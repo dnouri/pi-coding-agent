@@ -10,3 +10,9 @@
 
 # Package archives
 *.tar
+
+# Test dependencies (Ollama models, pi CLI)
+.cache/
+
+# Local scratch directory
+tmp/

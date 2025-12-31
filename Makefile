@@ -1,58 +1,130 @@
 # pi.el Makefile
-#
-# Targets:
-#   make test        - Run unit tests (fast, batch mode)
-#   make test-gui    - Run GUI tests (requires display)
-#   make test-all    - Run all tests
-#   make check       - Full check: compile, lint, unit tests
-#   make compile     - Byte-compile
-#   make lint        - Check docstrings
-#   make clean       - Remove generated files
 
 EMACS ?= emacs
 BATCH = $(EMACS) --batch -L .
 
-.PHONY: test test-gui test-integration test-all check compile lint clean help
+# Pi CLI version - update in workflows too when changing
+PI_VERSION ?= 0.30.2
+PI_BIN ?= .cache/pi/node_modules/.bin/pi
+PI_BIN_DIR = $(abspath $(dir $(PI_BIN)))
 
-# Default target
+.PHONY: test test-integration test-integration-ci test-gui test-gui-ci test-all
+.PHONY: check compile lint clean clean-cache help
+.PHONY: ollama-start ollama-stop ollama-status setup-pi setup-models
+
 help:
-	@echo "pi.el build targets:"
+	@echo "Targets:"
+	@echo "  make test             Unit tests (fast)"
+	@echo "  make test-integration Integration tests (local, starts Ollama)"
+	@echo "  make test-gui         GUI tests (local, starts Ollama)"
+	@echo "  make check            Compile, lint, unit tests"
+	@echo "  make clean            Remove generated files"
 	@echo ""
-	@echo "  make test          Run unit tests (fast, batch mode)"
-	@echo "  make test-gui      Run GUI integration tests (requires display)"
-	@echo "  make test-all      Run all tests"
-	@echo "  make check         Full check: compile, lint, unit tests"
-	@echo "  make compile       Byte-compile Elisp files"
-	@echo "  make lint          Check docstrings with checkdoc"
-	@echo "  make clean         Remove generated files"
+	@echo "CI targets (Ollama already running):"
+	@echo "  make test-integration-ci"
+	@echo "  make test-gui-ci"
 
-# Unit tests (batch mode, fast)
-# Clean first to avoid stale bytecode issues
+# ============================================================
+# Unit tests
+# ============================================================
+
 test: clean
 	@echo "=== Unit Tests ==="
 	$(BATCH) -L test -l pi -l pi-core-test -l pi-test -f ert-run-tests-batch-and-exit
 
-# GUI integration tests (requires display)
-test-gui:
-	@echo "=== GUI Tests ==="
-	./test/integration/run-gui-tests.sh
+# ============================================================
+# Setup helpers
+# ============================================================
 
-# Integration tests with real pi process (batch mode)
-test-integration: clean
-	@echo "=== Integration Tests ==="
-	@command -v pi >/dev/null 2>&1 || { echo "Error: pi not found in PATH"; exit 1; }
-	PI_RUN_INTEGRATION=1 $(BATCH) -L test -l pi -l pi-integration-test -f ert-run-tests-batch-and-exit
+setup-pi:
+	@if [ ! -x "$(PI_BIN)" ]; then \
+		echo "Installing pi@$(PI_VERSION) to .cache/pi/..."; \
+		rm -rf .cache/pi; \
+		npm install --prefix .cache/pi @mariozechner/pi-coding-agent@$(PI_VERSION) --silent; \
+	fi
+	@echo "Using pi: $(PI_BIN)"
+	@$(PI_BIN) --version || (echo "ERROR: pi not working"; exit 1)
 
+# Setup models.json - uses PI_CODING_AGENT_DIR if set, else temp dir
+setup-models:
+	@if [ -z "$$PI_CODING_AGENT_DIR" ]; then \
+		export PI_CODING_AGENT_DIR=$$(mktemp -d); \
+		echo "PI_CODING_AGENT_DIR=$$PI_CODING_AGENT_DIR"; \
+	fi; \
+	mkdir -p "$$PI_CODING_AGENT_DIR"; \
+	cp test/fixtures/ollama-models.json "$$PI_CODING_AGENT_DIR/models.json"
+
+# ============================================================
+# Integration tests
+# ============================================================
+
+# Local: starts Ollama via Docker
+test-integration: clean setup-pi
+	@echo "=== Integration Tests (pi@$(PI_VERSION)) ==="
+	@./scripts/ollama.sh start
+	@PI_CODING_AGENT_DIR=$$(mktemp -d) && \
+		cp test/fixtures/ollama-models.json "$$PI_CODING_AGENT_DIR/models.json" && \
+		env PATH="$(PI_BIN_DIR):$$PATH" PI_CODING_AGENT_DIR="$$PI_CODING_AGENT_DIR" PI_RUN_INTEGRATION=1 \
+		$(BATCH) -L test -l pi -l pi-integration-test -f ert-run-tests-batch-and-exit; \
+		status=$$?; rm -rf "$$PI_CODING_AGENT_DIR"; exit $$status
+
+# CI: Ollama already running via services block
+test-integration-ci: clean setup-pi
+	@echo "=== Integration Tests CI (pi@$(PI_VERSION)) ==="
+	@mkdir -p "$$PI_CODING_AGENT_DIR"
+	@cp test/fixtures/ollama-models.json "$$PI_CODING_AGENT_DIR/models.json"
+	env PATH="$(PI_BIN_DIR):$$PATH" PI_RUN_INTEGRATION=1 \
+	$(BATCH) -L test -l pi -l pi-integration-test -f ert-run-tests-batch-and-exit
+
+# ============================================================
+# GUI tests
+# ============================================================
+
+# Local: starts Ollama via Docker
+test-gui: clean setup-pi
+	@echo "=== GUI Tests (pi@$(PI_VERSION)) ==="
+	@./scripts/ollama.sh start
+	@PI_CODING_AGENT_DIR=$$(mktemp -d) && \
+		cp test/fixtures/ollama-models.json "$$PI_CODING_AGENT_DIR/models.json" && \
+		env PATH="$(PI_BIN_DIR):$$PATH" PI_CODING_AGENT_DIR="$$PI_CODING_AGENT_DIR" \
+		./test/run-gui-tests.sh; \
+		status=$$?; rm -rf "$$PI_CODING_AGENT_DIR"; exit $$status
+
+# CI: Ollama already running via services block
+test-gui-ci: clean setup-pi
+	@echo "=== GUI Tests CI (pi@$(PI_VERSION)) ==="
+	@mkdir -p "$$PI_CODING_AGENT_DIR"
+	@cp test/fixtures/ollama-models.json "$$PI_CODING_AGENT_DIR/models.json"
+	env PATH="$(PI_BIN_DIR):$$PATH" ./test/run-gui-tests.sh
+
+# ============================================================
 # All tests
-test-all: test test-gui
+# ============================================================
 
-# Byte-compile (clean first to ensure fresh build)
+test-all: test test-integration test-gui
+
+# ============================================================
+# Ollama management (local development)
+# ============================================================
+
+ollama-start:
+	@./scripts/ollama.sh start
+
+ollama-stop:
+	@./scripts/ollama.sh stop
+
+ollama-status:
+	@./scripts/ollama.sh status
+
+# ============================================================
+# Code quality
+# ============================================================
+
 compile: clean
 	@echo "=== Byte-compile ==="
 	$(BATCH) --eval "(setq byte-compile-error-on-warn t)" \
 		-f batch-byte-compile pi-core.el pi.el
 
-# Lint with checkdoc
 lint:
 	@echo "=== Checkdoc ==="
 	@$(BATCH) \
@@ -62,9 +134,15 @@ lint:
 		--eval "(checkdoc-file \"pi.el\")" 2>&1 | \
 		{ grep -q "^Warning" && { grep "^Warning"; exit 1; } || echo "OK"; }
 
-# Full check (what CI would run)
 check: compile lint test
 
-# Clean generated files (also used as dependency to avoid stale bytecode)
+# ============================================================
+# Cleanup
+# ============================================================
+
 clean:
 	@rm -f *.elc test/*.elc
+
+clean-cache:
+	@./scripts/ollama.sh stop 2>/dev/null || true
+	@rm -rf .cache
