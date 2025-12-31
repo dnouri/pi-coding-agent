@@ -1,0 +1,42 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+env:
+  PI_VERSION: '0.30.2'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      ollama:
+        image: ollama/ollama:latest
+        ports:
+          - 11434:11434
+    steps:
+      - uses: actions/checkout@v4
+      - uses: purcell/setup-emacs@master
+        with:
+          version: '29.4'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: deps-${{ runner.os }}-pi-${{ env.PI_VERSION }}
+      
+      - name: Setup Ollama model
+        run: |
+          for i in {1..30}; do curl -s http://localhost:11434/api/tags && break; sleep 1; done
+          curl -s http://localhost:11434/api/pull -d '{"name":"qwen3:1.7b"}' | tail -1
+      
+      - name: Run tests
+        run: make test-integration-ci PI_VERSION=${{ env.PI_VERSION }}
+        env:
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-test

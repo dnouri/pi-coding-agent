@@ -1,0 +1,131 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  unit:
+    name: Unit (Emacs ${{ matrix.emacs }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        emacs: ['28.2', '29.4']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: purcell/setup-emacs@master
+        with:
+          version: ${{ matrix.emacs }}
+      - run: sudo apt-get update && sudo apt-get install -y pandoc
+      - run: make check
+
+  integration:
+    name: Integration (pi@${{ matrix.pi_version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pi_version: ['0.30.2', 'latest', 'main']
+    services:
+      ollama:
+        image: ollama/ollama:latest
+        ports:
+          - 11434:11434
+    steps:
+      - uses: actions/checkout@v4
+      - uses: purcell/setup-emacs@master
+        with:
+          version: '29.4'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Cache npm dependencies
+        if: matrix.pi_version != 'main'
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: deps-${{ runner.os }}-pi-${{ matrix.pi_version }}
+      
+      - name: Setup pi-mono (main branch)
+        if: matrix.pi_version == 'main'
+        run: |
+          git clone --depth 1 https://github.com/badlogic/pi-mono.git pi-mono
+          cd pi-mono && npm install && npm run build
+          # Create 'pi' symlink like npm does
+          cd packages/coding-agent/dist && ln -s cli.js pi
+      
+      - name: Setup Ollama model
+        run: |
+          for i in {1..30}; do curl -s http://localhost:11434/api/tags && break; sleep 1; done
+          curl -s http://localhost:11434/api/pull -d '{"name":"qwen3:1.7b"}' | tail -1
+      
+      - name: Run tests (npm version)
+        if: matrix.pi_version != 'main'
+        run: make test-integration-ci PI_VERSION=${{ matrix.pi_version }}
+        env:
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-test
+      
+      - name: Run tests (main branch)
+        if: matrix.pi_version == 'main'
+        run: make test-integration-ci PI_BIN=${{ github.workspace }}/pi-mono/packages/coding-agent/dist/cli.js
+        env:
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-test
+
+  gui:
+    name: GUI (pi@${{ matrix.pi_version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pi_version: ['0.30.2', 'latest', 'main']
+    services:
+      ollama:
+        image: ollama/ollama:latest
+        ports:
+          - 11434:11434
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Emacs
+        run: sudo apt-get update && sudo apt-get install -y emacs xvfb
+      
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Cache npm dependencies
+        if: matrix.pi_version != 'main'
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: deps-${{ runner.os }}-pi-${{ matrix.pi_version }}
+      
+      - name: Setup pi-mono (main branch)
+        if: matrix.pi_version == 'main'
+        run: |
+          git clone --depth 1 https://github.com/badlogic/pi-mono.git pi-mono
+          cd pi-mono && npm install && npm run build
+          # Create 'pi' symlink like npm does
+          cd packages/coding-agent/dist && ln -s cli.js pi
+      
+      - name: Setup Ollama model
+        run: |
+          for i in {1..30}; do curl -s http://localhost:11434/api/tags && break; sleep 1; done
+          curl -s http://localhost:11434/api/pull -d '{"name":"qwen3:1.7b"}' | tail -1
+      
+      - name: Run tests (npm version)
+        if: matrix.pi_version != 'main'
+        run: make test-gui-ci PI_VERSION=${{ matrix.pi_version }}
+        env:
+          PI_HEADLESS: 1
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-test
+      
+      - name: Run tests (main branch)
+        if: matrix.pi_version == 'main'
+        run: make test-gui-ci PI_BIN=${{ github.workspace }}/pi-mono/packages/coding-agent/dist/cli.js
+        env:
+          PI_HEADLESS: 1
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-test

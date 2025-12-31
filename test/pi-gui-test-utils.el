@@ -22,8 +22,8 @@
 
 ;;;; Configuration
 
-(defvar pi-gui-test-model '(:provider "anthropic" :modelId "claude-haiku-4-5")
-  "Model to use for tests. Haiku is fast and cheap.")
+(defvar pi-gui-test-model '(:provider "ollama" :modelId "qwen3:1.7b")
+  "Model to use for tests. Supports tool calling.")
 
 ;;;; Session State
 
@@ -49,12 +49,13 @@ Returns session plist."
            (input-buf (and chat-buf (with-current-buffer chat-buf pi--input-buffer)))
            (proc (and chat-buf (with-current-buffer chat-buf pi--process))))
       (when (and chat-buf proc)
-        ;; Set model
+        ;; Set model and disable thinking for faster tests
         (with-current-buffer chat-buf
           (pi--rpc-sync proc
                         `(:type "set_model"
                           :provider ,(plist-get pi-gui-test-model :provider)
-                          :modelId ,(plist-get pi-gui-test-model :modelId))))
+                          :modelId ,(plist-get pi-gui-test-model :modelId)))
+          (pi--rpc-sync proc '(:type "set_thinking_level" :level "off")))
         (sit-for 1)
         (setq pi-gui-test--session
               (list :chat-buffer chat-buf
@@ -181,14 +182,14 @@ This is stricter than window-start for detecting scroll drift."
       (>= (window-end win t) (1- (point-max))))))
 
 (defun pi-gui-test-scroll-up (lines)
-  "Scroll chat window up LINES lines."
+  "Scroll chat window up LINES lines (away from end)."
   (when-let ((win (pi-gui-test-chat-window))
              (buf (plist-get pi-gui-test--session :chat-buffer)))
     (with-selected-window win
       (with-current-buffer buf
         (goto-char (point-max))
-        (forward-line (- lines))
-        (recenter 0)))))
+        (scroll-down lines)
+        (sit-for 0.1)))))
 
 (defun pi-gui-test-scroll-to-end ()
   "Scroll chat window to end."
@@ -246,15 +247,23 @@ Signals error if layout is wrong."
 
 (defun pi-gui-test-ensure-scrollable ()
   "Ensure chat has enough content to test scrolling.
-Generates content if needed."
+Inserts dummy content directly (no LLM calls) for speed."
   (pi-gui-test-ensure-session)
   (let* ((win (pi-gui-test-chat-window))
+         (buf (plist-get pi-gui-test--session :chat-buffer))
          (win-height (and win (window-body-height win)))
          (target-lines (and win-height (* 3 win-height))))
-    (when (and win target-lines)
-      (while (< (pi-gui-test-chat-lines) target-lines)
-        (pi-gui-test-send-no-tools "Write a 2 paragraph story about a wizard."))
-      t)))
+    (when (and buf win target-lines
+               (< (pi-gui-test-chat-lines) target-lines))
+      (with-current-buffer buf
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          ;; Insert dummy content to make buffer scrollable
+          (dotimes (i (- target-lines (pi-gui-test-chat-lines)))
+            (insert (format "Dummy line %d for scroll testing.\n" (1+ i))))
+          (set-window-point win (point-max))))
+      (sit-for 0.1))
+    t))
 
 ;;;; File Utilities (for tool tests)
 

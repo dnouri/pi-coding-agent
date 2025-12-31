@@ -18,7 +18,7 @@
 (defvar pi-test-rpc-timeout 10
   "Timeout in seconds for RPC calls in tests.")
 
-(defvar pi-test-integration-timeout 30
+(defvar pi-test-integration-timeout 180
   "Timeout in seconds for integration tests.")
 
 (defvar pi-test-gui-timeout 90

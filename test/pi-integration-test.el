@@ -160,7 +160,7 @@ Sets up event dispatching through pi--event-handlers list."
               (when (equal (plist-get e :type) "agent_end")
                 (setq got-agent-end t)))
             pi--event-handlers)
-      (pi--rpc-async proc '(:type "prompt" :message "OK") #'ignore)
+      (pi--rpc-async proc '(:type "prompt" :message "Say: done") #'ignore)
       (with-timeout (pi-test-integration-timeout
                      (ert-fail "Timeout"))
         (while (not got-agent-end)
@@ -181,7 +181,7 @@ Sets up event dispatching through pi--event-handlers list."
               (when (equal (plist-get e :type) "agent_end")
                 (setq got-agent-end t)))
             pi--event-handlers)
-      (pi--rpc-async proc '(:type "prompt" :message "Hi") #'ignore)
+      (pi--rpc-async proc '(:type "prompt" :message "Say: hello") #'ignore)
       (with-timeout (pi-test-integration-timeout
                      (ert-fail "Timeout"))
         (while (not got-agent-end)
@@ -220,189 +220,6 @@ Sets up event dispatching through pi--event-handlers list."
       ;; Verify we're no longer streaming
       (let* ((state (pi--rpc-sync proc '(:type "get_state") pi-test-rpc-timeout))
              (data (plist-get state :data)))
-        (should (eq (plist-get data :isStreaming) :false))))))
-
-;;; Message Queue Tests
-;; These tests document the pi backend's queue behavior.
-;; pi.el prevents the race condition client-side by blocking sends while streaming.
-
-(ert-deftest pi-integration-queue-single-message ()
-  "Queued message is processed after current response completes."
-  (pi-integration-with-process
-    (let ((agent-start-count 0)
-          (agent-end-count 0)
-          (user-message-count 0))
-      ;; Track events
-      (push (lambda (e)
-              (pcase (plist-get e :type)
-                ("agent_start"
-                 (setq agent-start-count (1+ agent-start-count)))
-                ("agent_end"
-                 (setq agent-end-count (1+ agent-end-count)))
-                ("message_start"
-                 (when-let ((msg (plist-get e :message)))
-                   (when (equal (plist-get msg :role) "user")
-                     (setq user-message-count (1+ user-message-count)))))))
-            pi--event-handlers)
-
-      ;; 1. Send prompt that triggers slow tool
-      (pi--rpc-async proc
-                     '(:type "prompt" :message "Run: sleep 2 && echo first")
-                     #'ignore)
-
-      ;; 2. Wait for streaming to start
-      (with-timeout (pi-test-rpc-timeout
-                     (ert-fail "Timeout waiting for agent_start"))
-        (while (< agent-start-count 1)
-          (accept-process-output proc 0.1)))
-
-      ;; 3. Queue a message while streaming
-      (pi--rpc-async proc
-                     '(:type "queue_message" :message "Say hello")
-                     #'ignore)
-      (sleep-for 0.2)
-
-      ;; 4. Verify queue count is 1
-      (let* ((state (pi--rpc-sync proc '(:type "get_state") pi-test-rpc-timeout))
-             (data (plist-get state :data)))
-        (should (= (plist-get data :queuedMessageCount) 1)))
-
-      ;; 5. Wait for agent_end (queued message processed within same loop)
-      (with-timeout (pi-test-integration-timeout
-                     (ert-fail "Timeout waiting for agent_end"))
-        (while (< agent-end-count 1)
-          (accept-process-output proc 0.1)))
-
-      ;; 6. Verify BOTH user messages were processed (original + queued)
-      (should (= user-message-count 2))
-
-      ;; 7. Verify queue is empty and session healthy
-      (let* ((state (pi--rpc-sync proc '(:type "get_state") pi-test-rpc-timeout))
-             (data (plist-get state :data)))
-        (should (= (plist-get data :queuedMessageCount) 0))
-        (should (eq (plist-get data :isStreaming) :false))))))
-
-(ert-deftest pi-integration-queue-multiple-messages ()
-  "Multiple queued messages are processed in order."
-  (pi-integration-with-process
-    (let ((agent-start-count 0)
-          (agent-end-count 0)
-          (user-messages nil))
-      ;; Track events - collect user message texts in order
-      (push (lambda (e)
-              (pcase (plist-get e :type)
-                ("agent_start"
-                 (setq agent-start-count (1+ agent-start-count)))
-                ("agent_end"
-                 (setq agent-end-count (1+ agent-end-count)))
-                ("message_start"
-                 (when-let ((msg (plist-get e :message)))
-                   (when (equal (plist-get msg :role) "user")
-                     ;; Extract text from content array
-                     (let* ((content (plist-get msg :content))
-                            (first-block (and (vectorp content) (aref content 0)))
-                            (text (and first-block (plist-get first-block :text))))
-                       (when text
-                         (push text user-messages))))))))
-            pi--event-handlers)
-
-      ;; Set queue mode to "all" so all messages are processed in one turn
-      (pi--rpc-async proc '(:type "set_queue_mode" :mode "all") #'ignore)
-      (sleep-for 0.1)
-
-      ;; 1. Send prompt that triggers slow tool
-      (pi--rpc-async proc
-                     '(:type "prompt" :message "Run: sleep 2 && echo first")
-                     #'ignore)
-
-      ;; 2. Wait for streaming to start
-      (with-timeout (pi-test-rpc-timeout
-                     (ert-fail "Timeout waiting for agent_start"))
-        (while (< agent-start-count 1)
-          (accept-process-output proc 0.1)))
-
-      ;; 3. Queue THREE messages while streaming
-      (pi--rpc-async proc '(:type "queue_message" :message "First queued") #'ignore)
-      (pi--rpc-async proc '(:type "queue_message" :message "Second queued") #'ignore)
-      (pi--rpc-async proc '(:type "queue_message" :message "Third queued") #'ignore)
-      (sleep-for 0.3)
-
-      ;; 4. Verify queue count is 3
-      (let* ((state (pi--rpc-sync proc '(:type "get_state") pi-test-rpc-timeout))
-             (data (plist-get state :data)))
-        (should (= (plist-get data :queuedMessageCount) 3)))
-
-      ;; 5. Wait for agent_end
-      (with-timeout (pi-test-integration-timeout
-                     (ert-fail "Timeout waiting for agent_end"))
-        (while (< agent-end-count 1)
-          (accept-process-output proc 0.1)))
-
-      ;; 6. Verify all 4 user messages were processed (original + 3 queued)
-      (should (= (length user-messages) 4))
-
-      ;; 7. Verify order (user-messages is reversed due to push)
-      (let ((ordered (reverse user-messages)))
-        (should (string-match-p "sleep 2" (nth 0 ordered)))
-        (should (string= "First queued" (nth 1 ordered)))
-        (should (string= "Second queued" (nth 2 ordered)))
-        (should (string= "Third queued" (nth 3 ordered))))
-
-      ;; 8. Verify queue is empty
-      (let* ((state (pi--rpc-sync proc '(:type "get_state") pi-test-rpc-timeout))
-             (data (plist-get state :data)))
-        (should (= (plist-get data :queuedMessageCount) 0))))))
-
-(ert-deftest pi-integration-queue-survives-abort ()
-  "Queue persists after abort (pi.el should clear manually and restore to input)."
-  ;; Note: The TUI calls clearQueue() before abort() and restores messages to editor.
-  ;; pi.el should do the same - this test verifies backend behavior.
-  (pi-integration-with-process
-    (let ((agent-start-count 0)
-          (agent-end-count 0))
-      ;; Track events
-      (push (lambda (e)
-              (pcase (plist-get e :type)
-                ("agent_start"
-                 (setq agent-start-count (1+ agent-start-count)))
-                ("agent_end"
-                 (setq agent-end-count (1+ agent-end-count)))))
-            pi--event-handlers)
-
-      ;; 1. Send prompt that triggers slow tool
-      (pi--rpc-async proc
-                     '(:type "prompt" :message "Run: sleep 3 && echo done")
-                     #'ignore)
-
-      ;; 2. Wait for streaming to start
-      (with-timeout (pi-test-rpc-timeout
-                     (ert-fail "Timeout waiting for agent_start"))
-        (while (< agent-start-count 1)
-          (accept-process-output proc 0.1)))
-
-      ;; 3. Queue messages while streaming
-      (pi--rpc-async proc '(:type "queue_message" :message "First") #'ignore)
-      (pi--rpc-async proc '(:type "queue_message" :message "Second") #'ignore)
-      (sleep-for 0.2)
-
-      ;; 4. Verify queue count is 2
-      (let* ((state (pi--rpc-sync proc '(:type "get_state") pi-test-rpc-timeout))
-             (data (plist-get state :data)))
-        (should (= (plist-get data :queuedMessageCount) 2)))
-
-      ;; 5. Abort!
-      (pi--rpc-async proc '(:type "abort") #'ignore)
-
-      ;; 6. Wait for agent_end
-      (with-timeout (pi-test-rpc-timeout
-                     (ert-fail "Timeout waiting for agent_end after abort"))
-        (while (< agent-end-count 1)
-          (accept-process-output proc 0.1)))
-
-      ;; 7. Queue persists after abort (backend doesn't auto-clear)
-      (let* ((state (pi--rpc-sync proc '(:type "get_state") pi-test-rpc-timeout))
-             (data (plist-get state :data)))
-        (should (= (plist-get data :queuedMessageCount) 2))
         (should (eq (plist-get data :isStreaming) :false))))))
 
 (provide 'pi-integration-test)

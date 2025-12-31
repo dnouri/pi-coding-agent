@@ -2,6 +2,10 @@
 #+author: Daniel Nouri
 
 #+html: <a href="https://melpa.org/#/pi"><img alt="MELPA" src="https://melpa.org/packages/pi-badge.svg"/></a>
+#+html: <a href="https://github.com/dnouri/pi.el/actions/workflows/test-unit.yml"><img alt="Unit Tests" src="https://github.com/dnouri/pi.el/actions/workflows/test-unit.yml/badge.svg"/></a>
+#+html: <a href="https://github.com/dnouri/pi.el/actions/workflows/test-integration.yml"><img alt="Integration Tests" src="https://github.com/dnouri/pi.el/actions/workflows/test-integration.yml/badge.svg"/></a>
+#+html: <a href="https://github.com/dnouri/pi.el/actions/workflows/test-gui.yml"><img alt="GUI Tests" src="https://github.com/dnouri/pi.el/actions/workflows/test-gui.yml/badge.svg"/></a>
+#+html: <a href="https://github.com/dnouri/pi.el/actions/workflows/nightly.yml"><img alt="Nightly" src="https://github.com/dnouri/pi.el/actions/workflows/nightly.yml/badge.svg"/></a>
 
 An Emacs frontend for the [[https://shittycodingagent.ai/][pi coding agent]].
 
@@ -134,6 +138,47 @@ Optional: Enable [[https://github.com/minad/org-modern][org-modern]] for prettie
   :ensure t
   :hook (pi-chat-mode . org-modern-mode))
 #+end_src
+
+* Testing
+
+** Running tests locally
+
+Requires Docker for integration and GUI tests (Ollama runs in a container).
+
+#+begin_src bash
+# Unit tests only (fast, no Docker)
+make check
+
+# Integration tests (requires Docker)
+make test-integration
+
+# GUI tests (requires Docker)
+make test-gui
+
+# All tests
+make test-all
+#+end_src
+
+** GUI tests with visible window
+
+By default, GUI tests auto-detect whether to show a window or run headless.
+
+#+begin_src bash
+# With a display available, runs with visible window
+./test/run-gui-tests.sh
+
+# Force headless even with display available
+./test/run-gui-tests.sh --headless
+#+end_src
+
+** CI setup
+
+GitHub Actions runs on every push:
+- =test-unit.yml= - Unit tests across Emacs 28.2 and 29.4
+- =test-integration.yml= - Integration tests with Docker Ollama
+- =test-gui.yml= - GUI tests with xvfb virtual framebuffer
+
+Nightly builds test against multiple pi versions (0.30.2, latest, and main branch).
 
 * Links
 
