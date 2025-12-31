@@ -162,6 +162,11 @@ Bash output is typically more verbose, so fewer lines are shown."
   "Face for model name in header line."
   :group 'pi)
 
+(defface pi-thinking
+  '((t :inherit font-lock-comment-face :slant italic))
+  "Face for thinking/reasoning block content."
+  :group 'pi)
+
 ;;;; Language Detection
 
 (defconst pi--extension-language-alist
@@ -245,6 +250,10 @@ Returns nil if the extension is not recognized."
         (goto-char pos)
       (message "No previous message"))))
 
+(defconst pi--thinking-block-regexp
+  "^#\\+begin_src thinking\n\\(\\(?:.*\n\\)*?\\)#\\+end_src"
+  "Regexp matching thinking blocks for font-lock.")
+
 (define-derived-mode pi-chat-mode org-mode "Pi-Chat"
   "Major mode for displaying pi conversation.
 Derives from `org-mode' for syntax highlighting of code blocks.
@@ -263,6 +272,13 @@ This is a read-only buffer showing the conversation history."
   ;; Don't use org-indent-mode - it visually indents content under org
   ;; headings, which causes our separators to appear indented when
   ;; assistant messages contain markdown headings (## -> **)
+
+  ;; Apply pi-thinking face to thinking block content
+  ;; Use 'append to override org-mode's default block face
+  (font-lock-add-keywords
+   nil
+   `((,pi--thinking-block-regexp 1 'pi-thinking append))
+   'append)
 
   ;; Enable org-modern for nicer visuals if available
   (when (require 'org-modern nil t)
@@ -584,6 +600,37 @@ Windows where user scrolled up (point earlier) stay in place."
           (insert delta)
           (set-marker pi--streaming-marker (point)))))))
 
+(defun pi--display-thinking-start ()
+  "Insert opening marker for thinking block."
+  (when pi--streaming-marker
+    (let ((inhibit-read-only t))
+      (pi--with-scroll-preservation
+        (save-excursion
+          (goto-char (marker-position pi--streaming-marker))
+          (insert "```thinking\n")
+          (set-marker pi--streaming-marker (point)))))))
+
+(defun pi--display-thinking-delta (delta)
+  "Display streaming thinking DELTA at the streaming marker."
+  (when (and delta pi--streaming-marker)
+    (let ((inhibit-read-only t))
+      (pi--with-scroll-preservation
+        (save-excursion
+          (goto-char (marker-position pi--streaming-marker))
+          (insert delta)
+          (set-marker pi--streaming-marker (point)))))))
+
+(defun pi--display-thinking-end (_content)
+  "Insert closing marker for thinking block.
+CONTENT is ignored - we use what was already streamed."
+  (when pi--streaming-marker
+    (let ((inhibit-read-only t))
+      (pi--with-scroll-preservation
+        (save-excursion
+          (goto-char (marker-position pi--streaming-marker))
+          (insert "\n```\n\n")
+          (set-marker pi--streaming-marker (point)))))))
+
 (defun pi--display-agent-end ()
   "Display end of agent turn."
   (let ((inhibit-read-only t))
@@ -682,8 +729,15 @@ Updates buffer-local state and renders display updates."
     ("message_update"
      (when-let* ((msg-event (plist-get event :assistantMessageEvent))
                  (event-type (plist-get msg-event :type)))
-       (when (equal event-type "text_delta")
-         (pi--display-message-delta (plist-get msg-event :delta)))))
+       (pcase event-type
+         ("text_delta"
+          (pi--display-message-delta (plist-get msg-event :delta)))
+         ("thinking_start"
+          (pi--display-thinking-start))
+         ("thinking_delta"
+          (pi--display-thinking-delta (plist-get msg-event :delta)))
+         ("thinking_end"
+          (pi--display-thinking-end (plist-get msg-event :content))))))
     ("message_end"
      (let ((message (plist-get event :message)))
        ;; Capture usage from assistant messages for context % calculation

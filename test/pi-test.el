@@ -362,6 +362,15 @@ Automatically cleans up chat and input buffers."
     (pi--display-message-delta "world!")
     (should (string-match-p "Hello, world!" (buffer-string)))))
 
+(ert-deftest pi-test-display-thinking-delta-appends-text ()
+  "message_update thinking_delta appends text to chat."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--display-agent-start)  ; Creates streaming marker
+    (pi--display-thinking-delta "Let me think...")
+    (pi--display-thinking-delta " about this.")
+    (should (string-match-p "Let me think... about this." (buffer-string)))))
+
 (ert-deftest pi-test-display-agent-end-adds-newlines ()
   "agent_end event adds trailing newlines."
   (with-temp-buffer
@@ -943,6 +952,58 @@ Content")
                        :isError nil)))
       (pi--handle-display-event event)
       (should (string-match-p "output" (buffer-string))))))
+
+(ert-deftest pi-test-display-handler-handles-thinking-delta ()
+  "Display handler processes thinking_delta events."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--handle-display-event '(:type "agent_start"))
+    (pi--handle-display-event '(:type "message_start"))
+    (pi--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "thinking_delta" :delta "Analyzing...")))
+    (should (string-match-p "Analyzing..." (buffer-string)))))
+
+(ert-deftest pi-test-thinking-rendered-as-src-block ()
+  "Thinking content renders as org src thinking block after message completion."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--handle-display-event '(:type "agent_start"))
+    (pi--handle-display-event '(:type "message_start"))
+    ;; Thinking lifecycle: start -> delta -> end
+    (pi--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "thinking_start")))
+    (pi--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "thinking_delta" :delta "Let me analyze this.")))
+    (pi--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "thinking_end" :content "Let me analyze this.")))
+    ;; Then regular text
+    (pi--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "text_delta" :delta "Here is my answer.")))
+    ;; Complete the message (triggers rendering)
+    (pi--handle-display-event '(:type "message_end" :message (:role "assistant")))
+    ;; After rendering, thinking should be in a src thinking block
+    (goto-char (point-min))
+    (should (search-forward "#+begin_src thinking" nil t))
+    (should (search-forward "Let me analyze this." nil t))
+    (should (search-forward "#+end_src" nil t))
+    ;; Regular text should be outside the block
+    (should (search-forward "Here is my answer." nil t))))
+
+(ert-deftest pi-test-thinking-block-has-face ()
+  "Thinking block content has pi-thinking face after font-lock."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "#+begin_src thinking\nSome thinking here.\n#+end_src\n"))
+    (font-lock-ensure)
+    (goto-char (point-min))
+    (search-forward "Some thinking")
+    (should (memq 'pi-thinking (ensure-list (get-text-property (1- (point)) 'face))))))
 
 (ert-deftest pi-test-read-tool-gets-syntax-highlighting ()
   "Read tool output gets syntax highlighting based on file path.
