@@ -7,7 +7,6 @@
 ;; URL: https://github.com/dnouri/pi.el
 ;; Keywords: ai llm ai-pair-programming tools
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
