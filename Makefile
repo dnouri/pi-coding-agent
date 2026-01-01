@@ -8,21 +8,25 @@ PI_VERSION ?= 0.30.2
 PI_BIN ?= .cache/pi/node_modules/.bin/pi
 PI_BIN_DIR = $(abspath $(dir $(PI_BIN)))
 
-.PHONY: test test-integration test-integration-ci test-gui test-gui-ci test-all
+.PHONY: test test-unit test-integration test-integration-ci test-gui test-gui-ci test-all
 .PHONY: check compile lint lint-checkdoc lint-package clean clean-cache help
 .PHONY: ollama-start ollama-stop ollama-status setup-pi setup-models
 
 help:
 	@echo "Targets:"
-	@echo "  make test             Unit tests (fast)"
+	@echo "  make test             Unit tests only (fast)"
+	@echo "  make test-unit        Compile + unit tests"
 	@echo "  make test-integration Integration tests (local, starts Ollama)"
 	@echo "  make test-gui         GUI tests (local, starts Ollama)"
-	@echo "  make check            Compile, lint, unit tests"
+	@echo "  make lint             Checkdoc + package-lint"
+	@echo "  make check            Compile, lint, unit tests (pre-commit)"
 	@echo "  make clean            Remove generated files"
 	@echo ""
-	@echo "CI targets (Ollama already running):"
-	@echo "  make test-integration-ci"
-	@echo "  make test-gui-ci"
+	@echo "CI targets:"
+	@echo "  make test-unit           (used by Unit Tests workflow)"
+	@echo "  make lint                (used by Lint workflow)"
+	@echo "  make test-integration-ci (Ollama already running)"
+	@echo "  make test-gui-ci         (Ollama already running)"
 
 # ============================================================
 # Unit tests
@@ -31,6 +35,8 @@ help:
 test: clean
 	@echo "=== Unit Tests ==="
 	$(BATCH) -L test -l pi -l pi-core-test -l pi-test -f ert-run-tests-batch-and-exit
+
+test-unit: compile test
 
 # ============================================================
 # Setup helpers
