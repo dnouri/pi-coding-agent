@@ -1281,6 +1281,14 @@ which is just a success message."
     (insert "hello")
     (should-not (pi--slash-capf))))
 
+(ert-deftest pi-test-slash-capf-returns-nil-at-line-start ()
+  "Completion returns nil when point is at beginning of line."
+  (with-temp-buffer
+    (pi-input-mode)
+    (insert "/test")
+    (goto-char (line-beginning-position))
+    (should-not (pi--slash-capf))))
+
 (ert-deftest pi-test-slash-capf-returns-completion-data ()
   "Completion returns data when after slash at start of line."
   (with-temp-buffer

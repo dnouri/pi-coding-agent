@@ -289,6 +289,16 @@ This is a read-only buffer showing the conversation history."
 
 (defvar pi-input-mode-map
   (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'pi-send)
+    (define-key map (kbd "TAB") #'completion-at-point)
+    (define-key map (kbd "C-c C-k") #'pi-abort)
+    (define-key map (kbd "C-c C-p") #'pi-menu)
+    (define-key map (kbd "C-c C-r") #'pi-resume-session)
+    (define-key map (kbd "M-p") #'pi-previous-input)
+    (define-key map (kbd "M-n") #'pi-next-input)
+    (define-key map (kbd "<C-up>") #'pi-previous-input)
+    (define-key map (kbd "<C-down>") #'pi-next-input)
+    (define-key map (kbd "C-r") #'pi-history-search)
     map)
   "Keymap for `pi-input-mode'.")
 
@@ -383,17 +393,6 @@ Restores saved input when moving past newest entry."
   (add-hook 'completion-at-point-functions #'pi--slash-capf nil t)
   (add-hook 'kill-buffer-query-functions #'pi--kill-buffer-query nil t)
   (add-hook 'kill-buffer-hook #'pi--cleanup-input-on-kill nil t))
-
-(define-key pi-input-mode-map (kbd "C-c C-c") #'pi-send)
-(define-key pi-input-mode-map (kbd "TAB") #'completion-at-point)
-(define-key pi-input-mode-map (kbd "C-c C-k") #'pi-abort)
-(define-key pi-input-mode-map (kbd "C-c C-p") #'pi-menu)
-(define-key pi-input-mode-map (kbd "C-c C-r") #'pi-resume-session)
-(define-key pi-input-mode-map (kbd "M-p") #'pi-previous-input)
-(define-key pi-input-mode-map (kbd "M-n") #'pi-next-input)
-(define-key pi-input-mode-map (kbd "<C-up>") #'pi-previous-input)
-(define-key pi-input-mode-map (kbd "<C-down>") #'pi-next-input)
-(define-key pi-input-mode-map (kbd "C-r") #'pi-history-search)
 
 ;;;; Session Directory Detection
 
@@ -2017,7 +2016,7 @@ Prompts for arguments if the command content contains placeholders."
   "Completion-at-point function for /commands in input buffer.
 Returns completion data when point is after / at start of line."
   (when (and (eq (char-after (line-beginning-position)) ?/)
-             (> (point) (line-beginning-position)))
+             (not (bolp)))
     (pi--ensure-file-commands)
     (let* ((start (1+ (line-beginning-position)))
            (end (point))
@@ -2132,7 +2131,6 @@ with argument substitution.  Otherwise return TEXT unchanged."
 
 ;;;; Main Entry Point
 
-;;;###autoload
 (defun pi--setup-session (dir &optional session)
   "Set up a new or existing session for DIR with optional SESSION name.
 Returns the chat buffer."
