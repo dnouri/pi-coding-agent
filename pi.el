@@ -219,7 +219,7 @@ Returns nil if the extension is not recognized."
 
 (defvar pi-chat-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "q") #'quit-window)
+    (define-key map (kbd "q") #'pi-quit)
     (define-key map (kbd "C-c C-p") #'pi-menu)
     (define-key map (kbd "n") #'pi-next-message)
     (define-key map (kbd "p") #'pi-previous-message)
@@ -802,11 +802,18 @@ If pi is currently streaming, shows a message and preserves input."
       (pi--send-prompt expanded)))))
 
 (defun pi--send-prompt (text)
-  "Send TEXT as a prompt to the pi process."
-  (when-let ((proc (pi--get-process)))
-    (pi--rpc-async proc
-                   (list :type "prompt" :message text)
-                   #'ignore)))
+  "Send TEXT as a prompt to the pi process.
+Shows an error message if process is unavailable."
+  (let ((proc (pi--get-process)))
+    (cond
+     ((null proc)
+      (message "Pi: No process available - try M-x pi to restart"))
+     ((not (process-live-p proc))
+      (message "Pi: Process died - try M-x pi to restart"))
+     (t
+      (pi--rpc-async proc
+                     (list :type "prompt" :message text)
+                     #'ignore)))))
 
 (defun pi-abort ()
   "Abort the current pi operation.

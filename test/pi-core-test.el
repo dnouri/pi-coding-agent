@@ -126,37 +126,40 @@
 ;;;; Process Cleanup Tests
 
 (ert-deftest pi-test-process-exit-clears-pending ()
-  "Process exit clears pending requests."
-  (let ((pi--pending-requests (make-hash-table :test 'equal))
-        (pi--request-id-counter 0)
-        )
-    (puthash "req_1" #'ignore pi--pending-requests)
-    (puthash "req_2" #'ignore pi--pending-requests)
-    (pi--handle-process-exit nil "finished\n")
-    (should (= (hash-table-count pi--pending-requests) 0))))
+  "Process exit clears that process's pending requests."
+  (let ((pi--request-id-counter 0)
+        (fake-proc (start-process "cat" nil "cat")))
+    (unwind-protect
+        (let ((pending (pi--get-pending-requests fake-proc)))
+          (puthash "req_1" #'ignore pending)
+          (puthash "req_2" #'ignore pending)
+          (pi--handle-process-exit fake-proc "finished\n")
+          (should (= (hash-table-count pending) 0)))
+      (ignore-errors (delete-process fake-proc)))))
 
 (ert-deftest pi-test-process-exit-calls-callbacks-with-error ()
   "Process exit calls pending callbacks with error response."
-  (let ((pi--pending-requests (make-hash-table :test 'equal))
-        (pi--request-id-counter 0)
-
-        (received nil))
-    (puthash "req_1" (lambda (r) (setq received r)) pi--pending-requests)
-    (pi--handle-process-exit nil "finished\n")
-    (should received)
-    (should (eq (plist-get received :success) :false))
-    (should (plist-get received :error))))
+  (let ((pi--request-id-counter 0)
+        (received nil)
+        (fake-proc (start-process "cat" nil "cat")))
+    (unwind-protect
+        (let ((pending (pi--get-pending-requests fake-proc)))
+          (puthash "req_1" (lambda (r) (setq received r)) pending)
+          (pi--handle-process-exit fake-proc "finished\n")
+          (should received)
+          (should (eq (plist-get received :success) :false))
+          (should (plist-get received :error)))
+      (ignore-errors (delete-process fake-proc)))))
 
 ;;;; Response Dispatch Tests
 
 (ert-deftest pi-test-dispatch-response-calls-callback ()
   "Response with matching ID calls stored callback."
-  (let ((pi--pending-requests (make-hash-table :test 'equal))
-        (received nil)
+  (let ((received nil)
         (fake-proc (start-process "cat" nil "cat")))
     (unwind-protect
-        (progn
-          (puthash "req_1" (lambda (r) (setq received r)) pi--pending-requests)
+        (let ((pending (pi--get-pending-requests fake-proc)))
+          (puthash "req_1" (lambda (r) (setq received r)) pending)
           (pi--dispatch-response fake-proc '(:type "response" :id "req_1" :success t))
           (should received)
           (should (eq (plist-get received :success) t)))
@@ -164,19 +167,17 @@
 
 (ert-deftest pi-test-dispatch-response-removes-callback ()
   "Response removes callback from pending requests after calling."
-  (let ((pi--pending-requests (make-hash-table :test 'equal))
-        (fake-proc (start-process "cat" nil "cat")))
+  (let ((fake-proc (start-process "cat" nil "cat")))
     (unwind-protect
-        (progn
-          (puthash "req_1" #'ignore pi--pending-requests)
+        (let ((pending (pi--get-pending-requests fake-proc)))
+          (puthash "req_1" #'ignore pending)
           (pi--dispatch-response fake-proc '(:type "response" :id "req_1" :success t))
-          (should (null (gethash "req_1" pi--pending-requests))))
+          (should (null (gethash "req_1" pending))))
       (delete-process fake-proc))))
 
 (ert-deftest pi-test-dispatch-event-calls-handler ()
   "Non-response messages call process's handler."
-  (let ((pi--pending-requests (make-hash-table :test 'equal))
-        (event-received nil)
+  (let ((event-received nil)
         (fake-proc (start-process "cat" nil "cat")))
     (unwind-protect
         (progn
@@ -189,9 +190,8 @@
       (delete-process fake-proc))))
 
 (ert-deftest pi-test-dispatch-unknown-id-no-crash ()
-  "Response with unknown ID logs warning but doesn't crash."
-  (let ((pi--pending-requests (make-hash-table :test 'equal))
-        (fake-proc (start-process "cat" nil "cat")))
+  "Response with unknown ID is handled gracefully."
+  (let ((fake-proc (start-process "cat" nil "cat")))
     (unwind-protect
         (should (null (pi--dispatch-response fake-proc '(:type "response" :id "unknown" :success t))))
       (delete-process fake-proc))))
@@ -199,21 +199,19 @@
 ;;;; RPC Send Tests
 
 (ert-deftest pi-test-rpc-async-stores-callback ()
-  "Sending a command stores the callback in pending requests."
-  (let ((pi--pending-requests (make-hash-table :test 'equal))
-        (pi--request-id-counter 0)
-        (sent-data nil)
+  "Sending a command stores the callback in process's pending requests."
+  (let ((pi--request-id-counter 0)
         (fake-proc (start-process "cat" nil "cat")))
     (unwind-protect
         (progn
           (pi--rpc-async fake-proc '(:type "get_state") #'ignore)
-          (should (gethash "req_1" pi--pending-requests)))
+          (let ((pending (pi--get-pending-requests fake-proc)))
+            (should (gethash "req_1" pending))))
       (delete-process fake-proc))))
 
 (ert-deftest pi-test-rpc-async-sends-json-with-id ()
   "Sending a command writes JSON with ID to process."
-  (let ((pi--pending-requests (make-hash-table :test 'equal))
-        (pi--request-id-counter 0)
+  (let ((pi--request-id-counter 0)
         (output-buffer (generate-new-buffer " *test-output*")))
     (unwind-protect
         (let ((fake-proc (start-process "cat" output-buffer "cat")))
@@ -239,13 +237,20 @@
     (should (equal (pi--next-request-id) "req_3"))))
 
 (ert-deftest pi-test-pending-requests-table ()
-  "Pending requests table stores and retrieves callbacks."
-  (let ((pi--pending-requests (make-hash-table :test 'equal))
-        (called nil))
-    (puthash "req_1" (lambda (r) (setq called r)) pi--pending-requests)
-    (should (functionp (gethash "req_1" pi--pending-requests)))
-    (funcall (gethash "req_1" pi--pending-requests) 'test-response)
-    (should (eq called 'test-response))))
+  "Each process gets its own pending requests table."
+  (let ((proc1 (start-process "cat1" nil "cat"))
+        (proc2 (start-process "cat2" nil "cat")))
+    (unwind-protect
+        (let ((pending1 (pi--get-pending-requests proc1))
+              (pending2 (pi--get-pending-requests proc2)))
+          ;; Tables should be separate
+          (puthash "req_1" #'ignore pending1)
+          (should (gethash "req_1" pending1))
+          (should (null (gethash "req_1" pending2)))
+          ;; Calling get again returns the same table
+          (should (eq pending1 (pi--get-pending-requests proc1))))
+      (ignore-errors (delete-process proc1))
+      (ignore-errors (delete-process proc2)))))
 
 ;;;; State Event Handling Tests
 

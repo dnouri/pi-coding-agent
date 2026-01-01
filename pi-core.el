@@ -75,20 +75,26 @@ Returns a JSON string terminated with a newline."
 (defvar pi--request-id-counter 0
   "Counter for generating unique request IDs.")
 
-(defvar pi--pending-requests (make-hash-table :test 'equal)
-  "Hash table mapping request IDs to callback functions.")
-
 (defun pi--next-request-id ()
   "Generate the next unique request ID."
   (format "req_%d" (cl-incf pi--request-id-counter)))
+
+(defun pi--get-pending-requests (process)
+  "Get or create the pending requests hash table for PROCESS.
+Each process has its own table stored as a process property."
+  (or (process-get process 'pi-pending-requests)
+      (let ((table (make-hash-table :test 'equal)))
+        (process-put process 'pi-pending-requests table)
+        table)))
 
 (defun pi--rpc-async (process command callback)
   "Send COMMAND to pi PROCESS asynchronously.
 COMMAND is a plist that will be augmented with a unique ID.
 CALLBACK is called with the response plist when received."
   (let* ((id (pi--next-request-id))
-         (full-command (plist-put (copy-sequence command) :id id)))
-    (puthash id callback pi--pending-requests)
+         (full-command (plist-put (copy-sequence command) :id id))
+         (pending (pi--get-pending-requests process)))
+    (puthash id callback pending)
     (process-send-string process (pi--encode-command full-command))))
 
 (defun pi--rpc-sync (process command &optional timeout)
@@ -133,9 +139,10 @@ Otherwise, treat it as an event and call the process's handler."
   (let ((type (plist-get json :type))
         (id (plist-get json :id)))
     (if (and (equal type "response") id)
-        (when-let ((callback (gethash id pi--pending-requests)))
-          (remhash id pi--pending-requests)
-          (funcall callback json))
+        (let ((pending (pi--get-pending-requests proc)))
+          (when-let ((callback (gethash id pending)))
+            (remhash id pending)
+            (funcall callback json)))
       ;; Call only this process's handler, not all handlers
       (pi--handle-event proc json))))
 
@@ -146,17 +153,19 @@ Calls only the handler registered for this specific process."
   (when-let ((handler (process-get proc 'pi-display-handler)))
     (funcall handler event)))
 
-(defun pi--handle-process-exit (_proc event)
-  "Clean up when pi process exits with EVENT.
-Calls all pending request callbacks with an error response
-containing EVENT, then clears the pending requests table."
-  (let ((error-response (list :type "response"
+(defun pi--handle-process-exit (proc event)
+  "Clean up when pi process PROC exits with EVENT.
+Calls pending request callbacks for this process with an error response
+containing EVENT, then clears this process's pending requests table."
+  (let ((pending (process-get proc 'pi-pending-requests))
+        (error-response (list :type "response"
                               :success :false
                               :error (format "Process exited: %s" (string-trim event)))))
-    (maphash (lambda (_id callback)
-               (funcall callback error-response))
-             pi--pending-requests)
-    (clrhash pi--pending-requests)))
+    (when pending
+      (maphash (lambda (_id callback)
+                 (funcall callback error-response))
+               pending)
+      (clrhash pending))))
 
 (defun pi--start-process (directory)
   "Start pi RPC process in DIRECTORY.
