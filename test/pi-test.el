@@ -1446,6 +1446,62 @@ which is just a success message."
   (let ((result (pi--header-format-context 190000 200000)))
     (should (eq (get-text-property 0 'face result) 'error))))
 
+(ert-deftest pi-test-message-end-updates-usage-for-normal-completion ()
+  "message_end with stopReason=stop updates pi--last-usage."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (setq pi--last-usage nil)
+    (pi--handle-display-event
+     '(:type "message_end"
+       :message (:role "assistant"
+                 :stopReason "stop"
+                 :usage (:input 1000 :output 500 :cacheRead 200 :cacheWrite 50))))
+    (should pi--last-usage)
+    (should (equal (plist-get pi--last-usage :input) 1000))))
+
+(ert-deftest pi-test-message-end-updates-usage-for-tool-use ()
+  "message_end with stopReason=toolUse updates pi--last-usage."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (setq pi--last-usage nil)
+    (pi--handle-display-event
+     '(:type "message_end"
+       :message (:role "assistant"
+                 :stopReason "toolUse"
+                 :usage (:input 2000 :output 300 :cacheRead 100 :cacheWrite 25))))
+    (should pi--last-usage)
+    (should (equal (plist-get pi--last-usage :input) 2000))))
+
+(ert-deftest pi-test-message-end-skips-usage-for-aborted ()
+  "message_end with stopReason=aborted does NOT update pi--last-usage.
+This preserves the previous valid usage for context percentage display."
+  (with-temp-buffer
+    (pi-chat-mode)
+    ;; Set up previous valid usage
+    (setq pi--last-usage '(:input 5000 :output 1000 :cacheRead 500 :cacheWrite 100))
+    ;; Process an aborted message with zeroed/incomplete usage
+    (pi--handle-display-event
+     '(:type "message_end"
+       :message (:role "assistant"
+                 :stopReason "aborted"
+                 :usage (:input 0 :output 0 :cacheRead 0 :cacheWrite 0))))
+    ;; Should preserve previous usage, not overwrite with zeros
+    (should (equal (plist-get pi--last-usage :input) 5000))))
+
+(ert-deftest pi-test-message-end-updates-usage-for-error ()
+  "message_end with stopReason=error updates pi--last-usage.
+Errors still consume context, so their usage data is valid for display."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (setq pi--last-usage nil)
+    (pi--handle-display-event
+     '(:type "message_end"
+       :message (:role "assistant"
+                 :stopReason "error"
+                 :usage (:input 3000 :output 100 :cacheRead 400 :cacheWrite 0))))
+    (should pi--last-usage)
+    (should (equal (plist-get pi--last-usage :input) 3000))))
+
 (ert-deftest pi-test-header-format-stats-returns-nil-when-no-stats ()
   "Stats format returns nil when stats is nil."
   (should (null (pi--header-format-stats nil nil nil))))

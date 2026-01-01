@@ -740,8 +740,12 @@ Updates buffer-local state and renders display updates."
           (pi--display-thinking-end (plist-get msg-event :content))))))
     ("message_end"
      (let ((message (plist-get event :message)))
-       ;; Capture usage from assistant messages for context % calculation
-       (when (equal (plist-get message :role) "assistant")
+       ;; Capture usage from assistant messages for context % calculation.
+       ;; Skip aborted messages - they may have incomplete usage data and
+       ;; would reset context percentage to 0%.  Matches TUI footer.ts behavior.
+       (when (and (equal (plist-get message :role) "assistant")
+                  (not (equal (plist-get message :stopReason) "aborted"))
+                  (plist-get message :usage))
          (setq pi--last-usage (plist-get message :usage))))
      (pi--render-complete-message))
     ("tool_execution_start"
