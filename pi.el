@@ -219,7 +219,7 @@ Returns nil if the extension is not recognized."
 
 (defvar pi-chat-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "q") #'quit-window)
+    (define-key map (kbd "q") #'pi-quit)
     (define-key map (kbd "C-c C-p") #'pi-menu)
     (define-key map (kbd "n") #'pi-next-message)
     (define-key map (kbd "p") #'pi-previous-message)
