@@ -9,7 +9,7 @@ PI_BIN ?= .cache/pi/node_modules/.bin/pi
 PI_BIN_DIR = $(abspath $(dir $(PI_BIN)))
 
 .PHONY: test test-integration test-integration-ci test-gui test-gui-ci test-all
-.PHONY: check compile lint clean clean-cache help
+.PHONY: check compile lint lint-checkdoc lint-package clean clean-cache help
 .PHONY: ollama-start ollama-stop ollama-status setup-pi setup-models
 
 help:
@@ -125,7 +125,9 @@ compile: clean
 	$(BATCH) --eval "(setq byte-compile-error-on-warn t)" \
 		-f batch-byte-compile pi-core.el pi.el
 
-lint:
+lint: lint-checkdoc lint-package
+
+lint-checkdoc:
 	@echo "=== Checkdoc ==="
 	@$(BATCH) \
 		--eval "(require 'checkdoc)" \
@@ -133,6 +135,19 @@ lint:
 		--eval "(checkdoc-file \"pi-core.el\")" \
 		--eval "(checkdoc-file \"pi.el\")" 2>&1 | \
 		{ grep -q "^Warning" && { grep "^Warning"; exit 1; } || echo "OK"; }
+
+lint-package:
+	@echo "=== Package-lint ==="
+	@$(BATCH) \
+		--eval "(require 'package)" \
+		--eval "(push '(\"melpa\" . \"https://melpa.org/packages/\") package-archives)" \
+		--eval "(package-initialize)" \
+		--eval "(unless (package-installed-p 'package-lint) \
+		          (package-refresh-contents) \
+		          (package-install 'package-lint))" \
+		--eval "(require 'package-lint)" \
+		--eval "(setq package-lint-main-file \"pi.el\")" \
+		-f package-lint-batch-and-exit pi.el pi-core.el
 
 check: compile lint test
 
