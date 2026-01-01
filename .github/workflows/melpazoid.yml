@@ -1,0 +1,33 @@
+# melpazoid <https://github.com/riscy/melpazoid> build checks.
+# Catches stylistic issues like top-level define-key, bolp suggestions, etc.
+
+name: melpazoid
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Install
+      run: |
+        sudo apt-get update && sudo apt-get install -y emacs
+        emacs --version
+        git clone https://github.com/riscy/melpazoid.git ~/melpazoid
+    - name: Run
+      env:
+        LOCAL_REPO: ${{ github.workspace }}
+        RECIPE: (pi :fetcher github :repo "dnouri/pi.el")
+        # Warnings are informational, not blocking
+        WARN_IS_ERROR: false
+        # Package exists on MELPA (or will soon)
+        EXIST_OK: true
+      run: make -C ~/melpazoid

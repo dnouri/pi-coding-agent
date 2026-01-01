@@ -54,6 +54,21 @@ fi
 echo "Checkdoc: Done."
 
 echo ""
+echo "=== Package-lint ==="
+emacs --batch \
+    -L . \
+    --eval "(require 'package)" \
+    --eval "(push '(\"melpa\" . \"https://melpa.org/packages/\") package-archives)" \
+    --eval "(package-initialize)" \
+    --eval "(unless (package-installed-p 'package-lint) \
+              (package-refresh-contents) \
+              (package-install 'package-lint))" \
+    --eval "(require 'package-lint)" \
+    --eval "(setq package-lint-main-file \"pi.el\")" \
+    -f package-lint-batch-and-exit pi.el pi-core.el
+echo "Package-lint: Done."
+
+echo ""
 echo "=== Running unit tests ==="
 emacs --batch \
     -L . \

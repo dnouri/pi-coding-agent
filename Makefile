@@ -8,21 +8,25 @@ PI_VERSION ?= 0.30.2
 PI_BIN ?= .cache/pi/node_modules/.bin/pi
 PI_BIN_DIR = $(abspath $(dir $(PI_BIN)))
 
-.PHONY: test test-integration test-integration-ci test-gui test-gui-ci test-all
-.PHONY: check compile lint clean clean-cache help
+.PHONY: test test-unit test-integration test-integration-ci test-gui test-gui-ci test-all
+.PHONY: check compile lint lint-checkdoc lint-package clean clean-cache help
 .PHONY: ollama-start ollama-stop ollama-status setup-pi setup-models
 
 help:
 	@echo "Targets:"
-	@echo "  make test             Unit tests (fast)"
+	@echo "  make test             Unit tests only (fast)"
+	@echo "  make test-unit        Compile + unit tests"
 	@echo "  make test-integration Integration tests (local, starts Ollama)"
 	@echo "  make test-gui         GUI tests (local, starts Ollama)"
-	@echo "  make check            Compile, lint, unit tests"
+	@echo "  make lint             Checkdoc + package-lint"
+	@echo "  make check            Compile, lint, unit tests (pre-commit)"
 	@echo "  make clean            Remove generated files"
 	@echo ""
-	@echo "CI targets (Ollama already running):"
-	@echo "  make test-integration-ci"
-	@echo "  make test-gui-ci"
+	@echo "CI targets:"
+	@echo "  make test-unit           (used by Unit Tests workflow)"
+	@echo "  make lint                (used by Lint workflow)"
+	@echo "  make test-integration-ci (Ollama already running)"
+	@echo "  make test-gui-ci         (Ollama already running)"
 
 # ============================================================
 # Unit tests
@@ -31,6 +35,8 @@ help:
 test: clean
 	@echo "=== Unit Tests ==="
 	$(BATCH) -L test -l pi -l pi-core-test -l pi-test -f ert-run-tests-batch-and-exit
+
+test-unit: compile test
 
 # ============================================================
 # Setup helpers
@@ -125,7 +131,9 @@ compile: clean
 	$(BATCH) --eval "(setq byte-compile-error-on-warn t)" \
 		-f batch-byte-compile pi-core.el pi.el
 
-lint:
+lint: lint-checkdoc lint-package
+
+lint-checkdoc:
 	@echo "=== Checkdoc ==="
 	@$(BATCH) \
 		--eval "(require 'checkdoc)" \
@@ -133,6 +141,19 @@ lint:
 		--eval "(checkdoc-file \"pi-core.el\")" \
 		--eval "(checkdoc-file \"pi.el\")" 2>&1 | \
 		{ grep -q "^Warning" && { grep "^Warning"; exit 1; } || echo "OK"; }
+
+lint-package:
+	@echo "=== Package-lint ==="
+	@$(BATCH) \
+		--eval "(require 'package)" \
+		--eval "(push '(\"melpa\" . \"https://melpa.org/packages/\") package-archives)" \
+		--eval "(package-initialize)" \
+		--eval "(unless (package-installed-p 'package-lint) \
+		          (package-refresh-contents) \
+		          (package-install 'package-lint))" \
+		--eval "(require 'package-lint)" \
+		--eval "(setq package-lint-main-file \"pi.el\")" \
+		-f package-lint-batch-and-exit pi.el pi-core.el
 
 check: compile lint test
 
