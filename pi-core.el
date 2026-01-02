@@ -213,14 +213,17 @@ JSON true (t) stays t, JSON false (:false) becomes nil."
 
 (defun pi--update-state-from-event (event)
   "Update `pi--state' based on EVENT.
-Handles agent lifecycle and message events."
+Handles agent lifecycle, message events, and error/retry events."
   (let ((type (plist-get event :type)))
     (pcase type
       ("agent_start"
        (plist-put pi--state :is-streaming t)
+       (plist-put pi--state :is-retrying nil)
+       (plist-put pi--state :last-error nil)
        (setq pi--state-timestamp (float-time)))
       ("agent_end"
        (plist-put pi--state :is-streaming nil)
+       (plist-put pi--state :is-retrying nil)
        (plist-put pi--state :messages (plist-get event :messages))
        (setq pi--state-timestamp (float-time)))
       ("message_start"
@@ -234,7 +237,17 @@ Handles agent lifecycle and message events."
       ("tool_execution_update"
        (pi--handle-tool-update event))
       ("tool_execution_end"
-       (pi--handle-tool-end event)))))
+       (pi--handle-tool-end event))
+      ("auto_retry_start"
+       (plist-put pi--state :is-retrying t)
+       (plist-put pi--state :retry-attempt (plist-get event :attempt))
+       (plist-put pi--state :last-error (plist-get event :errorMessage)))
+      ("auto_retry_end"
+       (plist-put pi--state :is-retrying nil)
+       (unless (eq (plist-get event :success) t)
+         (plist-put pi--state :last-error (plist-get event :finalError))))
+      ("hook_error"
+       (plist-put pi--state :last-error (plist-get event :error))))))
 
 (defun pi--handle-message-update (event)
   "Handle a message_update EVENT by accumulating text deltas."

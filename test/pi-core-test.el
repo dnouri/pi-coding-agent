@@ -434,5 +434,68 @@
       (should (eq (plist-get state :is-streaming) nil))
       (should (eq (plist-get state :is-compacting) nil)))))
 
+;;;; Auto-Retry Event State Tests
+
+(ert-deftest pi-test-event-auto-retry-start-sets-retrying ()
+  "auto_retry_start event sets is-retrying to t."
+  (let ((pi--state (list :is-streaming t :is-retrying nil)))
+    (pi--update-state-from-event
+     '(:type "auto_retry_start"
+       :attempt 1
+       :maxAttempts 3
+       :delayMs 2000
+       :errorMessage "429 rate_limit_error"))
+    (should (eq (plist-get pi--state :is-retrying) t))
+    (should (equal (plist-get pi--state :retry-attempt) 1))
+    (should (equal (plist-get pi--state :last-error) "429 rate_limit_error"))))
+
+(ert-deftest pi-test-event-auto-retry-end-success-clears-retrying ()
+  "auto_retry_end with success clears is-retrying."
+  (let ((pi--state (list :is-streaming t :is-retrying t :retry-attempt 2)))
+    (pi--update-state-from-event
+     '(:type "auto_retry_end"
+       :success t
+       :attempt 2))
+    (should (eq (plist-get pi--state :is-retrying) nil))))
+
+(ert-deftest pi-test-event-auto-retry-end-failure-stores-error ()
+  "auto_retry_end with failure stores final error."
+  (let ((pi--state (list :is-streaming t :is-retrying t)))
+    (pi--update-state-from-event
+     '(:type "auto_retry_end"
+       :success :false
+       :attempt 3
+       :finalError "529 overloaded_error: Overloaded"))
+    (should (eq (plist-get pi--state :is-retrying) nil))
+    (should (equal (plist-get pi--state :last-error) "529 overloaded_error: Overloaded"))))
+
+(ert-deftest pi-test-event-hook-error-stores-error ()
+  "hook_error event stores error message in state."
+  (let ((pi--state (list :is-streaming t)))
+    (pi--update-state-from-event
+     '(:type "hook_error"
+       :hookPath "/path/to/hook.ts"
+       :event "tool_call"
+       :error "TypeError: undefined is not a function"))
+    (should (equal (plist-get pi--state :last-error)
+                   "TypeError: undefined is not a function"))))
+
+(ert-deftest pi-test-event-agent-start-clears-error-state ()
+  "agent_start event clears error and retry state."
+  (let ((pi--state (list :is-streaming nil
+                         :is-retrying t
+                         :last-error "Previous error")))
+    (pi--update-state-from-event '(:type "agent_start"))
+    (should (eq (plist-get pi--state :is-streaming) t))
+    (should (eq (plist-get pi--state :is-retrying) nil))
+    (should (eq (plist-get pi--state :last-error) nil))))
+
+(ert-deftest pi-test-event-agent-end-clears-retry-state ()
+  "agent_end event clears retry state."
+  (let ((pi--state (list :is-streaming t :is-retrying t)))
+    (pi--update-state-from-event '(:type "agent_end" :messages []))
+    (should (eq (plist-get pi--state :is-streaming) nil))
+    (should (eq (plist-get pi--state :is-retrying) nil))))
+
 (provide 'pi-core-test)
 ;;; pi-core-test.el ends here
