@@ -559,15 +559,18 @@ Windows where user scrolled up (point earlier) stay in place."
         (insert text)))))
 
 (defun pi--make-separator (label face)
-  "Create a separator line with LABEL styled with FACE."
+  "Create a separator line with LABEL styled with FACE.
+Returns an org heading with decorative dashes."
   (let* ((label-str (concat " " label " "))
-         (total-width pi-separator-width)
+         (total-width (- pi-separator-width 2))  ; Account for "* " prefix
          (label-len (length label-str))
          (dash-count (max 4 (/ (- total-width label-len) 2)))
-         (dashes (make-string dash-count ?─)))
-    (concat (propertize dashes 'face 'pi-separator)
-            (propertize label-str 'face face)
-            (propertize dashes 'face 'pi-separator))))
+         (dashes (make-string dash-count ?─))
+         (decorated (concat (propertize dashes 'face 'pi-separator)
+                            (propertize label-str 'face face)
+                            (propertize dashes 'face 'pi-separator))))
+    ;; Use org heading format with unpropertized prefix for proper recognition
+    (concat "* " decorated)))
 
 (defun pi--display-user-message (text)
   "Display user message TEXT in the chat buffer."
@@ -872,13 +875,20 @@ and removes the input window (merging its space with adjacent windows)."
 
 (defun pi--post-process-org (org-text)
   "Post-process ORG-TEXT to clean up pandoc output.
-Removes :PROPERTIES: blocks and collapses multiple blank lines."
+Removes :PROPERTIES: blocks, demotes org headings by one level,
+and collapses multiple blank lines."
   (with-temp-buffer
     (insert org-text)
     ;; Remove :PROPERTIES: blocks (including the drawer lines)
     (goto-char (point-min))
     (while (re-search-forward "^[ \t]*:PROPERTIES:\n\\(?:.*\n\\)*?[ \t]*:END:\n?" nil t)
       (replace-match ""))
+    ;; Demote all org headings by one level (prepend *)
+    ;; So * -> **, ** -> ***, etc.
+    ;; This makes them sub-headings of the You/Assistant separators
+    (goto-char (point-min))
+    (while (re-search-forward "^\\(\\*+\\)\\([ \t]+.+\\)$" nil t)
+      (replace-match "*\\1\\2"))
     ;; Collapse multiple blank lines to at most two
     (goto-char (point-min))
     (while (re-search-forward "\n\\{3,\\}" nil t)

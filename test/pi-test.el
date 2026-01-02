@@ -615,7 +615,7 @@ Content")
 (ert-deftest pi-test-markdown-to-org-pipeline ()
   "Full pipeline converts markdown and post-processes."
   (let ((result (pi--markdown-to-org "# Hello\n\n**Bold** text")))
-    (should (string-match-p "^\\* Hello" result))
+    (should (string-match-p "^\\*\\* Hello" result))
     (should (string-match-p "\\*Bold\\*" result))
     (should-not (string-match-p ":PROPERTIES:" result))))
 
