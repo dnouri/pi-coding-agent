@@ -1480,37 +1480,11 @@ Returns list of command plists."
 
 (defun pi--parse-command-args (args-string)
   "Parse ARGS-STRING into a list of arguments.
-Handles quoted strings (single or double quotes) that may contain spaces.
-Returns a list of argument strings."
-  (let ((args '())
-        (current "")
-        (in-quote nil)
-        (i 0)
-        (len (length args-string)))
-    (while (< i len)
-      (let ((char (aref args-string i)))
-        (cond
-         ;; Inside a quote
-         (in-quote
-          (if (eq char in-quote)
-              (setq in-quote nil)
-            (setq current (concat current (char-to-string char)))))
-         ;; Start of quote
-         ((or (eq char ?\") (eq char ?'))
-          (setq in-quote char))
-         ;; Whitespace - end current arg
-         ((or (eq char ?\s) (eq char ?\t))
-          (when (not (string-empty-p current))
-            (push current args)
-            (setq current "")))
-         ;; Regular character
-         (t
-          (setq current (concat current (char-to-string char))))))
-      (setq i (1+ i)))
-    ;; Don't forget the last argument
-    (when (not (string-empty-p current))
-      (push current args))
-    (nreverse args)))
+Uses shell-like quoting rules: double and single quotes preserve spaces,
+backslash escapes characters.  Returns a list of argument strings,
+or nil for empty/whitespace-only input."
+  (let ((result (split-string-shell-command args-string)))
+    (if (equal result '("")) nil result)))
 
 (defun pi--substitute-args (content args)
   "Substitute argument placeholders in CONTENT with ARGS.
