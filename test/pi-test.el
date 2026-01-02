@@ -1525,7 +1525,7 @@ Errors still consume context, so their usage data is valid for display."
     (should (string-match-p "W100" result))
     (should (string-match-p "\\$0.05" result))))
 
-;;; Slash Command Argument Parsing
+;;; Slash Command Argument Parsing (shell-like quoting via split-string-shell-command)
 
 (ert-deftest pi-test-parse-args-simple ()
   "Parse simple space-separated arguments."
@@ -1534,11 +1534,11 @@ Errors still consume context, so their usage data is valid for display."
 
 (ert-deftest pi-test-parse-args-empty ()
   "Parse empty string returns empty list."
-  (should (equal (pi--parse-command-args "") '())))
+  (should (equal (pi--parse-command-args "") nil)))
 
 (ert-deftest pi-test-parse-args-whitespace-only ()
   "Parse whitespace-only string returns empty list."
-  (should (equal (pi--parse-command-args "   ") '())))
+  (should (equal (pi--parse-command-args "   ") nil)))
 
 (ert-deftest pi-test-parse-args-quoted-double ()
   "Parse double-quoted arguments preserves spaces."
@@ -1553,6 +1553,21 @@ Errors still consume context, so their usage data is valid for display."
 (ert-deftest pi-test-parse-args-extra-whitespace ()
   "Parse handles multiple spaces between arguments."
   (should (equal (pi--parse-command-args "foo   bar")
+                 '("foo" "bar"))))
+
+(ert-deftest pi-test-parse-args-escaped-quote ()
+  "Parse handles escaped quotes inside double-quoted strings."
+  (should (equal (pi--parse-command-args "foo \"bar\\\"baz\" qux")
+                 '("foo" "bar\"baz" "qux"))))
+
+(ert-deftest pi-test-parse-args-escaped-space ()
+  "Parse handles backslash-escaped spaces outside quotes."
+  (should (equal (pi--parse-command-args "foo\\ bar baz")
+                 '("foo bar" "baz"))))
+
+(ert-deftest pi-test-parse-args-mixed-quotes ()
+  "Parse handles mixed single and double quotes."
+  (should (equal (pi--parse-command-args "\"foo\" 'bar'")
                  '("foo" "bar"))))
 
 ;;; Slash Command Argument Substitution
