@@ -127,6 +127,11 @@ Bash output is typically more verbose, so fewer lines are shown."
   "Face for the You label in pi chat."
   :group 'pi)
 
+(defface pi-timestamp
+  '((t :inherit shadow))
+  "Face for timestamps in message headers."
+  :group 'pi)
+
 (defface pi-assistant-label
   '((t :inherit bold :foreground "sea green"))
   "Face for the Assistant label in pi chat."
@@ -558,24 +563,42 @@ Windows where user scrolled up (point earlier) stay in place."
         (goto-char (point-max))
         (insert text)))))
 
-(defun pi--make-separator (label face)
+(defun pi--make-separator (label face &optional timestamp)
   "Create a separator line with LABEL styled with FACE.
+If TIMESTAMP (Emacs time value) is provided, display it right-aligned.
+The label stays centered; timestamp eats into the right dashes.
 Returns an org heading with decorative dashes."
   (let* ((label-str (concat " " label " "))
          (total-width (- pi-separator-width 2))  ; Account for "* " prefix
          (label-len (length label-str))
+         ;; Calculate symmetric dash count (same for both sides without timestamp)
          (dash-count (max 4 (/ (- total-width label-len) 2)))
-         (dashes (make-string dash-count ?─))
-         (decorated (concat (propertize dashes 'face 'pi-separator)
-                            (propertize label-str 'face face)
-                            (propertize dashes 'face 'pi-separator))))
-    ;; Use org heading format with unpropertized prefix for proper recognition
-    (concat "* " decorated)))
+         (left-dashes (make-string dash-count ?─)))
+    (if timestamp
+        ;; With timestamp: label stays centered, timestamp eats into right dashes
+        (let* ((timestamp-str (pi--format-message-timestamp timestamp))
+               (timestamp-len (length timestamp-str))
+               ;; Right dashes reduced by timestamp length, keep at least 1 trailing dash
+               (right-dash-count (max 1 (- dash-count timestamp-len 1)))
+               (right-dashes (make-string right-dash-count ?─))
+               (decorated (concat (propertize left-dashes 'face 'pi-separator)
+                                  (propertize label-str 'face face)
+                                  (propertize right-dashes 'face 'pi-separator)
+                                  (propertize timestamp-str 'face 'pi-timestamp)
+                                  (propertize "─" 'face 'pi-separator))))
+          (concat "* " decorated))
+      ;; Without timestamp: symmetric dashes around label
+      (let* ((right-dashes (make-string dash-count ?─))
+             (decorated (concat (propertize left-dashes 'face 'pi-separator)
+                                (propertize label-str 'face face)
+                                (propertize right-dashes 'face 'pi-separator))))
+        (concat "* " decorated)))))
 
-(defun pi--display-user-message (text)
-  "Display user message TEXT in the chat buffer."
+(defun pi--display-user-message (text &optional timestamp)
+  "Display user message TEXT in the chat buffer.
+If TIMESTAMP (Emacs time value) is provided, display it in the header."
   (pi--append-to-chat
-   (concat "\n" (pi--make-separator "You" 'pi-user-label) "\n\n"
+   (concat "\n" (pi--make-separator "You" 'pi-user-label timestamp) "\n\n"
            text "\n")))
 
 (defun pi--display-agent-start ()
@@ -801,7 +824,7 @@ If pi is currently streaming, shows a message and preserves input."
             pi--input-saved nil)
       (erase-buffer)
       (with-current-buffer chat-buf
-        (pi--display-user-message text)
+        (pi--display-user-message text (current-time))
         (setq pi--status 'sending)
         (pi--spinner-start)
         (force-mode-line-update))
@@ -1592,6 +1615,15 @@ Returns plist (:modified-time :first-message :message-count) or nil on error."
          (t (format-time-string "%b %d" time))))
     (error "Unknown time format")))
 
+(defun pi--format-message-timestamp (time)
+  "Format TIME for message headers.
+Shows HH:MM if today, otherwise YYYY-MM-DD HH:MM."
+  (let* ((time-day (format-time-string "%Y-%m-%d" time))
+         (today (format-time-string "%Y-%m-%d" (current-time))))
+    (if (string= time-day today)
+        (format-time-string "%H:%M" time)
+      (format-time-string "%Y-%m-%d %H:%M" time))))
+
 (defun pi--truncate-string (str max-len)
   "Truncate STR to MAX-LEN chars, adding ellipsis if needed."
   (if (and str (> (length str) max-len))
@@ -1695,10 +1727,13 @@ Each text block is rendered independently to prevent org structure leakage."
              ;; Flush any pending tool count
              (flush-tools)
              ;; Show user message with blank line after header
-             (let ((text (pi--extract-message-text message)))
+             (let* ((text (pi--extract-message-text message))
+                    (timestamp-ms (plist-get message :timestamp))
+                    (timestamp (and timestamp-ms
+                                    (seconds-to-time (/ timestamp-ms 1000.0)))))
                (when (and text (not (string-empty-p text)))
                  (pi--append-to-chat
-                  (concat "\n" (pi--make-separator "You" 'pi-user-label) "\n\n"
+                  (concat "\n" (pi--make-separator "You" 'pi-user-label timestamp) "\n\n"
                           text "\n"))))
              (setq prev-role "user"))
             ("assistant"
@@ -1985,7 +2020,7 @@ Prompts for arguments if the command content contains placeholders."
            (args (pi--parse-command-args args-string))
            (expanded (pi--substitute-args content args)))
       (with-current-buffer chat-buf
-        (pi--display-user-message (format "/%s %s" name args-string))
+        (pi--display-user-message (format "/%s %s" name args-string) (current-time))
         (setq pi--status 'sending)
         (pi--spinner-start)
         (force-mode-line-update))

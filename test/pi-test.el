@@ -761,6 +761,40 @@ Content")
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
+(ert-deftest pi-test-format-message-timestamp-today ()
+  "Format timestamp shows just time for today."
+  (let ((now (current-time)))
+    (should (string-match-p "^[0-2][0-9]:[0-5][0-9]$"
+                            (pi--format-message-timestamp now)))))
+
+(ert-deftest pi-test-format-message-timestamp-other-day ()
+  "Format timestamp shows ISO date and time for other days."
+  (let ((yesterday (time-subtract (current-time) (days-to-time 1))))
+    (should (string-match-p "^[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\} [0-2][0-9]:[0-5][0-9]$"
+                            (pi--format-message-timestamp yesterday)))))
+
+(ert-deftest pi-test-display-user-message-with-timestamp ()
+  "User message displays with timestamp when provided."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--display-user-message "Test message" (current-time))
+    (let ((content (buffer-string)))
+      (should (string-match-p " You " content))
+      ;; Should have HH:MM timestamp format
+      (should (string-match-p "[0-2][0-9]:[0-5][0-9]" content)))))
+
+(ert-deftest pi-test-separator-without-timestamp ()
+  "Separator without timestamp has symmetric dashes."
+  (let ((sep (pi--make-separator "You" 'pi-user-label)))
+    (should (string-match-p "^\\* ─+ You ─+$" sep))))
+
+(ert-deftest pi-test-separator-with-timestamp ()
+  "Separator with timestamp shows time right-aligned with trailing dash."
+  (let ((sep (pi--make-separator "You" 'pi-user-label (current-time))))
+    (should (string-match-p " You " sep))
+    ;; Timestamp followed by trailing dash
+    (should (string-match-p "[0-2][0-9]:[0-5][0-9]─$" sep))))
+
 ;;; Startup Header
 
 (ert-deftest pi-test-startup-header-shows-version ()
@@ -1328,7 +1362,7 @@ which is just a success message."
     (cl-letf (((symbol-function 'pi--get-chat-buffer)
                (lambda () (current-buffer)))
               ((symbol-function 'pi--display-user-message)
-               (lambda (_) nil))
+               (lambda (_text &optional _timestamp) nil))
               ((symbol-function 'pi--send-prompt)
                (lambda (text) (setq sent-text text))))
       (with-temp-buffer
