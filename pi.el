@@ -137,6 +137,11 @@ Bash output is typically more verbose, so fewer lines are shown."
   "Face for the Assistant label in pi chat."
   :group 'pi)
 
+(defface pi-compaction-label
+  '((t :inherit bold :foreground "medium purple"))
+  "Face for the Compaction label in pi chat."
+  :group 'pi)
+
 (defface pi-tool-name
   '((t :inherit org-drawer :weight bold))
   "Face for tool names (BASH, READ, etc.) in pi chat."
@@ -792,6 +797,22 @@ Updates buffer-local state and renders display updates."
                              (plist-get result :content)
                              (plist-get result :details)
                              (plist-get event :isError))))
+    ("auto_compaction_start"
+     (setq pi--status 'compacting)
+     (pi--spinner-start)
+     (let ((reason (plist-get event :reason)))
+       (message "Pi: %sAuto-compacting... (C-c C-k to cancel)"
+                (if (equal reason "overflow") "Context overflow, " ""))))
+    ("auto_compaction_end"
+     (pi--spinner-stop)
+     (setq pi--status 'idle)
+     (if (plist-get event :aborted)
+         (message "Pi: Auto-compaction cancelled")
+       (when-let ((result (plist-get event :result)))
+         (pi--handle-compaction-success
+          (plist-get result :tokensBefore)
+          (plist-get result :summary)
+          (pi--ms-to-time (plist-get result :timestamp))))))
     ("agent_end"
      (pi--display-agent-end))))
 
@@ -1188,6 +1209,31 @@ Works anywhere inside a tool block (between :TOOL: and :END:)."
           (org-cycle))
       ;; Not in a tool block
       (org-cycle))))
+
+;;;; Compaction Display
+
+(defun pi--display-compaction-result (tokens-before summary &optional timestamp)
+  "Display a compaction result block in the chat buffer.
+TOKENS-BEFORE is the token count before compaction.
+SUMMARY is the compaction summary text (markdown, will be converted to org).
+TIMESTAMP is optional time when compaction occurred."
+  (let ((org-summary (if summary (pi--markdown-to-org-safe summary) "")))
+    (pi--append-to-chat
+     (concat "\n" (pi--make-separator "Compaction" 'pi-compaction-label timestamp) "\n\n"
+             (propertize (format "Compacted from %s tokens\n\n"
+                                 (pi--format-number (or tokens-before 0)))
+                         'face 'pi-tool-name)
+             org-summary "\n"))))
+
+(defun pi--handle-compaction-success (tokens-before summary &optional timestamp)
+  "Handle successful compaction: display result, reset state, notify user.
+TOKENS-BEFORE is the pre-compaction token count.
+SUMMARY is the compaction summary text.
+TIMESTAMP is optional time when compaction occurred."
+  (pi--display-compaction-result tokens-before summary timestamp)
+  (setq pi--last-usage nil)
+  (pi--refresh-header)
+  (message "Pi: Compacted from %s tokens" (pi--format-number (or tokens-before 0))))
 
 ;;;; Dependency Checking
 
@@ -1599,6 +1645,11 @@ Returns plist (:modified-time :first-message :message-count) or nil on error."
                       :message-count (max 0 (1- line-count))))))))
     (error nil)))
 
+(defun pi--ms-to-time (ms)
+  "Convert milliseconds MS to Emacs time value.
+Returns nil if MS is nil."
+  (and ms (seconds-to-time (/ ms 1000.0))))
+
 (defun pi--format-relative-time (time)
   "Format TIME (Emacs time value) as relative time string."
   (condition-case nil
@@ -1728,9 +1779,7 @@ Each text block is rendered independently to prevent org structure leakage."
              (flush-tools)
              ;; Show user message with blank line after header
              (let* ((text (pi--extract-message-text message))
-                    (timestamp-ms (plist-get message :timestamp))
-                    (timestamp (and timestamp-ms
-                                    (seconds-to-time (/ timestamp-ms 1000.0)))))
+                    (timestamp (pi--ms-to-time (plist-get message :timestamp))))
                (when (and text (not (string-empty-p text)))
                  (pi--append-to-chat
                   (concat "\n" (pi--make-separator "You" 'pi-user-label timestamp) "\n\n"
@@ -1749,6 +1798,14 @@ Each text block is rendered independently to prevent org structure leakage."
                  (pi--render-history-text text))
                (setq pending-tool-count (+ pending-tool-count tool-count)))
              (setq prev-role "assistant"))
+            ("compactionSummary"
+             ;; Show compaction with header, tokens, and summary
+             (flush-tools)
+             (let* ((summary (plist-get message :summary))
+                    (tokens-before (plist-get message :tokensBefore))
+                    (timestamp (pi--ms-to-time (plist-get message :timestamp))))
+               (pi--display-compaction-result tokens-before summary timestamp))
+             (setq prev-role "compactionSummary"))
             ;; Skip toolResult - already counted tool calls in assistant message
             ("toolResult"
              nil))))
@@ -1769,6 +1826,8 @@ Used when starting a new session."
         ;; Reset markers
         (setq pi--message-start-marker nil)
         (setq pi--streaming-marker nil)
+        ;; Reset usage (context % will show 0% until next message)
+        (setq pi--last-usage nil)
         ;; Clear tool args cache
         (clrhash pi--tool-args-cache)
         ;; Position at end
@@ -1928,14 +1987,21 @@ Calls CALLBACK with message count when done."
 (defun pi-compact ()
   "Compact conversation context to reduce token usage."
   (interactive)
-  (when-let ((proc (pi--get-process)))
+  (when-let ((proc (pi--get-process))
+             (chat-buf (pi--get-chat-buffer)))
+    (message "Pi: Compacting...")
+    (pi--spinner-start)
     (pi--rpc-async proc '(:type "compact")
                    (lambda (response)
+                     (pi--spinner-stop)
                      (if (plist-get response :success)
-                         (let* ((data (plist-get response :data))
-                                (tokens-before (plist-get data :tokensBefore)))
-                           (message "Pi: Compacted (was %s tokens)"
-                                    (pi--format-number (or tokens-before 0))))
+                         (when (buffer-live-p chat-buf)
+                           (with-current-buffer chat-buf
+                             (let ((data (plist-get response :data)))
+                               (pi--handle-compaction-success
+                                (plist-get data :tokensBefore)
+                                (plist-get data :summary)
+                                (current-time)))))
                        (message "Pi: Compact failed"))))))
 
 (defun pi-export-html ()
