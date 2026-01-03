@@ -143,6 +143,17 @@ Automatically cleans up chat and input buffers."
     (should (null pi--message-start-marker))
     (should (null pi--streaming-marker))))
 
+(ert-deftest pi-test-clear-chat-buffer-resets-usage ()
+  "Clearing chat buffer resets pi--last-usage to nil."
+  (with-temp-buffer
+    (pi-chat-mode)
+    ;; Set usage as if messages were received
+    (setq pi--last-usage '(:input 5000 :output 1000 :cacheRead 500 :cacheWrite 100))
+    ;; Clear the buffer
+    (pi--clear-chat-buffer)
+    ;; Usage should be reset
+    (should (null pi--last-usage))))
+
 (ert-deftest pi-test-find-session-returns-existing ()
   "pi--find-session returns existing chat buffer."
   (let ((buf (generate-new-buffer "*pi-chat:/tmp/test-find/*")))
@@ -432,6 +443,24 @@ Automatically cleans up chat and input buffers."
     ;; Should have exactly one blank line, not two
     (should (string-match-p ":END:\n\n:READ:" (buffer-string)))
     (should-not (string-match-p ":END:\n\n\n" (buffer-string)))))
+
+;;; History Display
+
+(ert-deftest pi-test-history-displays-compaction-summary ()
+  "Compaction summary messages display with header, tokens, and summary."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (let ((messages [(:role "compactionSummary"
+                      :summary "Session was compacted. Key points: user asked about testing."
+                      :tokensBefore 50000
+                      :timestamp 1704067200000)]))  ; 2024-01-01 00:00:00 UTC
+      (pi--display-history-messages messages))
+    ;; Should have Compaction header
+    (should (string-match-p "Compaction" (buffer-string)))
+    ;; Should show tokens
+    (should (string-match-p "50,000 tokens" (buffer-string)))
+    ;; Should show summary text
+    (should (string-match-p "Key points" (buffer-string)))))
 
 ;;; Streaming Marker
 
@@ -761,6 +790,17 @@ Content")
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
+(ert-deftest pi-test-ms-to-time-converts-correctly ()
+  "pi--ms-to-time converts milliseconds to Emacs time."
+  ;; 1704067200000 ms = 2024-01-01 00:00:00 UTC
+  (let ((time (pi--ms-to-time 1704067200000)))
+    (should time)
+    (should (equal (format-time-string "%Y-%m-%d" time t) "2024-01-01"))))
+
+(ert-deftest pi-test-ms-to-time-returns-nil-for-nil ()
+  "pi--ms-to-time returns nil when given nil."
+  (should (null (pi--ms-to-time nil))))
+
 (ert-deftest pi-test-format-message-timestamp-today ()
   "Format timestamp shows just time for today."
   (let ((now (current-time)))
@@ -997,6 +1037,78 @@ Content")
      '(:type "message_update"
        :assistantMessageEvent (:type "thinking_delta" :delta "Analyzing...")))
     (should (string-match-p "Analyzing..." (buffer-string)))))
+
+(ert-deftest pi-test-display-compaction-result-shows-header-tokens-summary ()
+  "pi--display-compaction-result shows header, token count, and summary."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--display-compaction-result 50000 "Key points from discussion.")
+    ;; Should have Compaction header
+    (should (string-match-p "Compaction" (buffer-string)))
+    ;; Should show formatted tokens
+    (should (string-match-p "50,000 tokens" (buffer-string)))
+    ;; Should show summary
+    (should (string-match-p "Key points" (buffer-string)))))
+
+(ert-deftest pi-test-display-compaction-result-with-timestamp ()
+  "pi--display-compaction-result includes timestamp when provided."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (let ((timestamp (seconds-to-time 1704067200))) ; 2024-01-01 00:00 UTC
+      (pi--display-compaction-result 30000 "Summary text." timestamp))
+    ;; Should have timestamp in header (format depends on locale, check for time marker)
+    (should (string-match-p "Compaction" (buffer-string)))
+    (should (string-match-p "30,000 tokens" (buffer-string)))))
+
+(ert-deftest pi-test-display-compaction-result-converts-markdown ()
+  "pi--display-compaction-result converts markdown summary to org."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--display-compaction-result 10000 "**Bold** and `code`")
+    ;; Should convert markdown bold to org bold
+    (should (string-match-p "\\*Bold\\*" (buffer-string)))
+    ;; Should convert markdown code to org code (pandoc uses = for verbatim)
+    (should (string-match-p "=code=" (buffer-string)))))
+
+(ert-deftest pi-test-display-handler-handles-auto-compaction-start ()
+  "Display handler processes auto_compaction_start events."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--handle-display-event '(:type "auto_compaction_start" :reason "threshold"))
+    ;; Status should change to compacting
+    (should (eq pi--status 'compacting))))
+
+(ert-deftest pi-test-display-handler-handles-auto-compaction-end ()
+  "Display handler processes auto_compaction_end with successful result."
+  (with-temp-buffer
+    (pi-chat-mode)
+    ;; Set up initial usage
+    (setq pi--last-usage '(:input 5000 :output 1000))
+    ;; Simulate compaction end
+    (pi--handle-display-event
+     '(:type "auto_compaction_end"
+       :aborted nil
+       :result (:summary "Context was compacted."
+                :tokensBefore 50000
+                :timestamp 1704067200000)))
+    ;; Usage should be reset
+    (should (null pi--last-usage))
+    ;; Should display compaction info
+    (should (string-match-p "Compaction" (buffer-string)))
+    (should (string-match-p "50,000" (buffer-string)))))
+
+(ert-deftest pi-test-display-handler-handles-auto-compaction-aborted ()
+  "Display handler processes auto_compaction_end when aborted."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (setq pi--status 'compacting)
+    (setq pi--last-usage '(:input 5000 :output 1000))
+    (pi--handle-display-event
+     '(:type "auto_compaction_end" :aborted t :result nil))
+    ;; Status should return to idle
+    (should (eq pi--status 'idle))
+    ;; Usage should NOT be reset on abort
+    (should pi--last-usage)))
 
 (ert-deftest pi-test-thinking-rendered-as-src-block ()
   "Thinking content renders as org src thinking block after message completion."
