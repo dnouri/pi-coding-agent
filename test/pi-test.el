@@ -193,6 +193,29 @@ Automatically cleans up chat and input buffers."
         (ignore-errors (kill-buffer "*pi-chat:/tmp/pi-test-named/<feature>*"))
         (ignore-errors (kill-buffer "*pi-input:/tmp/pi-test-named/<feature>*"))))))
 
+(ert-deftest pi-test-named-session-from-existing-pi-buffer ()
+  "Creating named session while in pi buffer creates new session, not reuse."
+  (let ((default-directory "/tmp/pi-test-from-pi/"))
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pi--start-process) (lambda (_) nil))
+              ((symbol-function 'pi--display-buffers) #'ignore))
+      (unwind-protect
+          (progn
+            (pi)  ; default session
+            ;; Now switch INTO the pi input buffer and create a named session
+            (with-current-buffer "*pi-input:/tmp/pi-test-from-pi/*"
+              (pi "feature"))  ; should create NEW session
+            ;; Both sessions should exist
+            (should (get-buffer "*pi-chat:/tmp/pi-test-from-pi/*"))
+            (should (get-buffer "*pi-chat:/tmp/pi-test-from-pi/<feature>*"))
+            ;; They should be different buffers
+            (should-not (eq (get-buffer "*pi-chat:/tmp/pi-test-from-pi/*")
+                            (get-buffer "*pi-chat:/tmp/pi-test-from-pi/<feature>*"))))
+        (ignore-errors (kill-buffer "*pi-chat:/tmp/pi-test-from-pi/*"))
+        (ignore-errors (kill-buffer "*pi-input:/tmp/pi-test-from-pi/*"))
+        (ignore-errors (kill-buffer "*pi-chat:/tmp/pi-test-from-pi/<feature>*"))
+        (ignore-errors (kill-buffer "*pi-input:/tmp/pi-test-from-pi/<feature>*"))))))
+
 (ert-deftest pi-test-quit-kills-both-buffers ()
   "pi-quit kills both chat and input buffers."
   (pi-test-with-mock-session "/tmp/pi-test-quit/"

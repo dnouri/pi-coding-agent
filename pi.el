@@ -2382,13 +2382,14 @@ Returns the chat buffer."
 (defun pi (&optional session)
   "Start or switch to pi session in current project.
 With prefix arg, prompt for SESSION name to allow multiple sessions.
-If already in a pi buffer, redisplays the current session."
+If already in a pi buffer and no SESSION specified, redisplays current session."
   (interactive
    (list (when current-prefix-arg
            (read-string "Session name: "))))
   (let (chat-buf input-buf)
-    (if (derived-mode-p 'pi-chat-mode 'pi-input-mode)
-        ;; Already in pi buffer - use current session
+    (if (and (derived-mode-p 'pi-chat-mode 'pi-input-mode)
+             (not session))
+        ;; Already in pi buffer with no new session requested - use current session
         (setq chat-buf (pi--get-chat-buffer)
               input-buf (pi--get-input-buffer))
       ;; Find or create session for current directory
