@@ -177,6 +177,16 @@ Bash output is typically more verbose, so fewer lines are shown."
   "Face for thinking/reasoning block content."
   :group 'pi)
 
+(defface pi-retry-notice
+  '((t :inherit warning :slant italic))
+  "Face for retry notifications (rate limit, overloaded, etc.)."
+  :group 'pi)
+
+(defface pi-error-notice
+  '((t :inherit error))
+  "Face for error notifications from the server."
+  :group 'pi)
+
 ;;;; Language Detection
 
 (defconst pi--extension-language-alist
@@ -486,6 +496,10 @@ Used to replace raw markdown with rendered Org on message completion.")
   "Hash table mapping toolCallId to args.
 Needed because tool_execution_end events don't include args.")
 
+(defvar-local pi--assistant-header-shown nil
+  "Non-nil if Assistant header has been shown for current prompt.
+Used to avoid duplicate headers during retry sequences.")
+
 ;;;; Buffer Navigation
 
 (defun pi--get-chat-buffer ()
@@ -607,10 +621,14 @@ If TIMESTAMP (Emacs time value) is provided, display it in the header."
            text "\n")))
 
 (defun pi--display-agent-start ()
-  "Display separator for new agent turn."
+  "Display separator for new agent turn.
+Only shows the Assistant header once per prompt, even during retries."
   (setq pi--aborted nil)  ; Reset abort flag for new turn
-  (pi--append-to-chat
-   (concat "\n" (pi--make-separator "Assistant" 'pi-assistant-label) "\n\n"))
+  ;; Only show header if not already shown for this prompt
+  (unless pi--assistant-header-shown
+    (pi--append-to-chat
+     (concat "\n" (pi--make-separator "Assistant" 'pi-assistant-label) "\n\n"))
+    (setq pi--assistant-header-shown t))
   ;; Create markers at current end position
   ;; message-start-marker: where content begins (for later replacement)
   ;; streaming-marker: where new deltas are inserted
@@ -682,6 +700,85 @@ CONTENT is ignored - we use what was already streamed."
   (setq pi--status 'idle)
   (pi--spinner-stop)
   (pi--refresh-header))
+
+(defun pi--display-retry-start (event)
+  "Display retry notice from auto_retry_start EVENT.
+Shows attempt number, delay, and raw error message."
+  (let* ((attempt (plist-get event :attempt))
+         (max-attempts (plist-get event :maxAttempts))
+         (delay-ms (plist-get event :delayMs))
+         (error-msg (or (plist-get event :errorMessage) "transient error"))
+         (delay-sec (/ (or delay-ms 0) 1000.0))
+         (notice (format "⟳ Retry %d/%d in %.0fs — %s"
+                         (or attempt 1)
+                         (or max-attempts 3)
+                         delay-sec
+                         error-msg)))
+    (pi--append-to-chat
+     (concat (propertize notice 'face 'pi-retry-notice) "\n"))))
+
+(defun pi--display-retry-end (event)
+  "Display retry result from auto_retry_end EVENT.
+Shows success or final failure with raw error."
+  (let* ((success (plist-get event :success))
+         (attempt (plist-get event :attempt))
+         (final-error (or (plist-get event :finalError) "unknown error")))
+    (if (eq success t)
+        (pi--append-to-chat
+         (concat (propertize (format "✓ Retry succeeded on attempt %d"
+                                     (or attempt 1))
+                             'face 'pi-retry-notice)
+                 "\n\n"))
+      ;; Final failure
+      (pi--append-to-chat
+       (concat (propertize (format "✗ Retry failed after %d attempts — %s"
+                                   (or attempt 1)
+                                   final-error)
+                           'face 'pi-error-notice)
+               "\n\n")))))
+
+(defun pi--display-error (error-msg)
+  "Display ERROR-MSG from the server."
+  (pi--append-to-chat
+   (concat "\n" (propertize (format "[Error: %s]" (or error-msg "unknown"))
+                            'face 'pi-error-notice)
+           "\n")))
+
+(defun pi--display-hook-error (event)
+  "Display hook error from hook_error EVENT."
+  (let* ((hook-path (plist-get event :hookPath))
+         (hook-event (plist-get event :event))
+         (error-msg (plist-get event :error))
+         (hook-name (if hook-path (file-name-nondirectory hook-path) "unknown")))
+    (pi--append-to-chat
+     (concat "\n"
+             (propertize (format "[Hook error in %s (%s): %s]"
+                                 hook-name
+                                 (or hook-event "unknown")
+                                 (or error-msg "unknown error"))
+                         'face 'pi-error-notice)
+             "\n"))))
+
+(defun pi--display-no-model-warning ()
+  "Display warning when no model is available.
+Shown when the session starts without a configured model/API key."
+  (pi--append-to-chat
+   (concat "\n"
+           (propertize "⚠ No models available"
+                       'face 'pi-error-notice)
+           "\n\n"
+           (propertize "To get started, either:\n"
+                       'face 'pi-retry-notice)
+           (propertize "  • Set an API key: "
+                       'face 'pi-retry-notice)
+           "ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.\n"
+           (propertize "  • Or run "
+                       'face 'pi-retry-notice)
+           (propertize "pi --login"
+                       'face 'pi-tool-command)
+           (propertize " in a terminal to authenticate via OAuth\n"
+                       'face 'pi-retry-notice)
+           "\n")))
 
 (defun pi--kill-buffer-query ()
   "Query function for killing pi buffers.
@@ -767,12 +864,19 @@ Updates buffer-local state and renders display updates."
          ("thinking_delta"
           (pi--display-thinking-delta (plist-get msg-event :delta)))
          ("thinking_end"
-          (pi--display-thinking-end (plist-get msg-event :content))))))
+          (pi--display-thinking-end (plist-get msg-event :content)))
+         ("error"
+          ;; Error during streaming (e.g., API error)
+          (pi--display-error (plist-get msg-event :reason))))))
     ("message_end"
      (let ((message (plist-get event :message)))
+       ;; Display error if message ended with error (e.g., API error)
+       (when (equal (plist-get message :stopReason) "error")
+         (pi--display-error (plist-get message :errorMessage)))
        ;; Capture usage from assistant messages for context % calculation.
        ;; Skip aborted messages - they may have incomplete usage data and
        ;; would reset context percentage to 0%.  Matches TUI footer.ts behavior.
+       ;; Note: error messages DO have valid usage data (tokens were consumed).
        (when (and (equal (plist-get message :role) "assistant")
                   (not (equal (plist-get message :stopReason) "aborted"))
                   (plist-get message :usage))
@@ -814,7 +918,13 @@ Updates buffer-local state and renders display updates."
           (plist-get result :summary)
           (pi--ms-to-time (plist-get result :timestamp))))))
     ("agent_end"
-     (pi--display-agent-end))))
+     (pi--display-agent-end))
+    ("auto_retry_start"
+     (pi--display-retry-start event))
+    ("auto_retry_end"
+     (pi--display-retry-end event))
+    ("hook_error"
+     (pi--display-hook-error event))))
 
 ;;;; Sending Prompts
 
@@ -847,6 +957,7 @@ If pi is currently streaming, shows a message and preserves input."
       (with-current-buffer chat-buf
         (pi--display-user-message text (current-time))
         (setq pi--status 'sending)
+        (setq pi--assistant-header-shown nil)  ; Reset for new prompt
         (pi--spinner-start)
         (force-mode-line-update))
       (pi--send-prompt expanded)))))
@@ -2070,7 +2181,18 @@ PROC is the pi process.  MESSAGES is a list of plists from get_branch_messages."
         (pi--rpc-async proc (list :type "branch" :entryIndex entry-index)
                        (lambda (response)
                          (if (plist-get response :success)
-                             (message "Pi: Branched from message %d" entry-index)
+                             (let* ((data (plist-get response :data))
+                                    (text (plist-get data :text)))
+                               ;; Reload and display the branched session
+                               (pi--load-session-history
+                                proc
+                                (lambda (count)
+                                  (message "Pi: Branched to new session (%d messages)" count)))
+                               ;; Pre-fill input with the selected message text
+                               (when-let ((input-buf (pi--get-input-buffer)))
+                                 (with-current-buffer input-buf
+                                   (erase-buffer)
+                                   (insert text))))
                            (message "Pi: Branch failed"))))))))
 
 (defun pi--run-custom-command (cmd)
@@ -2243,6 +2365,9 @@ Returns the chat buffer."
                                (with-current-buffer buf
                                  (setq pi--state
                                        (pi--extract-state-from-response response))
+                                 ;; Check if no model available and warn user
+                                 (unless (plist-get pi--state :model)
+                                   (pi--display-no-model-warning))
                                  (force-mode-line-update t))))))))
       ;; Build custom commands in transient for this session
       (when new-session

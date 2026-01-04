@@ -854,6 +854,141 @@ Content")
     ;; Should show "Pi X.Y.Z" or "Pi Unknown" in separator
     (should (string-match-p "Pi " header))))
 
+;;; Error and Retry Handling
+
+(ert-deftest pi-test-display-retry-start-shows-attempt ()
+  "auto_retry_start event shows attempt number and delay."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--display-retry-start '(:type "auto_retry_start"
+                               :attempt 1
+                               :maxAttempts 3
+                               :delayMs 2000
+                               :errorMessage "429 rate_limit_error"))
+    (should (string-match-p "Retry 1/3" (buffer-string)))
+    (should (string-match-p "2s" (buffer-string)))
+    ;; Raw error message is shown as-is
+    (should (string-match-p "429 rate_limit_error" (buffer-string)))))
+
+(ert-deftest pi-test-display-retry-start-with-overloaded-error ()
+  "auto_retry_start shows overloaded error message."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--display-retry-start '(:type "auto_retry_start"
+                               :attempt 2
+                               :maxAttempts 3
+                               :delayMs 4000
+                               :errorMessage "529 overloaded_error: Overloaded"))
+    (should (string-match-p "Retry 2/3" (buffer-string)))
+    (should (string-match-p "overloaded" (buffer-string)))))
+
+(ert-deftest pi-test-display-retry-end-success ()
+  "auto_retry_end with success shows success message."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--display-retry-end '(:type "auto_retry_end"
+                             :success t
+                             :attempt 2))
+    (should (string-match-p "succeeded" (buffer-string)))
+    (should (string-match-p "attempt 2" (buffer-string)))))
+
+(ert-deftest pi-test-display-retry-end-failure ()
+  "auto_retry_end with failure shows final error."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--display-retry-end '(:type "auto_retry_end"
+                             :success :false
+                             :attempt 3
+                             :finalError "529 overloaded_error: Overloaded"))
+    (should (string-match-p "failed" (buffer-string)))
+    (should (string-match-p "3 attempts" (buffer-string)))
+    (should (string-match-p "overloaded" (buffer-string)))))
+
+(ert-deftest pi-test-display-error-shows-message ()
+  "pi--display-error shows error message with proper face."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--display-error "API error: insufficient quota")
+    (should (string-match-p "Error:" (buffer-string)))
+    (should (string-match-p "insufficient quota" (buffer-string)))))
+
+(ert-deftest pi-test-display-error-handles-nil ()
+  "pi--display-error handles nil error message."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--display-error nil)
+    (should (string-match-p "Error:" (buffer-string)))
+    (should (string-match-p "unknown" (buffer-string)))))
+
+(ert-deftest pi-test-display-hook-error ()
+  "hook_error event shows hook name and error."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--display-hook-error '(:type "hook_error"
+                              :hookPath "/home/user/.pi/hooks/before_send.ts"
+                              :event "tool_call"
+                              :error "TypeError: Cannot read property"))
+    (should (string-match-p "Hook error" (buffer-string)))
+    (should (string-match-p "before_send.ts" (buffer-string)))
+    (should (string-match-p "tool_call" (buffer-string)))
+    (should (string-match-p "TypeError" (buffer-string)))))
+
+(ert-deftest pi-test-handle-display-event-retry-start ()
+  "pi--handle-display-event handles auto_retry_start."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (let ((pi--state (list :is-streaming t)))
+      (pi--handle-display-event '(:type "auto_retry_start"
+                                  :attempt 1
+                                  :maxAttempts 3
+                                  :delayMs 2000
+                                  :errorMessage "429 rate_limit_error"))
+      (should (string-match-p "Retry" (buffer-string))))))
+
+(ert-deftest pi-test-handle-display-event-retry-end ()
+  "pi--handle-display-event handles auto_retry_end."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (let ((pi--state (list :is-streaming t)))
+      (pi--handle-display-event '(:type "auto_retry_end"
+                                  :success t
+                                  :attempt 2))
+      (should (string-match-p "succeeded" (buffer-string))))))
+
+(ert-deftest pi-test-handle-display-event-hook-error ()
+  "pi--handle-display-event handles hook_error."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (let ((pi--state (list :is-streaming t)))
+      (pi--handle-display-event '(:type "hook_error"
+                                  :hookPath "/path/hook.ts"
+                                  :event "before_send"
+                                  :error "Hook failed"))
+      (should (string-match-p "Hook error" (buffer-string))))))
+
+(ert-deftest pi-test-handle-display-event-message-error ()
+  "pi--handle-display-event handles message_update with error type."
+  (with-temp-buffer
+    (pi-chat-mode)
+    ;; Need to set up markers first
+    (pi--display-agent-start)
+    (let ((pi--state (list :is-streaming t :current-message '(:role "assistant"))))
+      (pi--handle-display-event '(:type "message_update"
+                                  :message (:role "assistant")
+                                  :assistantMessageEvent (:type "error"
+                                                          :reason "API connection failed")))
+      (should (string-match-p "Error:" (buffer-string)))
+      (should (string-match-p "API connection failed" (buffer-string))))))
+
+(ert-deftest pi-test-display-no-model-warning ()
+  "pi--display-no-model-warning shows setup instructions."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--display-no-model-warning)
+    (should (string-match-p "No models available" (buffer-string)))
+    (should (string-match-p "API key" (buffer-string)))
+    (should (string-match-p "pi --login" (buffer-string)))))
+
 ;;; Tool Output
 
 (ert-deftest pi-test-tool-start-inserts-header ()
