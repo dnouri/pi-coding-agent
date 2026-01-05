@@ -114,10 +114,12 @@ Ends any existing session first, starts new one, cleans up after."
 ;;;; Waiting
 
 (defun pi-gui-test-streaming-p ()
-  "Return t if currently streaming."
+  "Return t if currently streaming or sending.
+Checks for both 'sending (waiting for response to start) and
+'streaming (receiving response) to avoid race conditions."
   (when-let ((chat-buf (plist-get pi-gui-test--session :chat-buffer)))
     (with-current-buffer chat-buf
-      (eq pi--status 'streaming))))
+      (memq pi--status '(sending streaming)))))
 
 (defun pi-gui-test-wait-for-idle (&optional timeout)
   "Wait until streaming stops, up to TIMEOUT seconds."
