@@ -25,7 +25,7 @@ jobs:
     - name: Run
       env:
         LOCAL_REPO: ${{ github.workspace }}
-        RECIPE: (pi :fetcher github :repo "dnouri/pi.el")
+        RECIPE: (pi-coding-agent :fetcher github :repo "dnouri/pi-coding-agent")
         # Warnings are informational, not blocking
         WARN_IS_ERROR: false
         # Package exists on MELPA (or will soon)

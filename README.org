@@ -1,11 +1,11 @@
-#+title: pi.el
+#+title: pi-coding-agent
 #+author: Daniel Nouri
 
-#+html: <a href="https://melpa.org/#/pi"><img alt="MELPA" src="https://melpa.org/packages/pi-badge.svg"/></a>
-#+html: <a href="https://github.com/dnouri/pi.el/actions/workflows/test-unit.yml"><img alt="Unit Tests" src="https://github.com/dnouri/pi.el/actions/workflows/test-unit.yml/badge.svg"/></a>
-#+html: <a href="https://github.com/dnouri/pi.el/actions/workflows/test-integration.yml"><img alt="Integration Tests" src="https://github.com/dnouri/pi.el/actions/workflows/test-integration.yml/badge.svg"/></a>
-#+html: <a href="https://github.com/dnouri/pi.el/actions/workflows/test-gui.yml"><img alt="GUI Tests" src="https://github.com/dnouri/pi.el/actions/workflows/test-gui.yml/badge.svg"/></a>
-#+html: <a href="https://github.com/dnouri/pi.el/actions/workflows/nightly.yml"><img alt="Nightly" src="https://github.com/dnouri/pi.el/actions/workflows/nightly.yml/badge.svg"/></a>
+#+html: <a href="https://melpa.org/#/pi-coding-agent"><img alt="MELPA" src="https://melpa.org/packages/pi-coding-agent-badge.svg"/></a>
+#+html: <a href="https://github.com/dnouri/pi-coding-agent/actions/workflows/test-unit.yml"><img alt="Unit Tests" src="https://github.com/dnouri/pi-coding-agent/actions/workflows/test-unit.yml/badge.svg"/></a>
+#+html: <a href="https://github.com/dnouri/pi-coding-agent/actions/workflows/test-integration.yml"><img alt="Integration Tests" src="https://github.com/dnouri/pi-coding-agent/actions/workflows/test-integration.yml/badge.svg"/></a>
+#+html: <a href="https://github.com/dnouri/pi-coding-agent/actions/workflows/test-gui.yml"><img alt="GUI Tests" src="https://github.com/dnouri/pi-coding-agent/actions/workflows/test-gui.yml/badge.svg"/></a>
+#+html: <a href="https://github.com/dnouri/pi-coding-agent/actions/workflows/nightly.yml"><img alt="Nightly" src="https://github.com/dnouri/pi-coding-agent/actions/workflows/nightly.yml/badge.svg"/></a>
 
 An Emacs frontend for the [[https://shittycodingagent.ai/][pi coding agent]].
 
@@ -40,17 +40,18 @@ mise use -g npm:@mariozechner/pi-coding-agent
 
 ** MELPA
 
-Once available on [[https://melpa.org/#/pi][MELPA]], you can install directly:
+Once available on [[https://melpa.org/#/pi-coding-agent][MELPA]], you can install directly:
 
 #+begin_src
-M-x package-install RET pi RET
+M-x package-install RET pi-coding-agent RET
 #+end_src
 
 Or with =use-package=:
 
 #+begin_src emacs-lisp
-(use-package pi
-  :ensure t)
+(use-package pi-coding-agent
+  :ensure t
+  :init (defalias 'pi 'pi-coding-agent))
 #+end_src
 
 If you don't have MELPA configured, add this to your init file:
@@ -66,19 +67,20 @@ If you don't have MELPA configured, add this to your init file:
 Clone the repository and add to your load path:
 
 #+begin_src bash
-git clone https://github.com/dnouri/pi.el ~/.emacs.d/site-lisp/pi.el
+git clone https://github.com/dnouri/pi-coding-agent ~/.emacs.d/site-lisp/pi-coding-agent
 #+end_src
 
 #+begin_src emacs-lisp
-(add-to-list 'load-path "~/.emacs.d/site-lisp/pi.el")
-(require 'pi)
+(add-to-list 'load-path "~/.emacs.d/site-lisp/pi-coding-agent")
+(require 'pi-coding-agent)
 #+end_src
 
 Or with =use-package=:
 
 #+begin_src emacs-lisp
-(use-package pi
-  :load-path "~/.emacs.d/site-lisp/pi.el")
+(use-package pi-coding-agent
+  :load-path "~/.emacs.d/site-lisp/pi-coding-agent"
+  :init (defalias 'pi 'pi-coding-agent))
 #+end_src
 
 * Usage
@@ -112,12 +114,13 @@ session management (new, resume, branch, export), statistics, and custom command
 Example configuration with =use-package=:
 
 #+begin_src emacs-lisp
-(use-package pi
+(use-package pi-coding-agent
   :ensure t
+  :init (defalias 'pi 'pi-coding-agent)
   :custom
-  (pi-input-window-height 10)      ; Height of input window
-  (pi-tool-preview-lines 10)       ; Lines shown before collapsing tool output
-  (pi-bash-preview-lines 5))       ; Lines shown for bash output
+  (pi-coding-agent-input-window-height 10)      ; Height of input window
+  (pi-coding-agent-tool-preview-lines 10)       ; Lines shown before collapsing tool output
+  (pi-coding-agent-bash-preview-lines 5))       ; Lines shown for bash output
 #+end_src
 
 * Testing

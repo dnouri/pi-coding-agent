@@ -1,4 +1,4 @@
-;;; pi.el --- Emacs frontend for pi coding agent -*- lexical-binding: t; -*-
+;;; pi-coding-agent.el --- Emacs frontend for pi coding agent -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025 Daniel Nouri
 
@@ -60,158 +60,158 @@
 
 ;;; Code:
 
-(require 'pi-core)
+(require 'pi-coding-agent-core)
 (require 'project)
 (require 'markdown-mode)
 
 ;;;; Customization Group
 
-(defgroup pi nil
+(defgroup pi-coding-agent nil
   "Emacs frontend for pi coding agent."
   :group 'tools
-  :prefix "pi-")
+  :prefix "pi-coding-agent-")
 
 ;;;; Customization
 
-(defcustom pi-rpc-timeout 30
+(defcustom pi-coding-agent-rpc-timeout 30
   "Default timeout in seconds for synchronous RPC calls.
 Some operations like model loading may need more time."
   :type 'natnum
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defcustom pi-input-window-height 10
+(defcustom pi-coding-agent-input-window-height 10
   "Height of the input window in lines."
   :type 'natnum
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defcustom pi-separator-width 72
+(defcustom pi-coding-agent-separator-width 72
   "Total width of section separators in chat buffer."
   :type 'natnum
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defcustom pi-tool-preview-lines 10
+(defcustom pi-coding-agent-tool-preview-lines 10
   "Number of lines to show before collapsing tool output."
   :type 'natnum
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defcustom pi-bash-preview-lines 5
+(defcustom pi-coding-agent-bash-preview-lines 5
   "Number of lines to show for bash output before collapsing.
 Bash output is typically more verbose, so fewer lines are shown."
   :type 'natnum
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defcustom pi-context-warning-threshold 70
+(defcustom pi-coding-agent-context-warning-threshold 70
   "Context usage percentage at which to show warning color."
   :type 'natnum
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defcustom pi-context-error-threshold 90
+(defcustom pi-coding-agent-context-error-threshold 90
   "Context usage percentage at which to show error color."
   :type 'natnum
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 ;;;; Faces
 
-(defface pi-separator
+(defface pi-coding-agent-separator
   '((t :inherit font-lock-comment-face))
   "Face for section separators in pi chat."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defface pi-user-label
+(defface pi-coding-agent-user-label
   '((t :inherit bold :foreground "dodger blue"))
   "Face for the You label in pi chat."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defface pi-timestamp
+(defface pi-coding-agent-timestamp
   '((t :inherit shadow))
   "Face for timestamps in message headers."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defface pi-assistant-label
+(defface pi-coding-agent-assistant-label
   '((t :inherit bold :foreground "sea green"))
   "Face for the Assistant label in pi chat."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defface pi-compaction-label
+(defface pi-coding-agent-compaction-label
   '((t :inherit bold :foreground "medium purple"))
   "Face for the Compaction label in pi chat."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defface pi-tool-name
+(defface pi-coding-agent-tool-name
   '((t :inherit font-lock-function-name-face :weight bold))
   "Face for tool names (BASH, READ, etc.) in pi chat."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defface pi-tool-command
+(defface pi-coding-agent-tool-command
   '((t :inherit font-lock-function-name-face))
   "Face for tool commands and arguments."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defface pi-tool-output
+(defface pi-coding-agent-tool-output
   '((t :inherit shadow))
   "Face for tool output text."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defface pi-tool-error
+(defface pi-coding-agent-tool-error
   '((t :inherit error))
   "Face for tool error indicators."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defface pi-tool-block-pending
+(defface pi-coding-agent-tool-block-pending
   '((((class color) (min-colors 88) (background dark))
      :background "#2a2a35" :extend t)
     (((class color) (min-colors 88) (background light))
      :background "#f0f0f5" :extend t)
     (t :inherit secondary-selection :extend t))
   "Face for tool blocks during execution."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defface pi-tool-block-success
+(defface pi-coding-agent-tool-block-success
   '((((class color) (min-colors 88) (background dark))
      :background "#2a352a" :extend t)
     (((class color) (min-colors 88) (background light))
      :background "#f0f5f0" :extend t)
     (t :inherit secondary-selection :extend t))
   "Face for tool blocks after successful completion."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defface pi-tool-block-error
+(defface pi-coding-agent-tool-block-error
   '((((class color) (min-colors 88) (background dark))
      :background "#352a2a" :extend t)
     (((class color) (min-colors 88) (background light))
      :background "#f5f0f0" :extend t)
     (t :inherit secondary-selection :extend t))
   "Face for tool blocks after failed completion."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defface pi-collapsed-indicator
+(defface pi-coding-agent-collapsed-indicator
   '((t :inherit font-lock-comment-face :slant italic))
   "Face for collapsed content indicators."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defface pi-model-name
+(defface pi-coding-agent-model-name
   '((t :inherit font-lock-type-face))
   "Face for model name in header line."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defface pi-thinking
+(defface pi-coding-agent-thinking
   '((t :inherit font-lock-comment-face :slant italic))
   "Face for thinking/reasoning block content."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defface pi-retry-notice
+(defface pi-coding-agent-retry-notice
   '((t :inherit warning :slant italic))
   "Face for retry notifications (rate limit, overloaded, etc.)."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
-(defface pi-error-notice
+(defface pi-coding-agent-error-notice
   '((t :inherit error))
   "Face for error notifications from the server."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 ;;;; Language Detection
 
-(defconst pi--extension-language-alist
+(defconst pi-coding-agent--extension-language-alist
   '(("ts" . "typescript") ("tsx" . "typescript")
     ("js" . "javascript") ("jsx" . "javascript") ("mjs" . "javascript")
     ("py" . "python") ("pyw" . "python")
@@ -250,27 +250,27 @@ Bash output is typically more verbose, so fewer lines are shown."
     ("makefile" . "makefile") ("mk" . "makefile"))
   "Alist mapping file extensions to language names for syntax highlighting.")
 
-(defun pi--path-to-language (path)
+(defun pi-coding-agent--path-to-language (path)
   "Return language name for PATH based on file extension.
 Returns nil if the extension is not recognized."
   (when path
     (let ((ext (downcase (or (file-name-extension path) ""))))
-      (cdr (assoc ext pi--extension-language-alist)))))
+      (cdr (assoc ext pi-coding-agent--extension-language-alist)))))
 
 ;;;; Major Modes
 
-(defvar pi-chat-mode-map
+(defvar pi-coding-agent-chat-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "q") #'pi-quit)
-    (define-key map (kbd "C-c C-p") #'pi-menu)
-    (define-key map (kbd "n") #'pi-next-message)
-    (define-key map (kbd "p") #'pi-previous-message)
-    (define-key map (kbd "TAB") #'pi-toggle-tool-section)
-    (define-key map (kbd "<tab>") #'pi-toggle-tool-section)
+    (define-key map (kbd "q") #'pi-coding-agent-quit)
+    (define-key map (kbd "C-c C-p") #'pi-coding-agent-menu)
+    (define-key map (kbd "n") #'pi-coding-agent-next-message)
+    (define-key map (kbd "p") #'pi-coding-agent-previous-message)
+    (define-key map (kbd "TAB") #'pi-coding-agent-toggle-tool-section)
+    (define-key map (kbd "<tab>") #'pi-coding-agent-toggle-tool-section)
     map)
-  "Keymap for `pi-chat-mode'.")
+  "Keymap for `pi-coding-agent-chat-mode'.")
 
-(defun pi-next-message ()
+(defun pi-coding-agent-next-message ()
   "Move to the next user message in the chat buffer."
   (interactive)
   (let ((pos (save-excursion
@@ -282,7 +282,7 @@ Returns nil if the extension is not recognized."
           (beginning-of-line))
       (message "No more messages"))))
 
-(defun pi-previous-message ()
+(defun pi-coding-agent-previous-message ()
   "Move to the previous user message in the chat buffer."
   (interactive)
   (let ((pos (save-excursion
@@ -292,15 +292,15 @@ Returns nil if the extension is not recognized."
         (goto-char pos)
       (message "No previous message"))))
 
-(defconst pi--thinking-block-regexp
+(defconst pi-coding-agent--thinking-block-regexp
   "^```thinking\n\\(\\(?:.*\n\\)*?\\)```"
   "Regexp matching thinking blocks for font-lock.")
 
-(define-derived-mode pi-chat-mode gfm-mode "Pi-Chat"
+(define-derived-mode pi-coding-agent-chat-mode gfm-mode "Pi-Chat"
   "Major mode for displaying pi conversation.
 Derives from `gfm-mode' for syntax highlighting of code blocks.
 This is a read-only buffer showing the conversation history."
-  :group 'pi
+  :group 'pi-coding-agent
   (setq-local buffer-read-only t)
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
@@ -308,60 +308,60 @@ This is a read-only buffer showing the conversation history."
   ;; Hide markdown markup (**, `, ```) for cleaner display
   (setq-local markdown-hide-markup t)
   (add-to-invisibility-spec 'markdown-markup)
-  (setq-local pi--tool-args-cache (make-hash-table :test 'equal))
+  (setq-local pi-coding-agent--tool-args-cache (make-hash-table :test 'equal))
   ;; Make window-point follow inserted text (like comint does).
   ;; This is key for natural scroll behavior during streaming.
   (setq-local window-point-insertion-type t)
 
-  ;; Apply pi-thinking face to thinking block content
+  ;; Apply pi-coding-agent-thinking face to thinking block content
   (font-lock-add-keywords
    nil
-   `((,pi--thinking-block-regexp 1 'pi-thinking append))
+   `((,pi-coding-agent--thinking-block-regexp 1 'pi-coding-agent-thinking append))
    'append)
 
-  (add-hook 'kill-buffer-query-functions #'pi--kill-buffer-query nil t)
-  (add-hook 'kill-buffer-hook #'pi--cleanup-on-kill nil t))
+  (add-hook 'kill-buffer-query-functions #'pi-coding-agent--kill-buffer-query nil t)
+  (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-on-kill nil t))
 
-(defvar pi-input-mode-map
+(defvar pi-coding-agent-input-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-c") #'pi-send)
+    (define-key map (kbd "C-c C-c") #'pi-coding-agent-send)
     (define-key map (kbd "TAB") #'completion-at-point)
-    (define-key map (kbd "C-c C-k") #'pi-abort)
-    (define-key map (kbd "C-c C-p") #'pi-menu)
-    (define-key map (kbd "C-c C-r") #'pi-resume-session)
-    (define-key map (kbd "M-p") #'pi-previous-input)
-    (define-key map (kbd "M-n") #'pi-next-input)
-    (define-key map (kbd "<C-up>") #'pi-previous-input)
-    (define-key map (kbd "<C-down>") #'pi-next-input)
-    (define-key map (kbd "C-r") #'pi-history-search)
+    (define-key map (kbd "C-c C-k") #'pi-coding-agent-abort)
+    (define-key map (kbd "C-c C-p") #'pi-coding-agent-menu)
+    (define-key map (kbd "C-c C-r") #'pi-coding-agent-resume-session)
+    (define-key map (kbd "M-p") #'pi-coding-agent-previous-input)
+    (define-key map (kbd "M-n") #'pi-coding-agent-next-input)
+    (define-key map (kbd "<C-up>") #'pi-coding-agent-previous-input)
+    (define-key map (kbd "<C-down>") #'pi-coding-agent-next-input)
+    (define-key map (kbd "C-r") #'pi-coding-agent-history-search)
     map)
-  "Keymap for `pi-input-mode'.")
+  "Keymap for `pi-coding-agent-input-mode'.")
 
 ;;;; Input History (comint/eshell style)
 
 (require 'ring)
 
-(defvar pi--input-ring-size 100
+(defvar pi-coding-agent--input-ring-size 100
   "Size of the input history ring.")
 
-(defvar pi--input-ring nil
+(defvar pi-coding-agent--input-ring nil
   "Ring holding input history.  Shared across all pi sessions.")
 
-(defvar-local pi--input-ring-index nil
+(defvar-local pi-coding-agent--input-ring-index nil
   "Current position in input ring, or nil if not navigating history.")
 
-(defvar-local pi--input-saved nil
+(defvar-local pi-coding-agent--input-saved nil
   "Saved input before starting history navigation.")
 
-(defun pi--input-ring ()
+(defun pi-coding-agent--input-ring ()
   "Return the input ring, creating if necessary."
-  (unless pi--input-ring
-    (setq pi--input-ring (make-ring pi--input-ring-size)))
-  pi--input-ring)
+  (unless pi-coding-agent--input-ring
+    (setq pi-coding-agent--input-ring (make-ring pi-coding-agent--input-ring-size)))
+  pi-coding-agent--input-ring)
 
-(defun pi--history-add (input)
+(defun pi-coding-agent--history-add (input)
   "Add INPUT to history ring if non-empty and different from last."
-  (let ((ring (pi--input-ring))
+  (let ((ring (pi-coding-agent--input-ring))
         (trimmed (and input (string-trim input))))
     (when (and trimmed
                (not (string-empty-p trimmed))
@@ -369,48 +369,48 @@ This is a read-only buffer showing the conversation history."
                    (not (string= input (ring-ref ring 0)))))
       (ring-insert ring input))))
 
-(defun pi-previous-input ()
+(defun pi-coding-agent-previous-input ()
   "Cycle backwards through input history.
 Saves current input before first navigation."
   (interactive)
-  (let ((ring (pi--input-ring)))
+  (let ((ring (pi-coding-agent--input-ring)))
     (when (ring-empty-p ring)
       (user-error "No history"))
     ;; Save current input on first navigation
-    (unless pi--input-ring-index
-      (setq pi--input-saved (buffer-string)))
+    (unless pi-coding-agent--input-ring-index
+      (setq pi-coding-agent--input-saved (buffer-string)))
     ;; Calculate new index
-    (let ((new-index (if pi--input-ring-index
-                         (1+ pi--input-ring-index)
+    (let ((new-index (if pi-coding-agent--input-ring-index
+                         (1+ pi-coding-agent--input-ring-index)
                        0)))
       (if (>= new-index (ring-length ring))
           (user-error "Beginning of history")
-        (setq pi--input-ring-index new-index)
+        (setq pi-coding-agent--input-ring-index new-index)
         (delete-region (point-min) (point-max))
         (insert (ring-ref ring new-index))))))
 
-(defun pi-next-input ()
+(defun pi-coding-agent-next-input ()
   "Cycle forwards through input history.
 Restores saved input when moving past newest entry."
   (interactive)
-  (unless pi--input-ring-index
+  (unless pi-coding-agent--input-ring-index
     (user-error "End of history"))
-  (let ((new-index (1- pi--input-ring-index)))
+  (let ((new-index (1- pi-coding-agent--input-ring-index)))
     (delete-region (point-min) (point-max))
     (if (< new-index 0)
         ;; Restore saved input
         (progn
-          (setq pi--input-ring-index nil)
-          (when pi--input-saved
-            (insert pi--input-saved)))
+          (setq pi-coding-agent--input-ring-index nil)
+          (when pi-coding-agent--input-saved
+            (insert pi-coding-agent--input-saved)))
       ;; Show history entry
-      (setq pi--input-ring-index new-index)
-      (insert (ring-ref (pi--input-ring) new-index)))))
+      (setq pi-coding-agent--input-ring-index new-index)
+      (insert (ring-ref (pi-coding-agent--input-ring) new-index)))))
 
-(defun pi-history-search ()
+(defun pi-coding-agent-history-search ()
   "Search input history with completion."
   (interactive)
-  (let* ((ring (pi--input-ring))
+  (let* ((ring (pi-coding-agent--input-ring))
          (entries (when (not (ring-empty-p ring))
                     (ring-elements ring)))
          (choice (completing-read "History: " entries nil t)))
@@ -418,20 +418,20 @@ Restores saved input when moving past newest entry."
       (delete-region (point-min) (point-max))
       (insert choice)
       ;; Reset history navigation state
-      (setq pi--input-ring-index nil
-            pi--input-saved nil))))
+      (setq pi-coding-agent--input-ring-index nil
+            pi-coding-agent--input-saved nil))))
 
-(define-derived-mode pi-input-mode text-mode "Pi-Input"
+(define-derived-mode pi-coding-agent-input-mode text-mode "Pi-Input"
   "Major mode for composing pi prompts."
-  :group 'pi
-  (setq-local header-line-format '(:eval (pi--header-line-string)))
-  (add-hook 'completion-at-point-functions #'pi--slash-capf nil t)
-  (add-hook 'kill-buffer-query-functions #'pi--kill-buffer-query nil t)
-  (add-hook 'kill-buffer-hook #'pi--cleanup-input-on-kill nil t))
+  :group 'pi-coding-agent
+  (setq-local header-line-format '(:eval (pi-coding-agent--header-line-string)))
+  (add-hook 'completion-at-point-functions #'pi-coding-agent--slash-capf nil t)
+  (add-hook 'kill-buffer-query-functions #'pi-coding-agent--kill-buffer-query nil t)
+  (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-input-on-kill nil t))
 
 ;;;; Session Directory Detection
 
-(defun pi--session-directory ()
+(defun pi-coding-agent--session-directory ()
   "Determine directory for pi session.
 Uses project root if available, otherwise `default-directory'.
 Always returns an expanded absolute path (no ~ abbreviation)."
@@ -442,7 +442,7 @@ Always returns an expanded absolute path (no ~ abbreviation)."
 
 ;;;; Buffer Naming & Creation
 
-(defun pi--buffer-name (type dir &optional session)
+(defun pi-coding-agent--buffer-name (type dir &optional session)
   "Generate buffer name for TYPE (:chat or :input) in DIR.
 Optional SESSION name creates a named session.
 Uses abbreviated directory for readability in buffer lists."
@@ -451,107 +451,107 @@ Uses abbreviated directory for readability in buffer lists."
                     (:input "input")))
         (abbrev-dir (abbreviate-file-name dir)))
     (if (and session (not (string-empty-p session)))
-        (format "*pi-%s:%s<%s>*" type-str abbrev-dir session)
-      (format "*pi-%s:%s*" type-str abbrev-dir))))
+        (format "*pi-coding-agent-%s:%s<%s>*" type-str abbrev-dir session)
+      (format "*pi-coding-agent-%s:%s*" type-str abbrev-dir))))
 
-(defun pi--find-session (dir &optional session)
+(defun pi-coding-agent--find-session (dir &optional session)
   "Find existing chat buffer for DIR and SESSION.
 Returns the chat buffer or nil if not found."
-  (get-buffer (pi--buffer-name :chat dir session)))
+  (get-buffer (pi-coding-agent--buffer-name :chat dir session)))
 
-(defun pi--get-or-create-buffer (type dir &optional session)
+(defun pi-coding-agent--get-or-create-buffer (type dir &optional session)
   "Get or create buffer of TYPE for DIR and optional SESSION.
 TYPE is :chat or :input.  Returns the buffer."
-  (let* ((name (pi--buffer-name type dir session))
+  (let* ((name (pi-coding-agent--buffer-name type dir session))
          (existing (get-buffer name)))
     (if existing
         existing
       (let ((buf (generate-new-buffer name)))
         (with-current-buffer buf
           (pcase type
-            (:chat (pi-chat-mode))
-            (:input (pi-input-mode))))
+            (:chat (pi-coding-agent-chat-mode))
+            (:input (pi-coding-agent-input-mode))))
         buf))))
 
 ;;;; Buffer-Local Session Variables
 
-(defvar-local pi--process nil
+(defvar-local pi-coding-agent--process nil
   "The pi RPC subprocess for this session.")
 
-(defvar-local pi--chat-buffer nil
+(defvar-local pi-coding-agent--chat-buffer nil
   "Reference to the chat buffer for this session.")
 
-(defvar-local pi--input-buffer nil
+(defvar-local pi-coding-agent--input-buffer nil
   "Reference to the input buffer for this session.")
 
-(defvar-local pi--streaming-marker nil
+(defvar-local pi-coding-agent--streaming-marker nil
   "Marker for current streaming insertion point.")
 
-;; pi--status is defined in pi-core.el as the single source of truth
+;; pi-coding-agent--status is defined in pi-coding-agent-core.el as the single source of truth
 ;; for session activity state (idle, sending, streaming, compacting)
 
-(defvar-local pi--cached-stats nil
+(defvar-local pi-coding-agent--cached-stats nil
   "Cached session statistics for header-line display.
 Updated after each agent turn completes.")
 
-(defvar-local pi--last-usage nil
+(defvar-local pi-coding-agent--last-usage nil
   "Usage from last assistant message for context percentage.
 This is the per-turn usage, not cumulative - used to calculate
 how much of the context window was used in the last turn.")
 
-(defvar-local pi--aborted nil
+(defvar-local pi-coding-agent--aborted nil
   "Non-nil if the current/last request was aborted.")
 
-(defvar-local pi--message-start-marker nil
+(defvar-local pi-coding-agent--message-start-marker nil
   "Marker for start of current message content.
 Used to replace raw markdown with rendered Org on message completion.")
 
-(defvar-local pi--tool-args-cache nil
+(defvar-local pi-coding-agent--tool-args-cache nil
   "Hash table mapping toolCallId to args.
 Needed because tool_execution_end events don't include args.")
 
-(defvar-local pi--pending-tool-overlay nil
+(defvar-local pi-coding-agent--pending-tool-overlay nil
   "Overlay for tool block currently being executed.
-Set by `pi--display-tool-start', used by `pi--display-tool-end'.")
+Set by display-tool-start, used by display-tool-end.")
 
-(defvar-local pi--assistant-header-shown nil
+(defvar-local pi-coding-agent--assistant-header-shown nil
   "Non-nil if Assistant header has been shown for current prompt.
 Used to avoid duplicate headers during retry sequences.")
 
 ;;;; Buffer Navigation
 
-(defun pi--get-chat-buffer ()
+(defun pi-coding-agent--get-chat-buffer ()
   "Get the chat buffer for the current session.
 Works from either chat or input buffer."
-  (if (derived-mode-p 'pi-chat-mode)
+  (if (derived-mode-p 'pi-coding-agent-chat-mode)
       (current-buffer)
-    pi--chat-buffer))
+    pi-coding-agent--chat-buffer))
 
-(defun pi--get-input-buffer ()
+(defun pi-coding-agent--get-input-buffer ()
   "Get the input buffer for the current session.
 Works from either chat or input buffer."
-  (if (derived-mode-p 'pi-input-mode)
+  (if (derived-mode-p 'pi-coding-agent-input-mode)
       (current-buffer)
-    pi--input-buffer))
+    pi-coding-agent--input-buffer))
 
-(defun pi--get-process ()
+(defun pi-coding-agent--get-process ()
   "Get the pi process for the current session.
 Works from either chat or input buffer."
-  (if (derived-mode-p 'pi-chat-mode)
-      pi--process
-    (and pi--chat-buffer
-         (buffer-local-value 'pi--process pi--chat-buffer))))
+  (if (derived-mode-p 'pi-coding-agent-chat-mode)
+      pi-coding-agent--process
+    (and pi-coding-agent--chat-buffer
+         (buffer-local-value 'pi-coding-agent--process pi-coding-agent--chat-buffer))))
 
 ;;;; Display
 
-(defun pi--display-buffers (chat-buf input-buf)
+(defun pi-coding-agent--display-buffers (chat-buf input-buf)
   "Display CHAT-BUF and INPUT-BUF in current window, split vertically.
 Does not affect other windows in the frame."
   ;; Use current window for chat, split for input
   (switch-to-buffer chat-buf)
   (with-current-buffer chat-buf
     (goto-char (point-max)))
-  (let ((input-win (split-window nil (- pi-input-window-height) 'below)))
+  (let ((input-win (split-window nil (- pi-coding-agent-input-window-height) 'below)))
     (set-window-buffer input-win input-buf)
     (select-window input-win)))
 
@@ -562,24 +562,24 @@ Does not affect other windows in the frame."
 ;; During streaming, windows "following" output (window-point at buffer end)
 ;; scroll to show new content. Windows where the user scrolled up stay put.
 ;;
-;; Key mechanism: `window-point-insertion-type' is set to t in pi-chat-mode,
+;; Key mechanism: `window-point-insertion-type' is set to t in pi-coding-agent-chat-mode,
 ;; making window-point move with inserted text. We track which windows are
 ;; following before each insert, then restore point for non-following windows
 ;; afterward. Emacs naturally scrolls to keep point visible.
 
-(defun pi--window-following-p (window)
+(defun pi-coding-agent--window-following-p (window)
   "Return non-nil if WINDOW is following output (point at end of buffer)."
   (>= (window-point window) (1- (point-max))))
 
-(defmacro pi--with-scroll-preservation (&rest body)
+(defmacro pi-coding-agent--with-scroll-preservation (&rest body)
   "Execute BODY preserving scroll for windows not following output.
 Windows at buffer end will scroll to show new content.
 Windows where user scrolled up stay in place."
   (declare (indent 0) (debug t))
   `(let* ((windows (get-buffer-window-list (current-buffer) nil t))
-          (following (cl-remove-if-not #'pi--window-following-p windows))
+          (following (cl-remove-if-not #'pi-coding-agent--window-following-p windows))
           (saved-points (mapcar (lambda (w) (cons w (window-point w)))
-                                (cl-remove-if #'pi--window-following-p windows))))
+                                (cl-remove-if #'pi-coding-agent--window-following-p windows))))
      ,@body
      ;; Restore point for non-following windows
      (dolist (pair saved-points)
@@ -590,136 +590,136 @@ Windows where user scrolled up stay in place."
        (when (window-live-p win)
          (set-window-point win (point-max))))))
 
-(defun pi--append-to-chat (text)
+(defun pi-coding-agent--append-to-chat (text)
   "Append TEXT to the chat buffer.
 Windows following the output (point at end) will scroll to show new text.
 Windows where user scrolled up (point earlier) stay in place."
   (let ((inhibit-read-only t))
-    (pi--with-scroll-preservation
+    (pi-coding-agent--with-scroll-preservation
       (save-excursion
         (goto-char (point-max))
         (insert text)))))
 
-(defun pi--make-separator (label face &optional timestamp)
+(defun pi-coding-agent--make-separator (label face &optional timestamp)
   "Create a separator line with LABEL styled with FACE.
 If TIMESTAMP (Emacs time value) is provided, display it right-aligned.
 The label stays centered; timestamp eats into the right dashes.
 Returns a decorated separator line with centered label."
   (let* ((label-str (concat " " label " "))
-         (total-width (- pi-separator-width 2))  ; Account for "* " prefix
+         (total-width (- pi-coding-agent-separator-width 2))  ; Account for "* " prefix
          (label-len (length label-str))
          ;; Calculate symmetric dash count (same for both sides without timestamp)
          (dash-count (max 4 (/ (- total-width label-len) 2)))
          (left-dashes (make-string dash-count ?─)))
     (if timestamp
         ;; With timestamp: label stays centered, timestamp eats into right dashes
-        (let* ((timestamp-str (pi--format-message-timestamp timestamp))
+        (let* ((timestamp-str (pi-coding-agent--format-message-timestamp timestamp))
                (timestamp-len (length timestamp-str))
                ;; Right dashes reduced by timestamp length, keep at least 1 trailing dash
                (right-dash-count (max 1 (- dash-count timestamp-len 1)))
                (right-dashes (make-string right-dash-count ?─))
-               (decorated (concat (propertize left-dashes 'face 'pi-separator)
+               (decorated (concat (propertize left-dashes 'face 'pi-coding-agent-separator)
                                   (propertize label-str 'face face)
-                                  (propertize right-dashes 'face 'pi-separator)
-                                  (propertize timestamp-str 'face 'pi-timestamp)
-                                  (propertize "─" 'face 'pi-separator))))
+                                  (propertize right-dashes 'face 'pi-coding-agent-separator)
+                                  (propertize timestamp-str 'face 'pi-coding-agent-timestamp)
+                                  (propertize "─" 'face 'pi-coding-agent-separator))))
           (concat "* " decorated))
       ;; Without timestamp: symmetric dashes around label
       (let* ((right-dashes (make-string dash-count ?─))
-             (decorated (concat (propertize left-dashes 'face 'pi-separator)
+             (decorated (concat (propertize left-dashes 'face 'pi-coding-agent-separator)
                                 (propertize label-str 'face face)
-                                (propertize right-dashes 'face 'pi-separator))))
+                                (propertize right-dashes 'face 'pi-coding-agent-separator))))
         (concat "* " decorated)))))
 
-(defun pi--display-user-message (text &optional timestamp)
+(defun pi-coding-agent--display-user-message (text &optional timestamp)
   "Display user message TEXT in the chat buffer.
 If TIMESTAMP (Emacs time value) is provided, display it in the header."
-  (pi--append-to-chat
-   (concat "\n" (pi--make-separator "You" 'pi-user-label timestamp) "\n\n"
+  (pi-coding-agent--append-to-chat
+   (concat "\n" (pi-coding-agent--make-separator "You" 'pi-coding-agent-user-label timestamp) "\n\n"
            text "\n")))
 
-(defun pi--display-agent-start ()
+(defun pi-coding-agent--display-agent-start ()
   "Display separator for new agent turn.
 Only shows the Assistant header once per prompt, even during retries.
-Note: `pi--status' is set to `streaming' by `pi--update-state-from-event'."
-  (setq pi--aborted nil)  ; Reset abort flag for new turn
+Note: status is set to `streaming' by the event handler."
+  (setq pi-coding-agent--aborted nil)  ; Reset abort flag for new turn
   ;; Only show header if not already shown for this prompt
-  (unless pi--assistant-header-shown
-    (pi--append-to-chat
-     (concat "\n" (pi--make-separator "Assistant" 'pi-assistant-label) "\n\n"))
-    (setq pi--assistant-header-shown t))
+  (unless pi-coding-agent--assistant-header-shown
+    (pi-coding-agent--append-to-chat
+     (concat "\n" (pi-coding-agent--make-separator "Assistant" 'pi-coding-agent-assistant-label) "\n\n"))
+    (setq pi-coding-agent--assistant-header-shown t))
   ;; Create markers at current end position
   ;; message-start-marker: where content begins (for later replacement)
   ;; streaming-marker: where new deltas are inserted
-  (setq pi--message-start-marker (copy-marker (point-max) nil))
-  (setq pi--streaming-marker (copy-marker (point-max) t))
-  (pi--spinner-start)
+  (setq pi-coding-agent--message-start-marker (copy-marker (point-max) nil))
+  (setq pi-coding-agent--streaming-marker (copy-marker (point-max) t))
+  (pi-coding-agent--spinner-start)
   (force-mode-line-update))
 
-(defun pi--display-message-delta (delta)
+(defun pi-coding-agent--display-message-delta (delta)
   "Display streaming message DELTA at the streaming marker."
-  (when (and delta pi--streaming-marker)
+  (when (and delta pi-coding-agent--streaming-marker)
     (let ((inhibit-read-only t))
-      (pi--with-scroll-preservation
+      (pi-coding-agent--with-scroll-preservation
         (save-excursion
-          (goto-char (marker-position pi--streaming-marker))
+          (goto-char (marker-position pi-coding-agent--streaming-marker))
           (insert delta)
-          (set-marker pi--streaming-marker (point)))))))
+          (set-marker pi-coding-agent--streaming-marker (point)))))))
 
-(defun pi--display-thinking-start ()
+(defun pi-coding-agent--display-thinking-start ()
   "Insert opening marker for thinking block."
-  (when pi--streaming-marker
+  (when pi-coding-agent--streaming-marker
     (let ((inhibit-read-only t))
-      (pi--with-scroll-preservation
+      (pi-coding-agent--with-scroll-preservation
         (save-excursion
-          (goto-char (marker-position pi--streaming-marker))
+          (goto-char (marker-position pi-coding-agent--streaming-marker))
           (insert "```thinking\n")
-          (set-marker pi--streaming-marker (point)))))))
+          (set-marker pi-coding-agent--streaming-marker (point)))))))
 
-(defun pi--display-thinking-delta (delta)
+(defun pi-coding-agent--display-thinking-delta (delta)
   "Display streaming thinking DELTA at the streaming marker."
-  (when (and delta pi--streaming-marker)
+  (when (and delta pi-coding-agent--streaming-marker)
     (let ((inhibit-read-only t))
-      (pi--with-scroll-preservation
+      (pi-coding-agent--with-scroll-preservation
         (save-excursion
-          (goto-char (marker-position pi--streaming-marker))
+          (goto-char (marker-position pi-coding-agent--streaming-marker))
           (insert delta)
-          (set-marker pi--streaming-marker (point)))))))
+          (set-marker pi-coding-agent--streaming-marker (point)))))))
 
-(defun pi--display-thinking-end (_content)
+(defun pi-coding-agent--display-thinking-end (_content)
   "Insert closing marker for thinking block.
 CONTENT is ignored - we use what was already streamed."
-  (when pi--streaming-marker
+  (when pi-coding-agent--streaming-marker
     (let ((inhibit-read-only t))
-      (pi--with-scroll-preservation
+      (pi-coding-agent--with-scroll-preservation
         (save-excursion
-          (goto-char (marker-position pi--streaming-marker))
+          (goto-char (marker-position pi-coding-agent--streaming-marker))
           (insert "\n```\n\n")
-          (set-marker pi--streaming-marker (point)))))))
+          (set-marker pi-coding-agent--streaming-marker (point)))))))
 
-(defun pi--display-agent-end ()
+(defun pi-coding-agent--display-agent-end ()
   "Display end of agent turn.
-Note: `pi--status' is set to `idle' by `pi--update-state-from-event'."
+Note: status is set to `idle' by the event handler."
   (let ((inhibit-read-only t))
     ;; Show abort indicator if aborted
-    (when pi--aborted
+    (when pi-coding-agent--aborted
       (save-excursion
         (goto-char (point-max))
         ;; Remove trailing whitespace before adding indicator
         (skip-chars-backward " \t\n")
         (delete-region (point) (point-max))
         (insert "\n\n" (propertize "[Aborted]" 'face 'error) "\n"))
-      (setq pi--aborted nil))
+      (setq pi-coding-agent--aborted nil))
     ;; Add spacing for next turn, avoiding excess blank lines
     (save-excursion
       (goto-char (point-max))
       (skip-chars-backward "\n")
       (delete-region (point) (point-max))
       (insert "\n\n")))
-  (pi--spinner-stop)
-  (pi--refresh-header))
+  (pi-coding-agent--spinner-stop)
+  (pi-coding-agent--refresh-header))
 
-(defun pi--display-retry-start (event)
+(defun pi-coding-agent--display-retry-start (event)
   "Display retry notice from auto_retry_start EVENT.
 Shows attempt number, delay, and raw error message."
   (let* ((attempt (plist-get event :attempt))
@@ -732,165 +732,165 @@ Shows attempt number, delay, and raw error message."
                          (or max-attempts 3)
                          delay-sec
                          error-msg)))
-    (pi--append-to-chat
-     (concat (propertize notice 'face 'pi-retry-notice) "\n"))))
+    (pi-coding-agent--append-to-chat
+     (concat (propertize notice 'face 'pi-coding-agent-retry-notice) "\n"))))
 
-(defun pi--display-retry-end (event)
+(defun pi-coding-agent--display-retry-end (event)
   "Display retry result from auto_retry_end EVENT.
 Shows success or final failure with raw error."
   (let* ((success (plist-get event :success))
          (attempt (plist-get event :attempt))
          (final-error (or (plist-get event :finalError) "unknown error")))
     (if (eq success t)
-        (pi--append-to-chat
+        (pi-coding-agent--append-to-chat
          (concat (propertize (format "✓ Retry succeeded on attempt %d"
                                      (or attempt 1))
-                             'face 'pi-retry-notice)
+                             'face 'pi-coding-agent-retry-notice)
                  "\n\n"))
       ;; Final failure
-      (pi--append-to-chat
+      (pi-coding-agent--append-to-chat
        (concat (propertize (format "✗ Retry failed after %d attempts — %s"
                                    (or attempt 1)
                                    final-error)
-                           'face 'pi-error-notice)
+                           'face 'pi-coding-agent-error-notice)
                "\n\n")))))
 
-(defun pi--display-error (error-msg)
+(defun pi-coding-agent--display-error (error-msg)
   "Display ERROR-MSG from the server."
-  (pi--append-to-chat
+  (pi-coding-agent--append-to-chat
    (concat "\n" (propertize (format "[Error: %s]" (or error-msg "unknown"))
-                            'face 'pi-error-notice)
+                            'face 'pi-coding-agent-error-notice)
            "\n")))
 
-(defun pi--display-hook-error (event)
+(defun pi-coding-agent--display-hook-error (event)
   "Display hook error from hook_error EVENT."
   (let* ((hook-path (plist-get event :hookPath))
          (hook-event (plist-get event :event))
          (error-msg (plist-get event :error))
          (hook-name (if hook-path (file-name-nondirectory hook-path) "unknown")))
-    (pi--append-to-chat
+    (pi-coding-agent--append-to-chat
      (concat "\n"
              (propertize (format "[Hook error in %s (%s): %s]"
                                  hook-name
                                  (or hook-event "unknown")
                                  (or error-msg "unknown error"))
-                         'face 'pi-error-notice)
+                         'face 'pi-coding-agent-error-notice)
              "\n"))))
 
-(defun pi--display-no-model-warning ()
+(defun pi-coding-agent--display-no-model-warning ()
   "Display warning when no model is available.
 Shown when the session starts without a configured model/API key."
-  (pi--append-to-chat
+  (pi-coding-agent--append-to-chat
    (concat "\n"
            (propertize "⚠ No models available"
-                       'face 'pi-error-notice)
+                       'face 'pi-coding-agent-error-notice)
            "\n\n"
            (propertize "To get started, either:\n"
-                       'face 'pi-retry-notice)
+                       'face 'pi-coding-agent-retry-notice)
            (propertize "  • Set an API key: "
-                       'face 'pi-retry-notice)
+                       'face 'pi-coding-agent-retry-notice)
            "ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.\n"
            (propertize "  • Or run "
-                       'face 'pi-retry-notice)
+                       'face 'pi-coding-agent-retry-notice)
            (propertize "pi --login"
-                       'face 'pi-tool-command)
+                       'face 'pi-coding-agent-tool-command)
            (propertize " in a terminal to authenticate via OAuth\n"
-                       'face 'pi-retry-notice)
+                       'face 'pi-coding-agent-retry-notice)
            "\n")))
 
-(defun pi--kill-buffer-query ()
+(defun pi-coding-agent--kill-buffer-query ()
   "Query function for killing pi buffers.
 Prompts for confirmation if streaming is in progress."
   (cond
    ;; Chat buffer during streaming - confirm
-   ((and (derived-mode-p 'pi-chat-mode)
-         (eq pi--status 'streaming))
+   ((and (derived-mode-p 'pi-coding-agent-chat-mode)
+         (eq pi-coding-agent--status 'streaming))
     (yes-or-no-p "Pi is streaming. Kill session? "))
    ;; Input buffer during streaming - confirm
-   ((and (derived-mode-p 'pi-input-mode)
-         pi--chat-buffer
-         (buffer-live-p pi--chat-buffer)
-         (eq (buffer-local-value 'pi--status pi--chat-buffer) 'streaming))
+   ((and (derived-mode-p 'pi-coding-agent-input-mode)
+         pi-coding-agent--chat-buffer
+         (buffer-live-p pi-coding-agent--chat-buffer)
+         (eq (buffer-local-value 'pi-coding-agent--status pi-coding-agent--chat-buffer) 'streaming))
     (yes-or-no-p "Pi is streaming. Kill session? "))
    ;; Otherwise allow
    (t t)))
 
-(defun pi--cleanup-on-kill ()
+(defun pi-coding-agent--cleanup-on-kill ()
   "Clean up resources when chat buffer is killed.
 Also kills the linked input buffer."
-  (when (derived-mode-p 'pi-chat-mode)
+  (when (derived-mode-p 'pi-coding-agent-chat-mode)
     ;; Kill linked input buffer
-    (when (and pi--input-buffer (buffer-live-p pi--input-buffer))
-      (let ((input-buf pi--input-buffer))
+    (when (and pi-coding-agent--input-buffer (buffer-live-p pi-coding-agent--input-buffer))
+      (let ((input-buf pi-coding-agent--input-buffer))
         ;; Clear reference to avoid infinite recursion
-        (setq pi--input-buffer nil)
+        (setq pi-coding-agent--input-buffer nil)
         (kill-buffer input-buf)))
     ;; Clean up process
-    (when pi--process
-      (pi--unregister-display-handler pi--process)
-      (when (process-live-p pi--process)
-        (delete-process pi--process)))))
+    (when pi-coding-agent--process
+      (pi-coding-agent--unregister-display-handler pi-coding-agent--process)
+      (when (process-live-p pi-coding-agent--process)
+        (delete-process pi-coding-agent--process)))))
 
-(defun pi--cleanup-input-on-kill ()
+(defun pi-coding-agent--cleanup-input-on-kill ()
   "Clean up when input buffer is killed.
 Also kills the linked chat buffer (which handles process cleanup)."
-  (when (derived-mode-p 'pi-input-mode)
-    (when (and pi--chat-buffer (buffer-live-p pi--chat-buffer))
-      (let ((chat-buf pi--chat-buffer))
+  (when (derived-mode-p 'pi-coding-agent-input-mode)
+    (when (and pi-coding-agent--chat-buffer (buffer-live-p pi-coding-agent--chat-buffer))
+      (let ((chat-buf pi-coding-agent--chat-buffer))
         ;; Clear reference to avoid infinite recursion
-        (setq pi--chat-buffer nil)
+        (setq pi-coding-agent--chat-buffer nil)
         (kill-buffer chat-buf)))))
 
-(defun pi--register-display-handler (process)
+(defun pi-coding-agent--register-display-handler (process)
   "Register display event handler for PROCESS."
-  (let ((handler (pi--make-display-handler process)))
-    (process-put process 'pi-display-handler handler)))
+  (let ((handler (pi-coding-agent--make-display-handler process)))
+    (process-put process 'pi-coding-agent-display-handler handler)))
 
-(defun pi--unregister-display-handler (process)
+(defun pi-coding-agent--unregister-display-handler (process)
   "Unregister display event handler for PROCESS."
-  (process-put process 'pi-display-handler nil))
+  (process-put process 'pi-coding-agent-display-handler nil))
 
-(defun pi--make-display-handler (process)
+(defun pi-coding-agent--make-display-handler (process)
   "Create a display event handler for PROCESS."
   (lambda (event)
-    (when-let ((chat-buf (process-get process 'pi-chat-buffer)))
+    (when-let ((chat-buf (process-get process 'pi-coding-agent-chat-buffer)))
       (when (buffer-live-p chat-buf)
         (with-current-buffer chat-buf
-          (pi--handle-display-event event))))))
+          (pi-coding-agent--handle-display-event event))))))
 
-(defun pi--handle-display-event (event)
+(defun pi-coding-agent--handle-display-event (event)
   "Handle EVENT for display purposes.
 Updates buffer-local state and renders display updates."
   ;; Update state first (now buffer-local)
-  (pi--update-state-from-event event)
+  (pi-coding-agent--update-state-from-event event)
   ;; Then handle display
   (pcase (plist-get event :type)
     ("agent_start"
-     (pi--display-agent-start))
+     (pi-coding-agent--display-agent-start))
     ("message_start"
      ;; Reset markers for each new message to avoid clobbering tool output
-     (setq pi--message-start-marker (copy-marker (point-max) nil))
-     (setq pi--streaming-marker (copy-marker (point-max) t)))
+     (setq pi-coding-agent--message-start-marker (copy-marker (point-max) nil))
+     (setq pi-coding-agent--streaming-marker (copy-marker (point-max) t)))
     ("message_update"
      (when-let* ((msg-event (plist-get event :assistantMessageEvent))
                  (event-type (plist-get msg-event :type)))
        (pcase event-type
          ("text_delta"
-          (pi--display-message-delta (plist-get msg-event :delta)))
+          (pi-coding-agent--display-message-delta (plist-get msg-event :delta)))
          ("thinking_start"
-          (pi--display-thinking-start))
+          (pi-coding-agent--display-thinking-start))
          ("thinking_delta"
-          (pi--display-thinking-delta (plist-get msg-event :delta)))
+          (pi-coding-agent--display-thinking-delta (plist-get msg-event :delta)))
          ("thinking_end"
-          (pi--display-thinking-end (plist-get msg-event :content)))
+          (pi-coding-agent--display-thinking-end (plist-get msg-event :content)))
          ("error"
           ;; Error during streaming (e.g., API error)
-          (pi--display-error (plist-get msg-event :reason))))))
+          (pi-coding-agent--display-error (plist-get msg-event :reason))))))
     ("message_end"
      (let ((message (plist-get event :message)))
        ;; Display error if message ended with error (e.g., API error)
        (when (equal (plist-get message :stopReason) "error")
-         (pi--display-error (plist-get message :errorMessage)))
+         (pi-coding-agent--display-error (plist-get message :errorMessage)))
        ;; Capture usage from assistant messages for context % calculation.
        ;; Skip aborted messages - they may have incomplete usage data and
        ;; would reset context percentage to 0%.  Matches TUI footer.ts behavior.
@@ -898,66 +898,66 @@ Updates buffer-local state and renders display updates."
        (when (and (equal (plist-get message :role) "assistant")
                   (not (equal (plist-get message :stopReason) "aborted"))
                   (plist-get message :usage))
-         (setq pi--last-usage (plist-get message :usage))))
-     (pi--render-complete-message))
+         (setq pi-coding-agent--last-usage (plist-get message :usage))))
+     (pi-coding-agent--render-complete-message))
     ("tool_execution_start"
      (let ((tool-call-id (plist-get event :toolCallId))
            (args (plist-get event :args)))
        ;; Cache args for tool_execution_end (which doesn't include args)
-       (when (and tool-call-id pi--tool-args-cache)
-         (puthash tool-call-id args pi--tool-args-cache))
-       (pi--display-tool-start (plist-get event :toolName) args)))
+       (when (and tool-call-id pi-coding-agent--tool-args-cache)
+         (puthash tool-call-id args pi-coding-agent--tool-args-cache))
+       (pi-coding-agent--display-tool-start (plist-get event :toolName) args)))
     ("tool_execution_end"
      (let* ((tool-call-id (plist-get event :toolCallId))
             (result (plist-get event :result))
             ;; Retrieve cached args since tool_execution_end doesn't include them
-            (args (when (and tool-call-id pi--tool-args-cache)
-                    (prog1 (gethash tool-call-id pi--tool-args-cache)
-                      (remhash tool-call-id pi--tool-args-cache)))))
-       (pi--display-tool-end (plist-get event :toolName)
+            (args (when (and tool-call-id pi-coding-agent--tool-args-cache)
+                    (prog1 (gethash tool-call-id pi-coding-agent--tool-args-cache)
+                      (remhash tool-call-id pi-coding-agent--tool-args-cache)))))
+       (pi-coding-agent--display-tool-end (plist-get event :toolName)
                              args
                              (plist-get result :content)
                              (plist-get result :details)
                              (plist-get event :isError))))
     ("auto_compaction_start"
-     (setq pi--status 'compacting)
-     (pi--spinner-start)
+     (setq pi-coding-agent--status 'compacting)
+     (pi-coding-agent--spinner-start)
      (let ((reason (plist-get event :reason)))
        (message "Pi: %sAuto-compacting... (C-c C-k to cancel)"
                 (if (equal reason "overflow") "Context overflow, " ""))))
     ("auto_compaction_end"
-     (pi--spinner-stop)
-     (setq pi--status 'idle)
+     (pi-coding-agent--spinner-stop)
+     (setq pi-coding-agent--status 'idle)
      (if (plist-get event :aborted)
          (message "Pi: Auto-compaction cancelled")
        (when-let ((result (plist-get event :result)))
-         (pi--handle-compaction-success
+         (pi-coding-agent--handle-compaction-success
           (plist-get result :tokensBefore)
           (plist-get result :summary)
-          (pi--ms-to-time (plist-get result :timestamp))))))
+          (pi-coding-agent--ms-to-time (plist-get result :timestamp))))))
     ("agent_end"
-     (pi--display-agent-end))
+     (pi-coding-agent--display-agent-end))
     ("auto_retry_start"
-     (pi--display-retry-start event))
+     (pi-coding-agent--display-retry-start event))
     ("auto_retry_end"
-     (pi--display-retry-end event))
+     (pi-coding-agent--display-retry-end event))
     ("hook_error"
-     (pi--display-hook-error event))))
+     (pi-coding-agent--display-hook-error event))))
 
 ;;;; Sending Prompts
 
-(defun pi-send ()
+(defun pi-coding-agent-send ()
   "Send the current input buffer contents to pi.
 Clears the input buffer after sending.  Does nothing if buffer is empty.
 If text starts with /, tries to expand as a custom slash command.
 If pi is currently streaming, shows a message and preserves input."
   (interactive)
   (let* ((text (string-trim (buffer-string)))
-         (expanded (pi--expand-slash-command text))
-         (chat-buf (pi--get-chat-buffer))
+         (expanded (pi-coding-agent--expand-slash-command text))
+         (chat-buf (pi-coding-agent--get-chat-buffer))
          (streaming (and chat-buf
-                         (buffer-local-value 'pi--status chat-buf)
-                         (memq (buffer-local-value 'pi--status chat-buf)
+                         (buffer-local-value 'pi-coding-agent--status chat-buf)
+                         (memq (buffer-local-value 'pi-coding-agent--status chat-buf)
                                '(streaming sending)))))
     (cond
      ;; Empty input - do nothing
@@ -968,56 +968,56 @@ If pi is currently streaming, shows a message and preserves input."
      ;; Normal send
      (t
       ;; Add to history and reset navigation state
-      (pi--history-add text)
-      (setq pi--input-ring-index nil
-            pi--input-saved nil)
+      (pi-coding-agent--history-add text)
+      (setq pi-coding-agent--input-ring-index nil
+            pi-coding-agent--input-saved nil)
       (erase-buffer)
       (with-current-buffer chat-buf
-        (pi--display-user-message text (current-time))
-        (setq pi--status 'sending)
-        (setq pi--assistant-header-shown nil)  ; Reset for new prompt
-        (pi--spinner-start)
+        (pi-coding-agent--display-user-message text (current-time))
+        (setq pi-coding-agent--status 'sending)
+        (setq pi-coding-agent--assistant-header-shown nil)  ; Reset for new prompt
+        (pi-coding-agent--spinner-start)
         (force-mode-line-update))
-      (pi--send-prompt expanded)))))
+      (pi-coding-agent--send-prompt expanded)))))
 
-(defun pi--send-prompt (text)
+(defun pi-coding-agent--send-prompt (text)
   "Send TEXT as a prompt to the pi process.
 Shows an error message if process is unavailable."
-  (let ((proc (pi--get-process)))
+  (let ((proc (pi-coding-agent--get-process)))
     (cond
      ((null proc)
       (message "Pi: No process available - try M-x pi to restart"))
      ((not (process-live-p proc))
       (message "Pi: Process died - try M-x pi to restart"))
      (t
-      (pi--rpc-async proc
+      (pi-coding-agent--rpc-async proc
                      (list :type "prompt" :message text)
                      #'ignore)))))
 
-(defun pi-abort ()
+(defun pi-coding-agent-abort ()
   "Abort the current pi operation.
 Only works when streaming is in progress."
   (interactive)
-  (when-let ((chat-buf (pi--get-chat-buffer)))
-    ;; Check pi--status in chat buffer (it's updated by agent_start/agent_end)
-    (when (eq (buffer-local-value 'pi--status chat-buf) 'streaming)
+  (when-let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+    ;; Check pi-coding-agent--status in chat buffer (it's updated by agent_start/agent_end)
+    (when (eq (buffer-local-value 'pi-coding-agent--status chat-buf) 'streaming)
       ;; Set aborted flag in chat buffer (where agent-end will check it)
       (with-current-buffer chat-buf
-        (setq pi--aborted t))
-      (when-let ((proc (pi--get-process)))
-        (pi--rpc-async proc
+        (setq pi-coding-agent--aborted t))
+      (when-let ((proc (pi-coding-agent--get-process)))
+        (pi-coding-agent--rpc-async proc
                        (list :type "abort")
                        (lambda (_response)
                          (run-with-timer 2 nil (lambda () (message nil)))
                          (message "Pi: Aborted")))))))
 
-(defun pi-quit ()
+(defun pi-coding-agent-quit ()
   "Close the current pi session.
 Kills both chat and input buffers, terminates the process,
 and removes the input window (merging its space with adjacent windows)."
   (interactive)
-  (let ((chat-buf (pi--get-chat-buffer))
-        (input-buf (pi--get-input-buffer))
+  (let ((chat-buf (pi-coding-agent--get-chat-buffer))
+        (input-buf (pi-coding-agent--get-input-buffer))
         (input-windows nil))
     ;; Collect windows showing the input buffer (we'll delete these)
     (when (buffer-live-p input-buf)
@@ -1032,7 +1032,7 @@ and removes the input window (merging its space with adjacent windows)."
       (when (window-live-p win)
         (ignore-errors (delete-window win))))))
 
-(defun pi--align-tables-in-region (start end)
+(defun pi-coding-agent--align-tables-in-region (start end)
   "Align all markdown tables between START and END."
   (save-excursion
     (goto-char start)
@@ -1041,14 +1041,14 @@ and removes the input window (merging its space with adjacent windows)."
       (when (markdown-table-at-point-p)
         (markdown-table-align)))))
 
-(defun pi--render-complete-message ()
+(defun pi-coding-agent--render-complete-message ()
   "Finalize completed message by applying font-lock and aligning tables.
-Uses pi--message-start-marker and pi--streaming-marker to find content.
-Markdown stays as-is; gfm-mode handles highlighting and markup hiding.
+Uses message-start-marker and streaming-marker to find content.
+Markdown stays as-is; `gfm-mode' handles highlighting and markup hiding.
 Ensures message ends with newline for proper spacing."
-  (when (and pi--message-start-marker pi--streaming-marker)
-    (let ((start (marker-position pi--message-start-marker))
-          (end (marker-position pi--streaming-marker)))
+  (when (and pi-coding-agent--message-start-marker pi-coding-agent--streaming-marker)
+    (let ((start (marker-position pi-coding-agent--message-start-marker))
+          (end (marker-position pi-coding-agent--streaming-marker)))
       (when (< start end)
         ;; Ensure trailing newline (messages should end with newline)
         (let ((inhibit-read-only t))
@@ -1056,40 +1056,40 @@ Ensures message ends with newline for proper spacing."
             (goto-char end)
             (unless (eq (char-before) ?\n)
               (insert "\n")
-              (set-marker pi--streaming-marker (point))))
+              (set-marker pi-coding-agent--streaming-marker (point))))
           ;; Align any markdown tables in the message
-          (pi--align-tables-in-region start (marker-position pi--streaming-marker)))
-        (font-lock-ensure start (marker-position pi--streaming-marker))))))
+          (pi-coding-agent--align-tables-in-region start (marker-position pi-coding-agent--streaming-marker)))
+        (font-lock-ensure start (marker-position pi-coding-agent--streaming-marker))))))
 
 ;;;; Tool Output
 
-(defsubst pi--tool-path (args)
+(defsubst pi-coding-agent--tool-path (args)
   "Extract file path from tool ARGS.
 Checks both :path and :file_path keys for compatibility."
   (or (plist-get args :path)
       (plist-get args :file_path)))
 
-(defun pi--tool-overlay-create (tool-name)
+(defun pi-coding-agent--tool-overlay-create (tool-name)
   "Create overlay for tool block TOOL-NAME at point.
 Returns the overlay.  The overlay uses rear-advance so it
 automatically extends when content is inserted at its end."
   (let ((ov (make-overlay (point) (point) nil nil t)))
-    (overlay-put ov 'pi-tool-block t)
-    (overlay-put ov 'pi-tool-name tool-name)
-    (overlay-put ov 'face 'pi-tool-block-pending)
+    (overlay-put ov 'pi-coding-agent-tool-block t)
+    (overlay-put ov 'pi-coding-agent-tool-name tool-name)
+    (overlay-put ov 'face 'pi-coding-agent-tool-block-pending)
     ov))
 
-(defun pi--display-tool-start (tool-name args)
+(defun pi-coding-agent--display-tool-start (tool-name args)
   "Display header for tool TOOL-NAME with ARGS and create overlay."
   (let* ((header (pcase tool-name
                    ("bash" (format "$ %s" (or (plist-get args :command) "...")))
-                   ("read" (format "read %s" (or (pi--tool-path args) "...")))
-                   ("write" (format "write %s" (or (pi--tool-path args) "...")))
-                   ("edit" (format "edit %s" (or (pi--tool-path args) "...")))
+                   ("read" (format "read %s" (or (pi-coding-agent--tool-path args) "...")))
+                   ("write" (format "write %s" (or (pi-coding-agent--tool-path args) "...")))
+                   ("edit" (format "edit %s" (or (pi-coding-agent--tool-path args) "...")))
                    (_ tool-name)))
-         (header-display (propertize header 'face 'pi-tool-command))
+         (header-display (propertize header 'face 'pi-coding-agent-tool-command))
          (inhibit-read-only t))
-    (pi--with-scroll-preservation
+    (pi-coding-agent--with-scroll-preservation
       (save-excursion
         (goto-char (point-max))
         ;; Add blank line before tool if previous line has content
@@ -1098,24 +1098,24 @@ automatically extends when content is inserted at its end."
                   (looking-at-p "^$"))
           (insert "\n"))
         ;; Create overlay at start of tool block
-        (setq pi--pending-tool-overlay (pi--tool-overlay-create tool-name))
+        (setq pi-coding-agent--pending-tool-overlay (pi-coding-agent--tool-overlay-create tool-name))
         (insert header-display "\n")))))
 
-(defun pi--wrap-in-src-block (content lang)
+(defun pi-coding-agent--wrap-in-src-block (content lang)
   "Wrap CONTENT in a markdown fenced code block with LANG.
 Returns markdown string for syntax highlighting."
   (format "```%s\n%s\n```" (or lang "") content))
 
-(defun pi--render-tool-content (content lang)
+(defun pi-coding-agent--render-tool-content (content lang)
   "Render CONTENT with optional syntax highlighting for LANG.
 If LANG is non-nil, wraps in markdown code fence.
 Returns the rendered string (markdown code block or plain text)."
   (if lang
-      (pi--wrap-in-src-block content lang)
+      (pi-coding-agent--wrap-in-src-block content lang)
     ;; No language - return plain text with face
-    (propertize content 'face 'pi-tool-output)))
+    (propertize content 'face 'pi-coding-agent-tool-output)))
 
-(defun pi--display-tool-end (tool-name args content details is-error)
+(defun pi-coding-agent--display-tool-end (tool-name args content details is-error)
   "Display result for TOOL-NAME and update overlay face.
 ARGS contains tool arguments, CONTENT is a list of content blocks.
 DETAILS contains tool-specific data (e.g., diff for edit tool).
@@ -1132,7 +1132,7 @@ Shows preview lines with expandable toggle for long output."
                                     (plist-get details :diff))
                            "diff"))
                  ((or "read" "write")
-                  (pi--path-to-language (pi--tool-path args)))
+                  (pi-coding-agent--path-to-language (pi-coding-agent--tool-path args)))
                  ("bash" "text")  ; wrap in fence for visual consistency
                  (_ nil)))
          ;; For edit with diff, use diff from details
@@ -1144,11 +1144,11 @@ Shows preview lines with expandable toggle for long output."
          (lines (split-string display-content "\n" t))
          (total-lines (length lines))
          (preview-limit (pcase tool-name
-                          ("bash" pi-bash-preview-lines)
-                          (_ pi-tool-preview-lines)))
+                          ("bash" pi-coding-agent-bash-preview-lines)
+                          (_ pi-coding-agent-tool-preview-lines)))
          (needs-collapse (> total-lines preview-limit))
          (inhibit-read-only t))
-    (pi--with-scroll-preservation
+    (pi-coding-agent--with-scroll-preservation
       (goto-char (point-max))
       (if needs-collapse
           ;; Long output: show preview + toggle button
@@ -1157,54 +1157,54 @@ Shows preview lines with expandable toggle for long output."
                  (full-content display-content)
                  (hidden-count (- total-lines preview-limit))
                  ;; Render preview with syntax highlighting
-                 (rendered-preview (pi--render-tool-content preview-content lang)))
+                 (rendered-preview (pi-coding-agent--render-tool-content preview-content lang)))
             (insert rendered-preview "\n")
             ;; Insert toggle button
             (insert-text-button
              (propertize (format "... (%d more lines)" hidden-count)
-                         'face 'pi-collapsed-indicator)
-             'action #'pi--toggle-tool-output
+                         'face 'pi-coding-agent-collapsed-indicator)
+             'action #'pi-coding-agent--toggle-tool-output
              'follow-link t
-             'pi-full-content full-content
-             'pi-preview-content preview-content
-             'pi-lang lang
-             'pi-expanded nil
+             'pi-coding-agent-full-content full-content
+             'pi-coding-agent-preview-content preview-content
+             'pi-coding-agent-lang lang
+             'pi-coding-agent-expanded nil
              'hidden-count hidden-count)
             (insert "\n"))
         ;; Short output: show all with syntax highlighting
-        (let ((rendered (pi--render-tool-content display-content lang)))
+        (let ((rendered (pi-coding-agent--render-tool-content display-content lang)))
           (insert rendered "\n")))
       ;; Error indicator
       (when is-error
-        (insert (propertize "[error]" 'face 'pi-tool-error) "\n"))
+        (insert (propertize "[error]" 'face 'pi-coding-agent-tool-error) "\n"))
       ;; Update overlay face and finalize bounds
-      (when pi--pending-tool-overlay
-        (overlay-put pi--pending-tool-overlay 'face
-                     (if is-error 'pi-tool-block-error 'pi-tool-block-success))
+      (when pi-coding-agent--pending-tool-overlay
+        (overlay-put pi-coding-agent--pending-tool-overlay 'face
+                     (if is-error 'pi-coding-agent-tool-block-error 'pi-coding-agent-tool-block-success))
         ;; Fix overlay end to prevent extension to subsequent content.
         ;; The overlay has rear-advance=t (needed during streaming), so we
         ;; must explicitly set the end AFTER inserting the trailing newline,
         ;; then shrink it back to exclude the newline.
         (insert "\n")
-        (move-overlay pi--pending-tool-overlay
-                      (overlay-start pi--pending-tool-overlay)
+        (move-overlay pi-coding-agent--pending-tool-overlay
+                      (overlay-start pi-coding-agent--pending-tool-overlay)
                       (1- (point)))
-        (setq pi--pending-tool-overlay nil)))))
+        (setq pi-coding-agent--pending-tool-overlay nil)))))
 
-(defun pi--toggle-tool-output (button)
+(defun pi-coding-agent--toggle-tool-output (button)
   "Toggle between preview and full content for BUTTON."
   (let* ((inhibit-read-only t)
-         (expanded (button-get button 'pi-expanded))
-         (full-content (button-get button 'pi-full-content))
-         (preview-content (button-get button 'pi-preview-content))
-         (lang (button-get button 'pi-lang))
+         (expanded (button-get button 'pi-coding-agent-expanded))
+         (full-content (button-get button 'pi-coding-agent-full-content))
+         (preview-content (button-get button 'pi-coding-agent-preview-content))
+         (lang (button-get button 'pi-coding-agent-lang))
          (hidden-count (button-get button 'hidden-count))
          (btn-start (button-start button))
          (btn-end (button-end button)))
     (save-excursion
       ;; Find the tool overlay
       (goto-char btn-start)
-      (when-let ((bounds (pi--find-tool-block-bounds)))
+      (when-let ((bounds (pi-coding-agent--find-tool-block-bounds)))
         ;; Content starts after first line (header)
         (goto-char (car bounds))
         (forward-line 1)
@@ -1213,72 +1213,72 @@ Shows preview lines with expandable toggle for long output."
           (delete-region content-start (1+ btn-end))
           (goto-char content-start)
           (if expanded
-              (pi--insert-collapsed-content preview-content full-content lang hidden-count)
-            (pi--insert-expanded-content preview-content full-content lang hidden-count)))))))
+              (pi-coding-agent--insert-collapsed-content preview-content full-content lang hidden-count)
+            (pi-coding-agent--insert-expanded-content preview-content full-content lang hidden-count)))))))
 
-(defun pi--insert-collapsed-content (preview-content full-content lang hidden-count)
+(defun pi-coding-agent--insert-collapsed-content (preview-content full-content lang hidden-count)
   "Insert PREVIEW-CONTENT with toggle button.
 FULL-CONTENT is stored for expansion.  LANG is for syntax highlighting.
 HIDDEN-COUNT shows lines remaining."
-  (let ((rendered (pi--render-tool-content preview-content lang)))
+  (let ((rendered (pi-coding-agent--render-tool-content preview-content lang)))
     (insert rendered "\n"))
   (insert-text-button
-   (propertize (format "... (%d more lines)" hidden-count) 'face 'pi-collapsed-indicator)
-   'action #'pi--toggle-tool-output
+   (propertize (format "... (%d more lines)" hidden-count) 'face 'pi-coding-agent-collapsed-indicator)
+   'action #'pi-coding-agent--toggle-tool-output
    'follow-link t
-   'pi-full-content full-content
-   'pi-preview-content preview-content
-   'pi-lang lang
-   'pi-expanded nil
+   'pi-coding-agent-full-content full-content
+   'pi-coding-agent-preview-content preview-content
+   'pi-coding-agent-lang lang
+   'pi-coding-agent-expanded nil
    'hidden-count hidden-count)
   (insert "\n"))
 
-(defun pi--insert-expanded-content (preview-content full-content lang hidden-count)
+(defun pi-coding-agent--insert-expanded-content (preview-content full-content lang hidden-count)
   "Insert FULL-CONTENT with collapse button.
 PREVIEW-CONTENT, LANG and HIDDEN-COUNT are stored for collapsing."
-  (let ((rendered (pi--render-tool-content full-content lang)))
+  (let ((rendered (pi-coding-agent--render-tool-content full-content lang)))
     (insert rendered "\n"))
   (insert-text-button
-   (propertize "[-]" 'face 'pi-collapsed-indicator)
-   'action #'pi--toggle-tool-output
+   (propertize "[-]" 'face 'pi-coding-agent-collapsed-indicator)
+   'action #'pi-coding-agent--toggle-tool-output
    'follow-link t
-   'pi-full-content full-content
-   'pi-preview-content preview-content
-   'pi-lang lang
-   'pi-expanded t
+   'pi-coding-agent-full-content full-content
+   'pi-coding-agent-preview-content preview-content
+   'pi-coding-agent-lang lang
+   'pi-coding-agent-expanded t
    'hidden-count hidden-count)
   (insert "\n"))
 
-(defun pi--find-tool-block-bounds ()
+(defun pi-coding-agent--find-tool-block-bounds ()
   "Find the bounds of the tool block at point.
 Returns (START . END) if inside a tool block, nil otherwise."
   (let ((overlays (overlays-at (point))))
-    (when-let ((ov (seq-find (lambda (o) (overlay-get o 'pi-tool-block)) overlays)))
+    (when-let ((ov (seq-find (lambda (o) (overlay-get o 'pi-coding-agent-tool-block)) overlays)))
       (cons (overlay-start ov) (overlay-end ov)))))
 
-(defun pi--find-toggle-button-in-region (start end)
+(defun pi-coding-agent--find-toggle-button-in-region (start end)
   "Find a toggle button between START and END."
   (save-excursion
     (goto-char start)
     (let ((found nil))
       (while (and (not found) (< (point) end))
         (let ((btn (button-at (point))))
-          (if (and btn (button-get btn 'pi-full-content))
+          (if (and btn (button-get btn 'pi-coding-agent-full-content))
               (setq found btn)
             (forward-char 1))))
       found)))
 
-(defun pi-toggle-tool-section ()
+(defun pi-coding-agent-toggle-tool-section ()
   "Toggle the tool output section at point.
 Works anywhere inside a tool block overlay."
   (interactive)
   (let ((original-pos (point)))
-    (if-let ((bounds (pi--find-tool-block-bounds)))
-        (if-let ((btn (pi--find-toggle-button-in-region (car bounds) (cdr bounds))))
+    (if-let ((bounds (pi-coding-agent--find-tool-block-bounds)))
+        (if-let ((btn (pi-coding-agent--find-toggle-button-in-region (car bounds) (cdr bounds))))
             (progn
-              (pi--toggle-tool-output btn)
+              (pi-coding-agent--toggle-tool-output btn)
               ;; Try to restore position, clamped to new block bounds
-              (when-let ((new-bounds (pi--find-tool-block-bounds)))
+              (when-let ((new-bounds (pi-coding-agent--find-tool-block-bounds)))
                 (goto-char (min original-pos (cdr new-bounds)))))
           ;; No button found - short output, use markdown-cycle
           (markdown-cycle))
@@ -1287,58 +1287,58 @@ Works anywhere inside a tool block overlay."
 
 ;;;; Compaction Display
 
-(defun pi--display-compaction-result (tokens-before summary &optional timestamp)
+(defun pi-coding-agent--display-compaction-result (tokens-before summary &optional timestamp)
   "Display a compaction result block in the chat buffer.
 TOKENS-BEFORE is the token count before compaction.
 SUMMARY is the compaction summary text (markdown).
 TIMESTAMP is optional time when compaction occurred."
-  (pi--append-to-chat
-   (concat "\n" (pi--make-separator "Compaction" 'pi-compaction-label timestamp) "\n\n"
+  (pi-coding-agent--append-to-chat
+   (concat "\n" (pi-coding-agent--make-separator "Compaction" 'pi-coding-agent-compaction-label timestamp) "\n\n"
            (propertize (format "Compacted from %s tokens\n\n"
-                               (pi--format-number (or tokens-before 0)))
-                       'face 'pi-tool-name)
+                               (pi-coding-agent--format-number (or tokens-before 0)))
+                       'face 'pi-coding-agent-tool-name)
            (or summary "") "\n")))
 
-(defun pi--handle-compaction-success (tokens-before summary &optional timestamp)
+(defun pi-coding-agent--handle-compaction-success (tokens-before summary &optional timestamp)
   "Handle successful compaction: display result, reset state, notify user.
 TOKENS-BEFORE is the pre-compaction token count.
 SUMMARY is the compaction summary text.
 TIMESTAMP is optional time when compaction occurred."
-  (pi--display-compaction-result tokens-before summary timestamp)
-  (setq pi--last-usage nil)
-  (pi--refresh-header)
-  (message "Pi: Compacted from %s tokens" (pi--format-number (or tokens-before 0))))
+  (pi-coding-agent--display-compaction-result tokens-before summary timestamp)
+  (setq pi-coding-agent--last-usage nil)
+  (pi-coding-agent--refresh-header)
+  (message "Pi: Compacted from %s tokens" (pi-coding-agent--format-number (or tokens-before 0))))
 
 ;;;; Dependency Checking
 
-(defun pi--check-pi ()
+(defun pi-coding-agent--check-pi ()
   "Check if pi binary is available.
 Returns t if available, nil otherwise."
   (and (executable-find "pi") t))
 
-(defun pi--check-dependencies ()
+(defun pi-coding-agent--check-dependencies ()
   "Check all required dependencies.
 Displays warnings for missing dependencies."
-  (unless (pi--check-pi)
+  (unless (pi-coding-agent--check-pi)
     (display-warning 'pi "pi binary not found. Install with: npm install -g @mariozechner/pi-coding-agent"
                      :error)))
 
 ;;;; Startup Header
 
-(defconst pi-version "0.1.0"
-  "Version of pi.el.")
+(defconst pi-coding-agent-version "0.1.0"
+  "Version of pi-coding-agent.")
 
-(defun pi--get-pi-version ()
+(defun pi-coding-agent--get-pi-coding-agent-version ()
   "Get pi CLI version by running `pi --version'."
   (condition-case nil
       (string-trim (shell-command-to-string "pi --version"))
     (error "Unknown")))
 
-(defun pi--format-startup-header ()
+(defun pi-coding-agent--format-startup-header ()
   "Format the startup header string with styled separator."
-  (let* ((pi-cli-version (pi--get-pi-version))
-         (separator (pi--make-separator (format "Pi %s" pi-cli-version)
-                                        'pi-assistant-label)))
+  (let* ((pi-coding-agent-cli-version (pi-coding-agent--get-pi-coding-agent-version))
+         (separator (pi-coding-agent--make-separator (format "Pi %s" pi-coding-agent-cli-version)
+                                        'pi-coding-agent-assistant-label)))
     (concat
      separator "\n"
      "C-c C-c   send prompt\n"
@@ -1346,20 +1346,20 @@ Displays warnings for missing dependencies."
      "C-c C-r   resume session\n"
      "C-c C-p   menu\n")))
 
-(defun pi--display-startup-header ()
+(defun pi-coding-agent--display-startup-header ()
   "Display the startup header in the chat buffer."
-  (pi--append-to-chat (pi--format-startup-header)))
+  (pi-coding-agent--append-to-chat (pi-coding-agent--format-startup-header)))
 
 ;;;; Header Line
 
-(defun pi--format-tokens-compact (n)
+(defun pi-coding-agent--format-tokens-compact (n)
   "Format token count N compactly (e.g., 50k, 1.2M)."
   (cond
    ((>= n 1000000) (format "%.1fM" (/ n 1000000.0)))
    ((>= n 1000) (format "%.0fk" (/ n 1000.0)))
    (t (number-to-string n))))
 
-(defun pi--shorten-model-name (name)
+(defun pi-coding-agent--shorten-model-name (name)
   "Shorten model NAME for display.
 Removes common prefixes like \"Claude \" and suffixes like \" (latest)\"."
   (thread-last name
@@ -1367,76 +1367,76 @@ Removes common prefixes like \"Claude \" and suffixes like \" (latest)\"."
     (replace-regexp-in-string " (latest)$" "")
     (replace-regexp-in-string "^claude-" "")))
 
-(defvar pi--spinner-frames ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
+(defvar pi-coding-agent--spinner-frames ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
   "Frames for the busy spinner animation.")
 
-(defvar pi--spinner-index 0
+(defvar pi-coding-agent--spinner-index 0
   "Current frame index in the spinner animation (shared for sync).")
 
-(defvar pi--spinner-timer nil
+(defvar pi-coding-agent--spinner-timer nil
   "Timer for animating spinners (shared across sessions).")
 
-(defvar pi--spinning-sessions nil
+(defvar pi-coding-agent--spinning-sessions nil
   "List of chat buffers currently spinning.")
 
-(defun pi--spinner-start ()
+(defun pi-coding-agent--spinner-start ()
   "Start the spinner for current session."
-  (let ((chat-buf (pi--get-chat-buffer)))
-    (when (and chat-buf (not (memq chat-buf pi--spinning-sessions)))
-      (push chat-buf pi--spinning-sessions)
+  (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+    (when (and chat-buf (not (memq chat-buf pi-coding-agent--spinning-sessions)))
+      (push chat-buf pi-coding-agent--spinning-sessions)
       ;; Start global timer if not running
-      (unless pi--spinner-timer
-        (setq pi--spinner-index 0)
-        (setq pi--spinner-timer
-              (run-with-timer 0 0.1 #'pi--spinner-tick))))))
+      (unless pi-coding-agent--spinner-timer
+        (setq pi-coding-agent--spinner-index 0)
+        (setq pi-coding-agent--spinner-timer
+              (run-with-timer 0 0.1 #'pi-coding-agent--spinner-tick))))))
 
-(defun pi--spinner-stop ()
+(defun pi-coding-agent--spinner-stop ()
   "Stop the spinner for current session."
-  (let ((chat-buf (pi--get-chat-buffer)))
-    (setq pi--spinning-sessions (delq chat-buf pi--spinning-sessions))
+  (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+    (setq pi-coding-agent--spinning-sessions (delq chat-buf pi-coding-agent--spinning-sessions))
     ;; Stop global timer if no sessions spinning
-    (when (and pi--spinner-timer (null pi--spinning-sessions))
-      (cancel-timer pi--spinner-timer)
-      (setq pi--spinner-timer nil))))
+    (when (and pi-coding-agent--spinner-timer (null pi-coding-agent--spinning-sessions))
+      (cancel-timer pi-coding-agent--spinner-timer)
+      (setq pi-coding-agent--spinner-timer nil))))
 
-(defun pi--spinner-tick ()
+(defun pi-coding-agent--spinner-tick ()
   "Advance spinner to next frame and update spinning sessions."
-  (setq pi--spinner-index
-        (mod (1+ pi--spinner-index) (length pi--spinner-frames)))
+  (setq pi-coding-agent--spinner-index
+        (mod (1+ pi-coding-agent--spinner-index) (length pi-coding-agent--spinner-frames)))
   ;; Only update windows showing spinning sessions
-  (dolist (buf pi--spinning-sessions)
+  (dolist (buf pi-coding-agent--spinning-sessions)
     (when (buffer-live-p buf)
-      (let ((input-buf (buffer-local-value 'pi--input-buffer buf)))
+      (let ((input-buf (buffer-local-value 'pi-coding-agent--input-buffer buf)))
         ;; Update input buffer's header line (where spinner shows)
         (when (and input-buf (buffer-live-p input-buf))
           (dolist (win (get-buffer-window-list input-buf nil t))
             (with-selected-window win
               (force-mode-line-update))))))))
 
-(defun pi--spinner-current ()
+(defun pi-coding-agent--spinner-current ()
   "Return current spinner frame if this session is spinning."
   (let ((chat-buf (cond
-                   ((derived-mode-p 'pi-chat-mode) (current-buffer))
-                   ((derived-mode-p 'pi-input-mode) pi--chat-buffer)
+                   ((derived-mode-p 'pi-coding-agent-chat-mode) (current-buffer))
+                   ((derived-mode-p 'pi-coding-agent-input-mode) pi-coding-agent--chat-buffer)
                    (t nil))))
-    (when (and chat-buf (memq chat-buf pi--spinning-sessions))
-      (aref pi--spinner-frames pi--spinner-index))))
+    (when (and chat-buf (memq chat-buf pi-coding-agent--spinning-sessions))
+      (aref pi-coding-agent--spinner-frames pi-coding-agent--spinner-index))))
 
-(defvar pi--header-model-map
+(defvar pi-coding-agent--header-model-map
   (let ((map (make-sparse-keymap)))
-    (define-key map [header-line mouse-1] #'pi-select-model)
-    (define-key map [header-line mouse-2] #'pi-select-model)
+    (define-key map [header-line mouse-1] #'pi-coding-agent-select-model)
+    (define-key map [header-line mouse-2] #'pi-coding-agent-select-model)
     map)
   "Keymap for clicking model name in header-line.")
 
-(defvar pi--header-thinking-map
+(defvar pi-coding-agent--header-thinking-map
   (let ((map (make-sparse-keymap)))
-    (define-key map [header-line mouse-1] #'pi-cycle-thinking)
-    (define-key map [header-line mouse-2] #'pi-cycle-thinking)
+    (define-key map [header-line mouse-1] #'pi-coding-agent-cycle-thinking)
+    (define-key map [header-line mouse-2] #'pi-coding-agent-cycle-thinking)
     map)
   "Keymap for clicking thinking level in header-line.")
 
-(defun pi--header-format-context (context-tokens context-window)
+(defun pi-coding-agent--header-format-context (context-tokens context-window)
   "Format context usage as percentage with color coding.
 CONTEXT-TOKENS is the tokens used, CONTEXT-WINDOW is the max.
 Returns nil if CONTEXT-WINDOW is 0."
@@ -1444,14 +1444,14 @@ Returns nil if CONTEXT-WINDOW is 0."
     (let* ((pct (* (/ (float context-tokens) context-window) 100))
            ;; Note: %% needed because % has special meaning in header-line-format
            (pct-str (format " %.1f%%%%/%s" pct
-                            (pi--format-tokens-compact context-window))))
+                            (pi-coding-agent--format-tokens-compact context-window))))
       (propertize pct-str
                   'face (cond
-                         ((> pct pi-context-error-threshold) 'error)
-                         ((> pct pi-context-warning-threshold) 'warning)
+                         ((> pct pi-coding-agent-context-error-threshold) 'error)
+                         ((> pct pi-coding-agent-context-warning-threshold) 'warning)
                          (t nil))))))
 
-(defun pi--header-format-stats (stats last-usage model-obj)
+(defun pi-coding-agent--header-format-stats (stats last-usage model-obj)
   "Format session STATS for header line.
 LAST-USAGE is the most recent message's token usage.
 MODEL-OBJ contains model info including context window.
@@ -1471,68 +1471,68 @@ Returns nil if STATS is nil."
            (context-tokens (+ last-input last-output last-cache-read last-cache-write))
            (context-window (or (plist-get model-obj :contextWindow) 0)))
       (concat
-       " │ ↑" (pi--format-tokens-compact input)
-       " ↓" (pi--format-tokens-compact output)
-       " R" (pi--format-tokens-compact cache-read)
-       " W" (pi--format-tokens-compact cache-write)
+       " │ ↑" (pi-coding-agent--format-tokens-compact input)
+       " ↓" (pi-coding-agent--format-tokens-compact output)
+       " R" (pi-coding-agent--format-tokens-compact cache-read)
+       " W" (pi-coding-agent--format-tokens-compact cache-write)
        (format " $%.2f" cost)
-       (pi--header-format-context context-tokens context-window)))))
+       (pi-coding-agent--header-format-context context-tokens context-window)))))
 
-(defun pi--header-line-string ()
+(defun pi-coding-agent--header-line-string ()
   "Return formatted header-line string for input buffer.
 Accesses state from the linked chat buffer."
   (let* ((chat-buf (cond
                     ;; In input buffer with valid link to chat
-                    ((and pi--chat-buffer (buffer-live-p pi--chat-buffer))
-                     pi--chat-buffer)
+                    ((and pi-coding-agent--chat-buffer (buffer-live-p pi-coding-agent--chat-buffer))
+                     pi-coding-agent--chat-buffer)
                     ;; In chat buffer itself
-                    ((derived-mode-p 'pi-chat-mode)
+                    ((derived-mode-p 'pi-coding-agent-chat-mode)
                      (current-buffer))
                     ;; No valid chat buffer yet
                     (t nil)))
-         (state (and chat-buf (buffer-local-value 'pi--state chat-buf)))
-         (stats (and chat-buf (buffer-local-value 'pi--cached-stats chat-buf)))
-         (last-usage (and chat-buf (buffer-local-value 'pi--last-usage chat-buf)))
+         (state (and chat-buf (buffer-local-value 'pi-coding-agent--state chat-buf)))
+         (stats (and chat-buf (buffer-local-value 'pi-coding-agent--cached-stats chat-buf)))
+         (last-usage (and chat-buf (buffer-local-value 'pi-coding-agent--last-usage chat-buf)))
          (model-obj (plist-get state :model))
          (model-name (cond
                       ((stringp model-obj) model-obj)
                       ((plist-get model-obj :name))
                       (t "")))
          (model-short (if (string-empty-p model-name) "..."
-                        (pi--shorten-model-name model-name)))
+                        (pi-coding-agent--shorten-model-name model-name)))
          (thinking (or (plist-get state :thinking-level) ""))
-         (status-str (if-let ((spinner (pi--spinner-current)))
+         (status-str (if-let ((spinner (pi-coding-agent--spinner-current)))
                          (concat " " spinner)
                        "  ")))  ; Same width as " ⠋" to prevent jumping
     (concat
      ;; Model (clickable)
      (propertize model-short
-                 'face 'pi-model-name
+                 'face 'pi-coding-agent-model-name
                  'mouse-face 'highlight
                  'help-echo "mouse-1: Select model"
-                 'local-map pi--header-model-map)
+                 'local-map pi-coding-agent--header-model-map)
      ;; Thinking level (clickable)
      (unless (string-empty-p thinking)
        (concat " • "
                (propertize thinking
                            'mouse-face 'highlight
                            'help-echo "mouse-1: Cycle thinking level"
-                           'local-map pi--header-thinking-map)))
+                           'local-map pi-coding-agent--header-thinking-map)))
      status-str
      ;; Stats (if available)
-     (pi--header-format-stats stats last-usage model-obj))))
+     (pi-coding-agent--header-format-stats stats last-usage model-obj))))
 
-(defun pi--refresh-header ()
+(defun pi-coding-agent--refresh-header ()
   "Refresh header-line by fetching and caching session stats."
-  (when-let ((proc (pi--get-process))
-             (chat-buf (pi--get-chat-buffer)))
-    (let ((input-buf (buffer-local-value 'pi--input-buffer chat-buf)))
-      (pi--rpc-async proc '(:type "get_session_stats")
+  (when-let ((proc (pi-coding-agent--get-process))
+             (chat-buf (pi-coding-agent--get-chat-buffer)))
+    (let ((input-buf (buffer-local-value 'pi-coding-agent--input-buffer chat-buf)))
+      (pi-coding-agent--rpc-async proc '(:type "get_session_stats")
                      (lambda (response)
                        (when (plist-get response :success)
                          (when (buffer-live-p chat-buf)
                            (with-current-buffer chat-buf
-                             (setq pi--cached-stats (plist-get response :data))))
+                             (setq pi-coding-agent--cached-stats (plist-get response :data))))
                          ;; Update the input buffer's header line
                          (when (buffer-live-p input-buf)
                            (dolist (win (get-buffer-window-list input-buf nil t))
@@ -1541,7 +1541,7 @@ Accesses state from the linked chat buffer."
 
 ;;;; Slash Command Discovery
 
-(defun pi--parse-frontmatter (content)
+(defun pi-coding-agent--parse-frontmatter (content)
   "Parse YAML frontmatter from CONTENT.
 Returns plist with :description and :content keys."
   (if (not (string-prefix-p "---" content))
@@ -1558,7 +1558,7 @@ Returns plist with :description and :content keys."
               (setq description (string-trim (match-string 1 line)))))
           (list :description description :content remaining-content))))))
 
-(defun pi--load-commands-from-dir (dir source)
+(defun pi-coding-agent--load-commands-from-dir (dir source)
   "Load slash commands from DIR.
 SOURCE is \"user\" or \"project\" for display purposes.
 Returns list of plists with :name, :description, :content, :source.
@@ -1573,7 +1573,7 @@ optional command files that may not exist or may have permission issues."
               (let* ((raw-content (with-temp-buffer
                                     (insert-file-contents file)
                                     (buffer-string)))
-                     (parsed (pi--parse-frontmatter raw-content))
+                     (parsed (pi-coding-agent--parse-frontmatter raw-content))
                      (name (file-name-base file))
                      (content (plist-get parsed :content))
                      (description (plist-get parsed :description)))
@@ -1599,21 +1599,21 @@ optional command files that may not exist or may have permission issues."
             (error nil))))
       (nreverse commands))))
 
-(defvar pi--file-commands nil
+(defvar pi-coding-agent--file-commands nil
   "Cached list of discovered file-based slash commands.")
 
-(defun pi--discover-file-commands (dir)
+(defun pi-coding-agent--discover-file-commands (dir)
   "Discover file-based slash commands for session in DIR.
 Searches ~/.pi/agent/commands/ and DIR/.pi/commands/.
 Returns list of command plists."
   (let ((user-dir (expand-file-name "~/.pi/agent/commands/"))
         (project-dir (expand-file-name ".pi/commands/" dir)))
-    (append (pi--load-commands-from-dir user-dir "user")
-            (pi--load-commands-from-dir project-dir "project"))))
+    (append (pi-coding-agent--load-commands-from-dir user-dir "user")
+            (pi-coding-agent--load-commands-from-dir project-dir "project"))))
 
 ;;;; Slash Command Argument Handling
 
-(defun pi--parse-command-args (args-string)
+(defun pi-coding-agent--parse-command-args (args-string)
   "Parse ARGS-STRING into a list of arguments.
 Uses shell-like quoting rules: double and single quotes preserve spaces,
 backslash escapes characters.  Returns a list of argument strings,
@@ -1621,7 +1621,7 @@ or nil for empty/whitespace-only input."
   (let ((result (split-string-shell-command args-string)))
     (if (equal result '("")) nil result)))
 
-(defun pi--substitute-args (content args)
+(defun pi-coding-agent--substitute-args (content args)
   "Substitute argument placeholders in CONTENT with ARGS.
 Replaces $1, $2, etc. with positional arguments.
 Replaces $@ with all arguments joined by spaces."
@@ -1642,33 +1642,34 @@ Replaces $@ with all arguments joined by spaces."
 
 (require 'transient)
 
-(defun pi--menu-model-description ()
+(defun pi-coding-agent--menu-model-description ()
   "Return model description for transient menu."
-  (let ((model (plist-get (plist-get pi--state :model) :name)))
+  (let ((model (plist-get (plist-get pi-coding-agent--state :model) :name)))
     (format "Model: %s" (or model "unknown"))))
 
-(defun pi--menu-thinking-description ()
+(defun pi-coding-agent--menu-thinking-description ()
   "Return thinking level description for transient menu."
-  (let ((level (plist-get pi--state :thinking-level)))
+  (let ((level (plist-get pi-coding-agent--state :thinking-level)))
     (format "Thinking: %s" (or level "off"))))
 
-(defun pi-new-session ()
+;;;###autoload
+(defun pi-coding-agent-new-session ()
   "Start a new pi session (reset)."
   (interactive)
-  (when-let ((proc (pi--get-process)))
-    (pi--rpc-async proc '(:type "reset")
+  (when-let ((proc (pi-coding-agent--get-process)))
+    (pi-coding-agent--rpc-async proc '(:type "reset")
                    (lambda (response)
                      (let* ((data (plist-get response :data))
                             (cancelled (plist-get data :cancelled)))
                        (if (and (plist-get response :success)
-                                (pi--json-false-p cancelled))
+                                (pi-coding-agent--json-false-p cancelled))
                            (progn
-                             (pi--clear-chat-buffer)
-                             (pi--refresh-header)
+                             (pi-coding-agent--clear-chat-buffer)
+                             (pi-coding-agent--refresh-header)
                              (message "Pi: New session started"))
                          (message "Pi: New session cancelled")))))))
 
-(defun pi--session-dir-name (dir)
+(defun pi-coding-agent--session-dir-name (dir)
   "Convert DIR to session directory name.
 Matches pi's encoding: --path-with-dashes--.
 Note: Handles both Unix and Windows path separators."
@@ -1677,7 +1678,7 @@ Note: Handles both Unix and Windows path separators."
                                               (replace-regexp-in-string "^[/\\\\]" "" clean-dir))))
     (concat "--" safe-path "--")))
 
-(defun pi--session-metadata (path)
+(defun pi-coding-agent--session-metadata (path)
   "Extract metadata from session file PATH.
 Returns plist (:modified-time :first-message :message-count) or nil on error."
   (condition-case nil
@@ -1711,12 +1712,12 @@ Returns plist (:modified-time :first-message :message-count) or nil on error."
                       :message-count (max 0 (1- line-count))))))))
     (error nil)))
 
-(defun pi--ms-to-time (ms)
+(defun pi-coding-agent--ms-to-time (ms)
   "Convert milliseconds MS to Emacs time value.
 Returns nil if MS is nil."
   (and ms (seconds-to-time (/ ms 1000.0))))
 
-(defun pi--format-relative-time (time)
+(defun pi-coding-agent--format-relative-time (time)
   "Format TIME (Emacs time value) as relative time string."
   (condition-case nil
       (let* ((now (current-time))
@@ -1732,7 +1733,7 @@ Returns nil if MS is nil."
          (t (format-time-string "%b %d" time))))
     (error "Unknown time format")))
 
-(defun pi--format-message-timestamp (time)
+(defun pi-coding-agent--format-message-timestamp (time)
   "Format TIME for message headers.
 Shows HH:MM if today, otherwise YYYY-MM-DD HH:MM."
   (let* ((time-day (format-time-string "%Y-%m-%d" time))
@@ -1741,17 +1742,17 @@ Shows HH:MM if today, otherwise YYYY-MM-DD HH:MM."
         (format-time-string "%H:%M" time)
       (format-time-string "%Y-%m-%d %H:%M" time))))
 
-(defun pi--truncate-string (str max-len)
+(defun pi-coding-agent--truncate-string (str max-len)
   "Truncate STR to MAX-LEN chars, adding ellipsis if needed."
   (if (and str (> (length str) max-len))
       (concat (substring str 0 (- max-len 1)) "…")
     str))
 
-(defun pi--list-sessions (dir)
+(defun pi-coding-agent--list-sessions (dir)
   "List available session files for project DIR.
 Returns list of absolute paths to .jsonl files, sorted newest first."
   (let* ((sessions-base (expand-file-name "~/.pi/agent/sessions/"))
-         (session-dir (expand-file-name (pi--session-dir-name dir) sessions-base)))
+         (session-dir (expand-file-name (pi-coding-agent--session-dir-name dir) sessions-base)))
     (when (file-directory-p session-dir)
       ;; Sort by filename descending (timestamps sort lexicographically)
       (sort (directory-files session-dir t "\\.jsonl$")
@@ -1759,16 +1760,16 @@ Returns list of absolute paths to .jsonl files, sorted newest first."
               (string> (file-name-nondirectory a)
                        (file-name-nondirectory b)))))))
 
-(defun pi--format-session-choice (path)
+(defun pi-coding-agent--format-session-choice (path)
   "Format session PATH for display in selector.
 Returns (display-string . path) for `completing-read'."
-  (let ((metadata (pi--session-metadata path)))
+  (let ((metadata (pi-coding-agent--session-metadata path)))
     (if metadata
         (let* ((modified-time (plist-get metadata :modified-time))
                (first-msg (plist-get metadata :first-message))
                (msg-count (plist-get metadata :message-count))
-               (relative-time (pi--format-relative-time modified-time))
-               (preview (pi--truncate-string first-msg 50))
+               (relative-time (pi-coding-agent--format-relative-time modified-time))
+               (preview (pi-coding-agent--truncate-string first-msg 50))
                (display (if preview
                             (format "%s · %s (%d msgs)"
                                     preview relative-time msg-count)
@@ -1778,7 +1779,7 @@ Returns (display-string . path) for `completing-read'."
       (let ((filename (file-name-nondirectory path)))
         (cons filename path)))))
 
-(defun pi--extract-message-text (message)
+(defun pi-coding-agent--extract-message-text (message)
   "Extract plain text content from MESSAGE.
 MESSAGE is a plist with :role and :content.
 Returns concatenated text from all text blocks."
@@ -1792,7 +1793,7 @@ Returns concatenated text from all text blocks."
             (push (plist-get block :text) texts)))))
     (string-join (nreverse texts) "")))
 
-(defun pi--count-tool-calls (message)
+(defun pi-coding-agent--count-tool-calls (message)
   "Count the number of tool call blocks in assistant MESSAGE."
   (let* ((content (plist-get message :content))
          (count 0))
@@ -1804,19 +1805,19 @@ Returns concatenated text from all text blocks."
             (setq count (1+ count))))))
     count))
 
-(defun pi--render-history-text (text)
+(defun pi-coding-agent--render-history-text (text)
   "Render TEXT as markdown content with proper isolation.
 Ensures markdown structures don't leak to subsequent content."
   (when (and text (not (string-empty-p text)))
-    (let ((start (with-current-buffer (pi--get-chat-buffer) (point-max))))
-      (pi--append-to-chat text)
-      (with-current-buffer (pi--get-chat-buffer)
+    (let ((start (with-current-buffer (pi-coding-agent--get-chat-buffer) (point-max))))
+      (pi-coding-agent--append-to-chat text)
+      (with-current-buffer (pi-coding-agent--get-chat-buffer)
         (font-lock-ensure start (point-max)))
       ;; Ensure we end with newlines to reset markdown context
       ;; Two newlines ends any list/paragraph context
-      (pi--append-to-chat "\n\n"))))
+      (pi-coding-agent--append-to-chat "\n\n"))))
 
-(defun pi--display-history-messages (messages)
+(defun pi-coding-agent--display-history-messages (messages)
   "Display MESSAGES from session history with smart grouping.
 Consecutive assistant messages are grouped under one header.
 Tool calls are accumulated and shown as a single summary per group.
@@ -1826,11 +1827,11 @@ Each text block is rendered independently for proper formatting."
     ;; Helper to flush tool count summary
     (cl-flet ((flush-tools ()
                 (when (> pending-tool-count 0)
-                  (pi--append-to-chat
+                  (pi-coding-agent--append-to-chat
                    (concat (propertize (format "[%d tool call%s]"
                                                pending-tool-count
                                                (if (= pending-tool-count 1) "" "s"))
-                                       'face 'pi-tool-name)
+                                       'face 'pi-coding-agent-tool-name)
                            "\n\n"))
                   (setq pending-tool-count 0))))
       ;; Process each message
@@ -1842,24 +1843,24 @@ Each text block is rendered independently for proper formatting."
              ;; Flush any pending tool count
              (flush-tools)
              ;; Show user message with blank line after header
-             (let* ((text (pi--extract-message-text message))
-                    (timestamp (pi--ms-to-time (plist-get message :timestamp))))
+             (let* ((text (pi-coding-agent--extract-message-text message))
+                    (timestamp (pi-coding-agent--ms-to-time (plist-get message :timestamp))))
                (when (and text (not (string-empty-p text)))
-                 (pi--append-to-chat
-                  (concat "\n" (pi--make-separator "You" 'pi-user-label timestamp) "\n\n"
+                 (pi-coding-agent--append-to-chat
+                  (concat "\n" (pi-coding-agent--make-separator "You" 'pi-coding-agent-user-label timestamp) "\n\n"
                           text "\n"))))
              (setq prev-role "user"))
             ("assistant"
              ;; Show header only on transition from user
              (when (not (equal prev-role "assistant"))
                (flush-tools)
-               (pi--append-to-chat
-                (concat "\n" (pi--make-separator "Assistant" 'pi-assistant-label) "\n\n")))
+               (pi-coding-agent--append-to-chat
+                (concat "\n" (pi-coding-agent--make-separator "Assistant" 'pi-coding-agent-assistant-label) "\n\n")))
              ;; Render text immediately (isolated)
-             (let ((text (pi--extract-message-text message))
-                   (tool-count (pi--count-tool-calls message)))
+             (let ((text (pi-coding-agent--extract-message-text message))
+                   (tool-count (pi-coding-agent--count-tool-calls message)))
                (when (and text (not (string-empty-p text)))
-                 (pi--render-history-text text))
+                 (pi-coding-agent--render-history-text text))
                (setq pending-tool-count (+ pending-tool-count tool-count)))
              (setq prev-role "assistant"))
             ("compactionSummary"
@@ -1867,8 +1868,8 @@ Each text block is rendered independently for proper formatting."
              (flush-tools)
              (let* ((summary (plist-get message :summary))
                     (tokens-before (plist-get message :tokensBefore))
-                    (timestamp (pi--ms-to-time (plist-get message :timestamp))))
-               (pi--display-compaction-result tokens-before summary timestamp))
+                    (timestamp (pi-coding-agent--ms-to-time (plist-get message :timestamp))))
+               (pi-coding-agent--display-compaction-result tokens-before summary timestamp))
              (setq prev-role "compactionSummary"))
             ;; Skip toolResult - already counted tool calls in assistant message
             ("toolResult"
@@ -1876,104 +1877,105 @@ Each text block is rendered independently for proper formatting."
       ;; Flush any remaining tool count
       (flush-tools))))
 
-(defun pi--clear-chat-buffer ()
+(defun pi-coding-agent--clear-chat-buffer ()
   "Clear the chat buffer and display fresh startup header.
 Used when starting a new session."
-  (when-let ((chat-buf (pi--get-chat-buffer)))
+  (when-let ((chat-buf (pi-coding-agent--get-chat-buffer)))
     (with-current-buffer chat-buf
       (let ((inhibit-read-only t))
         ;; Clear buffer
         (erase-buffer)
         ;; Show startup header
-        (insert (pi--format-startup-header))
+        (insert (pi-coding-agent--format-startup-header))
         (insert "\n")
         ;; Reset markers
-        (setq pi--message-start-marker nil)
-        (setq pi--streaming-marker nil)
+        (setq pi-coding-agent--message-start-marker nil)
+        (setq pi-coding-agent--streaming-marker nil)
         ;; Reset usage (context % will show 0% until next message)
-        (setq pi--last-usage nil)
+        (setq pi-coding-agent--last-usage nil)
         ;; Clear tool args cache
-        (clrhash pi--tool-args-cache)
+        (clrhash pi-coding-agent--tool-args-cache)
         ;; Position at end
         (goto-char (point-max))))))
 
-(defun pi--display-session-history (messages)
+(defun pi-coding-agent--display-session-history (messages)
   "Display session history MESSAGES in the chat buffer.
 MESSAGES is a vector of message plists from get_messages RPC."
-  (when-let ((chat-buf (pi--get-chat-buffer)))
+  (when-let ((chat-buf (pi-coding-agent--get-chat-buffer)))
     (with-current-buffer chat-buf
       (let ((inhibit-read-only t))
         ;; Clear buffer
         (erase-buffer)
         ;; Show startup header
-        (insert (pi--format-startup-header))
+        (insert (pi-coding-agent--format-startup-header))
         (insert "\n")
         ;; Render messages with smart grouping
         (when (vectorp messages)
-          (pi--display-history-messages messages))
+          (pi-coding-agent--display-history-messages messages))
         ;; Ensure we end with proper spacing
         (goto-char (point-max))
         (unless (bolp) (insert "\n"))
         ;; Reset markers for future streaming
-        (setq pi--message-start-marker nil)
-        (setq pi--streaming-marker nil)
+        (setq pi-coding-agent--message-start-marker nil)
+        (setq pi-coding-agent--streaming-marker nil)
         ;; Scroll to end
         (goto-char (point-max))))))
 
-(defun pi--load-session-history (proc callback)
+(defun pi-coding-agent--load-session-history (proc callback)
   "Load and display session history from PROC.
 Calls CALLBACK with message count when done."
-  (pi--rpc-async proc '(:type "get_messages")
+  (pi-coding-agent--rpc-async proc '(:type "get_messages")
                  (lambda (response)
                    (when (plist-get response :success)
                      (let* ((messages (plist-get (plist-get response :data) :messages))
                             (count (if (vectorp messages) (length messages) 0)))
-                       (pi--display-session-history messages)
+                       (pi-coding-agent--display-session-history messages)
                        ;; Update header with new session info
-                       (when-let ((chat-buf (pi--get-chat-buffer)))
+                       (when-let ((chat-buf (pi-coding-agent--get-chat-buffer)))
                          (with-current-buffer chat-buf
-                           (pi--refresh-header)))
+                           (pi-coding-agent--refresh-header)))
                        (when callback
                          (funcall callback count)))))))
 
-(defun pi-resume-session ()
+;;;###autoload
+(defun pi-coding-agent-resume-session ()
   "Resume a previous pi session from the current project."
   (interactive)
-  (when-let ((proc (pi--get-process))
-             (dir (pi--session-directory)))
-    (let ((sessions (pi--list-sessions dir)))
+  (when-let ((proc (pi-coding-agent--get-process))
+             (dir (pi-coding-agent--session-directory)))
+    (let ((sessions (pi-coding-agent--list-sessions dir)))
       (if (null sessions)
           (message "Pi: No previous sessions found")
-        (let* ((choices (mapcar #'pi--format-session-choice sessions))
+        (let* ((choices (mapcar #'pi-coding-agent--format-session-choice sessions))
                (choice (completing-read "Resume session: "
                                         (mapcar #'car choices)
                                         nil t))
                (selected-path (cdr (assoc choice choices))))
           (when selected-path
-            (pi--rpc-async proc (list :type "switch_session"
+            (pi-coding-agent--rpc-async proc (list :type "switch_session"
                                       :sessionPath selected-path)
                            (lambda (response)
                              (let* ((data (plist-get response :data))
                                     (cancelled (plist-get data :cancelled)))
                                (if (and (plist-get response :success)
-                                        (pi--json-false-p cancelled))
-                                   (pi--load-session-history
+                                        (pi-coding-agent--json-false-p cancelled))
+                                   (pi-coding-agent--load-session-history
                                     proc
                                     (lambda (count)
                                       (message "Pi: Resumed session (%d messages)" count)))
                                  (message "Pi: Failed to resume session")))))))))))
 
-(defun pi-select-model ()
+(defun pi-coding-agent-select-model ()
   "Select a model interactively."
   (interactive)
-  (let ((proc (pi--get-process))
-        (chat-buf (pi--get-chat-buffer)))
+  (let ((proc (pi-coding-agent--get-process))
+        (chat-buf (pi-coding-agent--get-chat-buffer)))
     (unless proc
       (user-error "No pi process running"))
-    (let* ((response (pi--rpc-sync proc '(:type "get_available_models") 5))
+    (let* ((response (pi-coding-agent--rpc-sync proc '(:type "get_available_models") 5))
            (data (plist-get response :data))
            (models (plist-get data :models))
-           (current-name (plist-get (plist-get pi--state :model) :name))
+           (current-name (plist-get (plist-get pi-coding-agent--state :model) :name))
            ;; Build alist of (display-name . model-plist) for selection
            (model-alist (mapcar (lambda (m)
                                   (cons (plist-get m :name) m))
@@ -1986,33 +1988,33 @@ Calls CALLBACK with message count when done."
         (let* ((selected-model (cdr (assoc choice model-alist)))
                (model-id (plist-get selected-model :id))
                (provider (plist-get selected-model :provider)))
-          (pi--rpc-async proc (list :type "set_model"
+          (pi-coding-agent--rpc-async proc (list :type "set_model"
                                     :provider provider
                                     :modelId model-id)
                          (lambda (resp)
                            (when (and (plist-get resp :success)
                                       (buffer-live-p chat-buf))
                              (with-current-buffer chat-buf
-                               (pi--update-state-from-response resp)
+                               (pi-coding-agent--update-state-from-response resp)
                                (force-mode-line-update))
                              (message "Pi: Model set to %s" choice)))))))))
 
-(defun pi-cycle-thinking ()
+(defun pi-coding-agent-cycle-thinking ()
   "Cycle through thinking levels."
   (interactive)
-  (when-let ((proc (pi--get-process))
-             (chat-buf (pi--get-chat-buffer)))
-    (pi--rpc-async proc '(:type "cycle_thinking_level")
+  (when-let ((proc (pi-coding-agent--get-process))
+             (chat-buf (pi-coding-agent--get-chat-buffer)))
+    (pi-coding-agent--rpc-async proc '(:type "cycle_thinking_level")
                    (lambda (response)
                      (when (and (plist-get response :success)
                                 (buffer-live-p chat-buf))
                        (with-current-buffer chat-buf
-                         (pi--update-state-from-response response)
+                         (pi-coding-agent--update-state-from-response response)
                          (force-mode-line-update)
                          (message "Pi: Thinking level: %s"
-                                  (plist-get pi--state :thinking-level))))))))
+                                  (plist-get pi-coding-agent--state :thinking-level))))))))
 
-(defun pi--format-number (n)
+(defun pi-coding-agent--format-number (n)
   "Format number N with thousands separators."
   (let ((str (number-to-string n)))
     (replace-regexp-in-string
@@ -2022,7 +2024,7 @@ Calls CALLBACK with message count when done."
       "\\([0-9]\\)\\([0-9]\\{3\\}\\)\\([0-9]\\{3\\}\\)\\([^0-9]\\|$\\)"
       "\\1,\\2,\\3\\4" str))))
 
-(defun pi--format-session-stats (stats)
+(defun pi-coding-agent--format-session-stats (stats)
   "Format STATS plist as human-readable string."
   (let* ((tokens (plist-get stats :tokens))
          (input (or (plist-get tokens :input) 0))
@@ -2032,47 +2034,47 @@ Calls CALLBACK with message count when done."
          (messages (or (plist-get stats :userMessages) 0))
          (tools (or (plist-get stats :toolCalls) 0)))
     (format "Tokens: %s in / %s out (%s total) | Cost: $%.2f | Messages: %d | Tools: %d"
-            (pi--format-number input)
-            (pi--format-number output)
-            (pi--format-number total)
+            (pi-coding-agent--format-number input)
+            (pi-coding-agent--format-number output)
+            (pi-coding-agent--format-number total)
             cost messages tools)))
 
-(defun pi-session-stats ()
+(defun pi-coding-agent-session-stats ()
   "Display session statistics in the echo area."
   (interactive)
-  (when-let ((proc (pi--get-process)))
-    (pi--rpc-async proc '(:type "get_session_stats")
+  (when-let ((proc (pi-coding-agent--get-process)))
+    (pi-coding-agent--rpc-async proc '(:type "get_session_stats")
                    (lambda (response)
                      (if (plist-get response :success)
                          (let ((data (plist-get response :data)))
-                           (message "Pi: %s" (pi--format-session-stats data)))
+                           (message "Pi: %s" (pi-coding-agent--format-session-stats data)))
                        (message "Pi: Failed to get session stats"))))))
 
-(defun pi-compact ()
+(defun pi-coding-agent-compact ()
   "Compact conversation context to reduce token usage."
   (interactive)
-  (when-let ((proc (pi--get-process))
-             (chat-buf (pi--get-chat-buffer)))
+  (when-let ((proc (pi-coding-agent--get-process))
+             (chat-buf (pi-coding-agent--get-chat-buffer)))
     (message "Pi: Compacting...")
-    (pi--spinner-start)
-    (pi--rpc-async proc '(:type "compact")
+    (pi-coding-agent--spinner-start)
+    (pi-coding-agent--rpc-async proc '(:type "compact")
                    (lambda (response)
-                     (pi--spinner-stop)
+                     (pi-coding-agent--spinner-stop)
                      (if (plist-get response :success)
                          (when (buffer-live-p chat-buf)
                            (with-current-buffer chat-buf
                              (let ((data (plist-get response :data)))
-                               (pi--handle-compaction-success
+                               (pi-coding-agent--handle-compaction-success
                                 (plist-get data :tokensBefore)
                                 (plist-get data :summary)
                                 (current-time)))))
                        (message "Pi: Compact failed"))))))
 
-(defun pi-export-html ()
+(defun pi-coding-agent-export-html ()
   "Export session to HTML file."
   (interactive)
-  (when-let ((proc (pi--get-process)))
-    (pi--rpc-async proc '(:type "export_html")
+  (when-let ((proc (pi-coding-agent--get-process)))
+    (pi-coding-agent--rpc-async proc '(:type "export_html")
                    (lambda (response)
                      (if (plist-get response :success)
                          (let* ((data (plist-get response :data))
@@ -2080,11 +2082,11 @@ Calls CALLBACK with message count when done."
                            (message "Pi: Exported to %s" path))
                        (message "Pi: Export failed"))))))
 
-(defun pi-copy-last-message ()
+(defun pi-coding-agent-copy-last-message ()
   "Copy last assistant message to kill ring."
   (interactive)
-  (when-let ((proc (pi--get-process)))
-    (pi--rpc-async proc '(:type "get_last_assistant_text")
+  (when-let ((proc (pi-coding-agent--get-process)))
+    (pi-coding-agent--rpc-async proc '(:type "get_last_assistant_text")
                    (lambda (response)
                      (if (plist-get response :success)
                          (let* ((data (plist-get response :data))
@@ -2096,7 +2098,7 @@ Calls CALLBACK with message count when done."
                              (message "Pi: No assistant message to copy")))
                        (message "Pi: Failed to get message"))))))
 
-(defun pi--format-branch-message (msg)
+(defun pi-coding-agent--format-branch-message (msg)
   "Format MSG for display in branch selector.
 MSG is a plist with :entryIndex and :text."
   (let* ((index (plist-get msg :entryIndex))
@@ -2104,26 +2106,26 @@ MSG is a plist with :entryIndex and :text."
          (preview (truncate-string-to-width text 60 nil nil "...")))
     (format "%d: %s" index preview)))
 
-(defun pi-branch ()
+(defun pi-coding-agent-branch ()
   "Branch conversation from a previous user message.
 Shows a selector of user messages and creates a branch from the selected one."
   (interactive)
-  (when-let ((proc (pi--get-process)))
-    (pi--rpc-async proc '(:type "get_branch_messages")
+  (when-let ((proc (pi-coding-agent--get-process)))
+    (pi-coding-agent--rpc-async proc '(:type "get_branch_messages")
                    (lambda (response)
                      (if (plist-get response :success)
                          (let* ((data (plist-get response :data))
                                 (messages (plist-get data :messages)))
                            (if (null messages)
                                (message "Pi: No messages to branch from")
-                             (pi--show-branch-selector proc messages)))
+                             (pi-coding-agent--show-branch-selector proc messages)))
                        (message "Pi: Failed to get branch messages"))))))
 
-(defun pi--show-branch-selector (proc messages)
+(defun pi-coding-agent--show-branch-selector (proc messages)
   "Show selector for MESSAGES and branch on selection.
 PROC is the pi process.  MESSAGES is a list of plists from get_branch_messages."
   (let* ((formatted (mapcar (lambda (msg)
-                              (cons (pi--format-branch-message msg) msg))
+                              (cons (pi-coding-agent--format-branch-message msg) msg))
                             messages))
          (choice (completing-read "Branch from: "
                                   (mapcar #'car formatted)
@@ -2131,64 +2133,64 @@ PROC is the pi process.  MESSAGES is a list of plists from get_branch_messages."
          (selected (cdr (assoc choice formatted))))
     (when selected
       (let ((entry-index (plist-get selected :entryIndex)))
-        (pi--rpc-async proc (list :type "branch" :entryIndex entry-index)
+        (pi-coding-agent--rpc-async proc (list :type "branch" :entryIndex entry-index)
                        (lambda (response)
                          (if (plist-get response :success)
                              (let* ((data (plist-get response :data))
                                     (text (plist-get data :text)))
                                ;; Reload and display the branched session
-                               (pi--load-session-history
+                               (pi-coding-agent--load-session-history
                                 proc
                                 (lambda (count)
                                   (message "Pi: Branched to new session (%d messages)" count)))
                                ;; Pre-fill input with the selected message text
-                               (when-let ((input-buf (pi--get-input-buffer)))
+                               (when-let ((input-buf (pi-coding-agent--get-input-buffer)))
                                  (with-current-buffer input-buf
                                    (erase-buffer)
                                    (insert text))))
                            (message "Pi: Branch failed"))))))))
 
-(defun pi--run-custom-command (cmd)
+(defun pi-coding-agent--run-custom-command (cmd)
   "Execute custom slash command CMD.
 Prompts for arguments if the command content contains placeholders."
-  (when-let ((chat-buf (pi--get-chat-buffer)))
+  (when-let ((chat-buf (pi-coding-agent--get-chat-buffer)))
     (let* ((content (plist-get cmd :content))
            (name (plist-get cmd :name))
            (needs-args (string-match-p "\\$[0-9@]" content))
            (args-string (if needs-args
                             (read-string (format "/%s: " name))
                           ""))
-           (args (pi--parse-command-args args-string))
-           (expanded (pi--substitute-args content args)))
+           (args (pi-coding-agent--parse-command-args args-string))
+           (expanded (pi-coding-agent--substitute-args content args)))
       (with-current-buffer chat-buf
-        (pi--display-user-message (format "/%s %s" name args-string) (current-time))
-        (setq pi--status 'sending)
-        (pi--spinner-start)
+        (pi-coding-agent--display-user-message (format "/%s %s" name args-string) (current-time))
+        (setq pi-coding-agent--status 'sending)
+        (pi-coding-agent--spinner-start)
         (force-mode-line-update))
-      (pi--send-prompt expanded))))
+      (pi-coding-agent--send-prompt expanded))))
 
-(defun pi--ensure-file-commands ()
-  "Ensure pi--file-commands is populated for current session."
-  (unless pi--file-commands
-    (setq pi--file-commands (pi--discover-file-commands (pi--session-directory)))))
+(defun pi-coding-agent--ensure-file-commands ()
+  "Ensure pi-coding-agent--file-commands is populated for current session."
+  (unless pi-coding-agent--file-commands
+    (setq pi-coding-agent--file-commands (pi-coding-agent--discover-file-commands (pi-coding-agent--session-directory)))))
 
-(defun pi--slash-capf ()
+(defun pi-coding-agent--slash-capf ()
   "Completion-at-point function for /commands in input buffer.
 Returns completion data when point is after / at start of line."
   (when (and (eq (char-after (line-beginning-position)) ?/)
              (not (bolp)))
-    (pi--ensure-file-commands)
+    (pi-coding-agent--ensure-file-commands)
     (let* ((start (1+ (line-beginning-position)))
            (end (point))
            (commands (mapcar (lambda (cmd) (plist-get cmd :name))
-                             pi--file-commands)))
+                             pi-coding-agent--file-commands)))
       (list start end commands :exclusive 'no))))
 
-(defun pi--expand-slash-command (text)
+(defun pi-coding-agent--expand-slash-command (text)
   "Expand TEXT if it's a known slash command.
 If TEXT starts with / and matches a known command, expand it
 with argument substitution.  Otherwise return TEXT unchanged."
-  (pi--ensure-file-commands)
+  (pi-coding-agent--ensure-file-commands)
   (if (not (string-prefix-p "/" text))
       text
     (let* ((space-index (string-match " " text))
@@ -2200,83 +2202,83 @@ with argument substitution.  Otherwise return TEXT unchanged."
                           ""))
            (cmd (seq-find (lambda (c)
                             (equal (plist-get c :name) command-name))
-                          pi--file-commands)))
+                          pi-coding-agent--file-commands)))
       (if cmd
-          (let ((args (pi--parse-command-args args-string)))
-            (pi--substitute-args (plist-get cmd :content) args))
+          (let ((args (pi-coding-agent--parse-command-args args-string)))
+            (pi-coding-agent--substitute-args (plist-get cmd :content) args))
         text))))
 
-(defun pi-run-custom-command ()
+(defun pi-coding-agent-run-custom-command ()
   "Select and run a custom slash command."
   (interactive)
-  (pi--ensure-file-commands)
-  (if (null pi--file-commands)
+  (pi-coding-agent--ensure-file-commands)
+  (if (null pi-coding-agent--file-commands)
       (message "Pi: No custom commands found")
     (let* ((choices (mapcar (lambda (cmd)
                               (cons (format "%s - %s"
                                             (plist-get cmd :name)
                                             (or (plist-get cmd :description) ""))
                                     cmd))
-                            pi--file-commands))
+                            pi-coding-agent--file-commands))
            (choice (completing-read "Custom command: " choices nil t))
            (cmd (cdr (assoc choice choices))))
       (when cmd
-        (pi--run-custom-command cmd)))))
+        (pi-coding-agent--run-custom-command cmd)))))
 
-(transient-define-prefix pi-menu ()
+(transient-define-prefix pi-coding-agent-menu ()
   "Pi coding agent menu."
   [:description
-   (lambda () (concat (pi--menu-model-description) " • "
-                      (pi--menu-thinking-description)))
+   (lambda () (concat (pi-coding-agent--menu-model-description) " • "
+                      (pi-coding-agent--menu-thinking-description)))
    :class transient-row]
   [["Session"
-    ("n" "new" pi-new-session)
-    ("r" "resume" pi-resume-session)
-    ("e" "export" pi-export-html)
-    ("q" "quit" pi-quit)]
+    ("n" "new" pi-coding-agent-new-session)
+    ("r" "resume" pi-coding-agent-resume-session)
+    ("e" "export" pi-coding-agent-export-html)
+    ("q" "quit" pi-coding-agent-quit)]
    ["Context"
-    ("c" "compact" pi-compact)
-    ("b" "branch" pi-branch)]]
+    ("c" "compact" pi-coding-agent-compact)
+    ("b" "branch" pi-coding-agent-branch)]]
   [["Model"
-    ("m" "select" pi-select-model)
-    ("t" "thinking" pi-cycle-thinking)]
+    ("m" "select" pi-coding-agent-select-model)
+    ("t" "thinking" pi-coding-agent-cycle-thinking)]
    ["Info"
-    ("s" "stats" pi-session-stats)
-    ("y" "copy last" pi-copy-last-message)]]
+    ("s" "stats" pi-coding-agent-session-stats)
+    ("y" "copy last" pi-coding-agent-copy-last-message)]]
   [["Actions"
-    ("RET" "send" pi-send)
-    ("k" "abort" pi-abort)]])
+    ("RET" "send" pi-coding-agent-send)
+    ("k" "abort" pi-coding-agent-abort)]])
 
-(defun pi-refresh-commands ()
+(defun pi-coding-agent-refresh-commands ()
   "Refresh custom commands in the transient menu."
   (interactive)
-  (pi--rebuild-custom-commands (pi--session-directory))
-  (message "Pi: Refreshed %d custom commands" (length pi--file-commands)))
+  (pi-coding-agent--rebuild-custom-commands (pi-coding-agent--session-directory))
+  (message "Pi: Refreshed %d custom commands" (length pi-coding-agent--file-commands)))
 
-(defun pi--rebuild-custom-commands (dir)
+(defun pi-coding-agent--rebuild-custom-commands (dir)
   "Rebuild custom command entries in transient menu for DIR."
   ;; Discover and sort commands alphabetically
-  (setq pi--file-commands
-        (sort (pi--discover-file-commands dir)
+  (setq pi-coding-agent--file-commands
+        (sort (pi-coding-agent--discover-file-commands dir)
               (lambda (a b)
                 (string< (plist-get a :name) (plist-get b :name)))))
   ;; Remove existing custom group (index 4 if it exists)
-  (ignore-errors (transient-remove-suffix 'pi-menu '(4)))
+  (ignore-errors (transient-remove-suffix 'pi-coding-agent-menu '(4)))
   ;; Add custom commands as a new two-column group after Actions (index 3)
-  (when pi--file-commands
-    (let* ((cmds (seq-take pi--file-commands 9))
+  (when pi-coding-agent--file-commands
+    (let* ((cmds (seq-take pi-coding-agent--file-commands 9))
            (mid (ceiling (length cmds) 2))
            (col1-cmds (seq-take cmds mid))
            (col2-cmds (seq-drop cmds mid))
-           (col1 (pi--build-command-column "Custom" col1-cmds 1))
-           (col2 (pi--build-command-column "" col2-cmds (1+ (length col1-cmds)))))
+           (col1 (pi-coding-agent--build-command-column "Custom" col1-cmds 1))
+           (col2 (pi-coding-agent--build-command-column "" col2-cmds (1+ (length col1-cmds)))))
       (if col2-cmds
           ;; Two columns
-          (transient-append-suffix 'pi-menu '(3) (vector col1 col2))
+          (transient-append-suffix 'pi-coding-agent-menu '(3) (vector col1 col2))
         ;; Single column
-        (transient-append-suffix 'pi-menu '(3) col1)))))
+        (transient-append-suffix 'pi-coding-agent-menu '(3) col1)))))
 
-(defun pi--build-command-column (title cmds start-key)
+(defun pi-coding-agent--build-command-column (title cmds start-key)
   "Build a transient column vector with TITLE and CMDS starting at START-KEY."
   (let ((key start-key)
         (suffixes (list title)))
@@ -2284,75 +2286,76 @@ with argument substitution.  Otherwise return TEXT unchanged."
       (let* ((name (plist-get cmd :name))
              (desc (truncate-string-to-width name 18)))
         (push (list (number-to-string key) desc
-                    `(lambda () (interactive) (pi--run-custom-command ',cmd)))
+                    `(lambda () (interactive) (pi-coding-agent--run-custom-command ',cmd)))
               suffixes)
         (setq key (1+ key))))
     (apply #'vector (nreverse suffixes))))
 
 ;;;; Main Entry Point
 
-(defun pi--setup-session (dir &optional session)
+(defun pi-coding-agent--setup-session (dir &optional session)
   "Set up a new or existing session for DIR with optional SESSION name.
 Returns the chat buffer."
-  (let* ((chat-buf (pi--get-or-create-buffer :chat dir session))
-         (input-buf (pi--get-or-create-buffer :input dir session))
+  (let* ((chat-buf (pi-coding-agent--get-or-create-buffer :chat dir session))
+         (input-buf (pi-coding-agent--get-or-create-buffer :input dir session))
          (new-session nil))
     ;; Link buffers to each other
     (with-current-buffer chat-buf
-      (setq pi--input-buffer input-buf)
+      (setq pi-coding-agent--input-buffer input-buf)
       ;; Start process if not already running
-      (unless (and pi--process (process-live-p pi--process))
-        (setq pi--process (pi--start-process dir))
+      (unless (and pi-coding-agent--process (process-live-p pi-coding-agent--process))
+        (setq pi-coding-agent--process (pi-coding-agent--start-process dir))
         (setq new-session t)
         ;; Store chat buffer reference in process for event handling
-        (when (processp pi--process)
-          (process-put pi--process 'pi-chat-buffer chat-buf)
+        (when (processp pi-coding-agent--process)
+          (process-put pi-coding-agent--process 'pi-coding-agent-chat-buffer chat-buf)
           ;; Register event handler
-          (pi--register-display-handler pi--process)
+          (pi-coding-agent--register-display-handler pi-coding-agent--process)
           ;; Initialize state from server
           (let ((buf chat-buf))  ; Capture for closure
-            (pi--rpc-async pi--process '(:type "get_state")
+            (pi-coding-agent--rpc-async pi-coding-agent--process '(:type "get_state")
                            (lambda (response)
                              (when (and (plist-get response :success)
                                         (buffer-live-p buf))
                                (with-current-buffer buf
-                                 (let ((new-state (pi--extract-state-from-response response)))
-                                   (setq pi--status (plist-get new-state :status)
-                                         pi--state new-state))
+                                 (let ((new-state (pi-coding-agent--extract-state-from-response response)))
+                                   (setq pi-coding-agent--status (plist-get new-state :status)
+                                         pi-coding-agent--state new-state))
                                  ;; Check if no model available and warn user
-                                 (unless (plist-get pi--state :model)
-                                   (pi--display-no-model-warning))
+                                 (unless (plist-get pi-coding-agent--state :model)
+                                   (pi-coding-agent--display-no-model-warning))
                                  (force-mode-line-update t))))))))
       ;; Build custom commands in transient for this session
       (when new-session
-        (pi--rebuild-custom-commands dir))
+        (pi-coding-agent--rebuild-custom-commands dir))
       ;; Display startup header for new sessions
       (when new-session
-        (pi--display-startup-header)))
+        (pi-coding-agent--display-startup-header)))
     (with-current-buffer input-buf
-      (setq pi--chat-buffer chat-buf))
+      (setq pi-coding-agent--chat-buffer chat-buf))
     chat-buf))
 
-(defun pi (&optional session)
-  "Start or switch to pi session in current project.
+;;;###autoload
+(defun pi-coding-agent (&optional session)
+  "Start or switch to pi coding agent session in current project.
 With prefix arg, prompt for SESSION name to allow multiple sessions.
 If already in a pi buffer and no SESSION specified, redisplays current session."
   (interactive
    (list (when current-prefix-arg
            (read-string "Session name: "))))
-  (pi--check-dependencies)
+  (pi-coding-agent--check-dependencies)
   (let (chat-buf input-buf)
-    (if (and (derived-mode-p 'pi-chat-mode 'pi-input-mode)
+    (if (and (derived-mode-p 'pi-coding-agent-chat-mode 'pi-coding-agent-input-mode)
              (not session))
         ;; Already in pi buffer with no new session requested - use current session
-        (setq chat-buf (pi--get-chat-buffer)
-              input-buf (pi--get-input-buffer))
+        (setq chat-buf (pi-coding-agent--get-chat-buffer)
+              input-buf (pi-coding-agent--get-input-buffer))
       ;; Find or create session for current directory
-      (let ((dir (pi--session-directory)))
-        (setq chat-buf (pi--setup-session dir session))
-        (setq input-buf (buffer-local-value 'pi--input-buffer chat-buf))))
+      (let ((dir (pi-coding-agent--session-directory)))
+        (setq chat-buf (pi-coding-agent--setup-session dir session))
+        (setq input-buf (buffer-local-value 'pi-coding-agent--input-buffer chat-buf))))
     ;; Display and focus
-    (pi--display-buffers chat-buf input-buf)))
+    (pi-coding-agent--display-buffers chat-buf input-buf)))
 
-(provide 'pi)
-;;; pi.el ends here
+(provide 'pi-coding-agent)
+;;; pi-coding-agent.el ends here

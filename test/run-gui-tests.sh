@@ -13,7 +13,7 @@
 # Examples:
 #   ./test/run-gui-tests.sh                        # Run with display
 #   ./test/run-gui-tests.sh --headless             # Run headless
-#   ./test/run-gui-tests.sh pi-gui-test-session    # Run specific test
+#   ./test/run-gui-tests.sh pi-coding-agent-gui-test-session    # Run specific test
 
 set -e
 
@@ -21,7 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 HEADLESS="${PI_HEADLESS:-0}"
-SELECTOR="\"pi-gui-test-\""
+SELECTOR="\"pi-coding-agent-gui-test-\""
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -67,24 +67,24 @@ cat >> /tmp/run-gui-tests.el << EOF
 (package-initialize)
 
 ;; Load test utilities and tests
-(require 'pi-gui-test-utils)
-(require 'pi-gui-tests)
+(require 'pi-coding-agent-gui-test-utils)
+(require 'pi-coding-agent-gui-tests)
 
 ;; Redirect messages to file for results
-(defvar pi-gui-test--output-file "$RESULTS_FILE")
+(defvar pi-coding-agent-gui-test--output-file "$RESULTS_FILE")
 
 ;; Helper to print to stderr immediately (unbuffered, works in non-batch mode)
-(defun pi-gui-test--log (fmt &rest args)
+(defun pi-coding-agent-gui-test--log (fmt &rest args)
   "Print formatted message to stderr immediately."
   (princ (concat (apply #'format fmt args) "\n") #'external-debugging-output))
 
 ;; Run tests and collect results
 ;; Order tests: session-starts first, then alphabetically
-(defun pi-gui-test--order-tests (tests)
+(defun pi-coding-agent-gui-test--order-tests (tests)
   "Order TESTS so session-starts runs first."
   (let (first-test rest-tests)
     (dolist (test tests)
-      (if (eq (ert-test-name test) 'pi-gui-test-session-starts)
+      (if (eq (ert-test-name test) 'pi-coding-agent-gui-test-session-starts)
           (setq first-test test)
         (push test rest-tests)))
     (if first-test
@@ -95,9 +95,9 @@ cat >> /tmp/run-gui-tests.el << EOF
        (passed 0)
        (failed 0)
        (total 0)
-       (test-list (pi-gui-test--order-tests (ert-select-tests selector t))))
+       (test-list (pi-coding-agent-gui-test--order-tests (ert-select-tests selector t))))
   (setq total (length test-list))
-  (pi-gui-test--log "Running %d GUI tests..." total)
+  (pi-coding-agent-gui-test--log "Running %d GUI tests..." total)
   (with-temp-buffer
     (insert "=== GUI Test Results ===\n\n")
     (let ((n 0))
@@ -108,35 +108,35 @@ cat >> /tmp/run-gui-tests.el << EOF
           (cond
            ((ert-test-passed-p result)
             (setq passed (1+ passed))
-            (pi-gui-test--log "  [%d/%d] PASS: %s" n total name)
+            (pi-coding-agent-gui-test--log "  [%d/%d] PASS: %s" n total name)
             (insert (format "  PASS: %s\n" name)))
            (t
             (setq failed (1+ failed))
-            (pi-gui-test--log "  [%d/%d] FAIL: %s" n total name)
+            (pi-coding-agent-gui-test--log "  [%d/%d] FAIL: %s" n total name)
             (insert (format "  FAIL: %s\n" name))
             (when (ert-test-failed-p result)
               (insert (format "        %S\n" (ert-test-result-with-condition-condition result))))
             ;; Debug: print diagnostic info on failure
-            (when (and (boundp 'pi-gui-test--session) pi-gui-test--session)
+            (when (and (boundp 'pi-coding-agent-gui-test--session) pi-coding-agent-gui-test--session)
               ;; Process status
-              (when-let ((proc (plist-get pi-gui-test--session :process)))
-                (pi-gui-test--log "  --- Process status ---")
-                (pi-gui-test--log "  Status: %s, Exit: %s"
+              (when-let ((proc (plist-get pi-coding-agent-gui-test--session :process)))
+                (pi-coding-agent-gui-test--log "  --- Process status ---")
+                (pi-coding-agent-gui-test--log "  Status: %s, Exit: %s"
                                   (process-status proc) (process-exit-status proc)))
               ;; Session state
-              (pi-gui-test--log "  --- Session state ---")
-              (pi-gui-test--log "  Model: %s, Streaming: %s"
-                                (plist-get pi-gui-test--session :model)
-                                (plist-get pi-gui-test--session :streaming))
+              (pi-coding-agent-gui-test--log "  --- Session state ---")
+              (pi-coding-agent-gui-test--log "  Model: %s, Streaming: %s"
+                                (plist-get pi-coding-agent-gui-test--session :model)
+                                (plist-get pi-coding-agent-gui-test--session :streaming))
               ;; Chat buffer content
-              (when-let ((chat-buf (plist-get pi-gui-test--session :chat-buffer)))
+              (when-let ((chat-buf (plist-get pi-coding-agent-gui-test--session :chat-buffer)))
                 (when (buffer-live-p chat-buf)
-                  (pi-gui-test--log "  --- Chat buffer content ---")
-                  (pi-gui-test--log "%s" (with-current-buffer chat-buf (buffer-string)))
-                  (pi-gui-test--log "  --- End chat buffer ---")))))))))
+                  (pi-coding-agent-gui-test--log "  --- Chat buffer content ---")
+                  (pi-coding-agent-gui-test--log "%s" (with-current-buffer chat-buf (buffer-string)))
+                  (pi-coding-agent-gui-test--log "  --- End chat buffer ---")))))))))
     (insert (format "\n=== %d tests: %d passed, %d failed ===\n" total passed failed))
-    (write-region (point-min) (point-max) pi-gui-test--output-file))
-  (pi-gui-test--log "=== %d tests: %d passed, %d failed ===" total passed failed)
+    (write-region (point-min) (point-max) pi-coding-agent-gui-test--output-file))
+  (pi-coding-agent-gui-test--log "=== %d tests: %d passed, %d failed ===" total passed failed)
   (kill-emacs (if (> failed 0) 1 0)))
 EOF
 
