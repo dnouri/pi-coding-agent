@@ -14,7 +14,7 @@ An Emacs frontend for the [[https://shittycodingagent.ai/][pi coding agent]].
 * Features
 
 - Separate windows for chat history and prompt composition
-- Markdown rendering via pandoc with syntax highlighting
+- Native markdown rendering with syntax highlighting
 - Auto-scroll that preserves your position when reading earlier content
 - Collapsible tool output with preview
 - Input history with search
@@ -25,7 +25,6 @@ An Emacs frontend for the [[https://shittycodingagent.ai/][pi coding agent]].
 
 - Emacs 28.1 or later
 - [[https://shittycodingagent.ai/][pi coding agent]] installed and in PATH
-- [[https://pandoc.org/][pandoc]] for markdown rendering
 
 ** Installing pi coding agent
 
@@ -35,16 +34,6 @@ npm install -g @mariozechner/pi-coding-agent
 
 # Or with mise
 mise use -g npm:@mariozechner/pi-coding-agent
-#+end_src
-
-** Installing pandoc
-
-#+begin_src bash
-# Debian/Ubuntu
-apt install pandoc
-
-# macOS
-brew install pandoc
 #+end_src
 
 * Installation
@@ -129,14 +118,6 @@ Example configuration with =use-package=:
   (pi-input-window-height 10)      ; Height of input window
   (pi-tool-preview-lines 10)       ; Lines shown before collapsing tool output
   (pi-bash-preview-lines 5))       ; Lines shown for bash output
-#+end_src
-
-Optional: Enable [[https://github.com/minad/org-modern][org-modern]] for prettier rendering:
-
-#+begin_src emacs-lisp
-(use-package org-modern
-  :ensure t
-  :hook (pi-chat-mode . org-modern-mode))
 #+end_src
 
 * Testing

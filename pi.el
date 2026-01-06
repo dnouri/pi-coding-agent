@@ -7,7 +7,7 @@
 ;; URL: https://github.com/dnouri/pi.el
 ;; Keywords: ai llm ai-pair-programming tools
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1"))
+;; Package-Requires: ((emacs "28.1") (markdown-mode "2.6"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -34,7 +34,6 @@
 ;;
 ;; Requirements:
 ;;   - pi coding agent installed and in PATH
-;;   - pandoc for markdown rendering
 ;;
 ;; Usage:
 ;;   M-x pi           Start a session in current project
@@ -63,11 +62,7 @@
 
 (require 'pi-core)
 (require 'project)
-(require 'org)
-(require 'org-src)
-
-;; Optional dependency - silence byte-compiler
-(declare-function org-modern-mode "org-modern" (&optional arg))
+(require 'markdown-mode)
 
 ;;;; Customization Group
 
@@ -118,7 +113,7 @@ Bash output is typically more verbose, so fewer lines are shown."
 ;;;; Faces
 
 (defface pi-separator
-  '((t :inherit org-meta-line))
+  '((t :inherit font-lock-comment-face))
   "Face for section separators in pi chat."
   :group 'pi)
 
@@ -143,7 +138,7 @@ Bash output is typically more verbose, so fewer lines are shown."
   :group 'pi)
 
 (defface pi-tool-name
-  '((t :inherit org-drawer :weight bold))
+  '((t :inherit font-lock-function-name-face :weight bold))
   "Face for tool names (BASH, READ, etc.) in pi chat."
   :group 'pi)
 
@@ -162,8 +157,35 @@ Bash output is typically more verbose, so fewer lines are shown."
   "Face for tool error indicators."
   :group 'pi)
 
+(defface pi-tool-block-pending
+  '((((class color) (min-colors 88) (background dark))
+     :background "#2a2a35" :extend t)
+    (((class color) (min-colors 88) (background light))
+     :background "#f0f0f5" :extend t)
+    (t :inherit secondary-selection :extend t))
+  "Face for tool blocks during execution."
+  :group 'pi)
+
+(defface pi-tool-block-success
+  '((((class color) (min-colors 88) (background dark))
+     :background "#2a352a" :extend t)
+    (((class color) (min-colors 88) (background light))
+     :background "#f0f5f0" :extend t)
+    (t :inherit secondary-selection :extend t))
+  "Face for tool blocks after successful completion."
+  :group 'pi)
+
+(defface pi-tool-block-error
+  '((((class color) (min-colors 88) (background dark))
+     :background "#352a2a" :extend t)
+    (((class color) (min-colors 88) (background light))
+     :background "#f5f0f0" :extend t)
+    (t :inherit secondary-selection :extend t))
+  "Face for tool blocks after failed completion."
+  :group 'pi)
+
 (defface pi-collapsed-indicator
-  '((t :inherit org-ellipsis :slant italic))
+  '((t :inherit font-lock-comment-face :slant italic))
   "Face for collapsed content indicators."
   :group 'pi)
 
@@ -271,38 +293,31 @@ Returns nil if the extension is not recognized."
       (message "No previous message"))))
 
 (defconst pi--thinking-block-regexp
-  "^#\\+begin_src thinking\n\\(\\(?:.*\n\\)*?\\)#\\+end_src"
+  "^```thinking\n\\(\\(?:.*\n\\)*?\\)```"
   "Regexp matching thinking blocks for font-lock.")
 
-(define-derived-mode pi-chat-mode org-mode "Pi-Chat"
+(define-derived-mode pi-chat-mode gfm-mode "Pi-Chat"
   "Major mode for displaying pi conversation.
-Derives from `org-mode' for syntax highlighting of code blocks.
+Derives from `gfm-mode' for syntax highlighting of code blocks.
 This is a read-only buffer showing the conversation history."
   :group 'pi
   (setq-local buffer-read-only t)
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
-  (setq-local org-src-fontify-natively t)
-  (setq-local org-hide-leading-stars t)
+  (setq-local markdown-fontify-code-blocks-natively t)
+  ;; Hide markdown markup (**, `, ```) for cleaner display
+  (setq-local markdown-hide-markup t)
+  (add-to-invisibility-spec 'markdown-markup)
   (setq-local pi--tool-args-cache (make-hash-table :test 'equal))
   ;; Make window-point follow inserted text (like comint does).
   ;; This is key for natural scroll behavior during streaming.
   (setq-local window-point-insertion-type t)
 
-  ;; Don't use org-indent-mode - it visually indents content under org
-  ;; headings, which causes our separators to appear indented when
-  ;; assistant messages contain markdown headings (## -> **)
-
   ;; Apply pi-thinking face to thinking block content
-  ;; Use 'append to override org-mode's default block face
   (font-lock-add-keywords
    nil
    `((,pi--thinking-block-regexp 1 'pi-thinking append))
    'append)
-
-  ;; Enable org-modern for nicer visuals if available
-  (when (require 'org-modern nil t)
-    (org-modern-mode 1))
 
   (add-hook 'kill-buffer-query-functions #'pi--kill-buffer-query nil t)
   (add-hook 'kill-buffer-hook #'pi--cleanup-on-kill nil t))
@@ -496,6 +511,10 @@ Used to replace raw markdown with rendered Org on message completion.")
   "Hash table mapping toolCallId to args.
 Needed because tool_execution_end events don't include args.")
 
+(defvar-local pi--pending-tool-overlay nil
+  "Overlay for tool block currently being executed.
+Set by `pi--display-tool-start', used by `pi--display-tool-end'.")
+
 (defvar-local pi--assistant-header-shown nil
   "Non-nil if Assistant header has been shown for current prompt.
 Used to avoid duplicate headers during retry sequences.")
@@ -586,7 +605,7 @@ Windows where user scrolled up (point earlier) stay in place."
   "Create a separator line with LABEL styled with FACE.
 If TIMESTAMP (Emacs time value) is provided, display it right-aligned.
 The label stays centered; timestamp eats into the right dashes.
-Returns an org heading with decorative dashes."
+Returns a decorated separator line with centered label."
   (let* ((label-str (concat " " label " "))
          (total-width (- pi-separator-width 2))  ; Account for "* " prefix
          (label-len (length label-str))
@@ -1014,93 +1033,34 @@ and removes the input window (merging its space with adjacent windows)."
       (when (window-live-p win)
         (ignore-errors (delete-window win))))))
 
-;;;; Pandoc Conversion
-
-(defun pi--pandoc-convert (markdown)
-  "Convert MARKDOWN string to Org format via pandoc subprocess."
-  (with-temp-buffer
-    (insert markdown)
-    (let ((exit-code (call-process-region
-                      (point-min) (point-max)
-                      "pandoc" t t nil
-                      "-f" "markdown" "-t" "org" "--wrap=none")))
-      (if (zerop exit-code)
-          (buffer-string)
-        (error "Pandoc conversion failed with exit code %d" exit-code)))))
-
-(defun pi--post-process-org (org-text)
-  "Post-process ORG-TEXT to clean up pandoc output.
-Removes :PROPERTIES: blocks, demotes org headings by one level,
-and collapses multiple blank lines."
-  (with-temp-buffer
-    (insert org-text)
-    ;; Remove :PROPERTIES: blocks (including the drawer lines)
-    (goto-char (point-min))
-    (while (re-search-forward "^[ \t]*:PROPERTIES:\n\\(?:.*\n\\)*?[ \t]*:END:\n?" nil t)
-      (replace-match ""))
-    ;; Demote all org headings by one level (prepend *)
-    ;; So * -> **, ** -> ***, etc.
-    ;; This makes them sub-headings of the You/Assistant separators
-    (goto-char (point-min))
-    (while (re-search-forward "^\\(\\*+\\)\\([ \t]+.+\\)$" nil t)
-      (replace-match "*\\1\\2"))
-    ;; Collapse multiple blank lines to at most two
-    (goto-char (point-min))
-    (while (re-search-forward "\n\\{3,\\}" nil t)
-      (replace-match "\n\n"))
-    ;; Remove trailing whitespace
-    (goto-char (point-min))
-    (while (re-search-forward "[ \t]+$" nil t)
-      (replace-match ""))
-    (buffer-string)))
-
-(defun pi--markdown-to-org (markdown)
-  "Convert MARKDOWN to clean Org format.
-Runs pandoc conversion followed by post-processing."
-  (pi--post-process-org (pi--pandoc-convert markdown)))
-
-(defun pi--markdown-to-org-safe (markdown)
-  "Convert MARKDOWN to Org, falling back to raw on error.
-Returns MARKDOWN unchanged if pandoc fails."
-  (condition-case err
-      (pi--markdown-to-org markdown)
-    (error
-     (message "Pi: Pandoc conversion failed: %s" (error-message-string err))
-     markdown)))
-
-(defun pi--hide-org-markers (start end)
-  "Hide #+begin_src and #+end_src lines between START and END.
-Uses overlays with invisible property.  Text remains searchable."
+(defun pi--align-tables-in-region (start end)
+  "Align all markdown tables between START and END."
   (save-excursion
     (goto-char start)
-    (while (re-search-forward "^[ \t]*#\\+\\(begin\\|end\\)_src.*$" end t)
-      (let ((ov (make-overlay (match-beginning 0) (1+ (match-end 0)))))
-        (overlay-put ov 'invisible t)
-        (overlay-put ov 'pi-org-marker t)))))
+    (while (and (< (point) end)
+                (re-search-forward "^|" end t))
+      (when (markdown-table-at-point-p)
+        (markdown-table-align)))))
 
 (defun pi--render-complete-message ()
-  "Render completed message by replacing raw markdown with Org.
-Uses pi--message-start-marker and pi--streaming-marker to find content."
+  "Finalize completed message by applying font-lock and aligning tables.
+Uses pi--message-start-marker and pi--streaming-marker to find content.
+Markdown stays as-is; gfm-mode handles highlighting and markup hiding.
+Ensures message ends with newline for proper spacing."
   (when (and pi--message-start-marker pi--streaming-marker)
-    (let* ((start (marker-position pi--message-start-marker))
-           (end (marker-position pi--streaming-marker))
-           (raw-content (buffer-substring-no-properties start end)))
-      ;; Skip rendering if content is empty (avoids pandoc adding newline)
-      (when (not (string-empty-p raw-content))
-        (let ((rendered (pi--markdown-to-org-safe raw-content))
-              (inhibit-read-only t))
-          (pi--with-scroll-preservation
-            (save-excursion
-              (delete-region start end)
-              (goto-char start)
-              (insert rendered)
-              (let ((new-end (point)))
-                ;; Hide org markers for cleaner display
-                (pi--hide-org-markers start new-end)
-                ;; Apply syntax highlighting to the rendered region
-                (font-lock-ensure start new-end)
-                ;; Update streaming marker to end of rendered content
-                (set-marker pi--streaming-marker new-end)))))))))
+    (let ((start (marker-position pi--message-start-marker))
+          (end (marker-position pi--streaming-marker)))
+      (when (< start end)
+        ;; Ensure trailing newline (messages should end with newline)
+        (let ((inhibit-read-only t))
+          (save-excursion
+            (goto-char end)
+            (unless (eq (char-before) ?\n)
+              (insert "\n")
+              (set-marker pi--streaming-marker (point))))
+          ;; Align any markdown tables in the message
+          (pi--align-tables-in-region start (marker-position pi--streaming-marker)))
+        (font-lock-ensure start (marker-position pi--streaming-marker))))))
 
 ;;;; Tool Output
 
@@ -1110,50 +1070,54 @@ Checks both :path and :file_path keys for compatibility."
   (or (plist-get args :path)
       (plist-get args :file_path)))
 
-(defun pi--tool-drawer-name (tool-name)
-  "Convert TOOL-NAME to an org-drawer name."
-  (upcase (or tool-name "TOOL")))
+(defun pi--tool-overlay-create (tool-name)
+  "Create overlay for tool block TOOL-NAME at point.
+Returns the overlay.  The overlay uses rear-advance so it
+automatically extends when content is inserted at its end."
+  (let ((ov (make-overlay (point) (point) nil nil t)))
+    (overlay-put ov 'pi-tool-block t)
+    (overlay-put ov 'pi-tool-name tool-name)
+    (overlay-put ov 'face 'pi-tool-block-pending)
+    ov))
 
 (defun pi--display-tool-start (tool-name args)
-  "Display drawer-style header for tool TOOL-NAME with ARGS."
-  (let* ((drawer-name (pi--tool-drawer-name tool-name))
-         (command-info (pcase tool-name
-                         ("bash" (format "$ %s" (or (plist-get args :command) "...")))
-                         ((or "read" "write" "edit")
-                          (or (pi--tool-path args) "..."))
-                         (_ "")))
-         ;; Drawer header on its own line, command on next line
-         (drawer-start (propertize (format ":%s:" drawer-name) 'face 'pi-tool-name))
-         (command-display (propertize command-info 'face 'pi-tool-command)))
-    ;; Add blank line before tool if previous line has content
-    ;; (Skip if already after blank line from header or previous tool)
-    (let ((prev-line-blank (with-current-buffer (pi--get-chat-buffer)
-                             (save-excursion
-                               (goto-char (point-max))
-                               (forward-line -1)
-                               (looking-at-p "^$")))))
-      (pi--append-to-chat (concat (if prev-line-blank "" "\n")
-                                  drawer-start "\n" command-display "\n")))))
+  "Display header for tool TOOL-NAME with ARGS and create overlay."
+  (let* ((header (pcase tool-name
+                   ("bash" (format "$ %s" (or (plist-get args :command) "...")))
+                   ("read" (format "read %s" (or (pi--tool-path args) "...")))
+                   ("write" (format "write %s" (or (pi--tool-path args) "...")))
+                   ("edit" (format "edit %s" (or (pi--tool-path args) "...")))
+                   (_ tool-name)))
+         (header-display (propertize header 'face 'pi-tool-command))
+         (inhibit-read-only t))
+    (pi--with-scroll-preservation
+      (save-excursion
+        (goto-char (point-max))
+        ;; Add blank line before tool if previous line has content
+        (unless (save-excursion
+                  (forward-line -1)
+                  (looking-at-p "^$"))
+          (insert "\n"))
+        ;; Create overlay at start of tool block
+        (setq pi--pending-tool-overlay (pi--tool-overlay-create tool-name))
+        (insert header-display "\n")))))
 
 (defun pi--wrap-in-src-block (content lang)
   "Wrap CONTENT in a markdown fenced code block with LANG.
-Returns markdown string ready for pandoc conversion."
+Returns markdown string for syntax highlighting."
   (format "```%s\n%s\n```" (or lang "") content))
 
 (defun pi--render-tool-content (content lang)
   "Render CONTENT with optional syntax highlighting for LANG.
-If LANG is non-nil, wraps in code fence and converts via pandoc.
-Returns the rendered string (org src block or plain text)."
+If LANG is non-nil, wraps in markdown code fence.
+Returns the rendered string (markdown code block or plain text)."
   (if lang
-      (let* ((markdown (pi--wrap-in-src-block content lang))
-             (org-text (pi--markdown-to-org-safe markdown)))
-        ;; Remove trailing newlines from pandoc output
-        (string-trim-right org-text))
+      (pi--wrap-in-src-block content lang)
     ;; No language - return plain text with face
     (propertize content 'face 'pi-tool-output)))
 
 (defun pi--display-tool-end (tool-name args content details is-error)
-  "Display result for TOOL-NAME and close the drawer.
+  "Display result for TOOL-NAME and update overlay face.
 ARGS contains tool arguments, CONTENT is a list of content blocks.
 DETAILS contains tool-specific data (e.g., diff for edit tool).
 IS-ERROR indicates failure.
@@ -1170,6 +1134,7 @@ Shows preview lines with expandable toggle for long output."
                            "diff"))
                  ((or "read" "write")
                   (pi--path-to-language (pi--tool-path args)))
+                 ("bash" "text")  ; wrap in fence for visual consistency
                  (_ nil)))
          ;; For edit with diff, use diff from details
          ;; For write, use content from args (result is just success message)
@@ -1213,8 +1178,19 @@ Shows preview lines with expandable toggle for long output."
       ;; Error indicator
       (when is-error
         (insert (propertize "[error]" 'face 'pi-tool-error) "\n"))
-      ;; Close drawer with blank line for separation
-      (insert (propertize ":END:" 'face 'pi-tool-name) "\n\n"))))
+      ;; Update overlay face and finalize bounds
+      (when pi--pending-tool-overlay
+        (overlay-put pi--pending-tool-overlay 'face
+                     (if is-error 'pi-tool-block-error 'pi-tool-block-success))
+        ;; Fix overlay end to prevent extension to subsequent content.
+        ;; The overlay has rear-advance=t (needed during streaming), so we
+        ;; must explicitly set the end AFTER inserting the trailing newline,
+        ;; then shrink it back to exclude the newline.
+        (insert "\n")
+        (move-overlay pi--pending-tool-overlay
+                      (overlay-start pi--pending-tool-overlay)
+                      (1- (point)))
+        (setq pi--pending-tool-overlay nil)))))
 
 (defun pi--toggle-tool-output (button)
   "Toggle between preview and full content for BUTTON."
@@ -1224,16 +1200,18 @@ Shows preview lines with expandable toggle for long output."
          (preview-content (button-get button 'pi-preview-content))
          (lang (button-get button 'pi-lang))
          (hidden-count (button-get button 'hidden-count))
-         (btn-start (button-start button)))
+         (btn-start (button-start button))
+         (btn-end (button-end button)))
     (save-excursion
+      ;; Find the tool overlay
       (goto-char btn-start)
-      (forward-line 0)
-      (when (re-search-backward "^:\\([A-Z]+\\):\n" nil t)
-        (forward-line 2)  ; Skip drawer header and command line
+      (when-let ((bounds (pi--find-tool-block-bounds)))
+        ;; Content starts after first line (header)
+        (goto-char (car bounds))
+        (forward-line 1)
         (let ((content-start (point)))
-          (goto-char btn-start)
-          (forward-line 1)
-          (delete-region content-start (point))
+          ;; Delete from content start to after button
+          (delete-region content-start (1+ btn-end))
           (goto-char content-start)
           (if expanded
               (pi--insert-collapsed-content preview-content full-content lang hidden-count)
@@ -1275,22 +1253,9 @@ PREVIEW-CONTENT, LANG and HIDDEN-COUNT are stored for collapsing."
 (defun pi--find-tool-block-bounds ()
   "Find the bounds of the tool block at point.
 Returns (START . END) if inside a tool block, nil otherwise."
-  (save-excursion
-    (let ((pos (point))
-          (start nil)
-          (end nil))
-      ;; Go to beginning of line first to catch current line
-      (beginning-of-line)
-      ;; Search backward for :TOOLNAME: (including current line)
-      (when (or (looking-at "^:\\([A-Z]+\\):$")
-                (re-search-backward "^:\\([A-Z]+\\):$" nil t))
-        (setq start (point))
-        ;; Search forward for :END:
-        (when (re-search-forward "^:END:$" nil t)
-          (setq end (point))
-          ;; Check if original position was inside
-          (when (and (>= pos start) (<= pos end))
-            (cons start end)))))))
+  (let ((overlays (overlays-at (point))))
+    (when-let ((ov (seq-find (lambda (o) (overlay-get o 'pi-tool-block)) overlays)))
+      (cons (overlay-start ov) (overlay-end ov)))))
 
 (defun pi--find-toggle-button-in-region (start end)
   "Find a toggle button between START and END."
@@ -1306,7 +1271,7 @@ Returns (START . END) if inside a tool block, nil otherwise."
 
 (defun pi-toggle-tool-section ()
   "Toggle the tool output section at point.
-Works anywhere inside a tool block (between :TOOL: and :END:)."
+Works anywhere inside a tool block overlay."
   (interactive)
   (let ((original-pos (point)))
     (if-let ((bounds (pi--find-tool-block-bounds)))
@@ -1316,25 +1281,24 @@ Works anywhere inside a tool block (between :TOOL: and :END:)."
               ;; Try to restore position, clamped to new block bounds
               (when-let ((new-bounds (pi--find-tool-block-bounds)))
                 (goto-char (min original-pos (cdr new-bounds)))))
-          ;; No button found - short output, use org-cycle
-          (org-cycle))
+          ;; No button found - short output, use markdown-cycle
+          (markdown-cycle))
       ;; Not in a tool block
-      (org-cycle))))
+      (markdown-cycle))))
 
 ;;;; Compaction Display
 
 (defun pi--display-compaction-result (tokens-before summary &optional timestamp)
   "Display a compaction result block in the chat buffer.
 TOKENS-BEFORE is the token count before compaction.
-SUMMARY is the compaction summary text (markdown, will be converted to org).
+SUMMARY is the compaction summary text (markdown).
 TIMESTAMP is optional time when compaction occurred."
-  (let ((org-summary (if summary (pi--markdown-to-org-safe summary) "")))
-    (pi--append-to-chat
-     (concat "\n" (pi--make-separator "Compaction" 'pi-compaction-label timestamp) "\n\n"
-             (propertize (format "Compacted from %s tokens\n\n"
-                                 (pi--format-number (or tokens-before 0)))
-                         'face 'pi-tool-name)
-             org-summary "\n"))))
+  (pi--append-to-chat
+   (concat "\n" (pi--make-separator "Compaction" 'pi-compaction-label timestamp) "\n\n"
+           (propertize (format "Compacted from %s tokens\n\n"
+                               (pi--format-number (or tokens-before 0)))
+                       'face 'pi-tool-name)
+           (or summary "") "\n")))
 
 (defun pi--handle-compaction-success (tokens-before summary &optional timestamp)
   "Handle successful compaction: display result, reset state, notify user.
@@ -1348,11 +1312,6 @@ TIMESTAMP is optional time when compaction occurred."
 
 ;;;; Dependency Checking
 
-(defun pi--check-pandoc ()
-  "Check if pandoc is available.
-Returns t if available, nil otherwise."
-  (and (executable-find "pandoc") t))
-
 (defun pi--check-pi ()
   "Check if pi binary is available.
 Returns t if available, nil otherwise."
@@ -1363,10 +1322,7 @@ Returns t if available, nil otherwise."
 Displays warnings for missing dependencies."
   (unless (pi--check-pi)
     (display-warning 'pi "pi binary not found. Install with: npm install -g @mariozechner/pi-coding-agent"
-                     :error))
-  (unless (pi--check-pandoc)
-    (display-warning 'pi "pandoc not found. Install pandoc for markdown rendering."
-                     :warning)))
+                     :error)))
 
 ;;;; Startup Header
 
@@ -1850,16 +1806,14 @@ Returns concatenated text from all text blocks."
     count))
 
 (defun pi--render-history-text (text)
-  "Render TEXT as `org-mode' content with proper isolation.
-Ensures org structures don't leak to subsequent content."
+  "Render TEXT as markdown content with proper isolation.
+Ensures markdown structures don't leak to subsequent content."
   (when (and text (not (string-empty-p text)))
-    (let* ((rendered (pi--markdown-to-org-safe text))
-           (start (with-current-buffer (pi--get-chat-buffer) (point-max))))
-      (pi--append-to-chat rendered)
+    (let ((start (with-current-buffer (pi--get-chat-buffer) (point-max))))
+      (pi--append-to-chat text)
       (with-current-buffer (pi--get-chat-buffer)
-        (pi--hide-org-markers start (point-max))
         (font-lock-ensure start (point-max)))
-      ;; Ensure we end with newlines to reset org context
+      ;; Ensure we end with newlines to reset markdown context
       ;; Two newlines ends any list/paragraph context
       (pi--append-to-chat "\n\n"))))
 
@@ -1867,7 +1821,7 @@ Ensures org structures don't leak to subsequent content."
   "Display MESSAGES from session history with smart grouping.
 Consecutive assistant messages are grouped under one header.
 Tool calls are accumulated and shown as a single summary per group.
-Each text block is rendered independently to prevent org structure leakage."
+Each text block is rendered independently for proper formatting."
   (let ((prev-role nil)
         (pending-tool-count 0))
     ;; Helper to flush tool count summary
@@ -2386,6 +2340,7 @@ If already in a pi buffer and no SESSION specified, redisplays current session."
   (interactive
    (list (when current-prefix-arg
            (read-string "Session name: "))))
+  (pi--check-dependencies)
   (let (chat-buf input-buf)
     (if (and (derived-mode-p 'pi-chat-mode 'pi-input-mode)
              (not session))

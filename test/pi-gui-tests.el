@@ -93,10 +93,36 @@
       (unwind-protect
           (progn
             (pi-gui-test-send (format "Read the file %s" test-file))
-            ;; Tool drawer header proves tool was invoked
-            (should (pi-gui-test-chat-matches ":READ:"))
-            ;; File content should appear in drawer
+            ;; Tool header proves tool was invoked
+            (should (pi-gui-test-chat-matches "^read "))
+            ;; File content should appear in tool output
             (should (pi-gui-test-chat-contains "XYZ123")))
+        (pi-gui-test-delete-temp-file test-file)))))
+
+(ert-deftest pi-gui-test-tool-overlay-bounded ()
+  "Test that tool block overlay doesn't extend beyond tool output.
+Regression test: overlay with rear-advance was extending to subsequent content."
+  (pi-gui-test-with-session
+    (let ((test-file (pi-gui-test-create-temp-file "overlay-test.txt" "BEFORE\n")))
+      (unwind-protect
+          (progn
+            ;; Ask to read file AND say something after
+            ;; Be explicit about using the tool - small models may skip it otherwise
+            (pi-gui-test-send
+             (format "Use the read tool to show the contents of %s. After that, say ENDMARKER" test-file))
+            ;; Wait for both tool output and the text response
+            (should (pi-gui-test-chat-contains "BEFORE"))
+            (should (pi-gui-test-chat-contains "ENDMARKER"))
+            ;; Now check: ENDMARKER should NOT be inside a tool-block overlay
+            (with-current-buffer (plist-get pi-gui-test--session :chat-buffer)
+              (goto-char (point-min))
+              (when (search-forward "ENDMARKER" nil t)
+                (let* ((pos (match-beginning 0))
+                       (overlays (overlays-at pos))
+                       (tool-overlay (seq-find
+                                      (lambda (ov) (overlay-get ov 'pi-tool-block))
+                                      overlays)))
+                  (should-not tool-overlay)))))
         (pi-gui-test-delete-temp-file test-file)))))
 
 (provide 'pi-gui-tests)

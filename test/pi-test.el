@@ -438,8 +438,8 @@ Automatically cleans up chat and input buffers."
     (pi--display-message-delta "Let me check.")
     (pi--render-complete-message)
     (pi--display-tool-start "bash" '(:command "ls"))
-    ;; Pattern: text, blank line, :BASH:
-    (should (string-match-p "check\\.\n\n:BASH:" (buffer-string)))))
+    ;; Pattern: text, blank line, $ command
+    (should (string-match-p "check\\.\n\n\\$ ls" (buffer-string)))))
 
 (ert-deftest pi-test-spacing-blank-line-after-tool ()
   "Tool block is followed by blank line."
@@ -450,8 +450,8 @@ Automatically cleans up chat and input buffers."
     (pi--display-tool-end "bash" '(:command "ls")
                           '((:type "text" :text "file.txt"))
                           nil nil)
-    ;; Pattern: :END: followed by blank line
-    (should (string-match-p ":END:\n\n" (buffer-string)))))
+    ;; Should end with closing fence and blank line
+    (should (string-match-p "```\n\n" (buffer-string)))))
 
 (ert-deftest pi-test-spacing-no-double-blank-between-tools ()
   "Consecutive tools have single blank line between them."
@@ -463,9 +463,9 @@ Automatically cleans up chat and input buffers."
                           '((:type "text" :text "file1"))
                           nil nil)
     (pi--display-tool-start "read" '(:path "file.txt"))
-    ;; Should have exactly one blank line, not two
-    (should (string-match-p ":END:\n\n:READ:" (buffer-string)))
-    (should-not (string-match-p ":END:\n\n\n" (buffer-string)))))
+    ;; Should have closing fence, blank line, then next tool
+    (should (string-match-p "```\n\nread file\\.txt" (buffer-string)))
+    (should-not (string-match-p "\n\n\n" (buffer-string)))))
 
 ;;; History Display
 
@@ -602,75 +602,6 @@ Automatically cleans up chat and input buffers."
 
 ;;; Pandoc Conversion
 
-(ert-deftest pi-test-pandoc-available ()
-  "Pandoc executable is available."
-  (should (executable-find "pandoc")))
-
-(ert-deftest pi-test-pandoc-convert-header ()
-  "Pandoc converts markdown header to org."
-  (skip-unless (executable-find "pandoc"))
-  (let ((result (pi--pandoc-convert "# Hello")))
-    (should (string-match-p "^\\* Hello" result))))
-
-(ert-deftest pi-test-pandoc-convert-bold ()
-  "Pandoc converts markdown bold to org."
-  (skip-unless (executable-find "pandoc"))
-  (let ((result (pi--pandoc-convert "**bold**")))
-    (should (string-match-p "\\*bold\\*" result))))
-
-(ert-deftest pi-test-pandoc-convert-code-block ()
-  "Pandoc converts markdown code block to org src block."
-  (skip-unless (executable-find "pandoc"))
-  (let ((result (pi--pandoc-convert "```python\nprint('hi')\n```")))
-    (should (string-match-p "#\\+begin_src python" result))
-    (should (string-match-p "#\\+end_src" result))))
-
-(ert-deftest pi-test-pandoc-convert-preserves-code ()
-  "Pandoc preserves code content in conversion."
-  (skip-unless (executable-find "pandoc"))
-  (let ((result (pi--pandoc-convert "```\nfoo bar\n```")))
-    (should (string-match-p "foo bar" result))))
-
-;;; Post-Processing
-
-(ert-deftest pi-test-post-process-removes-properties ()
-  "Post-processing removes :PROPERTIES: blocks."
-  (let* ((org-with-props "* Header
-:PROPERTIES:
-:CUSTOM_ID: header
-:END:
-Content")
-         (result (pi--post-process-org org-with-props)))
-    (should-not (string-match-p ":PROPERTIES:" result))
-    (should-not (string-match-p ":CUSTOM_ID:" result))
-    (should-not (string-match-p ":END:" result))
-    (should (string-match-p "\\* Header" result))
-    (should (string-match-p "Content" result))))
-
-(ert-deftest pi-test-post-process-preserves-content ()
-  "Post-processing preserves regular content."
-  (let* ((org "* Header\nParagraph with *bold* text.\n#+begin_src python\ncode\n#+end_src")
-         (result (pi--post-process-org org)))
-    (should (string-match-p "\\* Header" result))
-    (should (string-match-p "\\*bold\\*" result))
-    (should (string-match-p "#\\+begin_src python" result))))
-
-(ert-deftest pi-test-post-process-removes-blank-lines ()
-  "Post-processing collapses multiple blank lines."
-  (let* ((org "Line 1\n\n\n\nLine 2")
-         (result (pi--post-process-org org)))
-    (should (string-match-p "Line 1\n\nLine 2" result))
-    (should-not (string-match-p "\n\n\n" result))))
-
-;;; Complete Rendering Pipeline
-
-(ert-deftest pi-test-markdown-to-org-pipeline ()
-  "Full pipeline converts markdown and post-processes."
-  (let ((result (pi--markdown-to-org "# Hello\n\n**Bold** text")))
-    (should (string-match-p "^\\*\\* Hello" result))
-    (should (string-match-p "\\*Bold\\*" result))
-    (should-not (string-match-p ":PROPERTIES:" result))))
-
 (ert-deftest pi-test-message-start-marker-created ()
   "Message start position is tracked for later replacement."
   (with-temp-buffer
@@ -682,8 +613,8 @@ Content")
     (should (= (marker-position pi--message-start-marker)
                (marker-position pi--streaming-marker)))))
 
-(ert-deftest pi-test-render-complete-message-replaces-content ()
-  "Rendering replaces raw markdown with Org."
+(ert-deftest pi-test-render-complete-message-applies-fontlock ()
+  "Rendering applies font-lock to markdown content."
   (with-temp-buffer
     (pi-chat-mode)
     (pi--display-agent-start)
@@ -692,78 +623,78 @@ Content")
     (should (string-match-p "# Hello" (buffer-string)))
     ;; Now render
     (pi--render-complete-message)
-    ;; Raw markdown should be replaced with Org
-    (should (string-match-p "\\* Hello" (buffer-string)))
-    (should (string-match-p "\\*Bold\\*" (buffer-string)))
-    (should-not (string-match-p "# Hello" (buffer-string)))))
+    ;; Markdown stays as markdown (gfm-mode handles display)
+    (should (string-match-p "# Hello" (buffer-string)))
+    (should (string-match-p "\\*\\*Bold\\*\\*" (buffer-string)))))
 
-;;; Org Marker Hiding
-
-(ert-deftest pi-test-hide-org-markers-creates-overlays ()
-  "Hiding org markers creates invisible overlays."
+(ert-deftest pi-test-render-complete-message-aligns-tables ()
+  "Rendering aligns markdown tables."
   (with-temp-buffer
-    (insert "#+begin_src python\ncode\n#+end_src\n")
-    (pi--hide-org-markers (point-min) (point-max))
-    (let ((overlays (overlays-in (point-min) (point-max))))
-      (should (>= (length overlays) 2)))))
-
-(ert-deftest pi-test-hide-org-markers-makes-invisible ()
-  "Hidden markers have invisible property."
-  (with-temp-buffer
-    (insert "#+begin_src python\ncode\n#+end_src\n")
-    (pi--hide-org-markers (point-min) (point-max))
-    (let ((overlays (overlays-in (point-min) (point-max))))
-      (should (cl-some (lambda (ov) (overlay-get ov 'invisible)) overlays)))))
-
-(ert-deftest pi-test-hide-org-markers-preserves-code ()
-  "Code content is not hidden, only markers."
-  (with-temp-buffer
-    (insert "#+begin_src python\nmy_code()\n#+end_src\n")
-    (pi--hide-org-markers (point-min) (point-max))
-    ;; Find position of code
-    (goto-char (point-min))
-    (search-forward "my_code()")
-    (let ((code-pos (match-beginning 0)))
-      ;; No overlay should cover the code itself
-      (should-not (cl-some (lambda (ov) (overlay-get ov 'invisible))
-                           (overlays-at code-pos))))))
-
-;;; Error Handling
-
-(ert-deftest pi-test-pandoc-fallback-on-error ()
-  "Conversion falls back to raw content on error."
-  (cl-letf (((symbol-function 'pi--pandoc-convert)
-             (lambda (_) (error "Pandoc failed"))))
-    (let ((result (pi--markdown-to-org-safe "# Hello")))
-      (should (equal result "# Hello")))))
-
-(ert-deftest pi-test-pandoc-fallback-returns-original ()
-  "Fallback returns original markdown unchanged."
-  (cl-letf (((symbol-function 'pi--pandoc-convert)
-             (lambda (_) (error "Pandoc unavailable"))))
-    (let ((markdown "**Bold** and `code`"))
-      (should (equal (pi--markdown-to-org-safe markdown) markdown)))))
+    (pi-chat-mode)
+    (pi--display-agent-start)
+    ;; Insert unaligned table (columns have different widths)
+    (pi--display-message-delta
+     "| Short | Much Longer |\n|---|---|\n| a | b |\n")
+    ;; Before render: table is unaligned (separators are just ---)
+    (should (string-match-p "|---|---|" (buffer-string)))
+    ;; Render the message
+    (pi--render-complete-message)
+    ;; After render: separator dashes should match column widths
+    ;; "Short" = 5 chars, "Much Longer" = 11 chars
+    ;; So separators should be at least that wide
+    (should (string-match-p "|[-]+|[-]+|" (buffer-string)))
+    ;; The short separator "---" should now be longer (at least 5 dashes)
+    (should-not (string-match-p "|---|---|" (buffer-string)))))
 
 ;;; Syntax Highlighting
 
-(ert-deftest pi-test-chat-mode-derives-from-org ()
-  "Chat mode derives from org-mode for syntax highlighting."
+(ert-deftest pi-test-chat-mode-derives-from-gfm ()
+  "Chat mode derives from gfm-mode for syntax highlighting."
   (with-temp-buffer
     (pi-chat-mode)
-    (should (derived-mode-p 'org-mode))))
+    (should (derived-mode-p 'gfm-mode))))
 
 (ert-deftest pi-test-chat-mode-fontifies-code ()
   "Code blocks get syntax highlighting."
   (with-temp-buffer
     (pi-chat-mode)
-    (let ((inhibit-read-only t)
-          (org-src-fontify-natively t))
-      (insert "#+begin_src python\ndef hello():\n    return 42\n#+end_src\n")
+    (let ((inhibit-read-only t))
+      (insert "```python\ndef hello():\n    return 42\n```\n")
       (font-lock-ensure)
       (goto-char (point-min))
       (search-forward "def" nil t)
       (let ((face (get-text-property (match-beginning 0) 'face)))
         ;; Should have font-lock-keyword-face (from python)
+        (should (or (eq face 'font-lock-keyword-face)
+                    (and (listp face) (memq 'font-lock-keyword-face face))))))))
+
+(ert-deftest pi-test-incomplete-code-block-does-not-break-fontlock ()
+  "Incomplete code block during streaming does not break font-lock.
+Simulates streaming where code block opening arrives before closing.
+Font-lock should handle gracefully: no highlighting until complete,
+then proper highlighting once block is closed."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (let ((inhibit-read-only t))
+      ;; Simulate streaming: block opened but not closed
+      (insert "```python\ndef hello():\n    return 42\n")
+      (font-lock-ensure)
+      ;; Should not error, buffer should be functional
+      (should (eq major-mode 'pi-chat-mode))
+      (goto-char (point-min))
+      (should (search-forward "def" nil t))
+      ;; No highlighting expected for incomplete block
+      (let ((face (get-text-property (match-beginning 0) 'face)))
+        (should (or (null face)
+                    (not (memq 'font-lock-keyword-face (ensure-list face))))))
+      ;; Complete the block
+      (goto-char (point-max))
+      (insert "```\n")
+      (font-lock-ensure)
+      ;; Now should have highlighting
+      (goto-char (point-min))
+      (search-forward "def" nil t)
+      (let ((face (get-text-property (match-beginning 0) 'face)))
         (should (or (eq face 'font-lock-keyword-face)
                     (and (listp face) (memq 'font-lock-keyword-face face))))))))
 
@@ -1015,13 +946,12 @@ Content")
 ;;; Tool Output
 
 (ert-deftest pi-test-tool-start-inserts-header ()
-  "tool_execution_start inserts an org drawer header."
+  "tool_execution_start inserts tool header."
   (with-temp-buffer
     (pi-chat-mode)
     (pi--display-tool-start "bash" (list :command "ls -la"))
-    ;; Should have :BASH: drawer and command
-    (should (string-match-p ":BASH:" (buffer-string)))
-    (should (string-match-p "ls -la" (buffer-string)))))
+    ;; Should have $ command format
+    (should (string-match-p "\\$ ls -la" (buffer-string)))))
 
 (ert-deftest pi-test-tool-start-handles-file-path-key ()
   "tool_execution_start handles :file_path key (alternative to :path)."
@@ -1029,20 +959,17 @@ Content")
     (pi-chat-mode)
     ;; Test read tool with :file_path
     (pi--display-tool-start "read" '(:file_path "/tmp/test.txt"))
-    (should (string-match-p ":READ:" (buffer-string)))
-    (should (string-match-p "/tmp/test.txt" (buffer-string))))
+    (should (string-match-p "read /tmp/test.txt" (buffer-string))))
   (with-temp-buffer
     (pi-chat-mode)
     ;; Test write tool with :file_path
     (pi--display-tool-start "write" '(:file_path "/tmp/out.py"))
-    (should (string-match-p ":WRITE:" (buffer-string)))
-    (should (string-match-p "/tmp/out.py" (buffer-string))))
+    (should (string-match-p "write /tmp/out.py" (buffer-string))))
   (with-temp-buffer
     (pi-chat-mode)
     ;; Test edit tool with :file_path
     (pi--display-tool-start "edit" '(:file_path "/tmp/edit.rs"))
-    (should (string-match-p ":EDIT:" (buffer-string)))
-    (should (string-match-p "/tmp/edit.rs" (buffer-string)))))
+    (should (string-match-p "edit /tmp/edit.rs" (buffer-string)))))
 
 (ert-deftest pi-test-tool-end-inserts-result ()
   "tool_execution_end inserts the tool result."
@@ -1052,6 +979,17 @@ Content")
                           '((:type "text" :text "file1\nfile2"))
                           nil nil)
     (should (string-match-p "file1" (buffer-string)))))
+
+(ert-deftest pi-test-bash-output-wrapped-in-text-fence ()
+  "Bash output is wrapped in ```text fence for visual consistency."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--display-tool-end "bash" '(:command "ls")
+                          '((:type "text" :text "file1"))
+                          nil nil)
+    ;; Should have text fence markers
+    (should (string-match-p "```text" (buffer-string)))
+    (should (string-match-p "```$" (buffer-string)))))
 
 (ert-deftest pi-test-tool-output-shows-preview-when-long ()
   "Tool output shows preview lines when it exceeds the limit."
@@ -1067,20 +1005,7 @@ Content")
       (should (string-match-p "line1" (buffer-string)))
       (should (string-match-p "line5" (buffer-string)))
       ;; Should have more-lines indicator
-      (should (string-match-p "more lines" (buffer-string)))
-      ;; Should have :END: to close drawer
-      (should (string-match-p ":END:" (buffer-string))))))
-
-(ert-deftest pi-test-tool-output-has-drawer-end ()
-  "Tool output closes with :END: drawer marker."
-  (with-temp-buffer
-    (pi-chat-mode)
-    (let ((short-output "file1\nfile2"))
-      (pi--display-tool-end "bash" '(:command "ls")
-                            `((:type "text" :text ,short-output))
-                            nil nil)
-      ;; Should have :END: marker
-      (should (string-match-p ":END:" (buffer-string))))))
+      (should (string-match-p "more lines" (buffer-string))))))
 
 (ert-deftest pi-test-tool-output-short-shows-all ()
   "Short tool output shows all lines without truncation."
@@ -1097,17 +1022,18 @@ Content")
       ;; Should NOT have more-lines indicator
       (should-not (string-match-p "more lines" (buffer-string))))))
 
-(ert-deftest pi-test-tab-calls-org-cycle ()
-  "TAB on tool section calls `org-cycle' for drawer folding."
+(ert-deftest pi-test-tab-bound-to-toggle-tool-section ()
+  "TAB is bound to pi-toggle-tool-section for tool block handling."
   (with-temp-buffer
     (pi-chat-mode)
     (pi--display-tool-start "bash" '(:command "ls"))
     (pi--display-tool-end "bash" '(:command "ls")
                           '((:type "text" :text "output"))
                           nil nil)
-    ;; Verify we have an org drawer structure
-    (should (string-match-p ":BASH:" (buffer-string)))
-    (should (string-match-p ":END:" (buffer-string)))
+    ;; Verify we have a tool block with overlay
+    (should (string-match-p "\\$ ls" (buffer-string)))
+    (goto-char (point-min))
+    (should (pi--find-tool-block-bounds))
     ;; pi-toggle-tool-section should be bound to TAB and <tab>
     (should (eq (lookup-key pi-chat-mode-map (kbd "TAB")) 'pi-toggle-tool-section))
     (should (eq (lookup-key pi-chat-mode-map (kbd "<tab>")) 'pi-toggle-tool-section))))
@@ -1125,12 +1051,14 @@ Content")
   "Tool with isError :false should not show error indicator."
   (with-temp-buffer
     (pi-chat-mode)
+    (pi--display-tool-start "bash" '(:command "test"))
     (pi--display-tool-end "bash" nil
                           '((:type "text" :text "success output"))
                           nil :false)
-    ;; Should have output and :END:, no [error]
+    ;; Should have output, success face, no [error]
     (should (string-match-p "success output" (buffer-string)))
-    (should (string-match-p ":END:" (buffer-string)))
+    (let ((ov (car (overlays-at (point-min)))))
+      (should (eq (overlay-get ov 'face) 'pi-tool-block-success)))
     (should-not (string-match-p "\\[error\\]" (buffer-string)))))
 
 (ert-deftest pi-test-tool-output-survives-message-render ()
@@ -1158,10 +1086,10 @@ Content")
        :assistantMessageEvent (:type "text_delta" :delta "Done")))
     (pi--handle-display-event '(:type "message_end"))
     
-    ;; Tool output must still be present (in drawer)
+    ;; Tool output must still be present
     (should (string-match-p "file1" (buffer-string)))
     (should (string-match-p "file2" (buffer-string)))
-    (should (string-match-p ":END:" (buffer-string)))))
+    (should (string-match-p "\\$ ls" (buffer-string)))))
 
 (ert-deftest pi-test-display-handler-handles-tool-start ()
   "Display handler processes tool_execution_start events."
@@ -1218,15 +1146,14 @@ Content")
     (should (string-match-p "Compaction" (buffer-string)))
     (should (string-match-p "30,000 tokens" (buffer-string)))))
 
-(ert-deftest pi-test-display-compaction-result-converts-markdown ()
-  "pi--display-compaction-result converts markdown summary to org."
+(ert-deftest pi-test-display-compaction-result-shows-markdown ()
+  "pi--display-compaction-result displays markdown summary as-is."
   (with-temp-buffer
     (pi-chat-mode)
     (pi--display-compaction-result 10000 "**Bold** and `code`")
-    ;; Should convert markdown bold to org bold
-    (should (string-match-p "\\*Bold\\*" (buffer-string)))
-    ;; Should convert markdown code to org code (pandoc uses = for verbatim)
-    (should (string-match-p "=code=" (buffer-string)))))
+    ;; Markdown stays as markdown
+    (should (string-match-p "\\*\\*Bold\\*\\*" (buffer-string)))
+    (should (string-match-p "`code`" (buffer-string)))))
 
 (ert-deftest pi-test-display-handler-handles-auto-compaction-start ()
   "Display handler processes auto_compaction_start events."
@@ -1268,8 +1195,8 @@ Content")
     ;; Usage should NOT be reset on abort
     (should pi--last-usage)))
 
-(ert-deftest pi-test-thinking-rendered-as-src-block ()
-  "Thinking content renders as org src thinking block after message completion."
+(ert-deftest pi-test-thinking-rendered-as-fenced-block ()
+  "Thinking content renders as markdown fenced block after message completion."
   (with-temp-buffer
     (pi-chat-mode)
     (pi--handle-display-event '(:type "agent_start"))
@@ -1290,11 +1217,11 @@ Content")
        :assistantMessageEvent (:type "text_delta" :delta "Here is my answer.")))
     ;; Complete the message (triggers rendering)
     (pi--handle-display-event '(:type "message_end" :message (:role "assistant")))
-    ;; After rendering, thinking should be in a src thinking block
+    ;; After rendering, thinking should be in a markdown fenced block
     (goto-char (point-min))
-    (should (search-forward "#+begin_src thinking" nil t))
+    (should (search-forward "```thinking" nil t))
     (should (search-forward "Let me analyze this." nil t))
-    (should (search-forward "#+end_src" nil t))
+    (should (search-forward "```" nil t))
     ;; Regular text should be outside the block
     (should (search-forward "Here is my answer." nil t))))
 
@@ -1303,11 +1230,14 @@ Content")
   (with-temp-buffer
     (pi-chat-mode)
     (let ((inhibit-read-only t))
-      (insert "#+begin_src thinking\nSome thinking here.\n#+end_src\n"))
+      (insert "```thinking\nSome thinking here.\n```\n"))
     (font-lock-ensure)
     (goto-char (point-min))
     (search-forward "Some thinking")
-    (should (memq 'pi-thinking (ensure-list (get-text-property (1- (point)) 'face))))))
+    ;; Verify pi-thinking face is applied (may be in a list with other faces)
+    (let ((face (get-text-property (point) 'face)))
+      (should (or (eq face 'pi-thinking)
+                  (and (listp face) (memq 'pi-thinking face)))))))
 
 (ert-deftest pi-test-read-tool-gets-syntax-highlighting ()
   "Read tool output gets syntax highlighting based on file path.
@@ -1328,8 +1258,8 @@ are only present in tool_execution_start, not tool_execution_end."
            :toolName "read"
            :result (list :content '((:type "text" :text "def hello():\n    pass")))
            :isError nil))
-    ;; Should have python src block from pandoc conversion
-    (should (string-match-p "#\\+begin_src python" (buffer-string)))))
+    ;; Should have python markdown code fence
+    (should (string-match-p "```python" (buffer-string)))))
 
 (ert-deftest pi-test-write-tool-gets-syntax-highlighting ()
   "Write tool displays content from args with syntax highlighting.
@@ -1351,8 +1281,8 @@ which is just a success message."
            :toolName "write"
            :result (list :content '((:type "text" :text "Successfully wrote 42 bytes")))
            :isError nil))
-    ;; Should have rust src block (from args content, not result)
-    (should (string-match-p "#\\+begin_src rust" (buffer-string)))
+    ;; Should have rust markdown code fence (from args content, not result)
+    (should (string-match-p "```rust" (buffer-string)))
     ;; Should show the actual code, not the success message
     (should (string-match-p "fn main" (buffer-string)))))
 
@@ -1373,12 +1303,6 @@ which is just a success message."
     (should (eq (key-binding "n") 'pi-next-message))
     (should (eq (key-binding "p") 'pi-previous-message))
     (should (eq (key-binding (kbd "TAB")) 'pi-toggle-tool-section))))
-
-;;; Dependency Checking
-
-(ert-deftest pi-test-check-pandoc-returns-status ()
-  "pi--check-pandoc returns boolean."
-  (should (booleanp (pi--check-pandoc))))
 
 (provide 'pi-test)
 ;;; pi-test.el ends here
@@ -1434,9 +1358,9 @@ which is just a success message."
     (pi--display-tool-end "bash" nil
                           '((:type "text" :text "L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10"))
                           nil nil)
-    ;; Go to the :BASH: line (not the button)
+    ;; Go to the header line (not the button)
     (goto-char (point-min))
-    (search-forward ":BASH:" nil t)
+    (search-forward "$ ls" nil t)
     (beginning-of-line)
     ;; TAB should still expand
     (pi-toggle-tool-section)
@@ -1956,3 +1880,84 @@ Content")))
                  (cmd (car commands)))
             (should (string-match-p "First line" (plist-get cmd :description)))))
       (delete-directory temp-dir t))))
+
+(ert-deftest pi-test-tool-start-creates-overlay ()
+  "tool_execution_start creates an overlay with pending face."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--display-tool-start "bash" '(:command "ls"))
+    ;; Should have an overlay with pi-tool-block property
+    (goto-char (point-min))
+    (let* ((overlays (overlays-at (point)))
+           (tool-ov (seq-find (lambda (o) (overlay-get o 'pi-tool-block)) overlays)))
+      (should tool-ov)
+      (should (eq (overlay-get tool-ov 'face) 'pi-tool-block-pending))
+      (should (equal (overlay-get tool-ov 'pi-tool-name) "bash")))))
+
+(ert-deftest pi-test-tool-start-header-format ()
+  "tool_execution_start uses simple header format, not drawer syntax."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--display-tool-start "bash" '(:command "ls -la"))
+    ;; Should have "$ ls -la" header
+    (should (string-match-p "\\$ ls -la" (buffer-string)))
+    ;; Should NOT have drawer syntax
+    (should-not (string-match-p ":BASH:" (buffer-string)))))
+
+(ert-deftest pi-test-tool-end-changes-overlay-face ()
+  "tool_execution_end changes overlay face from pending to success/error."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--display-tool-start "bash" '(:command "ls"))
+    ;; Initially pending
+    (let ((ov (car (overlays-at (point-min)))))
+      (should (eq (overlay-get ov 'face) 'pi-tool-block-pending)))
+    ;; After success
+    (pi--display-tool-end "bash" '(:command "ls")
+                          '((:type "text" :text "file.txt"))
+                          nil nil)
+    (let ((ov (car (overlays-at (point-min)))))
+      (should (eq (overlay-get ov 'face) 'pi-tool-block-success)))))
+
+(ert-deftest pi-test-tool-end-error-face ()
+  "tool_execution_end sets error face on failure."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--display-tool-start "bash" '(:command "bad"))
+    (pi--display-tool-end "bash" '(:command "bad")
+                          '((:type "text" :text "error"))
+                          nil t)  ; is-error = t
+    (let ((ov (car (overlays-at (point-min)))))
+      (should (eq (overlay-get ov 'face) 'pi-tool-block-error)))))
+
+(ert-deftest pi-test-tool-end-no-drawer-syntax ()
+  "tool_execution_end does not insert :END: marker."
+  (with-temp-buffer
+    (pi-chat-mode)
+    (pi--display-tool-start "bash" '(:command "ls"))
+    (pi--display-tool-end "bash" '(:command "ls")
+                          '((:type "text" :text "output"))
+                          nil nil)
+    (should-not (string-match-p ":END:" (buffer-string)))))
+
+(ert-deftest pi-test-tool-overlay-does-not-extend-to-subsequent-content ()
+  "Tool overlay should not extend when content is inserted after tool block.
+Regression test: overlay with rear-advance was extending to subsequent content."
+  (with-temp-buffer
+    (pi-chat-mode)
+    ;; Create a complete tool block
+    (pi--display-tool-start "write" '(:path "/tmp/test.txt" :content "hello"))
+    (pi--display-tool-end "write" '(:path "/tmp/test.txt" :content "hello")
+                          '((:type "text" :text "Written to /tmp/test.txt"))
+                          nil nil)
+    ;; Simulate inserting more content after the tool (like next message)
+    (let ((inhibit-read-only t))
+      (goto-char (point-max))
+      (insert "AFTER_TOOL_CONTENT\n"))
+    ;; The new content should NOT be inside any tool overlay
+    (let* ((new-content-pos (- (point-max) 10))  ; somewhere in AFTER_TOOL_CONTENT
+           (overlays (overlays-at new-content-pos))
+           (tool-overlay (seq-find
+                          (lambda (ov) (overlay-get ov 'pi-tool-block))
+                          overlays)))
+      (should-not tool-overlay))))

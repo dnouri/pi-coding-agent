@@ -61,6 +61,11 @@ cat >> /tmp/run-gui-tests.el << EOF
 (add-to-list 'load-path "$PROJECT_DIR")
 (add-to-list 'load-path "$PROJECT_DIR/test")
 
+;; Initialize packages to find markdown-mode
+(require 'package)
+(push '("melpa" . "https://melpa.org/packages/") package-archives)
+(package-initialize)
+
 ;; Load test utilities and tests
 (require 'pi-gui-test-utils)
 (require 'pi-gui-tests)

@@ -10,7 +10,7 @@ PI_BIN_DIR = $(abspath $(dir $(PI_BIN)))
 
 .PHONY: test test-unit test-integration test-integration-ci test-gui test-gui-ci test-all
 .PHONY: check compile lint lint-checkdoc lint-package clean clean-cache help
-.PHONY: ollama-start ollama-stop ollama-status setup-pi setup-models
+.PHONY: ollama-start ollama-stop ollama-status setup-pi setup-models deps
 
 help:
 	@echo "Targets:"
@@ -29,12 +29,30 @@ help:
 	@echo "  make test-gui-ci         (Ollama already running)"
 
 # ============================================================
+# Dependencies
+# ============================================================
+
+# Install package dependencies from MELPA (markdown-mode)
+deps:
+	@$(BATCH) \
+		--eval "(require 'package)" \
+		--eval "(push '(\"melpa\" . \"https://melpa.org/packages/\") package-archives)" \
+		--eval "(package-initialize)" \
+		--eval "(unless (package-installed-p 'markdown-mode) \
+		          (package-refresh-contents) \
+		          (package-install 'markdown-mode))" \
+		--eval "(message \"Dependencies installed\")"
+
+# ============================================================
 # Unit tests
 # ============================================================
 
-test: clean
+test: clean deps
 	@echo "=== Unit Tests ==="
-	$(BATCH) -L test -l pi -l pi-core-test -l pi-test -f ert-run-tests-batch-and-exit
+	$(BATCH) -L test \
+		--eval "(require 'package)" \
+		--eval "(package-initialize)" \
+		-l pi -l pi-core-test -l pi-test -f ert-run-tests-batch-and-exit
 
 test-unit: compile test
 
@@ -65,29 +83,35 @@ setup-models:
 # ============================================================
 
 # Local: starts Ollama via Docker
-test-integration: clean setup-pi
+test-integration: clean deps setup-pi
 	@echo "=== Integration Tests (pi@$(PI_VERSION)) ==="
 	@./scripts/ollama.sh start
 	@PI_CODING_AGENT_DIR=$$(mktemp -d) && \
 		cp test/fixtures/ollama-models.json "$$PI_CODING_AGENT_DIR/models.json" && \
 		env PATH="$(PI_BIN_DIR):$$PATH" PI_CODING_AGENT_DIR="$$PI_CODING_AGENT_DIR" PI_RUN_INTEGRATION=1 \
-		$(BATCH) -L test -l pi -l pi-integration-test -f ert-run-tests-batch-and-exit; \
+		$(BATCH) -L test \
+			--eval "(require 'package)" \
+			--eval "(package-initialize)" \
+			-l pi -l pi-integration-test -f ert-run-tests-batch-and-exit; \
 		status=$$?; rm -rf "$$PI_CODING_AGENT_DIR"; exit $$status
 
 # CI: Ollama already running via services block
-test-integration-ci: clean setup-pi
+test-integration-ci: clean deps setup-pi
 	@echo "=== Integration Tests CI (pi@$(PI_VERSION)) ==="
 	@mkdir -p "$$PI_CODING_AGENT_DIR"
 	@cp test/fixtures/ollama-models.json "$$PI_CODING_AGENT_DIR/models.json"
 	env PATH="$(PI_BIN_DIR):$$PATH" PI_RUN_INTEGRATION=1 \
-	$(BATCH) -L test -l pi -l pi-integration-test -f ert-run-tests-batch-and-exit
+	$(BATCH) -L test \
+		--eval "(require 'package)" \
+		--eval "(package-initialize)" \
+		-l pi -l pi-integration-test -f ert-run-tests-batch-and-exit
 
 # ============================================================
 # GUI tests
 # ============================================================
 
 # Local: starts Ollama via Docker
-test-gui: clean setup-pi
+test-gui: clean deps setup-pi
 	@echo "=== GUI Tests (pi@$(PI_VERSION)) ==="
 	@./scripts/ollama.sh start
 	@PI_CODING_AGENT_DIR=$$(mktemp -d) && \
@@ -97,7 +121,7 @@ test-gui: clean setup-pi
 		status=$$?; rm -rf "$$PI_CODING_AGENT_DIR"; exit $$status
 
 # CI: Ollama already running via services block
-test-gui-ci: clean setup-pi
+test-gui-ci: clean deps setup-pi
 	@echo "=== GUI Tests CI (pi@$(PI_VERSION)) ==="
 	@mkdir -p "$$PI_CODING_AGENT_DIR"
 	@cp test/fixtures/ollama-models.json "$$PI_CODING_AGENT_DIR/models.json"
@@ -126,9 +150,12 @@ ollama-status:
 # Code quality
 # ============================================================
 
-compile: clean
+compile: clean deps
 	@echo "=== Byte-compile ==="
-	$(BATCH) --eval "(setq byte-compile-error-on-warn t)" \
+	$(BATCH) \
+		--eval "(require 'package)" \
+		--eval "(package-initialize)" \
+		--eval "(setq byte-compile-error-on-warn t)" \
 		-f batch-byte-compile pi-core.el pi.el
 
 lint: lint-checkdoc lint-package
