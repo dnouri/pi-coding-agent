@@ -340,5 +340,5 @@ Returns plist with :status key for setting `pi--status'."
             :message-count (plist-get data :messageCount)
             :queued-message-count (plist-get data :queuedMessageCount)))))
 
-(provide 'pi-core)
+(provide 'pi-coding-agent-core)
 ;;; pi-core.el ends here

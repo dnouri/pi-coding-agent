@@ -5,7 +5,7 @@
 ;; Shared utilities for GUI integration tests.
 ;;
 ;; Usage:
-;;   (require 'pi-gui-test-utils)
+;;   (require 'pi-coding-agent-gui-test-utils)
 ;;   (pi-gui-test-with-session
 ;;     (pi-gui-test-send "Hello")
 ;;     (should (pi-gui-test-chat-contains "Hello")))
@@ -17,8 +17,8 @@
 ;;; Code:
 
 (require 'ert)
-(require 'pi)
-(require 'pi-test-common)
+(require 'pi-coding-agent)
+(require 'pi-coding-agent-test-common)
 
 ;;;; Configuration
 
@@ -279,5 +279,5 @@ Inserts dummy content directly (no LLM calls) for speed."
   "Delete temp file at PATH if it exists."
   (ignore-errors (delete-file path)))
 
-(provide 'pi-gui-test-utils)
+(provide 'pi-coding-agent-gui-test-utils)
 ;;; pi-gui-test-utils.el ends here

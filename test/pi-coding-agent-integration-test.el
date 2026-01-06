@@ -25,8 +25,8 @@
 ;;; Code:
 
 (require 'ert)
-(require 'pi)
-(require 'pi-test-common)
+(require 'pi-coding-agent)
+(require 'pi-coding-agent-test-common)
 
 (defun pi-integration--skip-unless-available ()
   "Skip test if integration tests should not run."
@@ -222,5 +222,5 @@ Sets up event dispatching through pi--event-handlers list."
              (data (plist-get state :data)))
         (should (eq (plist-get data :isStreaming) :false))))))
 
-(provide 'pi-integration-test)
+(provide 'pi-coding-agent-integration-test)
 ;;; pi-integration-test.el ends here

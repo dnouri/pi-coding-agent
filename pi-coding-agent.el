@@ -60,7 +60,7 @@
 
 ;;; Code:
 
-(require 'pi-core)
+(require 'pi-coding-agent-core)
 (require 'project)
 (require 'markdown-mode)
 
@@ -2354,5 +2354,5 @@ If already in a pi buffer and no SESSION specified, redisplays current session."
     ;; Display and focus
     (pi--display-buffers chat-buf input-buf)))
 
-(provide 'pi)
+(provide 'pi-coding-agent)
 ;;; pi.el ends here

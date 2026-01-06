@@ -8,8 +8,8 @@
 ;;; Code:
 
 (require 'ert)
-(require 'pi-core)
-(require 'pi-test-common)
+(require 'pi-coding-agent-core)
+(require 'pi-coding-agent-test-common)
 
 ;;;; JSON Parsing Tests
 
@@ -525,5 +525,5 @@
     (should (eq pi--status 'idle))
     (should (eq (plist-get pi--state :is-retrying) nil))))
 
-(provide 'pi-core-test)
+(provide 'pi-coding-agent-core-test)
 ;;; pi-core-test.el ends here

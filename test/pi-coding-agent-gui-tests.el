@@ -15,7 +15,7 @@
 ;;; Code:
 
 (require 'ert)
-(require 'pi-gui-test-utils)
+(require 'pi-coding-agent-gui-test-utils)
 
 ;;;; Session Tests
 
@@ -125,5 +125,5 @@ Regression test: overlay with rear-advance was extending to subsequent content."
                   (should-not tool-overlay)))))
         (pi-gui-test-delete-temp-file test-file)))))
 
-(provide 'pi-gui-tests)
+(provide 'pi-coding-agent-gui-tests)
 ;;; pi-gui-tests.el ends here

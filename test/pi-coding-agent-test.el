@@ -7,7 +7,7 @@
 ;;; Code:
 
 (require 'ert)
-(require 'pi)
+(require 'pi-coding-agent)
 
 ;;; Test Utilities
 
@@ -1308,7 +1308,7 @@ which is just a success message."
     (should (eq (key-binding "p") 'pi-previous-message))
     (should (eq (key-binding (kbd "TAB")) 'pi-toggle-tool-section))))
 
-(provide 'pi-test)
+(provide 'pi-coding-agent-test)
 ;;; pi-test.el ends here
 
 (ert-deftest pi-test-tool-toggle-expands-content ()

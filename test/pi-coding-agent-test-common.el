@@ -24,5 +24,5 @@
 (defvar pi-test-gui-timeout 90
   "Timeout in seconds for GUI tests (includes real LLM responses).")
 
-(provide 'pi-test-common)
+(provide 'pi-coding-agent-test-common)
 ;;; pi-test-common.el ends here
