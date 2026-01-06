@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; ERT tests for the core pi.el functionality: JSON parsing,
+;; ERT tests for the core pi-coding-agent functionality: JSON parsing,
 ;; line accumulation, and command encoding.
 
 ;;; Code:

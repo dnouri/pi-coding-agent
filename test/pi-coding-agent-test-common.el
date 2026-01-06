@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; Common definitions shared across pi.el test files.
+;; Common definitions shared across pi-coding-agent test files.
 ;; Centralizes timeout values for easy adjustment (e.g., slow CI).
 
 ;;; Code:

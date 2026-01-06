@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; ERT tests for pi.el - the main UI layer.
+;; ERT tests for pi-coding-agent - the main UI layer.
 
 ;;; Code:
 
