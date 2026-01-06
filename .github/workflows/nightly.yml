@@ -9,6 +9,7 @@ jobs:
   unit:
     name: Unit (Emacs ${{ matrix.emacs }})
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -23,6 +24,7 @@ jobs:
   integration:
     name: Integration (pi@${{ matrix.pi_version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -76,6 +78,7 @@ jobs:
   gui:
     name: GUI (pi@${{ matrix.pi_version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
