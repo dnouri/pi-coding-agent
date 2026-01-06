@@ -43,7 +43,7 @@
 Returns session plist."
   (let ((default-directory (or dir "/tmp/")))
     (delete-other-windows)
-    (pi)
+    (pi-coding-agent)
     (sit-for 2)  ;; sit-for allows redisplay (sleep-for blocks it)
     (let* ((chat-buf (get-buffer (format "*pi-coding-agent-chat:%s*" default-directory)))
            (input-buf (and chat-buf (with-current-buffer chat-buf pi-coding-agent--input-buffer)))
