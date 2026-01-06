@@ -180,9 +180,14 @@ Returns the process object."
 
 ;;;; State Management
 
+(defvar-local pi--status 'idle
+  "Current status of the pi session (buffer-local in chat buffer).
+One of: `idle', `sending', `streaming', `compacting'.
+This is the single source of truth for session activity state.")
+
 (defvar-local pi--state nil
   "Current state of the pi session (buffer-local in chat buffer).
-A plist with keys like :is-streaming, :model, :thinking-level, etc.")
+A plist with keys like :model, :thinking-level, :messages, etc.")
 
 (defvar-local pi--state-timestamp nil
   "Time when state was last updated (buffer-local in chat buffer).")
@@ -194,11 +199,11 @@ A plist with keys like :is-streaming, :model, :thinking-level, etc.")
   "Return t if state should be verified with get_state.
 Verification is needed when:
 - State and timestamp exist
-- Not currently streaming
+- Session is idle (not streaming, sending, or compacting)
 - Timestamp is older than `pi--state-verify-interval' seconds."
   (and pi--state
        pi--state-timestamp
-       (not (plist-get pi--state :is-streaming))
+       (eq pi--status 'idle)
        (> (- (float-time) pi--state-timestamp)
           pi--state-verify-interval)))
 
@@ -212,17 +217,18 @@ JSON true (t) stays t, JSON false (:false) becomes nil."
   (if (pi--json-false-p value) nil value))
 
 (defun pi--update-state-from-event (event)
-  "Update `pi--state' based on EVENT.
-Handles agent lifecycle, message events, and error/retry events."
+  "Update `pi--status' and `pi--state' based on EVENT.
+Handles agent lifecycle, message events, and error/retry events.
+Sets `pi--status' to `streaming' on agent_start, `idle' on agent_end."
   (let ((type (plist-get event :type)))
     (pcase type
       ("agent_start"
-       (plist-put pi--state :is-streaming t)
+       (setq pi--status 'streaming)
        (plist-put pi--state :is-retrying nil)
        (plist-put pi--state :last-error nil)
        (setq pi--state-timestamp (float-time)))
       ("agent_end"
-       (plist-put pi--state :is-streaming nil)
+       (setq pi--status 'idle)
        (plist-put pi--state :is-retrying nil)
        (plist-put pi--state :messages (plist-get event :messages))
        (setq pi--state-timestamp (float-time)))
@@ -313,21 +319,26 @@ Only processes successful responses for state-modifying commands."
          (setq pi--state-timestamp (float-time)))
         ("get_state"
          (let ((new-state (pi--extract-state-from-response response)))
-           (setq pi--state new-state
+           (setq pi--status (plist-get new-state :status)
+                 pi--state new-state
                  pi--state-timestamp (float-time))))))))
 
 (defun pi--extract-state-from-response (response)
   "Extract state plist from a get_state RESPONSE.
-Converts camelCase keys to kebab-case and normalizes booleans."
+Converts camelCase keys to kebab-case and normalizes booleans.
+Returns plist with :status key for setting `pi--status'."
   (when-let ((data (plist-get response :data)))
-    (list :model (plist-get data :model)
-          :thinking-level (plist-get data :thinkingLevel)
-          :is-streaming (pi--normalize-boolean (plist-get data :isStreaming))
-          :is-compacting (pi--normalize-boolean (plist-get data :isCompacting))
-          :session-id (plist-get data :sessionId)
-          :session-file (plist-get data :sessionFile)
-          :message-count (plist-get data :messageCount)
-          :queued-message-count (plist-get data :queuedMessageCount))))
+    (let ((is-streaming (pi--normalize-boolean (plist-get data :isStreaming)))
+          (is-compacting (pi--normalize-boolean (plist-get data :isCompacting))))
+      (list :status (cond (is-streaming 'streaming)
+                          (is-compacting 'compacting)
+                          (t 'idle))
+            :model (plist-get data :model)
+            :thinking-level (plist-get data :thinkingLevel)
+            :session-id (plist-get data :sessionId)
+            :session-file (plist-get data :sessionFile)
+            :message-count (plist-get data :messageCount)
+            :queued-message-count (plist-get data :queuedMessageCount)))))
 
 (provide 'pi-core)
 ;;; pi-core.el ends here

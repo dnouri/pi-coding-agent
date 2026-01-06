@@ -255,20 +255,23 @@
 ;;;; State Event Handling Tests
 
 (ert-deftest pi-test-event-agent-start-sets-streaming ()
-  "agent_start event sets is-streaming to t."
-  (let ((pi--state (list :is-streaming nil)))
+  "agent_start event sets pi--status to streaming."
+  (let ((pi--status 'idle)
+        (pi--state nil))
     (pi--update-state-from-event '(:type "agent_start"))
-    (should (eq (plist-get pi--state :is-streaming) t))))
+    (should (eq pi--status 'streaming))))
 
 (ert-deftest pi-test-event-agent-end-clears-streaming ()
-  "agent_end event sets is-streaming to nil."
-  (let ((pi--state (list :is-streaming t)))
+  "agent_end event sets pi--status to idle."
+  (let ((pi--status 'streaming)
+        (pi--state nil))
     (pi--update-state-from-event '(:type "agent_end" :messages []))
-    (should (eq (plist-get pi--state :is-streaming) nil))))
+    (should (eq pi--status 'idle))))
 
 (ert-deftest pi-test-event-agent-end-stores-messages ()
   "agent_end event stores messages in state."
-  (let ((pi--state (list :is-streaming t :messages nil))
+  (let ((pi--status 'streaming)
+        (pi--state (list :messages nil))
         (msgs [(:role "user" :content "hi") (:role "assistant" :content "hello")]))
     (pi--update-state-from-event (list :type "agent_end" :messages msgs))
     (should (plist-get pi--state :messages))))
@@ -370,31 +373,36 @@
 
 (ert-deftest pi-test-state-needs-verify-when-stale ()
   "State needs verification when timestamp is old."
-  (let ((pi--state (list :is-streaming nil))
+  (let ((pi--status 'idle)
+        (pi--state (list :model "test"))
         (pi--state-timestamp (- (float-time) 60)))  ;; 60 seconds ago
     (should (pi--state-needs-verification-p))))
 
 (ert-deftest pi-test-state-no-verify-when-fresh ()
   "State does not need verification when recently updated."
-  (let ((pi--state (list :is-streaming nil))
+  (let ((pi--status 'idle)
+        (pi--state (list :model "test"))
         (pi--state-timestamp (float-time)))  ;; Now
     (should (not (pi--state-needs-verification-p)))))
 
 (ert-deftest pi-test-state-no-verify-during-streaming ()
   "State does not need verification while streaming."
-  (let ((pi--state (list :is-streaming t))
+  (let ((pi--status 'streaming)
+        (pi--state (list :model "test"))
         (pi--state-timestamp (- (float-time) 60)))  ;; Old, but streaming
     (should (not (pi--state-needs-verification-p)))))
 
 (ert-deftest pi-test-state-no-verify-when-no-timestamp ()
   "State does not need verification when not initialized."
-  (let ((pi--state nil)
+  (let ((pi--status 'idle)
+        (pi--state nil)
         (pi--state-timestamp nil))
     (should (not (pi--state-needs-verification-p)))))
 
 (ert-deftest pi-test-event-dispatch-updates-state ()
   "Events update buffer-local state via handler."
-  (let ((pi--state (list :is-streaming nil))
+  (let ((pi--status 'idle)
+        (pi--state nil)
         (fake-proc (start-process "cat" nil "cat")))
     (unwind-protect
         (progn
@@ -403,7 +411,7 @@
                        (lambda (e)
                          (pi--update-state-from-event e)))
           (pi--handle-event fake-proc '(:type "agent_start"))
-          (should (eq (plist-get pi--state :is-streaming) t)))
+          (should (eq pi--status 'streaming)))
       (delete-process fake-proc))))
 
 ;;;; State Management Tests
@@ -422,23 +430,39 @@
       (should state)
       (should (equal (plist-get state :session-id) "test-123"))
       (should (equal (plist-get state :thinking-level) "medium"))
-      (should (eq (plist-get state :is-streaming) nil))
+      (should (eq (plist-get state :status) 'idle))
       (should (plist-get state :model)))))
 
-(ert-deftest pi-test-state-converts-json-false-to-nil ()
-  "JSON :false is converted to nil for boolean fields."
+(ert-deftest pi-test-state-extract-status-idle ()
+  "Extracted state has status idle when not streaming or compacting."
   (let ((response '(:type "response"
                     :success t
                     :data (:isStreaming :false :isCompacting :false))))
     (let ((state (pi--extract-state-from-response response)))
-      (should (eq (plist-get state :is-streaming) nil))
-      (should (eq (plist-get state :is-compacting) nil)))))
+      (should (eq (plist-get state :status) 'idle)))))
+
+(ert-deftest pi-test-state-extract-status-streaming ()
+  "Extracted state has status streaming when isStreaming is true."
+  (let ((response '(:type "response"
+                    :success t
+                    :data (:isStreaming t :isCompacting :false))))
+    (let ((state (pi--extract-state-from-response response)))
+      (should (eq (plist-get state :status) 'streaming)))))
+
+(ert-deftest pi-test-state-extract-status-compacting ()
+  "Extracted state has status compacting when isCompacting is true."
+  (let ((response '(:type "response"
+                    :success t
+                    :data (:isStreaming :false :isCompacting t))))
+    (let ((state (pi--extract-state-from-response response)))
+      (should (eq (plist-get state :status) 'compacting)))))
 
 ;;;; Auto-Retry Event State Tests
 
 (ert-deftest pi-test-event-auto-retry-start-sets-retrying ()
   "auto_retry_start event sets is-retrying to t."
-  (let ((pi--state (list :is-streaming t :is-retrying nil)))
+  (let ((pi--status 'streaming)
+        (pi--state (list :is-retrying nil)))
     (pi--update-state-from-event
      '(:type "auto_retry_start"
        :attempt 1
@@ -451,7 +475,8 @@
 
 (ert-deftest pi-test-event-auto-retry-end-success-clears-retrying ()
   "auto_retry_end with success clears is-retrying."
-  (let ((pi--state (list :is-streaming t :is-retrying t :retry-attempt 2)))
+  (let ((pi--status 'streaming)
+        (pi--state (list :is-retrying t :retry-attempt 2)))
     (pi--update-state-from-event
      '(:type "auto_retry_end"
        :success t
@@ -460,7 +485,8 @@
 
 (ert-deftest pi-test-event-auto-retry-end-failure-stores-error ()
   "auto_retry_end with failure stores final error."
-  (let ((pi--state (list :is-streaming t :is-retrying t)))
+  (let ((pi--status 'streaming)
+        (pi--state (list :is-retrying t)))
     (pi--update-state-from-event
      '(:type "auto_retry_end"
        :success :false
@@ -471,7 +497,8 @@
 
 (ert-deftest pi-test-event-hook-error-stores-error ()
   "hook_error event stores error message in state."
-  (let ((pi--state (list :is-streaming t)))
+  (let ((pi--status 'streaming)
+        (pi--state (list :last-error nil)))
     (pi--update-state-from-event
      '(:type "hook_error"
        :hookPath "/path/to/hook.ts"
@@ -482,19 +509,20 @@
 
 (ert-deftest pi-test-event-agent-start-clears-error-state ()
   "agent_start event clears error and retry state."
-  (let ((pi--state (list :is-streaming nil
-                         :is-retrying t
+  (let ((pi--status 'idle)
+        (pi--state (list :is-retrying t
                          :last-error "Previous error")))
     (pi--update-state-from-event '(:type "agent_start"))
-    (should (eq (plist-get pi--state :is-streaming) t))
+    (should (eq pi--status 'streaming))
     (should (eq (plist-get pi--state :is-retrying) nil))
     (should (eq (plist-get pi--state :last-error) nil))))
 
 (ert-deftest pi-test-event-agent-end-clears-retry-state ()
   "agent_end event clears retry state."
-  (let ((pi--state (list :is-streaming t :is-retrying t)))
+  (let ((pi--status 'streaming)
+        (pi--state (list :is-retrying t)))
     (pi--update-state-from-event '(:type "agent_end" :messages []))
-    (should (eq (plist-get pi--state :is-streaming) nil))
+    (should (eq pi--status 'idle))
     (should (eq (plist-get pi--state :is-retrying) nil))))
 
 (provide 'pi-core-test)

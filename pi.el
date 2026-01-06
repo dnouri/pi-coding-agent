@@ -487,9 +487,8 @@ TYPE is :chat or :input.  Returns the buffer."
 (defvar-local pi--streaming-marker nil
   "Marker for current streaming insertion point.")
 
-(defvar-local pi--status 'idle
-  "Current status of the pi session.
-One of: idle, sending, streaming.")
+;; pi--status is defined in pi-core.el as the single source of truth
+;; for session activity state (idle, sending, streaming, compacting)
 
 (defvar-local pi--cached-stats nil
   "Cached session statistics for header-line display.
@@ -641,7 +640,8 @@ If TIMESTAMP (Emacs time value) is provided, display it in the header."
 
 (defun pi--display-agent-start ()
   "Display separator for new agent turn.
-Only shows the Assistant header once per prompt, even during retries."
+Only shows the Assistant header once per prompt, even during retries.
+Note: `pi--status' is set to `streaming' by `pi--update-state-from-event'."
   (setq pi--aborted nil)  ; Reset abort flag for new turn
   ;; Only show header if not already shown for this prompt
   (unless pi--assistant-header-shown
@@ -653,7 +653,6 @@ Only shows the Assistant header once per prompt, even during retries."
   ;; streaming-marker: where new deltas are inserted
   (setq pi--message-start-marker (copy-marker (point-max) nil))
   (setq pi--streaming-marker (copy-marker (point-max) t))
-  (setq pi--status 'streaming)
   (pi--spinner-start)
   (force-mode-line-update))
 
@@ -699,7 +698,8 @@ CONTENT is ignored - we use what was already streamed."
           (set-marker pi--streaming-marker (point)))))))
 
 (defun pi--display-agent-end ()
-  "Display end of agent turn."
+  "Display end of agent turn.
+Note: `pi--status' is set to `idle' by `pi--update-state-from-event'."
   (let ((inhibit-read-only t))
     ;; Show abort indicator if aborted
     (when pi--aborted
@@ -716,7 +716,6 @@ CONTENT is ignored - we use what was already streamed."
       (skip-chars-backward "\n")
       (delete-region (point) (point-max))
       (insert "\n\n")))
-  (setq pi--status 'idle)
   (pi--spinner-stop)
   (pi--refresh-header))
 
@@ -2317,8 +2316,9 @@ Returns the chat buffer."
                              (when (and (plist-get response :success)
                                         (buffer-live-p buf))
                                (with-current-buffer buf
-                                 (setq pi--state
-                                       (pi--extract-state-from-response response))
+                                 (let ((new-state (pi--extract-state-from-response response)))
+                                   (setq pi--status (plist-get new-state :status)
+                                         pi--state new-state))
                                  ;; Check if no model available and warn user
                                  (unless (plist-get pi--state :model)
                                    (pi--display-no-model-warning))
