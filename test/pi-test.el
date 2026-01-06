@@ -891,7 +891,8 @@ then proper highlighting once block is closed."
   "pi--handle-display-event handles auto_retry_start."
   (with-temp-buffer
     (pi-chat-mode)
-    (let ((pi--state (list :is-streaming t)))
+    (let ((pi--status 'streaming)
+          (pi--state nil))
       (pi--handle-display-event '(:type "auto_retry_start"
                                   :attempt 1
                                   :maxAttempts 3
@@ -903,7 +904,8 @@ then proper highlighting once block is closed."
   "pi--handle-display-event handles auto_retry_end."
   (with-temp-buffer
     (pi-chat-mode)
-    (let ((pi--state (list :is-streaming t)))
+    (let ((pi--status 'streaming)
+          (pi--state nil))
       (pi--handle-display-event '(:type "auto_retry_end"
                                   :success t
                                   :attempt 2))
@@ -913,7 +915,8 @@ then proper highlighting once block is closed."
   "pi--handle-display-event handles hook_error."
   (with-temp-buffer
     (pi-chat-mode)
-    (let ((pi--state (list :is-streaming t)))
+    (let ((pi--status 'streaming)
+          (pi--state (list :last-error nil)))
       (pi--handle-display-event '(:type "hook_error"
                                   :hookPath "/path/hook.ts"
                                   :event "before_send"
@@ -926,7 +929,8 @@ then proper highlighting once block is closed."
     (pi-chat-mode)
     ;; Need to set up markers first
     (pi--display-agent-start)
-    (let ((pi--state (list :is-streaming t :current-message '(:role "assistant"))))
+    (let ((pi--status 'streaming)
+          (pi--state (list :current-message '(:role "assistant"))))
       (pi--handle-display-event '(:type "message_update"
                                   :message (:role "assistant")
                                   :assistantMessageEvent (:type "error"
