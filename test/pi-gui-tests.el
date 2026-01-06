@@ -109,7 +109,7 @@ Regression test: overlay with rear-advance was extending to subsequent content."
             ;; Ask to read file AND say something after
             ;; Be explicit about using the tool - small models may skip it otherwise
             (pi-gui-test-send
-             (format "Use the read tool to show the contents of %s. After that, say ENDMARKER" test-file))
+             (format "Call the read tool on %s and show me its contents. After the tool output, say ENDMARKER." test-file))
             ;; Wait for both tool output and the text response
             (should (pi-gui-test-chat-contains "BEFORE"))
             (should (pi-gui-test-chat-contains "ENDMARKER"))
