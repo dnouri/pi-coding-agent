@@ -66,7 +66,7 @@
 
 ;;;; Customization Group
 
-(defgroup pi nil
+(defgroup pi-coding-agent nil
   "Emacs frontend for pi coding agent."
   :group 'tools
   :prefix "pi-")
@@ -77,85 +77,85 @@
   "Default timeout in seconds for synchronous RPC calls.
 Some operations like model loading may need more time."
   :type 'natnum
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defcustom pi-input-window-height 10
   "Height of the input window in lines."
   :type 'natnum
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defcustom pi-separator-width 72
   "Total width of section separators in chat buffer."
   :type 'natnum
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defcustom pi-tool-preview-lines 10
   "Number of lines to show before collapsing tool output."
   :type 'natnum
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defcustom pi-bash-preview-lines 5
   "Number of lines to show for bash output before collapsing.
 Bash output is typically more verbose, so fewer lines are shown."
   :type 'natnum
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defcustom pi-context-warning-threshold 70
   "Context usage percentage at which to show warning color."
   :type 'natnum
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defcustom pi-context-error-threshold 90
   "Context usage percentage at which to show error color."
   :type 'natnum
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 ;;;; Faces
 
 (defface pi-separator
   '((t :inherit font-lock-comment-face))
   "Face for section separators in pi chat."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defface pi-user-label
   '((t :inherit bold :foreground "dodger blue"))
   "Face for the You label in pi chat."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defface pi-timestamp
   '((t :inherit shadow))
   "Face for timestamps in message headers."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defface pi-assistant-label
   '((t :inherit bold :foreground "sea green"))
   "Face for the Assistant label in pi chat."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defface pi-compaction-label
   '((t :inherit bold :foreground "medium purple"))
   "Face for the Compaction label in pi chat."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defface pi-tool-name
   '((t :inherit font-lock-function-name-face :weight bold))
   "Face for tool names (BASH, READ, etc.) in pi chat."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defface pi-tool-command
   '((t :inherit font-lock-function-name-face))
   "Face for tool commands and arguments."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defface pi-tool-output
   '((t :inherit shadow))
   "Face for tool output text."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defface pi-tool-error
   '((t :inherit error))
   "Face for tool error indicators."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defface pi-tool-block-pending
   '((((class color) (min-colors 88) (background dark))
@@ -164,7 +164,7 @@ Bash output is typically more verbose, so fewer lines are shown."
      :background "#f0f0f5" :extend t)
     (t :inherit secondary-selection :extend t))
   "Face for tool blocks during execution."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defface pi-tool-block-success
   '((((class color) (min-colors 88) (background dark))
@@ -173,7 +173,7 @@ Bash output is typically more verbose, so fewer lines are shown."
      :background "#f0f5f0" :extend t)
     (t :inherit secondary-selection :extend t))
   "Face for tool blocks after successful completion."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defface pi-tool-block-error
   '((((class color) (min-colors 88) (background dark))
@@ -182,32 +182,32 @@ Bash output is typically more verbose, so fewer lines are shown."
      :background "#f5f0f0" :extend t)
     (t :inherit secondary-selection :extend t))
   "Face for tool blocks after failed completion."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defface pi-collapsed-indicator
   '((t :inherit font-lock-comment-face :slant italic))
   "Face for collapsed content indicators."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defface pi-model-name
   '((t :inherit font-lock-type-face))
   "Face for model name in header line."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defface pi-thinking
   '((t :inherit font-lock-comment-face :slant italic))
   "Face for thinking/reasoning block content."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defface pi-retry-notice
   '((t :inherit warning :slant italic))
   "Face for retry notifications (rate limit, overloaded, etc.)."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 (defface pi-error-notice
   '((t :inherit error))
   "Face for error notifications from the server."
-  :group 'pi)
+  :group 'pi-coding-agent)
 
 ;;;; Language Detection
 
@@ -300,7 +300,7 @@ Returns nil if the extension is not recognized."
   "Major mode for displaying pi conversation.
 Derives from `gfm-mode' for syntax highlighting of code blocks.
 This is a read-only buffer showing the conversation history."
-  :group 'pi
+  :group 'pi-coding-agent
   (setq-local buffer-read-only t)
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
@@ -423,7 +423,7 @@ Restores saved input when moving past newest entry."
 
 (define-derived-mode pi-input-mode text-mode "Pi-Input"
   "Major mode for composing pi prompts."
-  :group 'pi
+  :group 'pi-coding-agent
   (setq-local header-line-format '(:eval (pi--header-line-string)))
   (add-hook 'completion-at-point-functions #'pi--slash-capf nil t)
   (add-hook 'kill-buffer-query-functions #'pi--kill-buffer-query nil t)
