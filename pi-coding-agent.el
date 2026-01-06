@@ -701,6 +701,8 @@ CONTENT is ignored - we use what was already streamed."
   "Display end of agent turn.
 Note: status is set to `idle' by the event handler."
   (let ((inhibit-read-only t))
+    ;; Clean up pending tool overlay if abort happened mid-tool
+    (pi-coding-agent--tool-overlay-finalize 'pi-coding-agent-tool-block-error)
     ;; Show abort indicator if aborted
     (when pi-coding-agent--aborted
       (save-excursion
@@ -1079,6 +1081,22 @@ automatically extends when content is inserted at its end."
     (overlay-put ov 'face 'pi-coding-agent-tool-block-pending)
     ov))
 
+(defun pi-coding-agent--tool-overlay-finalize (face)
+  "Finalize pending tool overlay with FACE.
+Replaces the overlay with a new one without rear-advance to prevent
+it from extending to subsequent content.  Sets pending overlay to nil."
+  (when pi-coding-agent--pending-tool-overlay
+    (let ((start (overlay-start pi-coding-agent--pending-tool-overlay))
+          (end (overlay-end pi-coding-agent--pending-tool-overlay))
+          (tool-name (overlay-get pi-coding-agent--pending-tool-overlay
+                                  'pi-coding-agent-tool-name)))
+      (delete-overlay pi-coding-agent--pending-tool-overlay)
+      (let ((ov (make-overlay start end nil nil nil)))  ; rear-advance=nil
+        (overlay-put ov 'pi-coding-agent-tool-block t)
+        (overlay-put ov 'pi-coding-agent-tool-name tool-name)
+        (overlay-put ov 'face face)))
+    (setq pi-coding-agent--pending-tool-overlay nil)))
+
 (defun pi-coding-agent--display-tool-start (tool-name args)
   "Display header for tool TOOL-NAME with ARGS and create overlay."
   (let* ((header (pcase tool-name
@@ -1177,19 +1195,11 @@ Shows preview lines with expandable toggle for long output."
       ;; Error indicator
       (when is-error
         (insert (propertize "[error]" 'face 'pi-coding-agent-tool-error) "\n"))
-      ;; Update overlay face and finalize bounds
-      (when pi-coding-agent--pending-tool-overlay
-        (overlay-put pi-coding-agent--pending-tool-overlay 'face
-                     (if is-error 'pi-coding-agent-tool-block-error 'pi-coding-agent-tool-block-success))
-        ;; Fix overlay end to prevent extension to subsequent content.
-        ;; The overlay has rear-advance=t (needed during streaming), so we
-        ;; must explicitly set the end AFTER inserting the trailing newline,
-        ;; then shrink it back to exclude the newline.
-        (insert "\n")
-        (move-overlay pi-coding-agent--pending-tool-overlay
-                      (overlay-start pi-coding-agent--pending-tool-overlay)
-                      (1- (point)))
-        (setq pi-coding-agent--pending-tool-overlay nil)))))
+      ;; Finalize overlay - replace with non-rear-advance version
+      (pi-coding-agent--tool-overlay-finalize
+       (if is-error 'pi-coding-agent-tool-block-error 'pi-coding-agent-tool-block-success))
+      ;; Add trailing newline for spacing after tool block
+      (insert "\n"))))
 
 (defun pi-coding-agent--toggle-tool-output (button)
   "Toggle between preview and full content for BUTTON."
@@ -1204,7 +1214,9 @@ Shows preview lines with expandable toggle for long output."
     (save-excursion
       ;; Find the tool overlay
       (goto-char btn-start)
-      (when-let ((bounds (pi-coding-agent--find-tool-block-bounds)))
+      (when-let* ((bounds (pi-coding-agent--find-tool-block-bounds))
+                  (ov (seq-find (lambda (o) (overlay-get o 'pi-coding-agent-tool-block))
+                                (overlays-at (point)))))
         ;; Content starts after first line (header)
         (goto-char (car bounds))
         (forward-line 1)
@@ -1214,7 +1226,9 @@ Shows preview lines with expandable toggle for long output."
           (goto-char content-start)
           (if expanded
               (pi-coding-agent--insert-collapsed-content preview-content full-content lang hidden-count)
-            (pi-coding-agent--insert-expanded-content preview-content full-content lang hidden-count)))))))
+            (pi-coding-agent--insert-expanded-content preview-content full-content lang hidden-count))
+          ;; Update overlay to include new content (overlay no longer has rear-advance)
+          (move-overlay ov (car bounds) (point)))))))
 
 (defun pi-coding-agent--insert-collapsed-content (preview-content full-content lang hidden-count)
   "Insert PREVIEW-CONTENT with toggle button.
