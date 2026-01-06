@@ -1965,3 +1965,37 @@ Regression test: overlay with rear-advance was extending to subsequent content."
                           (lambda (ov) (overlay-get ov 'pi-coding-agent-tool-block))
                           overlays)))
       (should-not tool-overlay))))
+
+(ert-deftest pi-coding-agent-test-abort-mid-tool-cleans-up-overlay ()
+  "Aborting mid-tool should clean up the pending overlay.
+When abort happens during tool execution, tool_execution_end never arrives.
+display-agent-end must finalize the pending overlay with error face."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    ;; Start a tool (creates pending overlay)
+    (pi-coding-agent--display-tool-start "bash" '(:command "sleep 100"))
+    ;; Verify overlay is pending
+    (should pi-coding-agent--pending-tool-overlay)
+    (should (eq (overlay-get pi-coding-agent--pending-tool-overlay 'face)
+                'pi-coding-agent-tool-block-pending))
+    ;; Simulate abort - display-agent-end is called WITHOUT tool-end
+    (setq pi-coding-agent--aborted t)
+    (pi-coding-agent--display-agent-end)
+    ;; Pending overlay variable should be nil
+    (should-not pi-coding-agent--pending-tool-overlay)
+    ;; But there should still be a finalized overlay with error face
+    (goto-char (point-min))
+    (let* ((overlays (overlays-at (point)))
+           (tool-ov (seq-find (lambda (o) (overlay-get o 'pi-coding-agent-tool-block)) overlays)))
+      (should tool-ov)
+      (should (eq (overlay-get tool-ov 'face) 'pi-coding-agent-tool-block-error)))
+    ;; Content inserted after should NOT be inside the overlay
+    (let ((inhibit-read-only t))
+      (goto-char (point-max))
+      (insert "AFTER_ABORT_CONTENT\n"))
+    (let* ((new-content-pos (- (point-max) 10))
+           (overlays (overlays-at new-content-pos))
+           (tool-overlay (seq-find
+                          (lambda (ov) (overlay-get ov 'pi-coding-agent-tool-block))
+                          overlays)))
+      (should-not tool-overlay))))
