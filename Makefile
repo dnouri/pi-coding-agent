@@ -1,4 +1,4 @@
-# pi.el Makefile
+# pi-coding-agent Makefile
 
 EMACS ?= emacs
 BATCH = $(EMACS) --batch -L .
@@ -52,7 +52,7 @@ test: clean deps
 	$(BATCH) -L test \
 		--eval "(require 'package)" \
 		--eval "(package-initialize)" \
-		-l pi -l pi-core-test -l pi-test -f ert-run-tests-batch-and-exit
+		-l pi-coding-agent -l pi-coding-agent-core-test -l pi-coding-agent-test -f ert-run-tests-batch-and-exit
 
 test-unit: compile test
 
@@ -92,7 +92,7 @@ test-integration: clean deps setup-pi
 		$(BATCH) -L test \
 			--eval "(require 'package)" \
 			--eval "(package-initialize)" \
-			-l pi -l pi-integration-test -f ert-run-tests-batch-and-exit; \
+			-l pi-coding-agent -l pi-coding-agent-integration-test -f ert-run-tests-batch-and-exit; \
 		status=$$?; rm -rf "$$PI_CODING_AGENT_DIR"; exit $$status
 
 # CI: Ollama already running via services block
@@ -104,7 +104,7 @@ test-integration-ci: clean deps setup-pi
 	$(BATCH) -L test \
 		--eval "(require 'package)" \
 		--eval "(package-initialize)" \
-		-l pi -l pi-integration-test -f ert-run-tests-batch-and-exit
+		-l pi-coding-agent -l pi-coding-agent-integration-test -f ert-run-tests-batch-and-exit
 
 # ============================================================
 # GUI tests
@@ -156,7 +156,7 @@ compile: clean deps
 		--eval "(require 'package)" \
 		--eval "(package-initialize)" \
 		--eval "(setq byte-compile-error-on-warn t)" \
-		-f batch-byte-compile pi-core.el pi.el
+		-f batch-byte-compile pi-coding-agent-core.el pi-coding-agent.el
 
 lint: lint-checkdoc lint-package
 
@@ -165,8 +165,8 @@ lint-checkdoc:
 	@$(BATCH) \
 		--eval "(require 'checkdoc)" \
 		--eval "(setq sentence-end-double-space nil)" \
-		--eval "(checkdoc-file \"pi-core.el\")" \
-		--eval "(checkdoc-file \"pi.el\")" 2>&1 | \
+		--eval "(checkdoc-file \"pi-coding-agent-core.el\")" \
+		--eval "(checkdoc-file \"pi-coding-agent.el\")" 2>&1 | \
 		{ grep -q "^Warning" && { grep "^Warning"; exit 1; } || echo "OK"; }
 
 lint-package:
@@ -179,8 +179,8 @@ lint-package:
 		          (package-refresh-contents) \
 		          (package-install 'package-lint))" \
 		--eval "(require 'package-lint)" \
-		--eval "(setq package-lint-main-file \"pi.el\")" \
-		-f package-lint-batch-and-exit pi.el pi-core.el
+		--eval "(setq package-lint-main-file \"pi-coding-agent.el\")" \
+		-f package-lint-batch-and-exit pi-coding-agent.el pi-coding-agent-core.el
 
 check: compile lint test
 
