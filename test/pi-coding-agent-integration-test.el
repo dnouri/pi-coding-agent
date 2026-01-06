@@ -222,5 +222,35 @@ Sets up event dispatching through pi-coding-agent--event-handlers list."
              (data (plist-get state :data)))
         (should (eq (plist-get data :isStreaming) :false))))))
 
+;;; New Session Tests (HIGH value - catches API breaking changes)
+
+(ert-deftest pi-coding-agent-integration-new-session-resets ()
+  "new_session command resets the session and returns success."
+  (pi-coding-agent-integration-with-process
+    ;; First send a message to have something to reset
+    (let ((got-agent-end nil))
+      (push (lambda (e)
+              (when (equal (plist-get e :type) "agent_end")
+                (setq got-agent-end t)))
+            pi-coding-agent--event-handlers)
+      (pi-coding-agent--rpc-async proc
+                     '(:type "prompt" :message "Say hello")
+                     #'ignore)
+      (with-timeout (pi-coding-agent-test-rpc-timeout (ert-fail "Timeout waiting for agent_end"))
+        (while (not got-agent-end)
+          (accept-process-output proc 0.1))))
+    ;; Verify we have messages
+    (let* ((before (pi-coding-agent--rpc-sync proc '(:type "get_state") pi-coding-agent-test-rpc-timeout))
+           (before-count (plist-get (plist-get before :data) :messageCount)))
+      (should (> before-count 0))
+      ;; Now reset
+      (let ((response (pi-coding-agent--rpc-sync proc '(:type "new_session") pi-coding-agent-test-rpc-timeout)))
+        (should (plist-get response :success))
+        (should (eq (plist-get (plist-get response :data) :cancelled) :false)))
+      ;; Verify message count is reset
+      (let* ((after (pi-coding-agent--rpc-sync proc '(:type "get_state") pi-coding-agent-test-rpc-timeout))
+             (after-count (plist-get (plist-get after :data) :messageCount)))
+        (should (= after-count 0))))))
+
 (provide 'pi-coding-agent-integration-test)
 ;;; pi-coding-agent-integration-test.el ends here
