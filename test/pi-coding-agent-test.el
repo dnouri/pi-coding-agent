@@ -1393,10 +1393,15 @@ which is just a success message."
 
 (ert-deftest pi-coding-agent-test-format-branch-message ()
   "Branch message formatted with index and preview."
-  (let ((msg '(:entryIndex 2 :text "Hello world, this is a test")))
-    (let ((result (pi-coding-agent--format-branch-message msg)))
+  (let ((msg '(:entryId "abc-123" :text "Hello world, this is a test")))
+    ;; With index
+    (let ((result (pi-coding-agent--format-branch-message msg 2)))
       (should (string-match-p "2:" result))
-      (should (string-match-p "Hello world" result)))))
+      (should (string-match-p "Hello world" result)))
+    ;; Without index
+    (let ((result (pi-coding-agent--format-branch-message msg)))
+      (should (string-match-p "Hello world" result))
+      (should-not (string-match-p ":" result)))))
 
 (ert-deftest pi-coding-agent-test-session-dir-name ()
   "Session directory name derived from project path."

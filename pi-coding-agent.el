@@ -2112,13 +2112,15 @@ Calls CALLBACK with message count when done."
                              (message "Pi: No assistant message to copy")))
                        (message "Pi: Failed to get message"))))))
 
-(defun pi-coding-agent--format-branch-message (msg)
+(defun pi-coding-agent--format-branch-message (msg &optional index)
   "Format MSG for display in branch selector.
-MSG is a plist with :entryIndex and :text."
-  (let* ((index (plist-get msg :entryIndex))
-         (text (plist-get msg :text))
+MSG is a plist with :entryId and :text.
+INDEX is the display index (1-based) for the message."
+  (let* ((text (plist-get msg :text))
          (preview (truncate-string-to-width text 60 nil nil "...")))
-    (format "%d: %s" index preview)))
+    (if index
+        (format "%d: %s" index preview)
+      preview)))
 
 (defun pi-coding-agent-branch ()
   "Branch conversation from a previous user message.
@@ -2138,16 +2140,18 @@ Shows a selector of user messages and creates a branch from the selected one."
 (defun pi-coding-agent--show-branch-selector (proc messages)
   "Show selector for MESSAGES and branch on selection.
 PROC is the pi process.  MESSAGES is a list of plists from get_branch_messages."
-  (let* ((formatted (mapcar (lambda (msg)
-                              (cons (pi-coding-agent--format-branch-message msg) msg))
+  (let* ((index 0)
+         (formatted (mapcar (lambda (msg)
+                              (setq index (1+ index))
+                              (cons (pi-coding-agent--format-branch-message msg index) msg))
                             messages))
          (choice (completing-read "Branch from: "
                                   (mapcar #'car formatted)
                                   nil t))
          (selected (cdr (assoc choice formatted))))
     (when selected
-      (let ((entry-index (plist-get selected :entryIndex)))
-        (pi-coding-agent--rpc-async proc (list :type "branch" :entryIndex entry-index)
+      (let ((entry-id (plist-get selected :entryId)))
+        (pi-coding-agent--rpc-async proc (list :type "branch" :entryId entry-id)
                        (lambda (response)
                          (if (plist-get response :success)
                              (let* ((data (plist-get response :data))
