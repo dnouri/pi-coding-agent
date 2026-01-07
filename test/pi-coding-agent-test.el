@@ -415,11 +415,11 @@ not relying on current buffer context which may change before callback executes.
     (should (equal (buffer-string) "First Second"))))
 
 (ert-deftest pi-coding-agent-test-display-agent-start-inserts-separator ()
-  "agent_start event inserts a separator."
+  "agent_start event inserts a setext heading separator."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (pi-coding-agent--display-agent-start)
-    (should (string-match-p "─" (buffer-string)))))
+    (should (string-match-p "Assistant\n===" (buffer-string)))))
 
 (ert-deftest pi-coding-agent-test-display-message-delta-appends-text ()
   "message_update text_delta appends text to chat."
@@ -429,6 +429,47 @@ not relying on current buffer context which may change before callback executes.
     (pi-coding-agent--display-message-delta "Hello, ")
     (pi-coding-agent--display-message-delta "world!")
     (should (string-match-p "Hello, world!" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-delta-transforms-atx-headings ()
+  "ATX headings in assistant content are leveled down.
+# becomes ##, ## becomes ###, etc. This keeps our setext H1 separators
+as the top-level structure."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-message-delta "# Heading 1\n## Heading 2")
+    ;; # should become ##, ## should become ###
+    (should (string-match-p "## Heading 1" (buffer-string)))
+    (should (string-match-p "### Heading 2" (buffer-string)))
+    ;; Original single # should not appear (except as part of ##)
+    (should-not (string-match-p "^# " (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-delta-heading-transform-after-newline ()
+  "Heading transform works when # follows newline within delta."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-message-delta "Some text\n# Heading")
+    (should (string-match-p "Some text\n## Heading" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-delta-heading-transform-across-deltas ()
+  "Heading transform works when newline and # are in separate deltas."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-message-delta "Some text\n")
+    (pi-coding-agent--display-message-delta "# Heading")
+    (should (string-match-p "## Heading" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-delta-no-transform-mid-line-hash ()
+  "Hash characters mid-line are not transformed."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-message-delta "Use #include or C# language")
+    ;; Mid-line # should stay as-is
+    (should (string-match-p "#include" (buffer-string)))
+    (should (string-match-p "C#" (buffer-string)))))
 
 (ert-deftest pi-coding-agent-test-display-thinking-delta-appends-text ()
   "message_update thinking_delta appends text to chat."
@@ -452,8 +493,8 @@ not relying on current buffer context which may change before callback executes.
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (pi-coding-agent--display-user-message "Hello")
-    ;; Pattern: separator, blank line, content
-    (should (string-match-p "You ─+\n\nHello" (buffer-string)))))
+    ;; Pattern: setext heading (You + underline), blank line, content
+    (should (string-match-p "You\n=+\n\nHello" (buffer-string)))))
 
 (ert-deftest pi-coding-agent-test-spacing-blank-line-after-assistant-header ()
   "Assistant header is followed by blank line, then content."
@@ -461,8 +502,8 @@ not relying on current buffer context which may change before callback executes.
     (pi-coding-agent-chat-mode)
     (pi-coding-agent--display-agent-start)
     (pi-coding-agent--display-message-delta "Hi")
-    ;; Pattern: separator, blank line, content
-    (should (string-match-p "Assistant ─+\n\nHi" (buffer-string)))))
+    ;; Pattern: setext heading (Assistant + underline), blank line, content
+    (should (string-match-p "Assistant\n=+\n\nHi" (buffer-string)))))
 
 (ert-deftest pi-coding-agent-test-spacing-blank-line-before-tool ()
   "Tool block is preceded by blank line when after text."
@@ -742,18 +783,18 @@ then proper highlighting once block is closed."
     (should (string-match-p "Hello world" (buffer-string)))))
 
 (ert-deftest pi-coding-agent-test-display-user-message-has-prefix ()
-  "User message has You label in separator."
+  "User message has You label in setext heading."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (pi-coding-agent--display-user-message "Test message")
-    (should (string-match-p " You " (buffer-string)))))
+    (should (string-match-p "^You" (buffer-string)))))
 
 (ert-deftest pi-coding-agent-test-display-user-message-has-separator ()
-  "User message has visual separator."
+  "User message has setext underline separator."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (pi-coding-agent--display-user-message "Test")
-    (should (string-match-p "─" (buffer-string)))))
+    (should (string-match-p "^===" (buffer-string)))))
 
 (ert-deftest pi-coding-agent-test-send-displays-user-message ()
   "Sending a prompt displays the user message in chat."
@@ -771,9 +812,9 @@ then proper highlighting once block is closed."
             ;; Mock the process to avoid actual RPC
             (setq pi-coding-agent--process nil)
             (pi-coding-agent-send))
-          ;; Check chat buffer has the message with You separator and content
+          ;; Check chat buffer has the message with You setext heading and content
           (with-current-buffer chat-buf
-            (should (string-match-p " You " (buffer-string)))
+            (should (string-match-p "^You" (buffer-string)))
             (should (string-match-p "Hello from test" (buffer-string)))))
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
@@ -807,21 +848,31 @@ then proper highlighting once block is closed."
     (pi-coding-agent-chat-mode)
     (pi-coding-agent--display-user-message "Test message" (current-time))
     (let ((content (buffer-string)))
-      (should (string-match-p " You " content))
+      ;; Setext format: "You · HH:MM" on header line
+      (should (string-match-p "You · " content))
       ;; Should have HH:MM timestamp format
       (should (string-match-p "[0-2][0-9]:[0-5][0-9]" content)))))
 
 (ert-deftest pi-coding-agent-test-separator-without-timestamp ()
-  "Separator without timestamp has symmetric dashes."
+  "Separator without timestamp is setext H1 heading."
   (let ((sep (pi-coding-agent--make-separator "You" 'pi-coding-agent-user-label)))
-    (should (string-match-p "^\\* ─+ You ─+$" sep))))
+    ;; Setext format: label on one line, === underline on next
+    (should (string-match-p "^You\n=+$" sep))))
 
 (ert-deftest pi-coding-agent-test-separator-with-timestamp ()
-  "Separator with timestamp shows time right-aligned with trailing dash."
+  "Separator with timestamp shows label · time as setext H1."
   (let ((sep (pi-coding-agent--make-separator "You" 'pi-coding-agent-user-label (current-time))))
-    (should (string-match-p " You " sep))
-    ;; Timestamp followed by trailing dash
-    (should (string-match-p "[0-2][0-9]:[0-5][0-9]─$" sep))))
+    ;; Format: "You · HH:MM" followed by newline and ===
+    (should (string-match-p "^You · [0-2][0-9]:[0-5][0-9]\n=+$" sep))))
+
+(ert-deftest pi-coding-agent-test-separator-is-valid-setext-heading ()
+  "Separator produces valid markdown setext H1 syntax."
+  (let ((sep (pi-coding-agent--make-separator "Assistant" 'pi-coding-agent-assistant-label)))
+    ;; Must have at least 3 = characters for valid setext
+    (should (string-match-p "\n===+" sep))
+    ;; Underline should match or exceed label length
+    (should (>= (length (car (last (split-string sep "\n"))))
+                (length "Assistant")))))
 
 ;;; Startup Header
 
@@ -2174,3 +2225,42 @@ display-agent-end must finalize the pending overlay with error face."
                           (lambda (ov) (overlay-get ov 'pi-coding-agent-tool-block))
                           overlays)))
       (should-not tool-overlay))))
+
+(ert-deftest pi-coding-agent-test-delta-no-transform-inside-code-block ()
+  "Hash inside fenced code block should NOT be transformed."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-message-delta "```python\n# This is a comment\n```")
+    ;; The # inside code block should stay as single #
+    (should (string-match-p "^# This is a comment$" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-delta-transform-resumes-after-code-block ()
+  "Headings after code block closes should be transformed."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-message-delta "```\n# comment\n```\n# Real Heading")
+    ;; Inside block: stays #
+    (should (string-match-p "^# comment$" (buffer-string)))
+    ;; After block: becomes ##
+    (should (string-match-p "^## Real Heading" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-delta-code-fence-split-across-deltas ()
+  "Code fence split across deltas still detected."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-message-delta "``")
+    (pi-coding-agent--display-message-delta "`python\n# comment\n```")
+    ;; Should recognize the split ``` and not transform inside
+    (should (string-match-p "^# comment$" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-delta-backticks-mid-line-not-fence ()
+  "Backticks mid-line don't trigger code block state."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-message-delta "Use ```code``` inline\n# Heading")
+    ;; Inline backticks shouldn't affect heading transform
+    (should (string-match-p "^## Heading" (buffer-string)))))

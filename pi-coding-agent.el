@@ -487,6 +487,20 @@ TYPE is :chat or :input.  Returns the buffer."
 (defvar-local pi-coding-agent--streaming-marker nil
   "Marker for current streaming insertion point.")
 
+(defvar-local pi-coding-agent--in-code-block nil
+  "Non-nil when streaming inside a fenced code block.
+Used to suppress ATX heading transforms inside code.")
+
+(defvar-local pi-coding-agent--line-parse-state 'line-start
+  "Parsing state for current line during streaming.
+Values:
+  `line-start' - at beginning of line, ready for heading or fence
+  `fence-1'    - seen one backtick at line start
+  `fence-2'    - seen two backticks at line start
+  `mid-line'   - somewhere in middle of line
+
+Starts as `line-start' because content begins after separator newline.")
+
 ;; pi-coding-agent--status is defined in pi-coding-agent-core.el as the single source of truth
 ;; for session activity state (idle, sending, streaming, compacting)
 
@@ -601,35 +615,22 @@ Windows where user scrolled up (point earlier) stay in place."
         (insert text)))))
 
 (defun pi-coding-agent--make-separator (label face &optional timestamp)
-  "Create a separator line with LABEL styled with FACE.
-If TIMESTAMP (Emacs time value) is provided, display it right-aligned.
-The label stays centered; timestamp eats into the right dashes.
-Returns a decorated separator line with centered label."
-  (let* ((label-str (concat " " label " "))
-         (total-width (- pi-coding-agent-separator-width 2))  ; Account for "* " prefix
-         (label-len (length label-str))
-         ;; Calculate symmetric dash count (same for both sides without timestamp)
-         (dash-count (max 4 (/ (- total-width label-len) 2)))
-         (left-dashes (make-string dash-count ?─)))
-    (if timestamp
-        ;; With timestamp: label stays centered, timestamp eats into right dashes
-        (let* ((timestamp-str (pi-coding-agent--format-message-timestamp timestamp))
-               (timestamp-len (length timestamp-str))
-               ;; Right dashes reduced by timestamp length, keep at least 1 trailing dash
-               (right-dash-count (max 1 (- dash-count timestamp-len 1)))
-               (right-dashes (make-string right-dash-count ?─))
-               (decorated (concat (propertize left-dashes 'face 'pi-coding-agent-separator)
-                                  (propertize label-str 'face face)
-                                  (propertize right-dashes 'face 'pi-coding-agent-separator)
-                                  (propertize timestamp-str 'face 'pi-coding-agent-timestamp)
-                                  (propertize "─" 'face 'pi-coding-agent-separator))))
-          (concat "* " decorated))
-      ;; Without timestamp: symmetric dashes around label
-      (let* ((right-dashes (make-string dash-count ?─))
-             (decorated (concat (propertize left-dashes 'face 'pi-coding-agent-separator)
-                                (propertize label-str 'face face)
-                                (propertize right-dashes 'face 'pi-coding-agent-separator))))
-        (concat "* " decorated)))))
+  "Create a setext-style H1 heading separator with LABEL styled with FACE.
+If TIMESTAMP (Emacs time value) is provided, append it after \" · \".
+Returns a markdown setext heading: label line followed by === underline.
+
+Using setext headings enables outline/imenu navigation and keeps our
+turn markers as H1 while LLM ATX headings are leveled down to H2+."
+  (let* ((timestamp-str (when timestamp
+                          (pi-coding-agent--format-message-timestamp timestamp)))
+         (header-line (if timestamp-str
+                          (concat label " · " timestamp-str)
+                        label))
+         ;; Underline must be at least 3 chars, and at least as long as header
+         (underline-len (max 3 (length header-line)))
+         (underline (make-string underline-len ?=)))
+    (concat (propertize header-line 'face face) "\n"
+            (propertize underline 'face 'pi-coding-agent-separator))))
 
 (defun pi-coding-agent--display-user-message (text &optional timestamp)
   "Display user message TEXT in the chat buffer.
@@ -653,17 +654,77 @@ Note: status is set to `streaming' by the event handler."
   ;; streaming-marker: where new deltas are inserted
   (setq pi-coding-agent--message-start-marker (copy-marker (point-max) nil))
   (setq pi-coding-agent--streaming-marker (copy-marker (point-max) t))
+  ;; Reset streaming parse state - content starts at line beginning, outside code block
+  (setq pi-coding-agent--line-parse-state 'line-start)
+  (setq pi-coding-agent--in-code-block nil)
   (pi-coding-agent--spinner-start)
   (force-mode-line-update))
 
+(defun pi-coding-agent--process-streaming-char (char state in-block)
+  "Process CHAR with current STATE and IN-BLOCK flag.
+Returns (NEW-STATE . NEW-IN-BLOCK).
+STATE is one of: `line-start', `fence-1', `fence-2', `mid-line'."
+  (pcase state
+    ('line-start
+     (cond
+      ((eq char ?`) (cons 'fence-1 in-block))
+      ((eq char ?\n) (cons 'line-start in-block))
+      (t (cons 'mid-line in-block))))
+    ('fence-1
+     (cond
+      ((eq char ?`) (cons 'fence-2 in-block))
+      ((eq char ?\n) (cons 'line-start in-block))
+      (t (cons 'mid-line in-block))))
+    ('fence-2
+     (cond
+      ((eq char ?`) (cons 'mid-line (not in-block)))  ; Toggle code block!
+      ((eq char ?\n) (cons 'line-start in-block))     ; Was just ``
+      (t (cons 'mid-line in-block))))                 ; Was inline ``x
+    ('mid-line
+     (if (eq char ?\n)
+         (cons 'line-start in-block)
+       (cons 'mid-line in-block)))))
+
+(defun pi-coding-agent--transform-delta (delta)
+  "Transform DELTA for display, handling code blocks and heading levels.
+Uses and updates buffer-local state variables for parse state.
+Returns the transformed string."
+  (let ((result (make-string 0 ?x))
+        (state pi-coding-agent--line-parse-state)
+        (in-block pi-coding-agent--in-code-block)
+        (i 0)
+        (len (length delta)))
+    (while (< i len)
+      (let* ((char (aref delta i))
+             (at-heading-start (and (eq state 'line-start)
+                                    (not in-block)
+                                    (eq char ?#))))
+        ;; Add extra # for heading transform
+        (when at-heading-start
+          (setq result (concat result "#")))
+        ;; Add the character
+        (setq result (concat result (char-to-string char)))
+        ;; Update state
+        (let ((new-state (pi-coding-agent--process-streaming-char char state in-block)))
+          (setq state (car new-state))
+          (setq in-block (cdr new-state)))
+        (setq i (1+ i))))
+    ;; Save final state for next delta
+    (setq pi-coding-agent--line-parse-state state)
+    (setq pi-coding-agent--in-code-block in-block)
+    result))
+
 (defun pi-coding-agent--display-message-delta (delta)
-  "Display streaming message DELTA at the streaming marker."
+  "Display streaming message DELTA at the streaming marker.
+Transforms ATX headings (outside code blocks) by adding one # level
+to keep our setext H1 separators as the top-level document structure."
   (when (and delta pi-coding-agent--streaming-marker)
-    (let ((inhibit-read-only t))
+    (let* ((inhibit-read-only t)
+           (transformed (pi-coding-agent--transform-delta delta)))
       (pi-coding-agent--with-scroll-preservation
         (save-excursion
           (goto-char (marker-position pi-coding-agent--streaming-marker))
-          (insert delta)
+          (insert transformed)
           (set-marker pi-coding-agent--streaming-marker (point)))))))
 
 (defun pi-coding-agent--display-thinking-start ()
