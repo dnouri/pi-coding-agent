@@ -1151,6 +1151,14 @@ then proper highlighting once block is closed."
       (should (equal (plist-get result :content) content))
       (should (= (plist-get result :hidden-lines) 0)))))
 
+(ert-deftest pi-coding-agent-test-truncate-visual-lines-trailing-newline ()
+  "Trailing newlines don't create phantom hidden lines."
+  ;; Content with trailing newline - should count as 3 lines, not 4
+  (let ((content "line1\nline2\nline3\n"))
+    (let ((result (pi-coding-agent--truncate-to-visual-lines content 5 80)))
+      (should (= (plist-get result :hidden-lines) 0))
+      (should (= (plist-get result :visual-lines) 3)))))
+
 (ert-deftest pi-coding-agent-test-tool-output-truncates-long-lines ()
   "Tool output preview accounts for visual line wrapping."
   (with-temp-buffer
