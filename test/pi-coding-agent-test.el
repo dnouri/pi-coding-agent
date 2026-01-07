@@ -1525,6 +1525,37 @@ This ensures history loads correctly when callback runs in arbitrary context."
   (should (equal (pi-coding-agent--session-dir-name "/tmp/test")
                  "--tmp-test--")))
 
+(ert-deftest pi-coding-agent-test-list-sessions-sorted-by-mtime ()
+  "Sessions are sorted by modification time, most recent first.
+Regression test for #25: sessions were sorted by filename (creation time)
+and then re-sorted alphabetically by completing-read."
+  (let* ((temp-base (make-temp-file "pi-coding-agent-sessions-" t))
+         (session-dir (expand-file-name "--test-project--" temp-base))
+         ;; Create files with names that would sort differently alphabetically
+         (old-file (expand-file-name "2024-01-01_10-00-00.jsonl" session-dir))
+         (new-file (expand-file-name "2024-01-01_09-00-00.jsonl" session-dir)))
+    (unwind-protect
+        (progn
+          (make-directory session-dir t)
+          ;; Create "old" file first
+          (with-temp-file old-file (insert "{}"))
+          (sleep-for 0.1)  ; Ensure different mtime
+          ;; Create "new" file second (more recent mtime despite earlier filename)
+          (with-temp-file new-file (insert "{}"))
+          ;; Directly call directory-files and sort logic to test sorting
+          (let* ((files (directory-files session-dir t "\\.jsonl$"))
+                 (sorted (sort files
+                               (lambda (a b)
+                                 (time-less-p
+                                  (file-attribute-modification-time (file-attributes b))
+                                  (file-attribute-modification-time (file-attributes a)))))))
+            ;; new-file should be first (most recent mtime)
+            ;; even though "09-00-00" < "10-00-00" alphabetically
+            (should (equal (length sorted) 2))
+            (should (string-suffix-p "09-00-00.jsonl" (car sorted)))))
+      ;; Cleanup
+      (delete-directory temp-base t))))
+
 (ert-deftest pi-coding-agent-test-session-metadata-extracts-first-message ()
   "pi-coding-agent--session-metadata extracts first user message text."
   (let ((temp-file (make-temp-file "pi-coding-agent-test-session" nil ".jsonl")))

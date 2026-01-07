@@ -1770,15 +1770,16 @@ Shows HH:MM if today, otherwise YYYY-MM-DD HH:MM."
 
 (defun pi-coding-agent--list-sessions (dir)
   "List available session files for project DIR.
-Returns list of absolute paths to .jsonl files, sorted newest first."
+Returns list of absolute paths to .jsonl files, sorted by modification
+time with most recently used first."
   (let* ((sessions-base (expand-file-name "~/.pi/agent/sessions/"))
          (session-dir (expand-file-name (pi-coding-agent--session-dir-name dir) sessions-base)))
     (when (file-directory-p session-dir)
-      ;; Sort by filename descending (timestamps sort lexicographically)
+      ;; Sort by modification time descending (most recently used first)
       (sort (directory-files session-dir t "\\.jsonl$")
             (lambda (a b)
-              (string> (file-name-nondirectory a)
-                       (file-name-nondirectory b)))))))
+              (time-less-p (file-attribute-modification-time (file-attributes b))
+                           (file-attribute-modification-time (file-attributes a))))))))
 
 (defun pi-coding-agent--format-session-choice (path)
   "Format session PATH for display in selector.
@@ -1973,8 +1974,14 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
       (if (null sessions)
           (message "Pi: No previous sessions found")
         (let* ((choices (mapcar #'pi-coding-agent--format-session-choice sessions))
+               (choice-strings (mapcar #'car choices))
+               ;; Use completion table with metadata to preserve our sort order
+               ;; (completing-read normally re-sorts alphabetically)
                (choice (completing-read "Resume session: "
-                                        (mapcar #'car choices)
+                                        (lambda (string pred action)
+                                          (if (eq action 'metadata)
+                                              '(metadata (display-sort-function . identity))
+                                            (complete-with-action action choice-strings string pred)))
                                         nil t))
                (selected-path (cdr (assoc choice choices)))
                ;; Capture chat buffer before async call
