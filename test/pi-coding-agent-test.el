@@ -1437,6 +1437,58 @@ which is just a success message."
       (should (string-match-p "Hello world" result))
       (should-not (string-match-p ":" result)))))
 
+(ert-deftest pi-coding-agent-test-branch-detects-empty-messages-vector ()
+  "Branch correctly detects empty messages vector from RPC.
+JSON arrays are parsed as vectors, and (null []) is nil, not t.
+The branch code must use seq-empty-p or length check."
+  (let ((rpc-called nil)
+        (message-shown nil))
+    (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+              ((symbol-function 'pi-coding-agent--rpc-async)
+               (lambda (_proc cmd cb)
+                 (setq rpc-called t)
+                 ;; Simulate response with empty vector (no messages to branch from)
+                 (funcall cb '(:success t :data (:messages [])))))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (when (string-match-p "No messages" fmt)
+                   (setq message-shown t)))))
+      (pi-coding-agent-branch)
+      (should rpc-called)
+      ;; Should show "No messages to branch from", not call completing-read
+      (should message-shown))))
+
+(ert-deftest pi-coding-agent-test-format-branch-message-handles-nil-text ()
+  "Format branch message handles nil text gracefully."
+  (let ((msg '(:entryId "abc-123" :text nil)))
+    ;; Should not error, should return something displayable
+    (let ((result (pi-coding-agent--format-branch-message msg 1)))
+      (should (stringp result)))))
+
+(ert-deftest pi-coding-agent-test-load-session-history-uses-provided-buffer ()
+  "load-session-history uses provided chat buffer, not current buffer context.
+This ensures history loads correctly when callback runs in arbitrary context."
+  (let* ((chat-buf (generate-new-buffer "*pi-coding-agent-chat:test-history/*"))
+         (rpc-callback nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode))
+          ;; Mock RPC to capture callback
+          (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc _cmd cb) (setq rpc-callback cb))))
+            ;; Call with explicit buffer
+            (pi-coding-agent--load-session-history 'mock-proc nil chat-buf))
+          ;; Simulate callback from different buffer context
+          (with-temp-buffer
+            (funcall rpc-callback
+                     '(:success t :data (:messages [(:role "user" :content "test")]))))
+          ;; Chat buffer should have been updated (has startup header)
+          (with-current-buffer chat-buf
+            (should (string-match-p "C-c C-c" (buffer-string)))))
+      (when (buffer-live-p chat-buf)
+        (kill-buffer chat-buf)))))
+
 (ert-deftest pi-coding-agent-test-session-dir-name ()
   "Session directory name derived from project path."
   (should (equal (pi-coding-agent--session-dir-name "/home/daniel/co/pi-coding-agent")
