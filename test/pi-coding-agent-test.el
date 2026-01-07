@@ -819,6 +819,30 @@ then proper highlighting once block is closed."
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
+(ert-deftest pi-coding-agent-test-send-displays-expanded-slash-command ()
+  "Sending a slash command displays the EXPANDED text in chat, not the original."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-chat*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-input*"))
+        (pi-coding-agent--file-commands '((:name "greet" :content "Hello $@!"))))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "/greet world")
+            ;; Mock the process to avoid actual RPC
+            (setq pi-coding-agent--process nil)
+            (pi-coding-agent-send))
+          ;; Check chat buffer has EXPANDED text, not original slash command
+          (with-current-buffer chat-buf
+            (should (string-match-p "Hello world!" (buffer-string)))
+            (should-not (string-match-p "/greet" (buffer-string)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
 (ert-deftest pi-coding-agent-test-ms-to-time-converts-correctly ()
   "pi-coding-agent--ms-to-time converts milliseconds to Emacs time."
   ;; 1704067200000 ms = 2024-01-01 00:00:00 UTC

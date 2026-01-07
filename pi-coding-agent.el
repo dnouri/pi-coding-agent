@@ -1021,9 +1021,10 @@ Updates buffer-local state and renders display updates."
   "Send the current input buffer contents to pi.
 Clears the input buffer after sending.  Does nothing if buffer is empty.
 If pi is currently streaming, shows a message and preserves input.
-Slash command expansion happens in `pi-coding-agent--send-prompt'."
+Slash commands are expanded before display and sending."
   (interactive)
   (let* ((text (string-trim (buffer-string)))
+         (expanded (pi-coding-agent--expand-slash-command text))
          (chat-buf (pi-coding-agent--get-chat-buffer))
          (streaming (and chat-buf
                          (buffer-local-value 'pi-coding-agent--status chat-buf)
@@ -1037,18 +1038,18 @@ Slash command expansion happens in `pi-coding-agent--send-prompt'."
       (message "Pi: Please wait for response to complete"))
      ;; Normal send
      (t
-      ;; Add to history and reset navigation state
+      ;; Add to history and reset navigation state (save original for recall)
       (pi-coding-agent--history-add text)
       (setq pi-coding-agent--input-ring-index nil
             pi-coding-agent--input-saved nil)
       (erase-buffer)
       (with-current-buffer chat-buf
-        (pi-coding-agent--display-user-message text (current-time))
+        (pi-coding-agent--display-user-message expanded (current-time))
         (setq pi-coding-agent--status 'sending)
         (setq pi-coding-agent--assistant-header-shown nil)  ; Reset for new prompt
         (pi-coding-agent--spinner-start)
         (force-mode-line-update))
-      (pi-coding-agent--send-prompt text)))))
+      (pi-coding-agent--send-prompt expanded)))))
 
 (defun pi-coding-agent--send-prompt (text)
   "Send TEXT as a prompt to the pi process.
