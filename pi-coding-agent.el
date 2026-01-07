@@ -1020,8 +1020,8 @@ Updates buffer-local state and renders display updates."
 (defun pi-coding-agent-send ()
   "Send the current input buffer contents to pi.
 Clears the input buffer after sending.  Does nothing if buffer is empty.
-If text starts with /, tries to expand as a custom slash command.
-If pi is currently streaming, shows a message and preserves input."
+If pi is currently streaming, shows a message and preserves input.
+Slash commands are expanded before display and sending."
   (interactive)
   (let* ((text (string-trim (buffer-string)))
          (expanded (pi-coding-agent--expand-slash-command text))
@@ -1038,13 +1038,13 @@ If pi is currently streaming, shows a message and preserves input."
       (message "Pi: Please wait for response to complete"))
      ;; Normal send
      (t
-      ;; Add to history and reset navigation state
+      ;; Add to history and reset navigation state (save original for recall)
       (pi-coding-agent--history-add text)
       (setq pi-coding-agent--input-ring-index nil
             pi-coding-agent--input-saved nil)
       (erase-buffer)
       (with-current-buffer chat-buf
-        (pi-coding-agent--display-user-message text (current-time))
+        (pi-coding-agent--display-user-message expanded (current-time))
         (setq pi-coding-agent--status 'sending)
         (setq pi-coding-agent--assistant-header-shown nil)  ; Reset for new prompt
         (pi-coding-agent--spinner-start)
@@ -1053,8 +1053,10 @@ If pi is currently streaming, shows a message and preserves input."
 
 (defun pi-coding-agent--send-prompt (text)
   "Send TEXT as a prompt to the pi process.
+If TEXT starts with /, tries to expand as a custom slash command.
 Shows an error message if process is unavailable."
-  (let ((proc (pi-coding-agent--get-process)))
+  (let ((proc (pi-coding-agent--get-process))
+        (expanded (pi-coding-agent--expand-slash-command text)))
     (cond
      ((null proc)
       (message "Pi: No process available - try M-x pi to restart"))
@@ -1062,7 +1064,7 @@ Shows an error message if process is unavailable."
       (message "Pi: Process died - try M-x pi to restart"))
      (t
       (pi-coding-agent--rpc-async proc
-                     (list :type "prompt" :message text)
+                     (list :type "prompt" :message expanded)
                      #'ignore)))))
 
 (defun pi-coding-agent-abort ()

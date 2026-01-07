@@ -819,6 +819,30 @@ then proper highlighting once block is closed."
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
+(ert-deftest pi-coding-agent-test-send-displays-expanded-slash-command ()
+  "Sending a slash command displays the EXPANDED text in chat, not the original."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-chat*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-input*"))
+        (pi-coding-agent--file-commands '((:name "greet" :content "Hello $@!"))))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "/greet world")
+            ;; Mock the process to avoid actual RPC
+            (setq pi-coding-agent--process nil)
+            (pi-coding-agent-send))
+          ;; Check chat buffer has EXPANDED text, not original slash command
+          (with-current-buffer chat-buf
+            (should (string-match-p "Hello world!" (buffer-string)))
+            (should-not (string-match-p "/greet" (buffer-string)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
 (ert-deftest pi-coding-agent-test-ms-to-time-converts-correctly ()
   "pi-coding-agent--ms-to-time converts milliseconds to Emacs time."
   ;; 1704067200000 ms = 2024-01-01 00:00:00 UTC
@@ -1918,21 +1942,22 @@ Regression test for #27: history was shared across all sessions."
     (should (equal (pi-coding-agent--expand-slash-command "hello world")
                    "hello world"))))
 
-(ert-deftest pi-coding-agent-test-send-expands-slash-command ()
-  "pi-coding-agent-send expands slash commands before sending."
-  (let* ((sent-text nil)
-         (pi-coding-agent--file-commands '((:name "greet" :content "Hello $@!"))))
-    (cl-letf (((symbol-function 'pi-coding-agent--get-chat-buffer)
-               (lambda () (current-buffer)))
-              ((symbol-function 'pi-coding-agent--display-user-message)
-               (lambda (_text &optional _timestamp) nil))
-              ((symbol-function 'pi-coding-agent--send-prompt)
-               (lambda (text) (setq sent-text text))))
-      (with-temp-buffer
-        (pi-coding-agent-input-mode)
-        (insert "/greet world")
-        (pi-coding-agent-send)
-        (should (equal sent-text "Hello world!"))))))
+(ert-deftest pi-coding-agent-test-send-prompt-expands-slash-command ()
+  "pi-coding-agent--send-prompt expands slash commands before sending to process.
+This ensures all send paths get expansion, not just pi-coding-agent-send."
+  (let* ((rpc-message nil)
+         (pi-coding-agent--file-commands '((:name "greet" :content "Hello $@!")))
+         (fake-proc (start-process "test" nil "cat")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                   (lambda () fake-proc))
+                  ((symbol-function 'pi-coding-agent--rpc-async)
+                   (lambda (_proc msg _cb) (setq rpc-message msg))))
+          (pi-coding-agent--send-prompt "/greet world")
+          (should (equal (plist-get rpc-message :message) "Hello world!")))
+      (delete-process fake-proc))))
+
+
 
 (ert-deftest pi-coding-agent-test-format-session-stats ()
   "Format session stats returns readable string."
