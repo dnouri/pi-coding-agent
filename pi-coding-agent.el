@@ -2118,7 +2118,7 @@ Calls CALLBACK with message count when done."
   "Format MSG for display in branch selector.
 MSG is a plist with :entryId and :text.
 INDEX is the display index (1-based) for the message."
-  (let* ((text (plist-get msg :text))
+  (let* ((text (or (plist-get msg :text) ""))
          (preview (truncate-string-to-width text 60 nil nil "...")))
     (if index
         (format "%d: %s" index preview)
@@ -2134,7 +2134,8 @@ Shows a selector of user messages and creates a branch from the selected one."
                      (if (plist-get response :success)
                          (let* ((data (plist-get response :data))
                                 (messages (plist-get data :messages)))
-                           (if (null messages)
+                           ;; Note: messages is a vector from JSON, use seq-empty-p not null
+                           (if (seq-empty-p messages)
                                (message "Pi: No messages to branch from")
                              (pi-coding-agent--show-branch-selector proc messages)))
                        (message "Pi: Failed to get branch messages"))))))
