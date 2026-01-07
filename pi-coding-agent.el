@@ -1406,9 +1406,11 @@ Removes common prefixes like \"Claude \" and suffixes like \" (latest)\"."
         (setq pi-coding-agent--spinner-timer
               (run-with-timer 0 0.1 #'pi-coding-agent--spinner-tick))))))
 
-(defun pi-coding-agent--spinner-stop ()
-  "Stop the spinner for current session."
-  (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+(defun pi-coding-agent--spinner-stop (&optional chat-buf)
+  "Stop the spinner for current session.
+CHAT-BUF is the buffer to stop spinning; if nil, uses current context.
+Note: When called from async callbacks, pass CHAT-BUF explicitly."
+  (let ((chat-buf (or chat-buf (pi-coding-agent--get-chat-buffer))))
     (setq pi-coding-agent--spinning-sessions (delq chat-buf pi-coding-agent--spinning-sessions))
     ;; Stop global timer if no sessions spinning
     (when (and pi-coding-agent--spinner-timer (null pi-coding-agent--spinning-sessions))
@@ -2086,7 +2088,8 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
     (pi-coding-agent--spinner-start)
     (pi-coding-agent--rpc-async proc '(:type "compact")
                    (lambda (response)
-                     (pi-coding-agent--spinner-stop)
+                     ;; Pass chat-buf explicitly (callback may run in arbitrary context)
+                     (pi-coding-agent--spinner-stop chat-buf)
                      (if (plist-get response :success)
                          (when (buffer-live-p chat-buf)
                            (with-current-buffer chat-buf

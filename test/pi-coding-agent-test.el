@@ -1727,6 +1727,30 @@ This ensures history loads correctly when callback runs in arbitrary context."
           (should (string-match-p "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]" header)))
       (pi-coding-agent--spinner-stop))))
 
+(ert-deftest pi-coding-agent-test-spinner-stop-with-explicit-buffer ()
+  "Spinner stops correctly when buffer is passed explicitly.
+Regression test for #24: spinner wouldn't stop if callback ran in
+arbitrary buffer context (e.g., process sentinel)."
+  (let* ((chat-buf (generate-new-buffer "*pi-coding-agent-chat:test-spinner/*"))
+         (original-spinning pi-coding-agent--spinning-sessions))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (pi-coding-agent--spinner-start))
+          ;; Verify spinner started
+          (should (memq chat-buf pi-coding-agent--spinning-sessions))
+          ;; Stop from different buffer context (simulating sentinel/callback)
+          (with-temp-buffer
+            ;; Without explicit buffer, this would fail to remove chat-buf
+            (pi-coding-agent--spinner-stop chat-buf))
+          ;; Verify spinner stopped
+          (should-not (memq chat-buf pi-coding-agent--spinning-sessions)))
+      ;; Cleanup
+      (setq pi-coding-agent--spinning-sessions original-spinning)
+      (when (buffer-live-p chat-buf)
+        (kill-buffer chat-buf)))))
+
 (ert-deftest pi-coding-agent-test-format-tokens-compact ()
   "Tokens formatted compactly."
   (should (equal "500" (pi-coding-agent--format-tokens-compact 500)))
