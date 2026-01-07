@@ -1226,14 +1226,20 @@ it from extending to subsequent content.  Sets pending overlay to nil."
 
 (defun pi-coding-agent--display-tool-update (partial-result)
   "Display PARTIAL-RESULT as streaming output in pending tool overlay.
+PARTIAL-RESULT has same structure as tool result: plist with :content.
 Shows rolling tail of output, truncated to visual lines.
 Previous streaming content is replaced."
-  (when (and pi-coding-agent--pending-tool-overlay
-             partial-result
-             (not (string-empty-p partial-result)))
-    (let* ((width (or (window-width) 80))
+  (when (and pi-coding-agent--pending-tool-overlay partial-result)
+    ;; Extract text from content blocks (same structure as tool_execution_end)
+    (let* ((content (plist-get partial-result :content))
+           (text-blocks (seq-filter (lambda (c) (equal (plist-get c :type) "text"))
+                                    content))
+           (raw-output (mapconcat (lambda (c) (or (plist-get c :text) ""))
+                                  text-blocks "")))
+      (when (and raw-output (not (string-empty-p raw-output)))
+        (let* ((width (or (window-width) 80))
            (max-lines pi-coding-agent-bash-preview-lines)
-           (lines (split-string partial-result "\n"))
+           (lines (split-string raw-output "\n"))
            (total-lines (length lines))
            ;; Take last N lines for rolling tail
            (tail-lines (if (> total-lines max-lines)
@@ -1261,7 +1267,7 @@ Previous streaming content is replaced."
               (insert (propertize (format "... (%d earlier lines)\n" hidden-count)
                                   'face 'pi-coding-agent-collapsed-indicator)))
             (insert (propertize display-content 'face 'pi-coding-agent-tool-output))
-            (insert "\n")))))))
+            (insert "\n")))))))))
 
 (defun pi-coding-agent--wrap-in-src-block (content lang)
   "Wrap CONTENT in a markdown fenced code block with LANG.

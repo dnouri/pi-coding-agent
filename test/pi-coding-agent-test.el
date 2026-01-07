@@ -1272,11 +1272,11 @@ then proper highlighting once block is closed."
        :toolName "bash"
        :toolCallId "test-id"
        :args (:command "long-running")))
-    ;; Then send an update with partial result
+    ;; Then send an update with partial result (same structure as tool result)
     (pi-coding-agent--handle-display-event
      '(:type "tool_execution_update"
        :toolCallId "test-id"
-       :partialResult "streaming output line 1"))
+       :partialResult (:content [(:type "text" :text "streaming output line 1")])))
     ;; Should show partial content
     (should (string-match-p "streaming output" (buffer-string)))))
 
@@ -1298,7 +1298,7 @@ then proper highlighting once block is closed."
         (pi-coding-agent--handle-display-event
          `(:type "tool_execution_update"
            :toolCallId "test-id"
-           :partialResult ,many-lines))))
+           :partialResult (:content [(:type "text" :text ,many-lines)])))))
     ;; Should show indicator that earlier lines are hidden
     (should (string-match-p "earlier lines" (buffer-string)))
     ;; Should show last few lines
@@ -1316,7 +1316,7 @@ then proper highlighting once block is closed."
     (pi-coding-agent--handle-display-event
      '(:type "tool_execution_update"
        :toolCallId "test-id"
-       :partialResult "partial streaming"))
+       :partialResult (:content [(:type "text" :text "partial streaming")])))
     ;; Partial content should be present
     (should (string-match-p "partial streaming" (buffer-string)))
     ;; Now end the tool
