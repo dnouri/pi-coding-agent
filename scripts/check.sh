@@ -1,5 +1,5 @@
 #!/bin/bash
-# Quality checks for pi.el - run before commits
+# Quality checks for pi-coding-agent - run before commits
 #
 # Usage:
 #   ./scripts/check.sh              # Unit tests only (fast)
@@ -32,9 +32,12 @@ done
 echo "=== Byte-compiling ==="
 emacs --batch \
     -L . \
+    --eval "(require 'package)" \
+    --eval "(push '(\"melpa\" . \"https://melpa.org/packages/\") package-archives)" \
+    --eval "(package-initialize)" \
     --eval "(setq byte-compile-error-on-warn t)" \
     -f batch-byte-compile \
-    pi-core.el pi.el
+    pi-coding-agent-core.el pi-coding-agent.el
 
 echo ""
 echo "=== Checking docstrings ==="
@@ -43,8 +46,8 @@ CHECKDOC_OUTPUT=$(emacs --batch \
     -L . \
     --eval "(require 'checkdoc)" \
     --eval "(setq sentence-end-double-space nil)" \
-    --eval "(checkdoc-file \"pi-core.el\")" \
-    --eval "(checkdoc-file \"pi.el\")" 2>&1)
+    --eval "(checkdoc-file \"pi-coding-agent-core.el\")" \
+    --eval "(checkdoc-file \"pi-coding-agent.el\")" 2>&1)
 
 if echo "$CHECKDOC_OUTPUT" | grep -q "^Warning"; then
     echo "$CHECKDOC_OUTPUT" | grep "^Warning"
@@ -64,8 +67,8 @@ emacs --batch \
               (package-refresh-contents) \
               (package-install 'package-lint))" \
     --eval "(require 'package-lint)" \
-    --eval "(setq package-lint-main-file \"pi.el\")" \
-    -f package-lint-batch-and-exit pi.el pi-core.el
+    --eval "(setq package-lint-main-file \"pi-coding-agent.el\")" \
+    -f package-lint-batch-and-exit pi-coding-agent.el pi-coding-agent-core.el
 echo "Package-lint: Done."
 
 echo ""
@@ -73,9 +76,12 @@ echo "=== Running unit tests ==="
 emacs --batch \
     -L . \
     -L test \
-    -l pi \
-    -l pi-core-test \
-    -l pi-test \
+    --eval "(require 'package)" \
+    --eval "(push '(\"melpa\" . \"https://melpa.org/packages/\") package-archives)" \
+    --eval "(package-initialize)" \
+    -l pi-coding-agent \
+    -l pi-coding-agent-core-test \
+    -l pi-coding-agent-test \
     -f ert-run-tests-batch-and-exit
 
 if [ "$RUN_INTEGRATION" = true ]; then
@@ -91,8 +97,11 @@ if [ "$RUN_INTEGRATION" = true ]; then
     PI_RUN_INTEGRATION=1 emacs --batch \
         -L . \
         -L test \
-        -l pi \
-        -l pi-integration-test \
+        --eval "(require 'package)" \
+        --eval "(push '(\"melpa\" . \"https://melpa.org/packages/\") package-archives)" \
+        --eval "(package-initialize)" \
+        -l pi-coding-agent \
+        -l pi-coding-agent-integration-test \
         -f ert-run-tests-batch-and-exit
 fi
 
