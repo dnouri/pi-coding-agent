@@ -764,17 +764,17 @@ Shows success or final failure with raw error."
                             'face 'pi-coding-agent-error-notice)
            "\n")))
 
-(defun pi-coding-agent--display-hook-error (event)
-  "Display hook error from hook_error EVENT."
-  (let* ((hook-path (plist-get event :hookPath))
-         (hook-event (plist-get event :event))
+(defun pi-coding-agent--display-extension-error (event)
+  "Display extension error from extension_error EVENT."
+  (let* ((extension-path (plist-get event :extensionPath))
+         (extension-event (plist-get event :event))
          (error-msg (plist-get event :error))
-         (hook-name (if hook-path (file-name-nondirectory hook-path) "unknown")))
+         (extension-name (if extension-path (file-name-nondirectory extension-path) "unknown")))
     (pi-coding-agent--append-to-chat
      (concat "\n"
-             (propertize (format "[Hook error in %s (%s): %s]"
-                                 hook-name
-                                 (or hook-event "unknown")
+             (propertize (format "[Extension error in %s (%s): %s]"
+                                 extension-name
+                                 (or extension-event "unknown")
                                  (or error-msg "unknown error"))
                          'face 'pi-coding-agent-error-notice)
              "\n"))))
@@ -943,8 +943,8 @@ Updates buffer-local state and renders display updates."
      (pi-coding-agent--display-retry-start event))
     ("auto_retry_end"
      (pi-coding-agent--display-retry-end event))
-    ("hook_error"
-     (pi-coding-agent--display-hook-error event))))
+    ("extension_error"
+     (pi-coding-agent--display-extension-error event))))
 
 ;;;; Sending Prompts
 
@@ -1671,7 +1671,7 @@ Replaces $@ with all arguments joined by spaces."
   "Start a new pi session (reset)."
   (interactive)
   (when-let ((proc (pi-coding-agent--get-process)))
-    (pi-coding-agent--rpc-async proc '(:type "reset")
+    (pi-coding-agent--rpc-async proc '(:type "new_session")
                    (lambda (response)
                      (let* ((data (plist-get response :data))
                             (cancelled (plist-get data :cancelled)))
@@ -2112,13 +2112,15 @@ Calls CALLBACK with message count when done."
                              (message "Pi: No assistant message to copy")))
                        (message "Pi: Failed to get message"))))))
 
-(defun pi-coding-agent--format-branch-message (msg)
+(defun pi-coding-agent--format-branch-message (msg &optional index)
   "Format MSG for display in branch selector.
-MSG is a plist with :entryIndex and :text."
-  (let* ((index (plist-get msg :entryIndex))
-         (text (plist-get msg :text))
+MSG is a plist with :entryId and :text.
+INDEX is the display index (1-based) for the message."
+  (let* ((text (plist-get msg :text))
          (preview (truncate-string-to-width text 60 nil nil "...")))
-    (format "%d: %s" index preview)))
+    (if index
+        (format "%d: %s" index preview)
+      preview)))
 
 (defun pi-coding-agent-branch ()
   "Branch conversation from a previous user message.
@@ -2138,16 +2140,18 @@ Shows a selector of user messages and creates a branch from the selected one."
 (defun pi-coding-agent--show-branch-selector (proc messages)
   "Show selector for MESSAGES and branch on selection.
 PROC is the pi process.  MESSAGES is a list of plists from get_branch_messages."
-  (let* ((formatted (mapcar (lambda (msg)
-                              (cons (pi-coding-agent--format-branch-message msg) msg))
+  (let* ((index 0)
+         (formatted (mapcar (lambda (msg)
+                              (setq index (1+ index))
+                              (cons (pi-coding-agent--format-branch-message msg index) msg))
                             messages))
          (choice (completing-read "Branch from: "
                                   (mapcar #'car formatted)
                                   nil t))
          (selected (cdr (assoc choice formatted))))
     (when selected
-      (let ((entry-index (plist-get selected :entryIndex)))
-        (pi-coding-agent--rpc-async proc (list :type "branch" :entryIndex entry-index)
+      (let ((entry-id (plist-get selected :entryId)))
+        (pi-coding-agent--rpc-async proc (list :type "branch" :entryId entry-id)
                        (lambda (response)
                          (if (plist-get response :success)
                              (let* ((data (plist-get response :data))

@@ -495,13 +495,13 @@
     (should (eq (plist-get pi-coding-agent--state :is-retrying) nil))
     (should (equal (plist-get pi-coding-agent--state :last-error) "529 overloaded_error: Overloaded"))))
 
-(ert-deftest pi-coding-agent-test-event-hook-error-stores-error ()
-  "hook_error event stores error message in state."
+(ert-deftest pi-coding-agent-test-event-extension-error-stores-error ()
+  "extension_error event stores error message in state."
   (let ((pi-coding-agent--status 'streaming)
         (pi-coding-agent--state (list :last-error nil)))
     (pi-coding-agent--update-state-from-event
-     '(:type "hook_error"
-       :hookPath "/path/to/hook.ts"
+     '(:type "extension_error"
+       :extensionPath "/path/to/extension.ts"
        :event "tool_call"
        :error "TypeError: undefined is not a function"))
     (should (equal (plist-get pi-coding-agent--state :last-error)

@@ -222,5 +222,39 @@ Sets up event dispatching through pi-coding-agent--event-handlers list."
              (data (plist-get state :data)))
         (should (eq (plist-get data :isStreaming) :false))))))
 
+;;; New Session Tests (HIGH value - catches API breaking changes)
+
+(ert-deftest pi-coding-agent-integration-new-session-succeeds ()
+  "new_session command returns success and resets message count.
+This test verifies the RPC protocol works, not full LLM interaction."
+  (pi-coding-agent-integration-with-process
+    ;; Verify initial state
+    (let* ((before (pi-coding-agent--rpc-sync proc '(:type "get_state") pi-coding-agent-test-rpc-timeout))
+           (before-count (plist-get (plist-get before :data) :messageCount)))
+      (should (= before-count 0))
+      ;; Call new_session (should work even with no messages)
+      (let ((response (pi-coding-agent--rpc-sync proc '(:type "new_session") pi-coding-agent-test-rpc-timeout)))
+        (should (plist-get response :success))
+        (should (eq (plist-get (plist-get response :data) :cancelled) :false)))
+      ;; Verify still at 0 messages
+      (let* ((after (pi-coding-agent--rpc-sync proc '(:type "get_state") pi-coding-agent-test-rpc-timeout))
+             (after-count (plist-get (plist-get after :data) :messageCount)))
+        (should (= after-count 0))))))
+
+(ert-deftest pi-coding-agent-integration-get-branch-messages-returns-entry-id ()
+  "get_branch_messages returns messages with entryId field (not entryIndex).
+Catches API breaking changes in the branch message format."
+  (pi-coding-agent-integration-with-process
+    ;; Empty session should return empty messages array
+    (let ((response (pi-coding-agent--rpc-sync proc '(:type "get_branch_messages") pi-coding-agent-test-rpc-timeout)))
+      (should (plist-get response :success))
+      (let ((messages (plist-get (plist-get response :data) :messages)))
+        (should (vectorp messages))
+        ;; If there are messages, verify they have entryId not entryIndex
+        (when (> (length messages) 0)
+          (let ((first-msg (aref messages 0)))
+            (should (plist-get first-msg :entryId))
+            (should-not (plist-get first-msg :entryIndex))))))))
+
 (provide 'pi-coding-agent-integration-test)
 ;;; pi-coding-agent-integration-test.el ends here

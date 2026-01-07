@@ -253,7 +253,7 @@ Sets status to `streaming' on agent_start, `idle' on agent_end."
        (plist-put pi-coding-agent--state :is-retrying nil)
        (unless (eq (plist-get event :success) t)
          (plist-put pi-coding-agent--state :last-error (plist-get event :finalError))))
-      ("hook_error"
+      ("extension_error"
        (plist-put pi-coding-agent--state :last-error (plist-get event :error))))))
 
 (defun pi-coding-agent--handle-message-update (event)
@@ -339,7 +339,7 @@ Returns plist with :status key for setting `pi-coding-agent--status'."
             :session-id (plist-get data :sessionId)
             :session-file (plist-get data :sessionFile)
             :message-count (plist-get data :messageCount)
-            :queued-message-count (plist-get data :queuedMessageCount)))))
+            :pending-message-count (plist-get data :pendingMessageCount)))))
 
 (provide 'pi-coding-agent-core)
 ;;; pi-coding-agent-core.el ends here
