@@ -1670,16 +1670,18 @@ Replaces $@ with all arguments joined by spaces."
 (defun pi-coding-agent-new-session ()
   "Start a new pi session (reset)."
   (interactive)
-  (when-let ((proc (pi-coding-agent--get-process)))
+  (when-let ((proc (pi-coding-agent--get-process))
+             (chat-buf (pi-coding-agent--get-chat-buffer)))
     (pi-coding-agent--rpc-async proc '(:type "new_session")
                    (lambda (response)
                      (let* ((data (plist-get response :data))
                             (cancelled (plist-get data :cancelled)))
                        (if (and (plist-get response :success)
                                 (pi-coding-agent--json-false-p cancelled))
-                           (progn
-                             (pi-coding-agent--clear-chat-buffer)
-                             (pi-coding-agent--refresh-header)
+                           (when (buffer-live-p chat-buf)
+                             (with-current-buffer chat-buf
+                               (pi-coding-agent--clear-chat-buffer)
+                               (pi-coding-agent--refresh-header))
                              (message "Pi: New session started"))
                          (message "Pi: New session cancelled")))))))
 

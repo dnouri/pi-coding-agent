@@ -154,6 +154,40 @@ Automatically cleans up chat and input buffers."
     ;; Usage should be reset
     (should (null pi-coding-agent--last-usage))))
 
+(ert-deftest pi-coding-agent-test-new-session-clears-buffer-from-different-context ()
+  "New session callback clears chat buffer even when called from different buffer.
+This tests that the async callback properly captures the chat buffer reference,
+not relying on current buffer context which may change before callback executes."
+  (let ((chat-buf (generate-new-buffer "*pi-coding-agent-chat:/tmp/test-new-session/*"))
+        (captured-callback nil))
+    (unwind-protect
+        (progn
+          ;; Set up chat buffer with content
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (let ((inhibit-read-only t))
+              (insert "Existing conversation content\nMore content here")))
+          ;; Mock the RPC to capture the callback
+          (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                    ((symbol-function 'pi-coding-agent--get-chat-buffer) (lambda () chat-buf))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc _cmd cb) (setq captured-callback cb)))
+                    ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
+            ;; Call new-session from the chat buffer
+            (with-current-buffer chat-buf
+              (pi-coding-agent-new-session)))
+          ;; Now simulate the async callback being called from a DIFFERENT buffer
+          ;; (This is what happens in practice - callbacks run in arbitrary contexts)
+          (with-temp-buffer
+            (funcall captured-callback '(:success t :data (:cancelled :false))))
+          ;; The chat buffer should have been cleared
+          (with-current-buffer chat-buf
+            (should-not (string-match-p "Existing conversation" (buffer-string)))
+            ;; Should show startup header instead
+            (should (string-match-p "C-c C-c" (buffer-string)))))
+      (when (buffer-live-p chat-buf)
+        (kill-buffer chat-buf)))))
+
 (ert-deftest pi-coding-agent-test-find-session-returns-existing ()
   "pi-coding-agent--find-session returns existing chat buffer."
   (let ((buf (generate-new-buffer "*pi-coding-agent-chat:/tmp/test-find/*")))
