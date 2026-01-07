@@ -125,5 +125,24 @@ Regression test: overlay with rear-advance was extending to subsequent content."
                   (should-not tool-overlay)))))
         (pi-coding-agent-gui-test-delete-temp-file test-file)))))
 
+;;;; Formatting Tests
+
+(ert-deftest pi-coding-agent-gui-test-no-consecutive-blank-lines ()
+  "Test that chat buffer never has two consecutive blank lines.
+This test runs after other tests to check accumulated content from
+multiple turns, tool uses, and streaming responses."
+  (pi-coding-agent-gui-test-with-session
+    (let* ((content (pi-coding-agent-gui-test-chat-content))
+           (triple-newline-pos (string-match "\n\n\n" content)))
+      (when triple-newline-pos
+        ;; Show context around the problem for debugging
+        (let* ((start (max 0 (- triple-newline-pos 50)))
+               (end (min (length content) (+ triple-newline-pos 80)))
+               (context (substring content start end))
+               (context-visible (replace-regexp-in-string "\n" "↵\n" context)))
+          (ert-fail (format "Found consecutive blank lines at position %d:\n%s"
+                            triple-newline-pos context-visible))))
+      (should-not triple-newline-pos))))
+
 (provide 'pi-coding-agent-gui-tests)
 ;;; pi-coding-agent-gui-tests.el ends here

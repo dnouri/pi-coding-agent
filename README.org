@@ -109,6 +109,35 @@ For multiple sessions in the same directory, use =C-u M-x pi= to create a named 
 Press =C-c C-p= to access the full menu with model selection, thinking level,
 session management (new, resume, branch, export), statistics, and custom commands.
 
+* Tips & Tricks
+
+** 📁 Folding Turns
+
+Press =TAB= on a turn header (You/Assistant) to fold it, =TAB= again to
+unfold. Use =S-TAB= to cycle visibility of all turns at once.
+
+** ✏️ Composing Prompts
+
+The input buffer is a full Emacs buffer—one of the main advantages over
+terminal interfaces. Write multi-line prompts, yank code from other
+buffers with =C-y=, or use any editing commands you know.
+
+Slash commands (=/command=) work with completion: type =/= then =TAB= to
+see available commands, including your custom ones from =~/.pi/commands/=.
+
+** 🔧 Tool Output
+
+Tool output (file reads, command results) is collapsed by default to keep
+the chat readable. Press =TAB= on a tool block to expand it. Code blocks
+have full syntax highlighting.
+
+** 💾 Sessions
+
+Each project directory gets its own session automatically. To run multiple
+sessions in the same directory, use =C-u M-x pi= to create a named session.
+
+Branching (=C-c C-p b=) and resume (=C-c C-p r=) work as in the pi TUI.
+
 * Configuration
 
 Example configuration with =use-package=:

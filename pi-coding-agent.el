@@ -1251,7 +1251,9 @@ Shows preview lines with expandable toggle for long output."
              'hidden-count hidden-count)
             (insert "\n"))
         ;; Short output: show all with syntax highlighting
-        (let ((rendered (pi-coding-agent--render-tool-content display-content lang)))
+        ;; Strip trailing newlines from content to avoid double-spacing
+        (let ((rendered (pi-coding-agent--render-tool-content
+                         (string-trim-right display-content "\n+") lang)))
           (insert rendered "\n")))
       ;; Error indicator
       (when is-error
@@ -1313,7 +1315,9 @@ HIDDEN-COUNT shows lines remaining."
 (defun pi-coding-agent--insert-expanded-content (preview-content full-content lang hidden-count)
   "Insert FULL-CONTENT with collapse button.
 PREVIEW-CONTENT, LANG and HIDDEN-COUNT are stored for collapsing."
-  (let ((rendered (pi-coding-agent--render-tool-content full-content lang)))
+  ;; Strip trailing newlines from content to avoid double-spacing
+  (let ((rendered (pi-coding-agent--render-tool-content
+                   (string-trim-right full-content "\n+") lang)))
     (insert rendered "\n"))
   (insert-text-button
    (propertize "[-]" 'face 'pi-coding-agent-collapsed-indicator)
