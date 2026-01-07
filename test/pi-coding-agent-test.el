@@ -1388,6 +1388,35 @@ which is just a success message."
     (should (string-match-p "\\.\\.\\..*more lines" (buffer-string)))
     (should-not (string-match-p "L10" (buffer-string)))))
 
+(ert-deftest pi-coding-agent-test-tool-toggle-expands-with-highlighting ()
+  "Expanded tool output has syntax highlighting applied.
+Regression test for issue #32: JIT font-lock doesn't fontify expanded content."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    ;; Create a read tool with Python content (>10 lines to trigger collapse)
+    ;; The 'def' keyword is on line 11, hidden initially
+    (pi-coding-agent--display-tool-start "read" '(:path "test.py"))
+    (pi-coding-agent--display-tool-end "read" '(:path "test.py")
+                          '((:type "text" :text "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\ndef hello():\n    return 42"))
+                          nil nil)
+    ;; Initially collapsed - 'def' is hidden
+    (should (string-match-p "\\.\\.\\..*more lines" (buffer-string)))
+    (should-not (string-match-p "def hello" (buffer-string)))
+    ;; Expand
+    (goto-char (point-min))
+    (search-forward "..." nil t)
+    (backward-char 1)
+    (pi-coding-agent-toggle-tool-section)
+    ;; Now 'def' should be visible
+    (should (string-match-p "def hello" (buffer-string)))
+    ;; Find 'def' keyword and check for syntax highlighting
+    (goto-char (point-min))
+    (search-forward "def" nil t)
+    (let ((face (get-text-property (match-beginning 0) 'face)))
+      ;; Should have font-lock-keyword-face from python-mode
+      (should (or (eq face 'font-lock-keyword-face)
+                  (and (listp face) (memq 'font-lock-keyword-face face)))))))
+
 (ert-deftest pi-coding-agent-test-tab-works-from-anywhere-in-block ()
   "TAB toggles tool output from any position within the block."
   (with-temp-buffer
