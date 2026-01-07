@@ -1706,6 +1706,33 @@ and then re-sorted alphabetically by completing-read."
     (should (eq (key-binding (kbd "M-n")) 'pi-coding-agent-next-input))
     (should (eq (key-binding (kbd "C-r")) 'pi-coding-agent-history-search))))
 
+(ert-deftest pi-coding-agent-test-history-isolated-per-buffer ()
+  "Input history is isolated per buffer, not shared globally.
+Regression test for #27: history was shared across all sessions."
+  (let ((buf1 (generate-new-buffer "*pi-coding-agent-input:project-a*"))
+        (buf2 (generate-new-buffer "*pi-coding-agent-input:project-b*")))
+    (unwind-protect
+        (progn
+          ;; Add history in buffer 1
+          (with-current-buffer buf1
+            (pi-coding-agent-input-mode)
+            (pi-coding-agent--history-add "project-a-query"))
+          ;; Add different history in buffer 2
+          (with-current-buffer buf2
+            (pi-coding-agent-input-mode)
+            (pi-coding-agent--history-add "project-b-query"))
+          ;; Buffer 1 should only see its own history
+          (with-current-buffer buf1
+            (should (= (ring-length (pi-coding-agent--input-ring)) 1))
+            (should (equal (ring-ref (pi-coding-agent--input-ring) 0) "project-a-query")))
+          ;; Buffer 2 should only see its own history
+          (with-current-buffer buf2
+            (should (= (ring-length (pi-coding-agent--input-ring)) 1))
+            (should (equal (ring-ref (pi-coding-agent--input-ring) 0) "project-b-query"))))
+      ;; Cleanup
+      (kill-buffer buf1)
+      (kill-buffer buf2))))
+
 ;;; Input Buffer Slash Completion
 
 (ert-deftest pi-coding-agent-test-slash-capf-returns-nil-without-slash ()

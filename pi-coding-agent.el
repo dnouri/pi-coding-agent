@@ -344,8 +344,8 @@ This is a read-only buffer showing the conversation history."
 (defvar pi-coding-agent--input-ring-size 100
   "Size of the input history ring.")
 
-(defvar pi-coding-agent--input-ring nil
-  "Ring holding input history.  Shared across all pi sessions.")
+(defvar-local pi-coding-agent--input-ring nil
+  "Ring holding input history for this session.")
 
 (defvar-local pi-coding-agent--input-ring-index nil
   "Current position in input ring, or nil if not navigating history.")
