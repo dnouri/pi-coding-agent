@@ -1111,6 +1111,74 @@ then proper highlighting once block is closed."
       ;; Should NOT have more-lines indicator
       (should-not (string-match-p "more lines" (buffer-string))))))
 
+;;; Visual Line Truncation Tests
+
+(ert-deftest pi-coding-agent-test-truncate-visual-lines-simple ()
+  "Truncation with short lines counts each as one visual line."
+  (let ((content "line1\nline2\nline3\nline4\nline5"))
+    ;; Width 80, max 3 visual lines -> should get first 3 lines
+    (let ((result (pi-coding-agent--truncate-to-visual-lines content 3 80)))
+      (should (equal (plist-get result :content) "line1\nline2\nline3"))
+      (should (= (plist-get result :visual-lines) 3))
+      (should (= (plist-get result :hidden-lines) 2)))))
+
+(ert-deftest pi-coding-agent-test-truncate-visual-lines-wrapping ()
+  "Long lines count as multiple visual lines based on width."
+  ;; Create content where first line is 160 chars (2 visual lines at width 80)
+  (let ((long-line (make-string 160 ?a))
+        (short-line "short"))
+    (let* ((content (concat long-line "\n" short-line))
+           ;; Width 80, max 2 visual lines -> only first line fits (uses 2 visual lines)
+           (result (pi-coding-agent--truncate-to-visual-lines content 2 80)))
+      (should (equal (plist-get result :content) long-line))
+      (should (= (plist-get result :visual-lines) 2))
+      (should (= (plist-get result :hidden-lines) 1)))))
+
+(ert-deftest pi-coding-agent-test-truncate-visual-lines-byte-limit ()
+  "Truncation respects byte limit in addition to visual lines."
+  (let ((pi-coding-agent-preview-max-bytes 50))
+    ;; Each line is 10 chars, 5 lines = 54 bytes with newlines
+    (let* ((content "aaaaaaaaaa\nbbbbbbbbbb\ncccccccccc\ndddddddddd\neeeeeeeeee")
+           (result (pi-coding-agent--truncate-to-visual-lines content 100 80)))
+      ;; Should stop before exceeding 50 bytes
+      (should (< (length (plist-get result :content)) 50))
+      (should (> (plist-get result :hidden-lines) 0)))))
+
+(ert-deftest pi-coding-agent-test-truncate-visual-lines-no-truncation-needed ()
+  "Content under limits returns unchanged."
+  (let ((content "short\ncontent"))
+    (let ((result (pi-coding-agent--truncate-to-visual-lines content 100 80)))
+      (should (equal (plist-get result :content) content))
+      (should (= (plist-get result :hidden-lines) 0)))))
+
+(ert-deftest pi-coding-agent-test-truncate-visual-lines-trailing-newline ()
+  "Trailing newlines don't create phantom hidden lines."
+  ;; Content with trailing newline - should count as 3 lines, not 4
+  (let ((content "line1\nline2\nline3\n"))
+    (let ((result (pi-coding-agent--truncate-to-visual-lines content 5 80)))
+      (should (= (plist-get result :hidden-lines) 0))
+      (should (= (plist-get result :visual-lines) 3)))))
+
+(ert-deftest pi-coding-agent-test-tool-output-truncates-long-lines ()
+  "Tool output preview accounts for visual line wrapping."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    ;; Create output with one very long line (200 chars) that wraps to ~3 visual lines
+    ;; Plus 3 more short lines. At width 80 and 5 preview lines limit:
+    ;; Line 1: 200 chars = 3 visual lines
+    ;; Line 2-3: 2 visual lines
+    ;; Total: 5 visual lines (at limit), line 4 should be hidden
+    (let* ((long-line (make-string 200 ?x))
+           (output (concat long-line "\nline2\nline3\nline4")))
+      (cl-letf (((symbol-function 'window-width) (lambda (&rest _) 80)))
+        (pi-coding-agent--display-tool-end "bash" '(:command "test")
+                              `((:type "text" :text ,output))
+                              nil nil))
+      ;; Long line should be present
+      (should (string-match-p "xxxx" (buffer-string)))
+      ;; line4 should be hidden (in "more lines" section)
+      (should (string-match-p "more lines" (buffer-string))))))
+
 (ert-deftest pi-coding-agent-test-tab-bound-to-toggle-tool-section ()
   "TAB is bound to pi-coding-agent-toggle-tool-section for tool block handling."
   (with-temp-buffer
@@ -1201,6 +1269,74 @@ then proper highlighting once block is closed."
                        :isError nil)))
       (pi-coding-agent--handle-display-event event)
       (should (string-match-p "output" (buffer-string))))))
+
+(ert-deftest pi-coding-agent-test-display-handler-handles-tool-update ()
+  "Display handler processes tool_execution_update events."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    ;; First, start the tool
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash"
+       :toolCallId "test-id"
+       :args (:command "long-running")))
+    ;; Then send an update with partial result (same structure as tool result)
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_update"
+       :toolCallId "test-id"
+       :partialResult (:content [(:type "text" :text "streaming output line 1")])))
+    ;; Should show partial content
+    (should (string-match-p "streaming output" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-tool-update-shows-rolling-tail ()
+  "Tool updates show rolling tail of output, truncated to visual lines."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    ;; Start the tool
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash"
+       :toolCallId "test-id"
+       :args (:command "verbose-command")))
+    ;; Send update with many lines (more than preview limit)
+    (let ((many-lines (mapconcat (lambda (n) (format "line%d" n))
+                                 (number-sequence 1 20)
+                                 "\n")))
+      (cl-letf (((symbol-function 'window-width) (lambda (&rest _) 80)))
+        (pi-coding-agent--handle-display-event
+         `(:type "tool_execution_update"
+           :toolCallId "test-id"
+           :partialResult (:content [(:type "text" :text ,many-lines)])))))
+    ;; Should show indicator that earlier lines are hidden
+    (should (string-match-p "earlier lines" (buffer-string)))
+    ;; Should show last few lines
+    (should (string-match-p "line20" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-tool-update-replaced-by-end ()
+  "Tool update content is replaced by final result on tool_execution_end."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash"
+       :toolCallId "test-id"
+       :args (:command "test")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_update"
+       :toolCallId "test-id"
+       :partialResult (:content [(:type "text" :text "partial streaming")])))
+    ;; Partial content should be present
+    (should (string-match-p "partial streaming" (buffer-string)))
+    ;; Now end the tool
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_end"
+       :toolName "bash"
+       :toolCallId "test-id"
+       :result (:content ((:type "text" :text "final output")))
+       :isError nil))
+    ;; Streaming content should be replaced
+    (should-not (string-match-p "partial streaming" (buffer-string)))
+    (should (string-match-p "final output" (buffer-string)))))
 
 (ert-deftest pi-coding-agent-test-display-handler-handles-thinking-delta ()
   "Display handler processes thinking_delta events."

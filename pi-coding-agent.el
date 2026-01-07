@@ -100,6 +100,12 @@ Bash output is typically more verbose, so fewer lines are shown."
   :type 'natnum
   :group 'pi-coding-agent)
 
+(defcustom pi-coding-agent-preview-max-bytes 51200
+  "Maximum bytes for tool output preview (50KB default).
+Prevents huge single-line outputs from blowing up the chat buffer."
+  :type 'natnum
+  :group 'pi-coding-agent)
+
 (defcustom pi-coding-agent-context-warning-threshold 70
   "Context usage percentage at which to show warning color."
   :type 'natnum
@@ -982,6 +988,8 @@ Updates buffer-local state and renders display updates."
                              (plist-get result :content)
                              (plist-get result :details)
                              (plist-get event :isError))))
+    ("tool_execution_update"
+     (pi-coding-agent--display-tool-update (plist-get event :partialResult)))
     ("auto_compaction_start"
      (setq pi-coding-agent--status 'compacting)
      (pi-coding-agent--spinner-start)
@@ -1132,6 +1140,42 @@ Checks both :path and :file_path keys for compatibility."
   (or (plist-get args :path)
       (plist-get args :file_path)))
 
+(defun pi-coding-agent--truncate-to-visual-lines (content max-lines width)
+  "Truncate CONTENT to fit within MAX-LINES visual lines at WIDTH.
+Also respects `pi-coding-agent-preview-max-bytes'.
+
+Returns a plist with:
+  :content      - the truncated content (or original if no truncation)
+  :visual-lines - number of visual lines in result
+  :hidden-lines - number of raw lines that were hidden"
+  (let* ((lines (split-string content "\n" t))  ; omit empty strings from trailing newlines
+         (total-raw-lines (length lines))
+         (visual-count 0)
+         (byte-count 0)
+         (max-bytes pi-coding-agent-preview-max-bytes)
+         (result-lines nil))
+    ;; Accumulate lines until we'd exceed limits
+    (catch 'done
+      (dolist (line lines)
+        (let* ((line-len (length line))
+               ;; Visual lines: ceiling(length / width), minimum 1
+               (line-visual-lines (max 1 (ceiling (float line-len) width)))
+               (new-visual-count (+ visual-count line-visual-lines))
+               ;; +1 for newline between lines
+               (new-byte-count (+ byte-count line-len (if result-lines 1 0))))
+          ;; Check if adding this line would exceed limits
+          (when (and result-lines  ; always include at least one line
+                     (or (> new-visual-count max-lines)
+                         (> new-byte-count max-bytes)))
+            (throw 'done nil))
+          (setq visual-count new-visual-count)
+          (setq byte-count new-byte-count)
+          (push line result-lines))))
+    (let ((kept-lines (nreverse result-lines)))
+      (list :content (string-join kept-lines "\n")
+            :visual-lines visual-count
+            :hidden-lines (- total-raw-lines (length kept-lines))))))
+
 (defun pi-coding-agent--tool-overlay-create (tool-name)
   "Create overlay for tool block TOOL-NAME at point.
 Returns the overlay.  The overlay uses rear-advance so it
@@ -1180,6 +1224,51 @@ it from extending to subsequent content.  Sets pending overlay to nil."
         (setq pi-coding-agent--pending-tool-overlay (pi-coding-agent--tool-overlay-create tool-name))
         (insert header-display "\n")))))
 
+(defun pi-coding-agent--display-tool-update (partial-result)
+  "Display PARTIAL-RESULT as streaming output in pending tool overlay.
+PARTIAL-RESULT has same structure as tool result: plist with :content.
+Shows rolling tail of output, truncated to visual lines.
+Previous streaming content is replaced."
+  (when (and pi-coding-agent--pending-tool-overlay partial-result)
+    ;; Extract text from content blocks (same structure as tool_execution_end)
+    (let* ((content (plist-get partial-result :content))
+           (text-blocks (seq-filter (lambda (c) (equal (plist-get c :type) "text"))
+                                    content))
+           (raw-output (mapconcat (lambda (c) (or (plist-get c :text) ""))
+                                  text-blocks "")))
+      (when (and raw-output (not (string-empty-p raw-output)))
+        (let* ((width (or (window-width) 80))
+           (max-lines pi-coding-agent-bash-preview-lines)
+           (lines (split-string raw-output "\n" t))  ; omit empty strings
+           (total-lines (length lines))
+           ;; Take last N lines for rolling tail
+           (tail-lines (if (> total-lines max-lines)
+                           (last lines max-lines)
+                         lines))
+           (hidden-count (- total-lines (length tail-lines)))
+           (tail-content (string-join tail-lines "\n"))
+           ;; Apply visual line truncation to the tail
+           (truncation (pi-coding-agent--truncate-to-visual-lines
+                        tail-content max-lines width))
+           (display-content (plist-get truncation :content))
+           (inhibit-read-only t))
+      (pi-coding-agent--with-scroll-preservation
+        (save-excursion
+          (let* ((ov-start (overlay-start pi-coding-agent--pending-tool-overlay))
+                 (ov-end (overlay-end pi-coding-agent--pending-tool-overlay)))
+            ;; Delete previous streaming content (everything after header line)
+            (goto-char ov-start)
+            (forward-line 1)
+            (when (< (point) ov-end)
+              (delete-region (point) ov-end))
+            ;; Insert new streaming content
+            (goto-char (overlay-end pi-coding-agent--pending-tool-overlay))
+            (when (> hidden-count 0)
+              (insert (propertize (format "... (%d earlier lines)\n" hidden-count)
+                                  'face 'pi-coding-agent-collapsed-indicator)))
+            (insert (propertize display-content 'face 'pi-coding-agent-tool-output))
+            (insert "\n")))))))))
+
 (defun pi-coding-agent--wrap-in-src-block (content lang)
   "Wrap CONTENT in a markdown fenced code block with LANG.
 Returns markdown string for syntax highlighting."
@@ -1220,21 +1309,30 @@ Shows preview lines with expandable toggle for long output."
                             ("edit" (or (plist-get details :diff) raw-output))
                             ("write" (or (plist-get args :content) raw-output))
                             (_ raw-output)))
-         (lines (split-string display-content "\n" t))
-         (total-lines (length lines))
          (preview-limit (pcase tool-name
                           ("bash" pi-coding-agent-bash-preview-lines)
                           (_ pi-coding-agent-tool-preview-lines)))
-         (needs-collapse (> total-lines preview-limit))
+         ;; Use visual line truncation with byte limit
+         (width (or (window-width) 80))
+         (truncation (pi-coding-agent--truncate-to-visual-lines
+                      display-content preview-limit width))
+         (hidden-count (plist-get truncation :hidden-lines))
+         (needs-collapse (> hidden-count 0))
          (inhibit-read-only t))
     (pi-coding-agent--with-scroll-preservation
+      ;; Clear any streaming content from tool_execution_update
+      (when pi-coding-agent--pending-tool-overlay
+        (let ((ov-start (overlay-start pi-coding-agent--pending-tool-overlay))
+              (ov-end (overlay-end pi-coding-agent--pending-tool-overlay)))
+          (goto-char ov-start)
+          (forward-line 1)  ; skip header line
+          (when (< (point) ov-end)
+            (delete-region (point) ov-end))))
       (goto-char (point-max))
       (if needs-collapse
           ;; Long output: show preview + toggle button
-          (let* ((preview-lines (seq-take lines preview-limit))
-                 (preview-content (string-join preview-lines "\n"))
+          (let* ((preview-content (plist-get truncation :content))
                  (full-content display-content)
-                 (hidden-count (- total-lines preview-limit))
                  ;; Render preview with syntax highlighting
                  (rendered-preview (pi-coding-agent--render-tool-content preview-content lang)))
             (insert rendered-preview "\n")
