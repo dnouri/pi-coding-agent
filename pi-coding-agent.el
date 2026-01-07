@@ -1056,16 +1056,28 @@ Slash commands are expanded before display and sending."
 If TEXT starts with /, tries to expand as a custom slash command.
 Shows an error message if process is unavailable."
   (let ((proc (pi-coding-agent--get-process))
+        (chat-buf (pi-coding-agent--get-chat-buffer))
         (expanded (pi-coding-agent--expand-slash-command text)))
     (cond
      ((null proc)
-      (message "Pi: No process available - try M-x pi to restart"))
+      (pi-coding-agent--abort-send chat-buf)
+      (message "Pi: No process available - try M-x pi-coding-agent-recover or C-c C-p R"))
      ((not (process-live-p proc))
-      (message "Pi: Process died - try M-x pi to restart"))
+      (pi-coding-agent--abort-send chat-buf)
+      (message "Pi: Process died - try M-x pi-coding-agent-recover or C-c C-p R"))
      (t
       (pi-coding-agent--rpc-async proc
                      (list :type "prompt" :message expanded)
                      #'ignore)))))
+
+(defun pi-coding-agent--abort-send (chat-buf)
+  "Clean up after a failed send attempt in CHAT-BUF.
+Stops spinner and resets status to idle."
+  (when (buffer-live-p chat-buf)
+    (with-current-buffer chat-buf
+      (pi-coding-agent--spinner-stop)
+      (setq pi-coding-agent--status 'idle)
+      (force-mode-line-update))))
 
 (defun pi-coding-agent-abort ()
   "Abort the current pi operation.
@@ -2130,6 +2142,58 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
                            (funcall callback count))))))))
 
 ;;;###autoload
+(defun pi-coding-agent-recover ()
+  "Recover the current session by restarting the process.
+Useful when the pi process has died or become unresponsive.
+Kills any existing process and starts fresh, then resumes the session
+using the cached session file."
+  (interactive)
+  (let* ((chat-buf (pi-coding-agent--get-chat-buffer))
+         (session-file (and chat-buf
+                            (buffer-local-value 'pi-coding-agent--state chat-buf)
+                            (plist-get (buffer-local-value 'pi-coding-agent--state chat-buf)
+                                       :session-file))))
+    (cond
+     ;; No chat buffer
+     ((not chat-buf)
+      (message "Pi: No session to recover"))
+     ;; No session file cached
+     ((not session-file)
+      (message "Pi: No session file available - cannot recover"))
+     ;; Recover
+     (t
+      (with-current-buffer chat-buf
+        ;; Kill old process if it exists (alive or dead)
+        (when pi-coding-agent--process
+          (pi-coding-agent--unregister-display-handler pi-coding-agent--process)
+          (when (process-live-p pi-coding-agent--process)
+            (delete-process pi-coding-agent--process)))
+        ;; Reset status to idle (in case we were stuck in streaming)
+        (setq pi-coding-agent--status 'idle)
+        ;; Start new process
+        (let* ((dir (pi-coding-agent--session-directory))
+               (new-proc (pi-coding-agent--start-process dir)))
+          (setq pi-coding-agent--process new-proc)
+          (when (processp new-proc)
+            (process-put new-proc 'pi-coding-agent-chat-buffer chat-buf)
+            (pi-coding-agent--register-display-handler new-proc)
+            ;; Switch to the saved session
+            (pi-coding-agent--rpc-async new-proc
+                           (list :type "switch_session" :sessionPath session-file)
+                           (lambda (response)
+                             (if (plist-get response :success)
+                                 (progn
+                                   ;; Reload state
+                                   (pi-coding-agent--rpc-async new-proc '(:type "get_state")
+                                                  (lambda (state-response)
+                                                    (when (plist-get state-response :success)
+                                                      (let ((new-state (pi-coding-agent--extract-state-from-response state-response)))
+                                                        (setq pi-coding-agent--status (plist-get new-state :status)
+                                                              pi-coding-agent--state new-state))
+                                                      (force-mode-line-update t))))
+                                   (message "Pi: Session recovered"))
+                               (message "Pi: Failed to recover - %s"
+                                        (or (plist-get response :error) "unknown error"))))))))))))
 (defun pi-coding-agent-resume-session ()
   "Resume a previous pi session from the current project."
   (interactive)
@@ -2250,6 +2314,29 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
                          (let ((data (plist-get response :data)))
                            (message "Pi: %s" (pi-coding-agent--format-session-stats data)))
                        (message "Pi: Failed to get session stats"))))))
+
+(defun pi-coding-agent-process-info ()
+  "Display process information for debugging.
+Shows PID, status, and session file."
+  (interactive)
+  (let* ((chat-buf (pi-coding-agent--get-chat-buffer))
+         (proc (and chat-buf (buffer-local-value 'pi-coding-agent--process chat-buf)))
+         (state (and chat-buf (buffer-local-value 'pi-coding-agent--state chat-buf)))
+         (status (and chat-buf (buffer-local-value 'pi-coding-agent--status chat-buf)))
+         (session-file (and state (plist-get state :session-file))))
+    (cond
+     ((not chat-buf)
+      (message "Pi: No session"))
+     ((not proc)
+      (message "Pi: No process (status: %s, session: %s)"
+               status
+               (or session-file "none")))
+     (t
+      (message "Pi: PID %s, %s (status: %s, session: %s)"
+               (process-id proc)
+               (if (process-live-p proc) "alive" "dead")
+               status
+               (or (and session-file (file-name-nondirectory session-file)) "none"))))))
 
 (defun pi-coding-agent-compact ()
   "Compact conversation context to reduce token usage."
@@ -2447,6 +2534,7 @@ with argument substitution.  Otherwise return TEXT unchanged."
   [["Session"
     ("n" "new" pi-coding-agent-new-session)
     ("r" "resume" pi-coding-agent-resume-session)
+    ("R" "recover" pi-coding-agent-recover)
     ("e" "export" pi-coding-agent-export-html)
     ("q" "quit" pi-coding-agent-quit)]
    ["Context"
