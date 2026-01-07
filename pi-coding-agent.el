@@ -1227,6 +1227,8 @@ Shows preview lines with expandable toggle for long output."
           (if expanded
               (pi-coding-agent--insert-collapsed-content preview-content full-content lang hidden-count)
             (pi-coding-agent--insert-expanded-content preview-content full-content lang hidden-count))
+          ;; Ensure fontification of inserted content (JIT font-lock is lazy)
+          (font-lock-ensure content-start (point))
           ;; Update overlay to include new content (overlay no longer has rear-advance)
           (move-overlay ov (car bounds) (point)))))))
 
