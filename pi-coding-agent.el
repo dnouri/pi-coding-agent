@@ -1148,7 +1148,7 @@ Returns a plist with:
   :content      - the truncated content (or original if no truncation)
   :visual-lines - number of visual lines in result
   :hidden-lines - number of raw lines that were hidden"
-  (let* ((lines (split-string content "\n"))
+  (let* ((lines (split-string content "\n" t))  ; omit empty strings from trailing newlines
          (total-raw-lines (length lines))
          (visual-count 0)
          (byte-count 0)
@@ -1239,7 +1239,7 @@ Previous streaming content is replaced."
       (when (and raw-output (not (string-empty-p raw-output)))
         (let* ((width (or (window-width) 80))
            (max-lines pi-coding-agent-bash-preview-lines)
-           (lines (split-string raw-output "\n"))
+           (lines (split-string raw-output "\n" t))  ; omit empty strings
            (total-lines (length lines))
            ;; Take last N lines for rolling tail
            (tail-lines (if (> total-lines max-lines)
