@@ -61,6 +61,13 @@ test-unit: compile test
 # ============================================================
 
 setup-pi:
+	@if [ -x "$(PI_BIN)" ]; then \
+		CURRENT=$$($(PI_BIN) --version 2>/dev/null); \
+		if [ "$$CURRENT" != "$(PI_VERSION)" ] && [ "$(PI_VERSION)" != "latest" ]; then \
+			echo "Cached pi@$$CURRENT differs from requested $(PI_VERSION), reinstalling..."; \
+			rm -rf .cache/pi; \
+		fi; \
+	fi
 	@if [ ! -x "$(PI_BIN)" ]; then \
 		echo "Installing pi@$(PI_VERSION) to .cache/pi/..."; \
 		rm -rf .cache/pi; \
