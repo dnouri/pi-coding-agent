@@ -488,22 +488,24 @@ as the top-level structure."
     (pi-coding-agent--display-agent-end)
     (should (string-suffix-p "\n\n" (buffer-string)))))
 
-(ert-deftest pi-coding-agent-test-spacing-blank-line-after-user-header ()
-  "User header is followed by blank line, then content."
+(ert-deftest pi-coding-agent-test-spacing-no-blank-line-after-user-header ()
+  "User header has no blank line after setext underline.
+The hidden === provides visual spacing when `markdown-hide-markup' is t."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (pi-coding-agent--display-user-message "Hello")
-    ;; Pattern: setext heading (You + underline), blank line, content
-    (should (string-match-p "You\n=+\n\nHello" (buffer-string)))))
+    ;; Pattern: setext heading (You + underline), NO blank line, content
+    (should (string-match-p "You\n=+\nHello" (buffer-string)))))
 
-(ert-deftest pi-coding-agent-test-spacing-blank-line-after-assistant-header ()
-  "Assistant header is followed by blank line, then content."
+(ert-deftest pi-coding-agent-test-spacing-no-blank-line-after-assistant-header ()
+  "Assistant header has no blank line after setext underline.
+The hidden === provides visual spacing when `markdown-hide-markup' is t."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (pi-coding-agent--display-agent-start)
     (pi-coding-agent--display-message-delta "Hi")
-    ;; Pattern: setext heading (Assistant + underline), blank line, content
-    (should (string-match-p "Assistant\n=+\n\nHi" (buffer-string)))))
+    ;; Pattern: setext heading (Assistant + underline), NO blank line, content
+    (should (string-match-p "Assistant\n=+\nHi" (buffer-string)))))
 
 (ert-deftest pi-coding-agent-test-spacing-blank-line-before-tool ()
   "Tool block is preceded by blank line when after text."
