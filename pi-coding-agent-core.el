@@ -176,8 +176,7 @@ Returns the process object."
      :command '("pi" "--mode" "rpc")
      :connection-type 'pipe
      :filter #'pi-coding-agent--process-filter
-     :sentinel #'pi-coding-agent--process-sentinel
-     :noquery t)))
+     :sentinel #'pi-coding-agent--process-sentinel)))
 
 ;;;; State Management
 

@@ -61,6 +61,11 @@ Sets up event dispatching through pi-coding-agent--event-handlers list."
     (should (processp proc))
     (should (process-live-p proc))))
 
+(ert-deftest pi-coding-agent-integration-process-query-on-exit ()
+  "Pi process has query-on-exit-flag set for kill confirmation."
+  (pi-coding-agent-integration-with-process
+    (should (process-query-on-exit-flag proc))))
+
 (ert-deftest pi-coding-agent-integration-get-state-succeeds ()
   "get_state command returns successful response."
   (pi-coding-agent-integration-with-process

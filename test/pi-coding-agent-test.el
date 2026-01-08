@@ -641,27 +641,6 @@ The hidden === provides visual spacing when `markdown-hide-markup' is t."
 
 ;;; Kill Buffer Protection
 
-(ert-deftest pi-coding-agent-test-kill-query-prompts-during-streaming ()
-  "Killing chat buffer during streaming prompts for confirmation."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    (let ((pi-coding-agent--status 'streaming))
-      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) nil)))
-        (should-not (pi-coding-agent--kill-buffer-query))))))
-
-(ert-deftest pi-coding-agent-test-kill-query-allows-when-idle ()
-  "Killing chat buffer when idle is allowed without prompt."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    (let ((pi-coding-agent--status 'idle))
-      (should (pi-coding-agent--kill-buffer-query)))))
-
-(ert-deftest pi-coding-agent-test-kill-query-allows-non-chat-buffer ()
-  "Killing non-chat buffers is always allowed."
-  (with-temp-buffer
-    (fundamental-mode)
-    (should (pi-coding-agent--kill-buffer-query))))
-
 (ert-deftest pi-coding-agent-test-handler-removed-on-kill ()
   "Event handler is removed when chat buffer is killed."
   (with-temp-buffer

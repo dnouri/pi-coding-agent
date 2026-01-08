@@ -20,6 +20,9 @@
 (require 'pi-coding-agent)
 (require 'pi-coding-agent-test-common)
 
+;; Disable "Buffer has running process" prompts in tests
+(remove-hook 'kill-buffer-query-functions #'process-kill-buffer-query-function)
+
 ;;;; Configuration
 
 (defvar pi-coding-agent-gui-test-model '(:provider "ollama" :modelId "qwen3:1.7b")

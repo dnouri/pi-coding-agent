@@ -325,7 +325,6 @@ This is a read-only buffer showing the conversation history."
    `((,pi-coding-agent--thinking-block-regexp 1 'pi-coding-agent-thinking append))
    'append)
 
-  (add-hook 'kill-buffer-query-functions #'pi-coding-agent--kill-buffer-query nil t)
   (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-on-kill nil t))
 
 (defvar pi-coding-agent-input-mode-map
@@ -432,7 +431,6 @@ Restores saved input when moving past newest entry."
   :group 'pi-coding-agent
   (setq-local header-line-format '(:eval (pi-coding-agent--header-line-string)))
   (add-hook 'completion-at-point-functions #'pi-coding-agent--slash-capf nil t)
-  (add-hook 'kill-buffer-query-functions #'pi-coding-agent--kill-buffer-query nil t)
   (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-input-on-kill nil t))
 
 ;;;; Session Directory Detection
@@ -870,23 +868,6 @@ Shown when the session starts without a configured model/API key."
            (propertize " in a terminal to authenticate via OAuth\n"
                        'face 'pi-coding-agent-retry-notice)
            "\n")))
-
-(defun pi-coding-agent--kill-buffer-query ()
-  "Query function for killing pi buffers.
-Prompts for confirmation if streaming is in progress."
-  (cond
-   ;; Chat buffer during streaming - confirm
-   ((and (derived-mode-p 'pi-coding-agent-chat-mode)
-         (eq pi-coding-agent--status 'streaming))
-    (yes-or-no-p "Pi is streaming. Kill session? "))
-   ;; Input buffer during streaming - confirm
-   ((and (derived-mode-p 'pi-coding-agent-input-mode)
-         pi-coding-agent--chat-buffer
-         (buffer-live-p pi-coding-agent--chat-buffer)
-         (eq (buffer-local-value 'pi-coding-agent--status pi-coding-agent--chat-buffer) 'streaming))
-    (yes-or-no-p "Pi is streaming. Kill session? "))
-   ;; Otherwise allow
-   (t t)))
 
 (defun pi-coding-agent--cleanup-on-kill ()
   "Clean up resources when chat buffer is killed.
@@ -2179,6 +2160,7 @@ using the cached session file."
                (new-proc (pi-coding-agent--start-process dir)))
           (setq pi-coding-agent--process new-proc)
           (when (processp new-proc)
+            (set-process-buffer new-proc chat-buf)
             (process-put new-proc 'pi-coding-agent-chat-buffer chat-buf)
             (pi-coding-agent--register-display-handler new-proc)
             ;; Switch to the saved session
@@ -2611,8 +2593,9 @@ Returns the chat buffer."
       (unless (and pi-coding-agent--process (process-live-p pi-coding-agent--process))
         (setq pi-coding-agent--process (pi-coding-agent--start-process dir))
         (setq new-session t)
-        ;; Store chat buffer reference in process for event handling
+        ;; Associate process with chat buffer for built-in kill confirmation
         (when (processp pi-coding-agent--process)
+          (set-process-buffer pi-coding-agent--process chat-buf)
           (process-put pi-coding-agent--process 'pi-coding-agent-chat-buffer chat-buf)
           ;; Register event handler
           (pi-coding-agent--register-display-handler pi-coding-agent--process)
