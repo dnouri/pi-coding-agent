@@ -1425,8 +1425,8 @@ then proper highlighting once block is closed."
     ;; Usage should NOT be reset on abort
     (should pi-coding-agent--last-usage)))
 
-(ert-deftest pi-coding-agent-test-thinking-rendered-as-fenced-block ()
-  "Thinking content renders as markdown fenced block after message completion."
+(ert-deftest pi-coding-agent-test-thinking-rendered-as-blockquote ()
+  "Thinking content renders as markdown blockquote."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (pi-coding-agent--handle-display-event '(:type "agent_start"))
@@ -1447,27 +1447,49 @@ then proper highlighting once block is closed."
        :assistantMessageEvent (:type "text_delta" :delta "Here is my answer.")))
     ;; Complete the message (triggers rendering)
     (pi-coding-agent--handle-display-event '(:type "message_end" :message (:role "assistant")))
-    ;; After rendering, thinking should be in a markdown fenced block
+    ;; After rendering, thinking should be in a blockquote (> prefix)
     (goto-char (point-min))
-    (should (search-forward "```thinking" nil t))
-    (should (search-forward "Let me analyze this." nil t))
-    (should (search-forward "```" nil t))
-    ;; Regular text should be outside the block
-    (should (search-forward "Here is my answer." nil t))))
+    (should (search-forward "> Let me analyze this." nil t))
+    ;; Regular text should be outside the blockquote
+    (should (search-forward "Here is my answer." nil t))
+    ;; Should NOT have code fence markers
+    (goto-char (point-min))
+    (should-not (search-forward "```thinking" nil t))))
 
-(ert-deftest pi-coding-agent-test-thinking-block-has-face ()
-  "Thinking block content has pi-coding-agent-thinking face after font-lock."
+(ert-deftest pi-coding-agent-test-thinking-blockquote-has-face ()
+  "Thinking blockquote has markdown-blockquote-face after font-lock."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (let ((inhibit-read-only t))
-      (insert "```thinking\nSome thinking here.\n```\n"))
+      (insert "> Some thinking here.\n"))
     (font-lock-ensure)
     (goto-char (point-min))
     (search-forward "Some thinking")
-    ;; Verify pi-coding-agent-thinking face is applied (may be in a list with other faces)
+    ;; Verify markdown-blockquote-face is applied (may be in a list with other faces)
     (let ((face (get-text-property (point) 'face)))
-      (should (or (eq face 'pi-coding-agent-thinking)
-                  (and (listp face) (memq 'pi-coding-agent-thinking face)))))))
+      (should (or (eq face 'markdown-blockquote-face)
+                  (and (listp face) (memq 'markdown-blockquote-face face)))))))
+
+(ert-deftest pi-coding-agent-test-thinking-multiline-blockquote ()
+  "Multi-line thinking content has > prefix on each line."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event '(:type "agent_start"))
+    (pi-coding-agent--handle-display-event '(:type "message_start"))
+    (pi-coding-agent--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "thinking_start")))
+    ;; Multi-line thinking with newline in delta
+    (pi-coding-agent--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "thinking_delta" :delta "First line.\nSecond line.")))
+    (pi-coding-agent--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "thinking_end" :content "")))
+    ;; Each line should have > prefix
+    (goto-char (point-min))
+    (should (search-forward "> First line." nil t))
+    (should (search-forward "> Second line." nil t))))
 
 (ert-deftest pi-coding-agent-test-read-tool-gets-syntax-highlighting ()
   "Read tool output gets syntax highlighting based on file path.
