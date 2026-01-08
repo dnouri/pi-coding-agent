@@ -1969,30 +1969,33 @@ Returns plist (:modified-time :first-message :message-count) or nil on error."
              (modified-time (file-attribute-modification-time attrs)))
         (with-temp-buffer
           (insert-file-contents path)
-          (let* ((line-count (count-lines (point-min) (point-max)))
-                 ;; Get first line (session header)
-                 (session-json (progn
-                                 (goto-char (point-min))
-                                 (buffer-substring-no-properties
-                                  (point) (line-end-position))))
-                 ;; Get second line (first message) if it exists
-                 (first-msg-json (progn
-                                   (forward-line 1)
-                                   (unless (eobp)
-                                     (buffer-substring-no-properties
-                                      (point) (line-end-position))))))
-            ;; Need at least the session header
-            (when (and session-json (not (string-empty-p session-json)))
-              (let* ((first-message
-                      (when (and first-msg-json (not (string-empty-p first-msg-json)))
-                        (let* ((msg-data (json-parse-string first-msg-json :object-type 'plist))
-                               (message (plist-get msg-data :message))
+          (let ((first-message nil)
+                (message-count 0)
+                (has-session-header nil))
+            (goto-char (point-min))
+            ;; Scan lines to find session header, first message, and count messages
+            (while (not (eobp))
+              (let* ((line (buffer-substring-no-properties
+                            (point) (line-end-position))))
+                (when (and line (not (string-empty-p line)))
+                  (let* ((data (json-parse-string line :object-type 'plist))
+                         (type (plist-get data :type)))
+                    (when (equal type "session")
+                      (setq has-session-header t))
+                    (when (equal type "message")
+                      (setq message-count (1+ message-count))
+                      ;; Extract text from first message only
+                      (unless first-message
+                        (let* ((message (plist-get data :message))
                                (content (plist-get message :content)))
                           (when (and content (vectorp content) (> (length content) 0))
-                            (plist-get (aref content 0) :text))))))
-                (list :modified-time modified-time
-                      :first-message first-message
-                      :message-count (max 0 (1- line-count))))))))
+                            (setq first-message (plist-get (aref content 0) :text)))))))))
+              (forward-line 1))
+            ;; Only return metadata if we found a valid session header
+            (when has-session-header
+              (list :modified-time modified-time
+                    :first-message first-message
+                    :message-count message-count)))))
     (error nil)))
 
 (defun pi-coding-agent--ms-to-time (ms)
