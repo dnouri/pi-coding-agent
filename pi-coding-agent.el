@@ -1461,6 +1461,16 @@ Works anywhere inside a tool block overlay."
 
 ;;;; Diff Overlay Highlighting
 
+;; Overlay priorities determine stacking order (higher = on top)
+;; Tool-block overlay has no priority (defaults to 0)
+(defconst pi-coding-agent--diff-line-priority 10
+  "Priority for diff line background overlays.
+Higher than tool-block (0) so diff colors show through.")
+
+(defconst pi-coding-agent--diff-indicator-priority 20
+  "Priority for diff indicator (+/-) overlays.
+Higher than line background so indicator face isn't obscured.")
+
 (defun pi-coding-agent--apply-diff-overlays (start end)
   "Apply diff highlighting overlays to region from START to END.
 Scans for lines starting with +/- and applies diff faces via overlays.
@@ -1482,11 +1492,11 @@ For example: '+ 7     code' or '-12     code'"
         (overlay-put ind-ov 'face (if is-added
                                       'diff-indicator-added
                                     'diff-indicator-removed))
-        (overlay-put ind-ov 'priority 20)
+        (overlay-put ind-ov 'priority pi-coding-agent--diff-indicator-priority)
         (overlay-put ind-ov 'pi-coding-agent-diff-overlay t)
         ;; Line background face - higher than tool-block but lower than indicator
         (overlay-put line-ov 'face (if is-added 'diff-added 'diff-removed))
-        (overlay-put line-ov 'priority 10)
+        (overlay-put line-ov 'priority pi-coding-agent--diff-line-priority)
         (overlay-put line-ov 'pi-coding-agent-diff-overlay t)))))
 
 ;;;; Compaction Display
