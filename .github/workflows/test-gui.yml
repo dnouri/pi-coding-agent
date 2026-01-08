@@ -14,7 +14,7 @@ jobs:
     timeout-minutes: 15
     services:
       ollama:
-        image: ollama/ollama:latest
+        image: ollama/ollama:0.11.11
         ports:
           - 11434:11434
     steps:
@@ -36,8 +36,21 @@ jobs:
       
       - name: Setup Ollama model
         run: |
+          # Wait for Ollama to be ready
           for i in {1..30}; do curl -s http://localhost:11434/api/tags && break; sleep 1; done
+          
+          # Pull the model
+          echo "Pulling qwen3:1.7b..."
           curl -s http://localhost:11434/api/pull -d '{"name":"qwen3:1.7b"}' | tail -1
+          
+          # Verify
+          echo "Verifying model..."
+          curl -s http://localhost:11434/api/tags | grep -q 'qwen3:1.7b' || {
+            echo "::error::Model not found after pull"
+            curl -s http://localhost:11434/api/tags
+            exit 1
+          }
+          echo "Model qwen3:1.7b is ready"
       
       - name: Run tests
         run: make test-gui-ci PI_VERSION=${{ env.PI_VERSION }}
