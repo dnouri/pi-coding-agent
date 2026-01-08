@@ -2672,3 +2672,63 @@ display-agent-end must finalize the pending overlay with error face."
             (should (eq pi-coding-agent--status 'idle))))
       (when (buffer-live-p chat-buf) (kill-buffer chat-buf))
       (when (buffer-live-p input-buf) (kill-buffer input-buf)))))
+
+;;;; Performance Tests
+
+(ert-deftest pi-coding-agent-test-streaming-inhibits-modification-hooks ()
+  "Streaming delta functions inhibit modification hooks for performance.
+This prevents expensive jit-lock/font-lock from running on each delta,
+which caused major performance issues with large buffers."
+  (let ((hook-called nil))
+    (cl-flet ((test-hook (beg end len) (setq hook-called t)))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (pi-coding-agent--display-agent-start)
+        (add-hook 'after-change-functions #'test-hook nil t)
+        (setq hook-called nil)
+        (pi-coding-agent--display-message-delta "Test delta")
+        (should-not hook-called)))))
+
+(ert-deftest pi-coding-agent-test-thinking-delta-inhibits-modification-hooks ()
+  "Thinking delta inhibits modification hooks for performance."
+  (let ((hook-called nil))
+    (cl-flet ((test-hook (beg end len) (setq hook-called t)))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (pi-coding-agent--display-agent-start)
+        (add-hook 'after-change-functions #'test-hook nil t)
+        (setq hook-called nil)
+        (pi-coding-agent--display-thinking-delta "Test thinking")
+        (should-not hook-called)))))
+
+(ert-deftest pi-coding-agent-test-tool-update-inhibits-modification-hooks ()
+  "Tool update inhibits modification hooks for performance."
+  (let ((hook-called nil))
+    (cl-flet ((test-hook (beg end len) (setq hook-called t)))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (pi-coding-agent--display-agent-start)
+        ;; Create pending tool overlay
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (setq pi-coding-agent--pending-tool-overlay
+                (pi-coding-agent--tool-overlay-create "bash"))
+          (insert "$ test\n"))
+        (add-hook 'after-change-functions #'test-hook nil t)
+        (setq hook-called nil)
+        (pi-coding-agent--display-tool-update
+         '(:content [(:type "text" :text "output")]))
+        (should-not hook-called)))))
+
+(ert-deftest pi-coding-agent-test-normal-insert-does-call-hooks ()
+  "Control test: normal inserts DO trigger hooks.
+This validates that our hook-based tests are meaningful."
+  (let ((hook-called nil))
+    (cl-flet ((test-hook (beg end len) (setq hook-called t)))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (add-hook 'after-change-functions #'test-hook nil t)
+        (setq hook-called nil)
+        (let ((inhibit-read-only t))
+          (insert "Normal insert"))
+        (should hook-called)))))

@@ -541,6 +541,14 @@ Set by display-tool-start, used by display-tool-end.")
   "Non-nil if Assistant header has been shown for current prompt.
 Used to avoid duplicate headers during retry sequences.")
 
+(defvar-local pi-coding-agent--fontify-timer nil
+  "Idle timer for periodic fontification during streaming.
+Started on agent_start, stopped on agent_end.")
+
+(defvar-local pi-coding-agent--last-fontified-pos nil
+  "Position up to which we've fontified during streaming.
+Used to avoid re-fontifying already-fontified text.")
+
 ;;;; Buffer Navigation
 
 (defun pi-coding-agent--get-chat-buffer ()
@@ -672,6 +680,7 @@ visual spacing when `markdown-hide-markup' is enabled."
   (setq pi-coding-agent--in-code-block nil)
   (setq pi-coding-agent--in-thinking-block nil)
   (pi-coding-agent--spinner-start)
+  (pi-coding-agent--fontify-timer-start)
   (force-mode-line-update))
 
 (defun pi-coding-agent--process-streaming-char (char state in-block)
@@ -731,9 +740,12 @@ Returns the transformed string."
 (defun pi-coding-agent--display-message-delta (delta)
   "Display streaming message DELTA at the streaming marker.
 Transforms ATX headings (outside code blocks) by adding one # level
-to keep our setext H1 separators as the top-level document structure."
+to keep our setext H1 separators as the top-level document structure.
+Inhibits modification hooks to prevent expensive jit-lock fontification
+on each delta - fontification happens at message end instead."
   (when (and delta pi-coding-agent--streaming-marker)
     (let* ((inhibit-read-only t)
+           (inhibit-modification-hooks t)
            (transformed (pi-coding-agent--transform-delta delta)))
       (pi-coding-agent--with-scroll-preservation
         (save-excursion
@@ -754,9 +766,12 @@ to keep our setext H1 separators as the top-level document structure."
 
 (defun pi-coding-agent--display-thinking-delta (delta)
   "Display streaming thinking DELTA at the streaming marker.
-Transforms newlines to include blockquote prefix."
+Transforms newlines to include blockquote prefix.
+Inhibits modification hooks to prevent expensive jit-lock fontification
+on each delta - fontification happens at message end instead."
   (when (and delta pi-coding-agent--streaming-marker)
     (let ((inhibit-read-only t)
+          (inhibit-modification-hooks t)
           ;; Transform newlines to include blockquote prefix on next line
           (transformed (replace-regexp-in-string "\n" "\n> " delta)))
       (pi-coding-agent--with-scroll-preservation
@@ -800,6 +815,7 @@ Note: status is set to `idle' by the event handler."
       (delete-region (point) (point-max))
       (insert "\n\n")))
   (pi-coding-agent--spinner-stop)
+  (pi-coding-agent--fontify-timer-stop)
   (pi-coding-agent--refresh-header))
 
 (defun pi-coding-agent--display-retry-start (event)
@@ -1239,7 +1255,9 @@ it from extending to subsequent content.  Sets pending overlay to nil."
   "Display PARTIAL-RESULT as streaming output in pending tool overlay.
 PARTIAL-RESULT has same structure as tool result: plist with :content.
 Shows rolling tail of output, truncated to visual lines.
-Previous streaming content is replaced."
+Previous streaming content is replaced.
+Inhibits modification hooks to prevent expensive jit-lock fontification
+on each update - fontification happens at tool end instead."
   (when (and pi-coding-agent--pending-tool-overlay partial-result)
     ;; Extract text from content blocks (same structure as tool_execution_end)
     (let* ((content (plist-get partial-result :content))
@@ -1262,7 +1280,8 @@ Previous streaming content is replaced."
            (truncation (pi-coding-agent--truncate-to-visual-lines
                         tail-content max-lines width))
            (display-content (plist-get truncation :content))
-           (inhibit-read-only t))
+           (inhibit-read-only t)
+           (inhibit-modification-hooks t))
       (pi-coding-agent--with-scroll-preservation
         (save-excursion
           (let* ((ov-start (overlay-start pi-coding-agent--pending-tool-overlay))
@@ -1637,6 +1656,52 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
                    (t nil))))
     (when (and chat-buf (memq chat-buf pi-coding-agent--spinning-sessions))
       (aref pi-coding-agent--spinner-frames pi-coding-agent--spinner-index))))
+
+;;;; Streaming Fontification
+
+(defcustom pi-coding-agent-fontify-idle-delay 0.2
+  "Seconds of idle time before fontifying streamed content.
+Lower values give more responsive highlighting but may cause stuttering."
+  :type 'number
+  :group 'pi-coding-agent)
+
+(defun pi-coding-agent--fontify-streaming-region ()
+  "Fontify newly streamed content incrementally.
+Called by idle timer during streaming.  Only fontifies content
+that hasn't been fontified yet."
+  (when (and pi-coding-agent--message-start-marker
+             pi-coding-agent--streaming-marker
+             (marker-position pi-coding-agent--message-start-marker)
+             (marker-position pi-coding-agent--streaming-marker))
+    (let* ((start (or pi-coding-agent--last-fontified-pos
+                      (marker-position pi-coding-agent--message-start-marker)))
+           (end (marker-position pi-coding-agent--streaming-marker)))
+      (when (< start end)
+        (font-lock-ensure start end)
+        (setq pi-coding-agent--last-fontified-pos end)))))
+
+(defun pi-coding-agent--fontify-timer-start ()
+  "Start idle timer for periodic fontification during streaming."
+  (unless pi-coding-agent--fontify-timer
+    (setq pi-coding-agent--last-fontified-pos nil)
+    (setq pi-coding-agent--fontify-timer
+          (run-with-idle-timer pi-coding-agent-fontify-idle-delay t
+                               #'pi-coding-agent--fontify-timer-callback
+                               (current-buffer)))))
+
+(defun pi-coding-agent--fontify-timer-stop ()
+  "Stop the fontification idle timer."
+  (when pi-coding-agent--fontify-timer
+    (cancel-timer pi-coding-agent--fontify-timer)
+    (setq pi-coding-agent--fontify-timer nil)
+    (setq pi-coding-agent--last-fontified-pos nil)))
+
+(defun pi-coding-agent--fontify-timer-callback (buffer)
+  "Fontify streaming region in BUFFER if it's still live and streaming."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (eq pi-coding-agent--status 'streaming)
+        (pi-coding-agent--fontify-streaming-region)))))
 
 (defvar pi-coding-agent--header-model-map
   (let ((map (make-sparse-keymap)))
