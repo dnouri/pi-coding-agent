@@ -2505,12 +2505,20 @@ Shows a selector of user messages and creates a branch from the selected one."
 PROC is the pi process.
 MESSAGES is a vector of plists from get_branch_messages."
   (let* ((index 0)
+         ;; Reverse so most recent messages appear first (upstream sends chronological order)
+         (reversed-messages (reverse (append messages nil)))
          (formatted (mapcar (lambda (msg)
                               (setq index (1+ index))
                               (cons (pi-coding-agent--format-branch-message msg index) msg))
-                            messages))
+                            reversed-messages))
+         (choice-strings (mapcar #'car formatted))
+         ;; Use completion table with metadata to preserve our sort order
+         ;; (completing-read normally re-sorts alphabetically)
          (choice (completing-read "Branch from: "
-                                  (mapcar #'car formatted)
+                                  (lambda (string pred action)
+                                    (if (eq action 'metadata)
+                                        '(metadata (display-sort-function . identity))
+                                      (complete-with-action action choice-strings string pred)))
                                   nil t))
          (selected (cdr (assoc choice formatted)))
          ;; Capture buffers before async call (callback runs in arbitrary context)
