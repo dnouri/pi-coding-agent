@@ -711,31 +711,54 @@ STATE is one of: `line-start', `fence-1', `fence-2', `mid-line'."
 (defun pi-coding-agent--transform-delta (delta)
   "Transform DELTA for display, handling code blocks and heading levels.
 Uses and updates buffer-local state variables for parse state.
-Returns the transformed string."
-  (let ((result (make-string 0 ?x))
-        (state pi-coding-agent--line-parse-state)
+Returns the transformed string.
+
+Performance: Uses a two-pass approach.  First checks if transformation
+is needed (rare), then only does the work when necessary.  The common
+case of no headings is O(n) with no allocations."
+  (let ((state pi-coding-agent--line-parse-state)
         (in-block pi-coding-agent--in-code-block)
-        (i 0)
-        (len (length delta)))
-    (while (< i len)
-      (let* ((char (aref delta i))
-             (at-heading-start (and (eq state 'line-start)
-                                    (not in-block)
-                                    (eq char ?#))))
-        ;; Add extra # for heading transform
-        (when at-heading-start
-          (setq result (concat result "#")))
-        ;; Add the character
-        (setq result (concat result (char-to-string char)))
-        ;; Update state
-        (let ((new-state (pi-coding-agent--process-streaming-char char state in-block)))
-          (setq state (car new-state))
-          (setq in-block (cdr new-state)))
-        (setq i (1+ i))))
-    ;; Save final state for next delta
-    (setq pi-coding-agent--line-parse-state state)
-    (setq pi-coding-agent--in-code-block in-block)
-    result))
+        (len (length delta))
+        (needs-transform nil)
+        (i 0))
+    ;; First pass: check if any transformation is needed and track state
+    ;; Also collect positions where we need to insert extra #
+    (let ((insert-positions nil))
+      (while (< i len)
+        (let ((char (aref delta i)))
+          ;; Check if we need to add # at this position
+          (when (and (eq state 'line-start)
+                     (not in-block)
+                     (eq char ?#))
+            (push i insert-positions)
+            (setq needs-transform t))
+          ;; Update state
+          (let ((new-state (pi-coding-agent--process-streaming-char char state in-block)))
+            (setq state (car new-state))
+            (setq in-block (cdr new-state)))
+          (setq i (1+ i))))
+      ;; Save final state
+      (setq pi-coding-agent--line-parse-state state)
+      (setq pi-coding-agent--in-code-block in-block)
+      ;; Fast path: no transformation needed
+      (if (not needs-transform)
+          delta
+        ;; Slow path: build result with extra # at marked positions
+        ;; insert-positions is in reverse order (last position first)
+        (let ((positions (nreverse insert-positions))
+              (result nil)
+              (prev-pos 0))
+          (dolist (pos positions)
+            ;; Add content before this position
+            (when (< prev-pos pos)
+              (push (substring delta prev-pos pos) result))
+            ;; Add the extra #
+            (push "#" result)
+            (setq prev-pos pos))
+          ;; Add remaining content
+          (when (< prev-pos len)
+            (push (substring delta prev-pos) result))
+          (apply #'concat (nreverse result)))))))
 
 (defun pi-coding-agent--display-message-delta (delta)
   "Display streaming message DELTA at the streaming marker.
@@ -1251,53 +1274,90 @@ it from extending to subsequent content.  Sets pending overlay to nil."
         (setq pi-coding-agent--pending-tool-overlay (pi-coding-agent--tool-overlay-create tool-name))
         (insert header-display "\n")))))
 
+(defun pi-coding-agent--extract-text-from-content (content-blocks)
+  "Extract text from CONTENT-BLOCKS vector efficiently.
+Returns the concatenated text from all text blocks.
+Optimized for the common case of a single text block."
+  (if (and (vectorp content-blocks) (> (length content-blocks) 0))
+      (let ((first-block (aref content-blocks 0)))
+        (if (and (= (length content-blocks) 1)
+                 (equal (plist-get first-block :type) "text"))
+            ;; Fast path: single text block (common case)
+            (or (plist-get first-block :text) "")
+          ;; Slow path: multiple blocks, need to filter and concat
+          (mapconcat (lambda (c)
+                       (if (equal (plist-get c :type) "text")
+                           (or (plist-get c :text) "")
+                         ""))
+                     content-blocks "")))
+    ""))
+
+(defun pi-coding-agent--get-tail-lines (content n)
+  "Get last N lines from CONTENT by scanning backward.
+Returns (TAIL-CONTENT . HAS-HIDDEN) where HAS-HIDDEN is non-nil
+if there are earlier lines not included in TAIL-CONTENT.
+This is O(k) where k is the size of the tail, not O(n) like `split-string'."
+  (let* ((len (length content))
+         (pos len)
+         (newlines-found 0))
+    (if (= len 0)
+        (cons "" nil)
+      ;; Skip trailing newlines
+      (while (and (> pos 0) (eq (aref content (1- pos)) ?\n))
+        (setq pos (1- pos)))
+      ;; Find N newlines from the end
+      (while (and (> pos 0) (< newlines-found n))
+        (setq pos (1- pos))
+        (when (eq (aref content pos) ?\n)
+          (setq newlines-found (1+ newlines-found))))
+      ;; Adjust pos to start after the Nth newline
+      (when (and (> pos 0) (eq (aref content pos) ?\n))
+        (setq pos (1+ pos)))
+      ;; Return tail and whether there's hidden content
+      (cons (substring content pos) (> pos 0)))))
+
 (defun pi-coding-agent--display-tool-update (partial-result)
   "Display PARTIAL-RESULT as streaming output in pending tool overlay.
 PARTIAL-RESULT has same structure as tool result: plist with :content.
 Shows rolling tail of output, truncated to visual lines.
 Previous streaming content is replaced.
 Inhibits modification hooks to prevent expensive jit-lock fontification
-on each update - fontification happens at tool end instead."
+on each update - fontification happens at tool end instead.
+
+Performance: Uses backward scanning to extract tail lines in O(k) time
+where k is the tail size, rather than O(n) for the full content."
   (when (and pi-coding-agent--pending-tool-overlay partial-result)
-    ;; Extract text from content blocks (same structure as tool_execution_end)
-    (let* ((content (plist-get partial-result :content))
-           (text-blocks (seq-filter (lambda (c) (equal (plist-get c :type) "text"))
-                                    content))
-           (raw-output (mapconcat (lambda (c) (or (plist-get c :text) ""))
-                                  text-blocks "")))
-      (when (and raw-output (not (string-empty-p raw-output)))
-        (let* ((width (or (window-width) 80))
-           (max-lines pi-coding-agent-bash-preview-lines)
-           (lines (split-string raw-output "\n" t))  ; omit empty strings
-           (total-lines (length lines))
-           ;; Take last N lines for rolling tail
-           (tail-lines (if (> total-lines max-lines)
-                           (last lines max-lines)
-                         lines))
-           (hidden-count (- total-lines (length tail-lines)))
-           (tail-content (string-join tail-lines "\n"))
-           ;; Apply visual line truncation to the tail
-           (truncation (pi-coding-agent--truncate-to-visual-lines
-                        tail-content max-lines width))
-           (display-content (plist-get truncation :content))
-           (inhibit-read-only t)
-           (inhibit-modification-hooks t))
-      (pi-coding-agent--with-scroll-preservation
-        (save-excursion
-          (let* ((ov-start (overlay-start pi-coding-agent--pending-tool-overlay))
-                 (ov-end (overlay-end pi-coding-agent--pending-tool-overlay)))
-            ;; Delete previous streaming content (everything after header line)
-            (goto-char ov-start)
-            (forward-line 1)
-            (when (< (point) ov-end)
-              (delete-region (point) ov-end))
-            ;; Insert new streaming content
-            (goto-char (overlay-end pi-coding-agent--pending-tool-overlay))
-            (when (> hidden-count 0)
-              (insert (propertize (format "... (%d earlier lines)\n" hidden-count)
-                                  'face 'pi-coding-agent-collapsed-indicator)))
-            (insert (propertize display-content 'face 'pi-coding-agent-tool-output))
-            (insert "\n")))))))))
+    (let* ((content-blocks (plist-get partial-result :content))
+           (raw-output (pi-coding-agent--extract-text-from-content content-blocks)))
+      (when (not (string-empty-p raw-output))
+        (let* ((max-lines pi-coding-agent-bash-preview-lines)
+               ;; Get tail lines efficiently via backward scan
+               (tail-result (pi-coding-agent--get-tail-lines raw-output max-lines))
+               (tail-content (car tail-result))
+               (has-hidden (cdr tail-result))
+               ;; Apply visual line truncation to the tail
+               (width (or (window-width) 80))
+               (truncation (pi-coding-agent--truncate-to-visual-lines
+                            tail-content max-lines width))
+               (display-content (plist-get truncation :content))
+               (inhibit-read-only t)
+               (inhibit-modification-hooks t))
+          (pi-coding-agent--with-scroll-preservation
+            (save-excursion
+              (let* ((ov-start (overlay-start pi-coding-agent--pending-tool-overlay))
+                     (ov-end (overlay-end pi-coding-agent--pending-tool-overlay)))
+                ;; Delete previous streaming content (everything after header line)
+                (goto-char ov-start)
+                (forward-line 1)
+                (when (< (point) ov-end)
+                  (delete-region (point) ov-end))
+                ;; Insert new streaming content
+                (goto-char (overlay-end pi-coding-agent--pending-tool-overlay))
+                (when has-hidden
+                  (insert (propertize "... (earlier output)\n"
+                                      'face 'pi-coding-agent-collapsed-indicator)))
+                (insert (propertize display-content 'face 'pi-coding-agent-tool-output))
+                (insert "\n")))))))))
 
 (defun pi-coding-agent--wrap-in-src-block (content lang)
   "Wrap CONTENT in a markdown fenced code block with LANG.
