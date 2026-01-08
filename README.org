@@ -120,7 +120,9 @@ unfold. Use =S-TAB= to cycle visibility of all turns at once.
 
 The input buffer is a full Emacs buffer—one of the main advantages over
 terminal interfaces. Write multi-line prompts, yank code from other
-buffers with =C-y=, or use any editing commands you know.
+buffers with =C-y=, or use any editing commands you know. If you prefer
+Vim-style editing, [[https://github.com/emacs-evil/evil][Evil mode]] works seamlessly—compose
+prompts with =i=, =a=, =ciw=, and all the motions you're used to.
 
 Slash commands (=/command=) work with completion: type =/= then =TAB= to
 see available commands, including your custom ones from =~/.pi/commands/=.
