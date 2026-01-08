@@ -293,6 +293,19 @@ Returns nil if the extension is not recognized."
         (goto-char pos)
       (message "No previous message"))))
 
+(defconst pi-coding-agent--blockquote-wrap-prefix
+  (propertize "▌ " 'face 'markdown-blockquote-face)
+  "String for continuation lines in blockquotes.
+Matches `markdown-blockquote-display-char' with same face.")
+
+(defun pi-coding-agent--fontify-blockquote-wrap-prefix (last)
+  "Add `wrap-prefix' to blockquotes from point to LAST.
+This makes wrapped lines show the blockquote indicator."
+  (when (re-search-forward markdown-regex-blockquote last t)
+    (put-text-property (match-beginning 0) (match-end 0)
+                       'wrap-prefix pi-coding-agent--blockquote-wrap-prefix)
+    t))
+
 (define-derived-mode pi-coding-agent-chat-mode gfm-mode "Pi-Chat"
   "Major mode for displaying pi conversation.
 Derives from `gfm-mode' for syntax highlighting of code blocks.
@@ -309,6 +322,9 @@ This is a read-only buffer showing the conversation history."
   ;; Make window-point follow inserted text (like comint does).
   ;; This is key for natural scroll behavior during streaming.
   (setq-local window-point-insertion-type t)
+
+  ;; Add wrap-prefix to blockquotes so wrapped lines show the indicator
+  (font-lock-add-keywords nil '((pi-coding-agent--fontify-blockquote-wrap-prefix)) 'append)
 
   (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-on-kill nil t))
 
