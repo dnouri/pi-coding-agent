@@ -1116,6 +1116,89 @@ then proper highlighting once block is closed."
       ;; Should NOT have more-lines indicator
       (should-not (string-match-p "more lines" (buffer-string))))))
 
+;;; Diff Overlay Highlighting
+
+(ert-deftest pi-coding-agent-test-apply-diff-overlays-added-line ()
+  "Diff overlays should mark added lines with diff-added faces."
+  (with-temp-buffer
+    ;; Use actual pi format: +<space><padded-linenum><space><code>
+    (insert "+ 7     added line\n")
+    (pi-coding-agent--apply-diff-overlays (point-min) (point-max))
+    (goto-char (point-min))
+    ;; Should have overlay with diff-indicator-added on the + character
+    (let ((ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
+                           (overlays-at (point)))))
+      (should ovs)
+      (should (memq 'diff-indicator-added
+                    (mapcar (lambda (ov) (overlay-get ov 'face)) ovs))))))
+
+(ert-deftest pi-coding-agent-test-apply-diff-overlays-removed-line ()
+  "Diff overlays should mark removed lines with diff-removed faces."
+  (with-temp-buffer
+    ;; Use actual pi format: -<space><padded-linenum><space><code>
+    (insert "-12     removed line\n")
+    (pi-coding-agent--apply-diff-overlays (point-min) (point-max))
+    (goto-char (point-min))
+    (let ((ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
+                           (overlays-at (point)))))
+      (should ovs)
+      (should (memq 'diff-indicator-removed
+                    (mapcar (lambda (ov) (overlay-get ov 'face)) ovs))))))
+
+(ert-deftest pi-coding-agent-test-apply-diff-overlays-multiline ()
+  "Diff overlays should handle multiple diff lines."
+  (with-temp-buffer
+    ;; Use actual pi format
+    (insert "+ 1     added\n- 2     removed\n")
+    (pi-coding-agent--apply-diff-overlays (point-min) (point-max))
+    ;; Count diff overlays
+    (let ((all-ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
+                               (overlays-in (point-min) (point-max)))))
+      ;; Should have 4 overlays: indicator + line for each of 2 lines
+      (should (= 4 (length all-ovs))))))
+
+(ert-deftest pi-coding-agent-test-apply-diff-overlays-line-background ()
+  "Diff overlays should apply background color to entire line."
+  (with-temp-buffer
+    ;; Use actual pi format: "+ 7     def foo():"
+    (insert "+ 7     def foo():\n")
+    (pi-coding-agent--apply-diff-overlays (point-min) (point-max))
+    ;; Check overlay at "def" position (after "+ 7     ")
+    (goto-char 9)
+    (let ((ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
+                           (overlays-at (point)))))
+      (should ovs)
+      ;; Should have diff-added face for background
+      (should (memq 'diff-added
+                    (mapcar (lambda (ov) (overlay-get ov 'face)) ovs))))))
+
+(ert-deftest pi-coding-agent-test-edit-tool-diff-uses-overlays ()
+  "Edit tool output should use overlays for diff highlighting."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--tool-args-cache (make-hash-table :test 'equal))
+    (puthash "test" '(:path "/tmp/test.py") pi-coding-agent--tool-args-cache)
+    (pi-coding-agent--display-tool-start "edit" '(:path "/tmp/test.py"))
+    ;; Use actual pi format
+    (let ((diff-content "+ 1     def foo():\n- 2     def bar():"))
+      (pi-coding-agent--display-tool-end
+       "edit"
+       '(:path "/tmp/test.py")
+       '((:type "text" :text "Edit successful"))
+       (list :diff diff-content)
+       nil))
+    ;; Should have diff overlays
+    (let ((diff-ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
+                                (overlays-in (point-min) (point-max)))))
+      (should (> (length diff-ovs) 0)))
+    ;; Check for added line overlay
+    (goto-char (point-min))
+    (search-forward "+ 1" nil t)
+    (let ((ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
+                           (overlays-at (match-beginning 0)))))
+      (should (memq 'diff-indicator-added
+                    (mapcar (lambda (ov) (overlay-get ov 'face)) ovs))))))
+
 ;;; Visual Line Truncation Tests
 
 (ert-deftest pi-coding-agent-test-truncate-visual-lines-simple ()
