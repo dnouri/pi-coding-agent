@@ -200,11 +200,6 @@ Prevents huge single-line outputs from blowing up the chat buffer."
   "Face for model name in header line."
   :group 'pi-coding-agent)
 
-(defface pi-coding-agent-thinking
-  '((t :inherit font-lock-comment-face :slant italic))
-  "Face for thinking/reasoning block content."
-  :group 'pi-coding-agent)
-
 (defface pi-coding-agent-retry-notice
   '((t :inherit warning :slant italic))
   "Face for retry notifications (rate limit, overloaded, etc.)."
@@ -298,10 +293,6 @@ Returns nil if the extension is not recognized."
         (goto-char pos)
       (message "No previous message"))))
 
-(defconst pi-coding-agent--thinking-block-regexp
-  "^```thinking\n\\(\\(?:.*\n\\)*?\\)```"
-  "Regexp matching thinking blocks for font-lock.")
-
 (define-derived-mode pi-coding-agent-chat-mode gfm-mode "Pi-Chat"
   "Major mode for displaying pi conversation.
 Derives from `gfm-mode' for syntax highlighting of code blocks.
@@ -318,12 +309,6 @@ This is a read-only buffer showing the conversation history."
   ;; Make window-point follow inserted text (like comint does).
   ;; This is key for natural scroll behavior during streaming.
   (setq-local window-point-insertion-type t)
-
-  ;; Apply pi-coding-agent-thinking face to thinking block content
-  (font-lock-add-keywords
-   nil
-   `((,pi-coding-agent--thinking-block-regexp 1 'pi-coding-agent-thinking append))
-   'append)
 
   (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-on-kill nil t))
 
@@ -495,6 +480,10 @@ TYPE is :chat or :input.  Returns the buffer."
   "Non-nil when streaming inside a fenced code block.
 Used to suppress ATX heading transforms inside code.")
 
+(defvar-local pi-coding-agent--in-thinking-block nil
+  "Non-nil when streaming inside a thinking block.
+Used to add blockquote prefix to each line.")
+
 (defvar-local pi-coding-agent--line-parse-state 'line-start
   "Parsing state for current line during streaming.
 Values:
@@ -662,9 +651,10 @@ visual spacing when `markdown-hide-markup' is enabled."
   ;; streaming-marker: where new deltas are inserted
   (setq pi-coding-agent--message-start-marker (copy-marker (point-max) nil))
   (setq pi-coding-agent--streaming-marker (copy-marker (point-max) t))
-  ;; Reset streaming parse state - content starts at line beginning, outside code block
+  ;; Reset streaming parse state - content starts at line beginning, outside code/thinking block
   (setq pi-coding-agent--line-parse-state 'line-start)
   (setq pi-coding-agent--in-code-block nil)
+  (setq pi-coding-agent--in-thinking-block nil)
   (pi-coding-agent--spinner-start)
   (force-mode-line-update))
 
@@ -736,34 +726,40 @@ to keep our setext H1 separators as the top-level document structure."
           (set-marker pi-coding-agent--streaming-marker (point)))))))
 
 (defun pi-coding-agent--display-thinking-start ()
-  "Insert opening marker for thinking block."
+  "Insert opening marker for thinking block (blockquote)."
   (when pi-coding-agent--streaming-marker
+    (setq pi-coding-agent--in-thinking-block t)
     (let ((inhibit-read-only t))
       (pi-coding-agent--with-scroll-preservation
         (save-excursion
           (goto-char (marker-position pi-coding-agent--streaming-marker))
-          (insert "```thinking\n")
+          (insert "> ")
           (set-marker pi-coding-agent--streaming-marker (point)))))))
 
 (defun pi-coding-agent--display-thinking-delta (delta)
-  "Display streaming thinking DELTA at the streaming marker."
+  "Display streaming thinking DELTA at the streaming marker.
+Transforms newlines to include blockquote prefix."
   (when (and delta pi-coding-agent--streaming-marker)
-    (let ((inhibit-read-only t))
+    (let ((inhibit-read-only t)
+          ;; Transform newlines to include blockquote prefix on next line
+          (transformed (replace-regexp-in-string "\n" "\n> " delta)))
       (pi-coding-agent--with-scroll-preservation
         (save-excursion
           (goto-char (marker-position pi-coding-agent--streaming-marker))
-          (insert delta)
+          (insert transformed)
           (set-marker pi-coding-agent--streaming-marker (point)))))))
 
 (defun pi-coding-agent--display-thinking-end (_content)
-  "Insert closing marker for thinking block.
+  "End thinking block (blockquote).
 CONTENT is ignored - we use what was already streamed."
   (when pi-coding-agent--streaming-marker
+    (setq pi-coding-agent--in-thinking-block nil)
     (let ((inhibit-read-only t))
       (pi-coding-agent--with-scroll-preservation
         (save-excursion
           (goto-char (marker-position pi-coding-agent--streaming-marker))
-          (insert "\n```\n\n")
+          ;; End blockquote with blank line
+          (insert "\n\n")
           (set-marker pi-coding-agent--streaming-marker (point)))))))
 
 (defun pi-coding-agent--display-agent-end ()
