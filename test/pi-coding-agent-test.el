@@ -1116,42 +1116,7 @@ then proper highlighting once block is closed."
       ;; Should NOT have more-lines indicator
       (should-not (string-match-p "more lines" (buffer-string))))))
 
-;;; Diff Syntax Highlighting
-
-(ert-deftest pi-coding-agent-test-parse-diff-line-added ()
-  "Parse an added line from diff output."
-  (let ((result (pi-coding-agent--parse-diff-line "+  1 def foo():")))
-    (should (equal (plist-get result :prefix) "+  1 "))
-    (should (equal (plist-get result :code) "def foo():"))
-    (should (equal (plist-get result :type) 'added))))
-
-(ert-deftest pi-coding-agent-test-parse-diff-line-removed ()
-  "Parse a removed line from diff output."
-  (let ((result (pi-coding-agent--parse-diff-line "-123 old_line")))
-    (should (equal (plist-get result :prefix) "-123 "))
-    (should (equal (plist-get result :code) "old_line"))
-    (should (equal (plist-get result :type) 'removed))))
-
-(ert-deftest pi-coding-agent-test-parse-diff-line-context ()
-  "Parse a context line from diff output."
-  (let ((result (pi-coding-agent--parse-diff-line "  42 unchanged")))
-    (should (equal (plist-get result :prefix) "  42 "))
-    (should (equal (plist-get result :code) "unchanged"))
-    (should (equal (plist-get result :type) 'context))))
-
-(ert-deftest pi-coding-agent-test-parse-diff-line-empty-code ()
-  "Parse a diff line with empty code portion."
-  (let ((result (pi-coding-agent--parse-diff-line "+  5 ")))
-    (should (equal (plist-get result :prefix) "+  5 "))
-    (should (equal (plist-get result :code) ""))
-    (should (equal (plist-get result :type) 'added))))
-
-(ert-deftest pi-coding-agent-test-parse-diff-line-code-starts-with-digits ()
-  "Parse a diff line where code starts with digits."
-  (let ((result (pi-coding-agent--parse-diff-line " 999 123start")))
-    (should (equal (plist-get result :prefix) " 999 "))
-    (should (equal (plist-get result :code) "123start"))
-    (should (equal (plist-get result :type) 'context))))
+;;; Diff Overlay Highlighting
 
 (ert-deftest pi-coding-agent-test-lang-to-mode-returns-callable ()
   "Language strings should resolve to callable major modes."
@@ -1164,128 +1129,86 @@ then proper highlighting once block is closed."
   "Unknown language should return nil."
   (should-not (pi-coding-agent--lang-to-mode "unknown-language-xyz")))
 
-(ert-deftest pi-coding-agent-test-fontify-code-string-applies-faces ()
-  "Fontifying code string should apply language-specific faces."
-  (let ((result (pi-coding-agent--fontify-code-string "def foo():" 'python-mode)))
-    ;; "def" should have keyword face
-    (let ((face-at-def (get-text-property 0 'face result)))
-      (should (or (eq face-at-def 'font-lock-keyword-face)
-                  (and (listp face-at-def)
-                       (memq 'font-lock-keyword-face face-at-def)))))))
+(ert-deftest pi-coding-agent-test-apply-diff-overlays-added-line ()
+  "Diff overlays should mark added lines with diff-added faces."
+  (with-temp-buffer
+    ;; Use actual pi format: +<space><padded-linenum><space><code>
+    (insert "+ 7     added line\n")
+    (pi-coding-agent--apply-diff-overlays (point-min) (point-max))
+    (goto-char (point-min))
+    ;; Should have overlay with diff-indicator-added on the + character
+    (let ((ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
+                           (overlays-at (point)))))
+      (should ovs)
+      (should (memq 'diff-indicator-added
+                    (mapcar (lambda (ov) (overlay-get ov 'face)) ovs))))))
 
-(ert-deftest pi-coding-agent-test-fontify-code-string-preserves-text ()
-  "Fontifying code string should preserve the original text."
-  (let ((result (pi-coding-agent--fontify-code-string "def foo():" 'python-mode)))
-    (should (equal (substring-no-properties result) "def foo():"))))
+(ert-deftest pi-coding-agent-test-apply-diff-overlays-removed-line ()
+  "Diff overlays should mark removed lines with diff-removed faces."
+  (with-temp-buffer
+    ;; Use actual pi format: -<space><padded-linenum><space><code>
+    (insert "-12     removed line\n")
+    (pi-coding-agent--apply-diff-overlays (point-min) (point-max))
+    (goto-char (point-min))
+    (let ((ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
+                           (overlays-at (point)))))
+      (should ovs)
+      (should (memq 'diff-indicator-removed
+                    (mapcar (lambda (ov) (overlay-get ov 'face)) ovs))))))
 
-(ert-deftest pi-coding-agent-test-fontify-diff-line-added ()
-  "Fontifying an added diff line should combine diff and syntax faces."
-  (let ((result (pi-coding-agent--fontify-diff-line "+  1 def foo():" 'python-mode)))
-    ;; Prefix should have diff-indicator-added face
-    (let ((prefix-face (get-text-property 0 'face result)))
-      (should (or (eq prefix-face 'diff-indicator-added)
-                  (and (listp prefix-face)
-                       (memq 'diff-indicator-added prefix-face)))))
-    ;; Code portion "def" should have both syntax and diff faces
-    (let ((code-start 5)  ; After "+  1 "
-          (def-face (get-text-property 5 'face result)))
-      (should (or (and (listp def-face)
-                       (memq 'font-lock-keyword-face def-face)
-                       (memq 'diff-added def-face))
-                  ;; Or just keyword face if layering not implemented yet
-                  (eq def-face 'font-lock-keyword-face))))))
+(ert-deftest pi-coding-agent-test-apply-diff-overlays-multiline ()
+  "Diff overlays should handle multiple diff lines."
+  (with-temp-buffer
+    ;; Use actual pi format
+    (insert "+ 1     added\n- 2     removed\n")
+    (pi-coding-agent--apply-diff-overlays (point-min) (point-max))
+    ;; Count diff overlays
+    (let ((all-ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
+                               (overlays-in (point-min) (point-max)))))
+      ;; Should have 4 overlays: indicator + line for each of 2 lines
+      (should (= 4 (length all-ovs))))))
 
-(ert-deftest pi-coding-agent-test-fontify-diff-line-removed ()
-  "Fontifying a removed diff line should use diff-removed faces."
-  (let ((result (pi-coding-agent--fontify-diff-line "-  1 old_code" 'python-mode)))
-    (let ((prefix-face (get-text-property 0 'face result)))
-      (should (or (eq prefix-face 'diff-indicator-removed)
-                  (and (listp prefix-face)
-                       (memq 'diff-indicator-removed prefix-face)))))))
+(ert-deftest pi-coding-agent-test-apply-diff-overlays-line-background ()
+  "Diff overlays should apply background color to entire line."
+  (with-temp-buffer
+    ;; Use actual pi format: "+ 7     def foo():"
+    (insert "+ 7     def foo():\n")
+    (pi-coding-agent--apply-diff-overlays (point-min) (point-max))
+    ;; Check overlay at "def" position (after "+ 7     ")
+    (goto-char 9)
+    (let ((ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
+                           (overlays-at (point)))))
+      (should ovs)
+      ;; Should have diff-added face for background
+      (should (memq 'diff-added
+                    (mapcar (lambda (ov) (overlay-get ov 'face)) ovs))))))
 
-(ert-deftest pi-coding-agent-test-fontify-diff-line-preserves-text ()
-  "Fontifying diff line should preserve the original text."
-  (let ((result (pi-coding-agent--fontify-diff-line "+  1 def foo():" 'python-mode)))
-    (should (equal (substring-no-properties result) "+  1 def foo():"))))
-
-(ert-deftest pi-coding-agent-test-fontify-diff-line-layers-faces ()
-  "Syntax highlighting should layer on top of diff faces."
-  (let ((result (pi-coding-agent--fontify-diff-line "+  1 def foo():" 'python-mode)))
-    ;; "def" at position 5 should have both keyword and diff-added faces
-    (let ((faces-at-def (get-text-property 5 'face result)))
-      (should (listp faces-at-def))
-      (should (memq 'font-lock-keyword-face faces-at-def))
-      (should (memq 'diff-added faces-at-def)))))
-
-(ert-deftest pi-coding-agent-test-fontify-diff-content-multiline ()
-  "Fontifying multi-line diff content should handle each line."
-  (let* ((diff-content "+  1 def foo():\n-  1 def bar():\n   2     pass")
-         (result (pi-coding-agent--fontify-diff-content diff-content "test.py")))
-    ;; Should preserve overall structure
-    (should (string-match-p "def foo" result))
-    (should (string-match-p "def bar" result))
-    (should (string-match-p "pass" result))
-    ;; First line should have added face
-    (should (memq 'diff-indicator-added
-                  (ensure-list (get-text-property 0 'face result))))))
-
-(ert-deftest pi-coding-agent-test-fontify-diff-content-unknown-language ()
-  "Fontifying diff for unknown file type should still apply diff faces."
-  (let* ((diff-content "+  1 some content")
-         (result (pi-coding-agent--fontify-diff-content diff-content "test.unknown")))
-    ;; Should have diff face even without syntax highlighting
-    (should (memq 'diff-indicator-added
-                  (ensure-list (get-text-property 0 'face result))))))
-
-(ert-deftest pi-coding-agent-test-fontify-diff-content-marked-fontified ()
-  "Fontified diff content should be marked to prevent font-lock override."
-  (let* ((diff-content "+  1 def foo():")
-         (result (pi-coding-agent--fontify-diff-content diff-content "test.py")))
-    ;; Should have font-lock-fontified property to prevent re-fontification
-    (should (get-text-property 0 'font-lock-fontified result))
-    (should (get-text-property 0 'fontified result))))
-
-(ert-deftest pi-coding-agent-test-edit-tool-diff-has-syntax-highlighting ()
-  "Edit tool output should have both diff and syntax highlighting."
+(ert-deftest pi-coding-agent-test-edit-tool-diff-uses-overlays ()
+  "Edit tool output should use overlays for diff highlighting."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--tool-args-cache (make-hash-table :test 'equal))
+    (puthash "test" '(:path "/tmp/test.py") pi-coding-agent--tool-args-cache)
     (pi-coding-agent--display-tool-start "edit" '(:path "/tmp/test.py"))
-    (let ((diff-content "+  1 def foo():\n   2     pass"))
+    ;; Use actual pi format
+    (let ((diff-content "+ 1     def foo():\n- 2     def bar():"))
       (pi-coding-agent--display-tool-end
        "edit"
        '(:path "/tmp/test.py")
        '((:type "text" :text "Edit successful"))
        (list :diff diff-content)
        nil))
-    ;; Find the "def" keyword in the buffer
+    ;; Should have diff overlays
+    (let ((diff-ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
+                                (overlays-in (point-min) (point-max)))))
+      (should (> (length diff-ovs) 0)))
+    ;; Check for added line overlay
     (goto-char (point-min))
-    (should (search-forward "def" nil t))
-    (let ((face (get-text-property (match-beginning 0) 'face)))
-      ;; Should have Python keyword face
-      (should (memq 'font-lock-keyword-face (ensure-list face))))))
-
-(ert-deftest pi-coding-agent-test-edit-tool-diff-has-diff-faces ()
-  "Edit tool output should have diff indicator faces on prefix."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    (pi-coding-agent--display-tool-start "edit" '(:path "/tmp/test.py"))
-    (let ((diff-content "+  1 def foo():\n-  1 def bar():"))
-      (pi-coding-agent--display-tool-end
-       "edit"
-       '(:path "/tmp/test.py")
-       '((:type "text" :text "Edit successful"))
-       (list :diff diff-content)
-       nil))
-    ;; Find the "+" indicator at start of added line
-    (goto-char (point-min))
-    (should (search-forward "+  1" nil t))
-    (let ((face (get-text-property (match-beginning 0) 'face)))
-      (should (memq 'diff-indicator-added (ensure-list face))))
-    ;; Find the "-" indicator at start of removed line
-    (goto-char (point-min))
-    (should (search-forward "-  1" nil t))
-    (let ((face (get-text-property (match-beginning 0) 'face)))
-      (should (memq 'diff-indicator-removed (ensure-list face))))))
+    (search-forward "+ 1" nil t)
+    (let ((ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
+                           (overlays-at (match-beginning 0)))))
+      (should (memq 'diff-indicator-added
+                    (mapcar (lambda (ov) (overlay-get ov 'face)) ovs))))))
 
 ;;; Visual Line Truncation Tests
 
