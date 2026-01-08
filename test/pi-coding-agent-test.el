@@ -1491,6 +1491,17 @@ then proper highlighting once block is closed."
     (should (search-forward "> First line." nil t))
     (should (search-forward "> Second line." nil t))))
 
+(ert-deftest pi-coding-agent-test-blockquote-has-wrap-prefix ()
+  "Blockquotes have wrap-prefix for continuation lines after font-lock."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "> Some blockquote content.\n"))
+    (font-lock-ensure)
+    (goto-char (point-min))
+    (search-forward "Some blockquote")
+    (should (get-text-property (point) 'wrap-prefix))))
+
 (ert-deftest pi-coding-agent-test-read-tool-gets-syntax-highlighting ()
   "Read tool output gets syntax highlighting based on file path.
 The toolCallId is used to correlate start/end events since args
