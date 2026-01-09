@@ -63,6 +63,7 @@
 (require 'pi-coding-agent-core)
 (require 'project)
 (require 'markdown-mode)
+(require 'ansi-color)
 
 ;;;; Customization Group
 
@@ -1429,10 +1430,12 @@ Shows preview lines with expandable toggle for long output."
                             (plist-get details :diff)))
          ;; For edit with diff, use diff from details
          ;; For write, use content from args (result is just success message)
-         (display-content (pcase tool-name
-                            ("edit" (or (plist-get details :diff) raw-output))
-                            ("write" (or (plist-get args :content) raw-output))
-                            (_ raw-output)))
+         ;; Strip ANSI escape codes - CLI tools often output colors
+         (display-content (ansi-color-filter-apply
+                           (pcase tool-name
+                             ("edit" (or (plist-get details :diff) raw-output))
+                             ("write" (or (plist-get args :content) raw-output))
+                             (_ raw-output))))
          (preview-limit (pcase tool-name
                           ("bash" pi-coding-agent-bash-preview-lines)
                           (_ pi-coding-agent-tool-preview-lines)))
