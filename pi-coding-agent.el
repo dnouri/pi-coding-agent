@@ -2159,6 +2159,8 @@ Ensures markdown structures don't leak to subsequent content."
     (let ((start (with-current-buffer (pi-coding-agent--get-chat-buffer) (point-max))))
       (pi-coding-agent--append-to-chat text)
       (with-current-buffer (pi-coding-agent--get-chat-buffer)
+        (let ((inhibit-read-only t))
+          (pi-coding-agent--align-tables-in-region start (point-max)))
         (font-lock-ensure start (point-max)))
       ;; Ensure we end with newlines to reset markdown context
       ;; Two newlines ends any list/paragraph context

@@ -702,6 +702,17 @@ The hidden === provides visual spacing when `markdown-hide-markup' is t."
     ;; The short separator "---" should now be longer (at least 5 dashes)
     (should-not (string-match-p "|---|---|" (buffer-string)))))
 
+(ert-deftest pi-coding-agent-test-history-text-aligns-tables ()
+  "Tables in restored history messages get aligned."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--chat-buffer (current-buffer))
+    ;; Simulate rendering history text with a table
+    (pi-coding-agent--render-history-text
+     "| Short | Much Longer |\n|---|---|\n| a | b |\n")
+    ;; After render: tables should be aligned (separators expanded)
+    (should-not (string-match-p "|---|---|" (buffer-string)))))
+
 ;;; Syntax Highlighting
 
 (ert-deftest pi-coding-agent-test-chat-mode-derives-from-gfm ()
