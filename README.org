@@ -9,7 +9,7 @@
 
 An Emacs frontend for the [[https://shittycodingagent.ai/][pi coding agent]].
 
-[[https://danielnouri.org/media/pi-el-demo.gif]]
+#+html: <video src="https://danielnouri.org/media/pi-coding-agent-demo.mp4" width="100%" controls></video>
 
 * Features
 
