@@ -56,8 +56,15 @@
         (pi-coding-agent-gui-test-delete-temp-file test-file)))))
 
 (ert-deftest pi-coding-agent-gui-test-scroll-auto-when-at-end ()
-  "Test auto-scroll when user is at end of buffer."
+  "Test auto-scroll when user is at end of buffer.
+Also verifies window-point stayed at end across previous tests (shared session).
+Regression: display-agent-end was leaving window-point behind point-max,
+breaking auto-scroll for subsequent turns."
   (pi-coding-agent-gui-test-with-session
+    ;; After previous tests, window-point should still be at end (following)
+    ;; This catches the regression where display-agent-end left point behind
+    (should (pi-coding-agent-gui-test-window-point-at-end-p))
+    ;; Explicitly scroll to end (main test purpose) and verify auto-scroll works
     (pi-coding-agent-gui-test-scroll-to-end)
     (should (pi-coding-agent-gui-test-at-end-p))
     (pi-coding-agent-gui-test-send "Say: ok")

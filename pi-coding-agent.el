@@ -823,20 +823,24 @@ Note: status is set to `idle' by the event handler."
     ;; Clean up pending tool overlay if abort happened mid-tool
     (pi-coding-agent--tool-overlay-finalize 'pi-coding-agent-tool-block-error)
     ;; Show abort indicator if aborted
+    ;; Use scroll preservation so following windows stay at end
     (when pi-coding-agent--aborted
-      (save-excursion
-        (goto-char (point-max))
-        ;; Remove trailing whitespace before adding indicator
-        (skip-chars-backward " \t\n")
-        (delete-region (point) (point-max))
-        (insert "\n\n" (propertize "[Aborted]" 'face 'error) "\n"))
+      (pi-coding-agent--with-scroll-preservation
+        (save-excursion
+          (goto-char (point-max))
+          ;; Remove trailing whitespace before adding indicator
+          (skip-chars-backward " \t\n")
+          (delete-region (point) (point-max))
+          (insert "\n\n" (propertize "[Aborted]" 'face 'error) "\n")))
       (setq pi-coding-agent--aborted nil))
     ;; Add spacing for next turn, avoiding excess blank lines
-    (save-excursion
-      (goto-char (point-max))
-      (skip-chars-backward "\n")
-      (delete-region (point) (point-max))
-      (insert "\n\n")))
+    ;; Use scroll preservation so following windows stay at end
+    (pi-coding-agent--with-scroll-preservation
+      (save-excursion
+        (goto-char (point-max))
+        (skip-chars-backward "\n")
+        (delete-region (point) (point-max))
+        (insert "\n\n"))))
   (pi-coding-agent--spinner-stop)
   (pi-coding-agent--fontify-timer-stop)
   (pi-coding-agent--refresh-header))
@@ -1172,12 +1176,14 @@ Ensures message ends with newline for proper spacing."
           (end (marker-position pi-coding-agent--streaming-marker)))
       (when (< start end)
         ;; Ensure trailing newline (messages should end with newline)
+        ;; Use scroll preservation to keep following windows at end
         (let ((inhibit-read-only t))
-          (save-excursion
-            (goto-char end)
-            (unless (eq (char-before) ?\n)
-              (insert "\n")
-              (set-marker pi-coding-agent--streaming-marker (point))))
+          (pi-coding-agent--with-scroll-preservation
+            (save-excursion
+              (goto-char end)
+              (unless (eq (char-before) ?\n)
+                (insert "\n")
+                (set-marker pi-coding-agent--streaming-marker (point)))))
           ;; Align any markdown tables in the message
           (pi-coding-agent--align-tables-in-region start (marker-position pi-coding-agent--streaming-marker)))
         (font-lock-ensure start (marker-position pi-coding-agent--streaming-marker))))))

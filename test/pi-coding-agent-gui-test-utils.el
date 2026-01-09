@@ -186,6 +186,15 @@ This is stricter than window-start for detecting scroll drift."
     (with-current-buffer buf
       (>= (window-end win t) (1- (point-max))))))
 
+(defun pi-coding-agent-gui-test-window-point-at-end-p ()
+  "Return t if chat window's point is at buffer end (following).
+This checks window-point, not window-end.  Window-point being at end
+is what determines if the window will auto-scroll during streaming."
+  (when-let ((win (pi-coding-agent-gui-test-chat-window))
+             (buf (plist-get pi-coding-agent-gui-test--session :chat-buffer)))
+    (with-current-buffer buf
+      (>= (window-point win) (1- (point-max))))))
+
 (defun pi-coding-agent-gui-test-scroll-up (lines)
   "Scroll chat window up LINES lines (away from end)."
   (when-let ((win (pi-coding-agent-gui-test-chat-window))
