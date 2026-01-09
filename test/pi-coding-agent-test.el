@@ -1395,10 +1395,66 @@ then proper highlighting once block is closed."
          `(:type "tool_execution_update"
            :toolCallId "test-id"
            :partialResult (:content [(:type "text" :text ,many-lines)])))))
-    ;; Should show indicator that earlier lines are hidden
-    (should (string-match-p "earlier lines" (buffer-string)))
+    ;; Should show indicator that earlier output is hidden
+    (should (string-match-p "earlier output" (buffer-string)))
     ;; Should show last few lines
     (should (string-match-p "line20" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-get-tail-lines-basic ()
+  "Get-tail-lines returns last N lines correctly."
+  (let ((content "line1\nline2\nline3\nline4\nline5"))
+    ;; Get last 2 lines
+    (let ((result (pi-coding-agent--get-tail-lines content 2)))
+      (should (equal (car result) "line4\nline5"))
+      (should (eq (cdr result) t)))  ; has hidden content
+    ;; Get last 5 lines (all)
+    (let ((result (pi-coding-agent--get-tail-lines content 5)))
+      (should (equal (car result) content))
+      (should (eq (cdr result) nil)))  ; no hidden content
+    ;; Get last 10 lines (more than available)
+    (let ((result (pi-coding-agent--get-tail-lines content 10)))
+      (should (equal (car result) content))
+      (should (eq (cdr result) nil)))))
+
+(ert-deftest pi-coding-agent-test-get-tail-lines-trailing-newlines ()
+  "Get-tail-lines handles trailing newlines correctly."
+  ;; Content with trailing newlines - the function preserves them
+  (let ((content "line1\nline2\nline3\n\n"))
+    (let ((result (pi-coding-agent--get-tail-lines content 2)))
+      ;; Gets last 2 lines including trailing newlines
+      (should (equal (car result) "line2\nline3\n\n"))
+      (should (eq (cdr result) t)))))
+
+(ert-deftest pi-coding-agent-test-get-tail-lines-empty ()
+  "Get-tail-lines handles empty content."
+  (let ((result (pi-coding-agent--get-tail-lines "" 5)))
+    (should (equal (car result) ""))
+    (should (eq (cdr result) nil))))
+
+(ert-deftest pi-coding-agent-test-get-tail-lines-single-line ()
+  "Get-tail-lines handles single line content."
+  (let ((result (pi-coding-agent--get-tail-lines "just one line" 5)))
+    (should (equal (car result) "just one line"))
+    (should (eq (cdr result) nil))))
+
+(ert-deftest pi-coding-agent-test-extract-text-from-content-single-block ()
+  "Extract-text-from-content handles single text block efficiently."
+  (let ((blocks [(:type "text" :text "hello world")]))
+    (should (equal (pi-coding-agent--extract-text-from-content blocks)
+                   "hello world"))))
+
+(ert-deftest pi-coding-agent-test-extract-text-from-content-multiple-blocks ()
+  "Extract-text-from-content concatenates multiple text blocks."
+  (let ((blocks [(:type "text" :text "hello ")
+                 (:type "image" :data "...")
+                 (:type "text" :text "world")]))
+    (should (equal (pi-coding-agent--extract-text-from-content blocks)
+                   "hello world"))))
+
+(ert-deftest pi-coding-agent-test-extract-text-from-content-empty ()
+  "Extract-text-from-content handles empty input."
+  (should (equal (pi-coding-agent--extract-text-from-content []) ""))
+  (should (equal (pi-coding-agent--extract-text-from-content nil) "")))
 
 (ert-deftest pi-coding-agent-test-tool-update-replaced-by-end ()
   "Tool update content is replaced by final result on tool_execution_end."
