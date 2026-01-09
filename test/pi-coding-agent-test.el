@@ -1096,6 +1096,27 @@ then proper highlighting once block is closed."
     (should (string-match-p "```text" (buffer-string)))
     (should (string-match-p "```$" (buffer-string)))))
 
+(ert-deftest pi-coding-agent-test-bash-output-strips-ansi-codes ()
+  "ANSI escape codes are stripped from bash output."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    ;; Simulate colored test output: blue "▶ Test", green "✓ pass"
+    ;; \033[34m = blue, \033[32m = green, \033[0m = reset
+    (let ((ansi-output "\033[34m▶ AmbientSoundConfig\033[0m\n\033[32m  ✓ \033[0mshould pass"))
+      (pi-coding-agent--display-tool-end "bash" '(:command "test")
+                            `((:type "text" :text ,ansi-output))
+                            nil nil)
+      (let ((result (buffer-string)))
+        ;; Text content should be preserved
+        (should (string-match-p "▶ AmbientSoundConfig" result))
+        (should (string-match-p "✓" result))
+        (should (string-match-p "should pass" result))
+        ;; ANSI escape sequences should be gone
+        (should-not (string-match-p "\033" result))
+        (should-not (string-match-p "\\[34m" result))
+        (should-not (string-match-p "\\[32m" result))
+        (should-not (string-match-p "\\[0m" result))))))
+
 (ert-deftest pi-coding-agent-test-tool-output-shows-preview-when-long ()
   "Tool output shows preview lines when it exceeds the limit."
   (with-temp-buffer
