@@ -1203,7 +1203,8 @@ Returns a plist with:
          (visual-count 0)
          (byte-count 0)
          (max-bytes pi-coding-agent-preview-max-bytes)
-         (result-lines nil))
+         (result-lines nil)
+         (truncated-first-line nil))
     ;; Accumulate lines until we'd exceed limits
     (catch 'done
       (dolist (line lines)
@@ -1214,17 +1215,34 @@ Returns a plist with:
                ;; +1 for newline between lines
                (new-byte-count (+ byte-count line-len (if result-lines 1 0))))
           ;; Check if adding this line would exceed limits
-          (when (and result-lines  ; always include at least one line
-                     (or (> new-visual-count max-lines)
-                         (> new-byte-count max-bytes)))
+          (cond
+           ;; Not first line and exceeds limits: stop
+           ((and result-lines
+                 (or (> new-visual-count max-lines)
+                     (> new-byte-count max-bytes)))
             (throw 'done nil))
+           ;; First line exceeds limits: truncate it to fit
+           ((and (null result-lines)
+                 (or (> new-visual-count max-lines)
+                     (> new-byte-count max-bytes)))
+            (let* ((max-chars-by-visual (* max-lines width))
+                   (max-chars (min max-chars-by-visual max-bytes)))
+              (setq line (substring line 0 (min line-len max-chars)))
+              (setq line-len (length line))
+              (setq line-visual-lines (max 1 (ceiling (float line-len) width)))
+              (setq new-visual-count line-visual-lines)
+              (setq new-byte-count line-len)
+              (setq truncated-first-line t))))
           (setq visual-count new-visual-count)
           (setq byte-count new-byte-count)
           (push line result-lines))))
-    (let ((kept-lines (nreverse result-lines)))
+    (let* ((kept-lines (nreverse result-lines))
+           ;; Count hidden lines - if first line was truncated, that's conceptually hidden content
+           (hidden (- total-raw-lines (length kept-lines))))
       (list :content (string-join kept-lines "\n")
             :visual-lines visual-count
-            :hidden-lines (- total-raw-lines (length kept-lines))))))
+            ;; Report hidden lines; truncated first line means there's hidden content even with 1 line
+            :hidden-lines (if (and truncated-first-line (= hidden 0)) 1 hidden)))))
 
 (defun pi-coding-agent--tool-overlay-create (tool-name)
   "Create overlay for tool block TOOL-NAME at point.
@@ -1340,6 +1358,9 @@ where k is the tail size, rather than O(n) for the full content."
                (truncation (pi-coding-agent--truncate-to-visual-lines
                             tail-content max-lines width))
                (display-content (plist-get truncation :content))
+               ;; Show indicator if either: earlier lines hidden OR single line truncated
+               (show-hidden-indicator (or has-hidden
+                                          (> (plist-get truncation :hidden-lines) 0)))
                (inhibit-read-only t)
                (inhibit-modification-hooks t))
           (pi-coding-agent--with-scroll-preservation
@@ -1353,7 +1374,7 @@ where k is the tail size, rather than O(n) for the full content."
                   (delete-region (point) ov-end))
                 ;; Insert new streaming content
                 (goto-char (overlay-end pi-coding-agent--pending-tool-overlay))
-                (when has-hidden
+                (when show-hidden-indicator
                   (insert (propertize "... (earlier output)\n"
                                       'face 'pi-coding-agent-collapsed-indicator)))
                 (insert (propertize display-content 'face 'pi-coding-agent-tool-output))

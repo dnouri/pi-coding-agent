@@ -1258,6 +1258,28 @@ then proper highlighting once block is closed."
       (should (= (plist-get result :hidden-lines) 0))
       (should (= (plist-get result :visual-lines) 3)))))
 
+(ert-deftest pi-coding-agent-test-truncate-visual-lines-single-long-line ()
+  "A single line exceeding visual line limit gets truncated.
+Regression test: single lines without newlines should still be capped.
+If we ask for 5 visual lines at width 80, we should get ~400 chars max."
+  ;; 1000 char single line with no newlines - at width 80, this is ~13 visual lines
+  (let ((content (make-string 1000 ?x)))
+    (let ((result (pi-coding-agent--truncate-to-visual-lines content 5 80)))
+      ;; Should be capped to ~5 visual lines worth of content
+      ;; 5 * 80 = 400 chars max
+      (should (<= (length (plist-get result :content)) 400))
+      (should (<= (plist-get result :visual-lines) 5)))))
+
+(ert-deftest pi-coding-agent-test-truncate-visual-lines-single-line-byte-limit ()
+  "A single line exceeding byte limit gets truncated.
+Regression test: single lines should respect byte limit even with no newlines."
+  (let ((pi-coding-agent-preview-max-bytes 100))
+    ;; 500 char single line - exceeds 100 byte limit
+    (let* ((content (make-string 500 ?y))
+           (result (pi-coding-agent--truncate-to-visual-lines content 100 80)))
+      ;; Should respect byte limit
+      (should (<= (length (plist-get result :content)) 100)))))
+
 (ert-deftest pi-coding-agent-test-tool-output-truncates-long-lines ()
   "Tool output preview accounts for visual line wrapping."
   (with-temp-buffer
@@ -1410,6 +1432,32 @@ then proper highlighting once block is closed."
     (should (string-match-p "earlier output" (buffer-string)))
     ;; Should show last few lines
     (should (string-match-p "line20" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-tool-update-truncates-single-long-line ()
+  "Tool updates truncate single lines that exceed visual line limit.
+Regression test: streaming output with no newlines should still be capped."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    ;; Start the tool
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash"
+       :toolCallId "test-id"
+       :args (:command "json-dump")))
+    ;; Send update with a single very long line (1000 chars, ~13 visual lines at width 80)
+    ;; Preview limit is 5 lines, so this should be truncated
+    (let ((long-line (make-string 1000 ?x)))
+      (cl-letf (((symbol-function 'window-width) (lambda (&rest _) 80)))
+        (pi-coding-agent--handle-display-event
+         `(:type "tool_execution_update"
+           :toolCallId "test-id"
+           :partialResult (:content [(:type "text" :text ,long-line)])))))
+    ;; Output should be truncated - 5 visual lines * 80 chars = 400 chars max
+    (let ((buffer-content (buffer-string)))
+      ;; Should NOT contain all 1000 x's
+      (should-not (string-match-p (make-string 500 ?x) buffer-content))
+      ;; Should contain truncation indicator
+      (should (string-match-p "earlier output\\|truncated" buffer-content)))))
 
 (ert-deftest pi-coding-agent-test-get-tail-lines-basic ()
   "Get-tail-lines returns last N lines correctly."
