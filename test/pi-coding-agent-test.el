@@ -1541,6 +1541,42 @@ Regression test: streaming output with no newlines should still be capped."
     (should-not (string-match-p "partial streaming" (buffer-string)))
     (should (string-match-p "final output" (buffer-string)))))
 
+(ert-deftest pi-coding-agent-test-tool-update-preserves-multiline-command-header ()
+  "Tool updates preserve command headers that span multiple lines.
+Commands with embedded newlines should not have any lines deleted."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((multiline-cmd "echo 'line1'\necho 'line2'"))
+      (pi-coding-agent--display-tool-start "bash" `(:command ,multiline-cmd))
+      ;; Both lines of header should be present
+      (should (string-match-p "echo 'line1'" (buffer-string)))
+      (should (string-match-p "echo 'line2'" (buffer-string)))
+      ;; Update with streaming content
+      (pi-coding-agent--display-tool-update
+       '(:content [(:type "text" :text "output from command")]))
+      ;; Header should still be intact
+      (should (string-match-p "echo 'line1'" (buffer-string)))
+      (should (string-match-p "echo 'line2'" (buffer-string)))
+      (should (string-match-p "output from command" (buffer-string))))))
+
+(ert-deftest pi-coding-agent-test-tool-end-preserves-multiline-command-header ()
+  "Tool end preserves command headers that span multiple lines."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((multiline-cmd "echo 'first'\necho 'second'\necho 'third'"))
+      (pi-coding-agent--display-tool-start "bash" `(:command ,multiline-cmd))
+      ;; Stream some content first
+      (pi-coding-agent--display-tool-update
+       '(:content [(:type "text" :text "streaming...")]))
+      ;; Then end the tool
+      (pi-coding-agent--display-tool-end "bash" `(:command ,multiline-cmd)
+                            '((:type "text" :text "final output")) nil nil)
+      ;; All three lines of the header should be intact
+      (should (string-match-p "echo 'first'" (buffer-string)))
+      (should (string-match-p "echo 'second'" (buffer-string)))
+      (should (string-match-p "echo 'third'" (buffer-string)))
+      (should (string-match-p "final output" (buffer-string))))))
+
 (ert-deftest pi-coding-agent-test-display-handler-handles-thinking-delta ()
   "Display handler processes thinking_delta events."
   (with-temp-buffer

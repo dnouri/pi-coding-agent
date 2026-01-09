@@ -1262,11 +1262,14 @@ it from extending to subsequent content.  Sets pending overlay to nil."
     (let ((start (overlay-start pi-coding-agent--pending-tool-overlay))
           (end (overlay-end pi-coding-agent--pending-tool-overlay))
           (tool-name (overlay-get pi-coding-agent--pending-tool-overlay
-                                  'pi-coding-agent-tool-name)))
+                                  'pi-coding-agent-tool-name))
+          (header-end (overlay-get pi-coding-agent--pending-tool-overlay
+                                   'pi-coding-agent-header-end)))
       (delete-overlay pi-coding-agent--pending-tool-overlay)
       (let ((ov (make-overlay start end nil nil nil)))  ; rear-advance=nil
         (overlay-put ov 'pi-coding-agent-tool-block t)
         (overlay-put ov 'pi-coding-agent-tool-name tool-name)
+        (overlay-put ov 'pi-coding-agent-header-end header-end)
         (overlay-put ov 'face face)))
     (setq pi-coding-agent--pending-tool-overlay nil)))
 
@@ -1290,7 +1293,11 @@ it from extending to subsequent content.  Sets pending overlay to nil."
           (insert "\n"))
         ;; Create overlay at start of tool block
         (setq pi-coding-agent--pending-tool-overlay (pi-coding-agent--tool-overlay-create tool-name))
-        (insert header-display "\n")))))
+        (insert header-display "\n")
+        ;; Store header end position for correct deletion in updates
+        ;; (header may span multiple lines if command contains newlines)
+        (overlay-put pi-coding-agent--pending-tool-overlay
+                     'pi-coding-agent-header-end (point-marker))))))
 
 (defun pi-coding-agent--extract-text-from-content (content-blocks)
   "Extract text from CONTENT-BLOCKS vector efficiently.
@@ -1365,13 +1372,13 @@ where k is the tail size, rather than O(n) for the full content."
                (inhibit-modification-hooks t))
           (pi-coding-agent--with-scroll-preservation
             (save-excursion
-              (let* ((ov-start (overlay-start pi-coding-agent--pending-tool-overlay))
-                     (ov-end (overlay-end pi-coding-agent--pending-tool-overlay)))
-                ;; Delete previous streaming content (everything after header line)
-                (goto-char ov-start)
-                (forward-line 1)
-                (when (< (point) ov-end)
-                  (delete-region (point) ov-end))
+              (let* ((ov-end (overlay-end pi-coding-agent--pending-tool-overlay))
+                     (header-end (overlay-get pi-coding-agent--pending-tool-overlay
+                                              'pi-coding-agent-header-end)))
+                ;; Delete previous streaming content (everything after header)
+                ;; Header may span multiple lines if command contains newlines
+                (when (and header-end (< header-end ov-end))
+                  (delete-region header-end ov-end))
                 ;; Insert new streaming content
                 (goto-char (overlay-end pi-coding-agent--pending-tool-overlay))
                 (when show-hidden-indicator
@@ -1433,12 +1440,12 @@ Shows preview lines with expandable toggle for long output."
     (pi-coding-agent--with-scroll-preservation
       ;; Clear any streaming content from tool_execution_update
       (when pi-coding-agent--pending-tool-overlay
-        (let ((ov-start (overlay-start pi-coding-agent--pending-tool-overlay))
+        (let ((header-end (overlay-get pi-coding-agent--pending-tool-overlay
+                                       'pi-coding-agent-header-end))
               (ov-end (overlay-end pi-coding-agent--pending-tool-overlay)))
-          (goto-char ov-start)
-          (forward-line 1)  ; skip header line
-          (when (< (point) ov-end)
-            (delete-region (point) ov-end))))
+          ;; Header may span multiple lines if command contains newlines
+          (when (and header-end (< header-end ov-end))
+            (delete-region header-end ov-end))))
       (goto-char (point-max))
       (if needs-collapse
           ;; Long output: show preview with toggle button
@@ -1477,11 +1484,10 @@ Shows preview lines with expandable toggle for long output."
       (goto-char btn-start)
       (when-let* ((bounds (pi-coding-agent--find-tool-block-bounds))
                   (ov (seq-find (lambda (o) (overlay-get o 'pi-coding-agent-tool-block))
-                                (overlays-at (point)))))
-        ;; Content starts after first line (header)
-        (goto-char (car bounds))
-        (forward-line 1)
-        (let ((content-start (point)))
+                                (overlays-at (point))))
+                  (header-end (overlay-get ov 'pi-coding-agent-header-end)))
+        ;; Content starts after header (which may span multiple lines)
+        (let ((content-start header-end))
           ;; Delete from content start to after button
           (delete-region content-start (1+ btn-end))
           (goto-char content-start)
