@@ -13,13 +13,14 @@ An Emacs frontend for the [[https://shittycodingagent.ai/][pi coding agent]].
 
 * Features
 
-- Separate windows for chat history and prompt composition
-- Native markdown rendering with syntax highlighting
-- Auto-scroll that preserves your position when reading earlier content
-- Collapsible tool output with preview
-- Input history with search
+- Compose prompts in a full Emacs buffer: multi-line, copy/paste, macros, support for Vi bindings
+- Chat history as a markdown buffer: copy, save, search, navigate
+- Live streaming output as bash commands and tool operations run
+- Syntax-highlighted code blocks and diffs
+- Collapsible tool output with smart preview (expand with TAB)
+- Click the model name or thinking level to change them
+- Input history with search (M-p/M-n, C-r)
 - Magit-style transient menu for all commands
-- Full support for pi features: models, thinking levels, sessions, custom commands
 
 * Requirements
 
@@ -95,50 +96,73 @@ For multiple sessions in the same directory, use =C-u M-x pi= to create a named 
 
 * Key Bindings
 
-| Key           | Context | Description        |
-|---------------+---------+--------------------|
-| =C-c C-c=     | input   | Send prompt        |
-| =C-c C-k=     | input   | Abort streaming    |
-| =C-c C-p=     | both    | Open menu          |
-| =C-c C-r=     | input   | Resume session     |
-| =M-p= / =M-n= | input   | History navigation |
-| =C-r=         | input   | Search history     |
-| =n= / =p=     | chat    | Navigate messages  |
-| =TAB=         | chat    | Toggle tool output |
+| Key           | Context | Description             |
+|---------------+---------+-------------------------|
+| =C-c C-c=     | input   | Send prompt             |
+| =C-c C-k=     | input   | Abort streaming         |
+| =C-c C-p=     | both    | Open menu               |
+| =C-c C-r=     | input   | Resume session          |
+| =M-p= / =M-n= | input   | History navigation      |
+| =C-r=         | input   | Search history          |
+| =TAB=         | input   | Complete slash commands |
+| =n= / =p=     | chat    | Navigate messages       |
+| =TAB=         | chat    | Toggle section          |
+| =S-TAB=       | chat    | Cycle all folds         |
+| =q=           | chat    | Quit session            |
 
 Press =C-c C-p= to access the full menu with model selection, thinking level,
 session management (new, resume, branch, export), statistics, and custom commands.
 
 * Tips & Tricks
 
-** 📁 Folding Turns
-
-Press =TAB= on a turn header (You/Assistant) to fold it, =TAB= again to
-unfold. Use =S-TAB= to cycle visibility of all turns at once.
-
 ** ✏️ Composing Prompts
 
-The input buffer is a full Emacs buffer—one of the main advantages over
-terminal interfaces. Write multi-line prompts, yank code from other
-buffers with =C-y=, or use any editing commands you know. If you prefer
-Vim-style editing, [[https://github.com/emacs-evil/evil][Evil mode]] works seamlessly—compose
-prompts with =i=, =a=, =ciw=, and all the motions you're used to.
+The input buffer is a full Emacs buffer, one of the main advantages over
+terminal interfaces. Take your time composing, write multi-line prompts,
+paste from other buffers, use registers or kill-ring history. Your prompt
+stays put while the AI responds above.
 
 Slash commands (=/command=) work with completion: type =/= then =TAB= to
 see available commands, including your custom ones from =~/.pi/commands/=.
 
 ** 🔧 Tool Output
 
-Tool output (file reads, command results) is collapsed by default to keep
-the chat readable. Press =TAB= on a tool block to expand it. Code blocks
-have full syntax highlighting.
+Tool output is collapsed by default to keep the chat readable, with a
+preview of the first few lines visible. Press =TAB= on a tool block to
+expand and see everything. File operations (read, write, edit) show full
+syntax highlighting, and edit diffs highlight what changed. Long-running
+commands stream output live so you can watch progress.
+
+** 📁 Folding Turns
+
+Press =TAB= on a turn header (You/Assistant) to fold it, =TAB= again to
+unfold. Use =S-TAB= to cycle visibility of all turns at once.
 
 ** 💾 Sessions
 
 Each project directory gets its own session automatically. To run multiple
 sessions in the same directory, use =C-u M-x pi= to create a named session.
 
-Branching (=C-c C-p b=) and resume (=C-c C-p r=) work as in the pi TUI.
+Resume (=C-c C-r=) and branch (=C-c C-p b=) present a selection menu:
+pick from previous sessions or conversation messages to start from.
+
+** 🌿 Branching and Context Management
+
+When a conversation gets long, the AI's context window fills up. The menu
+(=C-c C-p=) offers tools to manage this:
+
+- *Compact* (=c=): Summarizes earlier conversation to free up context while
+  preserving key information. Use when context is filling up. If you don't
+  compact manually, pi does it automatically when needed.
+
+- *Branch* (=b=): Creates a new session starting from a previous message.
+  Go back to any point and take the conversation in a new direction.
+
+- *Export* (=e=): Saves the conversation as an HTML file for sharing or
+  archiving.
+
+The context indicator in the status area shows current usage, warning
+when getting full.
 
 * Configuration
 
@@ -149,9 +173,11 @@ Example configuration with =use-package=:
   :ensure t
   :init (defalias 'pi 'pi-coding-agent)
   :custom
-  (pi-coding-agent-input-window-height 10)      ; Height of input window
-  (pi-coding-agent-tool-preview-lines 10)       ; Lines shown before collapsing tool output
-  (pi-coding-agent-bash-preview-lines 5))       ; Lines shown for bash output
+  (pi-coding-agent-input-window-height 10)        ; Height of input window
+  (pi-coding-agent-tool-preview-lines 10)         ; Lines shown before collapsing tool output
+  (pi-coding-agent-bash-preview-lines 5)          ; Lines shown for bash output
+  (pi-coding-agent-context-warning-threshold 70)  ; Warn when context exceeds this %
+  (pi-coding-agent-context-error-threshold 90))   ; Critical when context exceeds this %
 #+end_src
 
 * Testing
