@@ -523,6 +523,23 @@ Updated after each agent turn completes.")
 This is the per-turn usage, not cumulative - used to calculate
 how much of the context window was used in the last turn.")
 
+(defun pi-coding-agent--extract-last-usage (messages)
+  "Extract usage from the last non-aborted assistant message in MESSAGES.
+MESSAGES is a vector of message plists from get_messages RPC.
+Returns the usage plist, or nil if no valid assistant message found.
+Skips aborted messages as they may have incomplete usage data."
+  (when (vectorp messages)
+    (let ((i (1- (length messages)))
+          (result nil))
+      (while (and (>= i 0) (not result))
+        (let ((msg (aref messages i)))
+          (when (and (equal (plist-get msg :role) "assistant")
+                     (not (equal (plist-get msg :stopReason) "aborted"))
+                     (plist-get msg :usage))
+            (setq result (plist-get msg :usage))))
+        (setq i (1- i)))
+      result)))
+
 (defvar-local pi-coding-agent--aborted nil
   "Non-nil if the current/last request was aborted.")
 
@@ -2349,9 +2366,12 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
                        (let* ((messages (plist-get (plist-get response :data) :messages))
                               (count (if (vectorp messages) (length messages) 0)))
                          (pi-coding-agent--display-session-history messages chat-buf)
-                         ;; Update header with new session info
+                         ;; Restore context usage from last assistant message
+                         ;; (ensures context % displays correctly after resume/branch)
                          (when (buffer-live-p chat-buf)
                            (with-current-buffer chat-buf
+                             (setq pi-coding-agent--last-usage
+                                   (pi-coding-agent--extract-last-usage messages))
                              (pi-coding-agent--refresh-header)))
                          (when callback
                            (funcall callback count))))))))

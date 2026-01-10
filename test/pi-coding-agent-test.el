@@ -1617,6 +1617,44 @@ Regression test: streaming output with no newlines should still be capped."
   (should (equal (pi-coding-agent--extract-text-from-content []) ""))
   (should (equal (pi-coding-agent--extract-text-from-content nil) "")))
 
+(ert-deftest pi-coding-agent-test-extract-last-usage-from-messages ()
+  "Extract-last-usage finds usage from last assistant message."
+  (let ((messages
+         [(:role "user" :content "Hi")
+          (:role "assistant"
+           :usage (:input 100 :output 50 :cacheRead 0 :cacheWrite 20)
+           :stopReason "endTurn")
+          (:role "user" :content "More")
+          (:role "assistant"
+           :usage (:input 200 :output 80 :cacheRead 20 :cacheWrite 30)
+           :stopReason "endTurn")]))
+    (let ((usage (pi-coding-agent--extract-last-usage messages)))
+      (should (equal (plist-get usage :input) 200))
+      (should (equal (plist-get usage :output) 80)))))
+
+(ert-deftest pi-coding-agent-test-extract-last-usage-skips-aborted ()
+  "Extract-last-usage skips aborted messages."
+  (let ((messages
+         [(:role "assistant"
+           :usage (:input 100 :output 50 :cacheRead 0 :cacheWrite 0)
+           :stopReason "endTurn")
+          (:role "assistant"
+           :usage (:input 0 :output 0 :cacheRead 0 :cacheWrite 0)
+           :stopReason "aborted")]))
+    (let ((usage (pi-coding-agent--extract-last-usage messages)))
+      ;; Should return the non-aborted message's usage
+      (should (equal (plist-get usage :input) 100)))))
+
+(ert-deftest pi-coding-agent-test-extract-last-usage-empty ()
+  "Extract-last-usage handles empty/nil input."
+  (should-not (pi-coding-agent--extract-last-usage []))
+  (should-not (pi-coding-agent--extract-last-usage nil)))
+
+(ert-deftest pi-coding-agent-test-extract-last-usage-no-assistant ()
+  "Extract-last-usage returns nil when no assistant messages."
+  (let ((messages [(:role "user" :content "Hi")]))
+    (should-not (pi-coding-agent--extract-last-usage messages))))
+
 (ert-deftest pi-coding-agent-test-tool-update-replaced-by-end ()
   "Tool update content is replaced by final result on tool_execution_end."
   (with-temp-buffer
@@ -2076,6 +2114,93 @@ This ensures history loads correctly when callback runs in arbitrary context."
           ;; Chat buffer should have been updated (has startup header)
           (with-current-buffer chat-buf
             (should (string-match-p "C-c C-c" (buffer-string)))))
+      (when (buffer-live-p chat-buf)
+        (kill-buffer chat-buf)))))
+
+(ert-deftest pi-coding-agent-test-load-session-history-restores-context-usage ()
+  "load-session-history sets last-usage from final assistant message.
+This ensures context percentage is displayed correctly after resume/branch.
+Regression test: context showed 0% after resuming because usage wasn't extracted."
+  (let* ((chat-buf (generate-new-buffer "*pi-coding-agent-chat:test-usage/*"))
+         (rpc-callback nil)
+         ;; Simulate a Fortnite tips conversation with usage data
+         (mock-messages
+          [(:role "user"
+            :content "How do I get better at Fortnite?"
+            :timestamp 1704067200000)
+           (:role "assistant"
+            :content [(:type "text" :text "Here are some tips to improve at Fortnite:\n\n1. **Practice building** - Building is essential\n2. **Land at busy spots** - More combat practice\n3. **Watch pro players** - Learn advanced techniques")]
+            :usage (:input 150 :output 80 :cacheRead 0 :cacheWrite 50)
+            :stopReason "endTurn"
+            :timestamp 1704067260000)
+           (:role "user"
+            :content "What about aiming?"
+            :timestamp 1704067320000)
+           (:role "assistant"
+            :content [(:type "text" :text "For better aim:\n\n1. Lower your sensitivity\n2. Use aim trainers\n3. Practice tracking moving targets")]
+            :usage (:input 280 :output 120 :cacheRead 50 :cacheWrite 30)
+            :stopReason "endTurn"
+            :timestamp 1704067380000)]))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            ;; Ensure usage starts as nil
+            (should-not pi-coding-agent--last-usage))
+          ;; Mock RPC to capture callback
+          (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc _cmd cb) (setq rpc-callback cb))))
+            (pi-coding-agent--load-session-history 'mock-proc nil chat-buf))
+          ;; Simulate RPC response with our mock messages
+          (funcall rpc-callback
+                   `(:success t :data (:messages ,mock-messages)))
+          ;; Verify last-usage was extracted from final assistant message
+          (with-current-buffer chat-buf
+            (should pi-coding-agent--last-usage)
+            (should (equal (plist-get pi-coding-agent--last-usage :input) 280))
+            (should (equal (plist-get pi-coding-agent--last-usage :output) 120))
+            (should (equal (plist-get pi-coding-agent--last-usage :cacheRead) 50))
+            (should (equal (plist-get pi-coding-agent--last-usage :cacheWrite) 30))))
+      (when (buffer-live-p chat-buf)
+        (kill-buffer chat-buf)))))
+
+(ert-deftest pi-coding-agent-test-load-session-history-skips-aborted-usage ()
+  "load-session-history skips aborted messages when extracting usage.
+Aborted messages may have incomplete usage data."
+  (let* ((chat-buf (generate-new-buffer "*pi-coding-agent-chat:test-aborted/*"))
+         (rpc-callback nil)
+         ;; Session where last message was aborted
+         (mock-messages
+          [(:role "user"
+            :content "Tell me about Fortnite"
+            :timestamp 1704067200000)
+           (:role "assistant"
+            :content [(:type "text" :text "Fortnite is a battle royale game...")]
+            :usage (:input 100 :output 50 :cacheRead 0 :cacheWrite 20)
+            :stopReason "endTurn"
+            :timestamp 1704067260000)
+           (:role "user"
+            :content "More details"
+            :timestamp 1704067320000)
+           (:role "assistant"
+            :content [(:type "text" :text "Well...")]
+            :usage (:input 0 :output 0 :cacheRead 0 :cacheWrite 0)
+            :stopReason "aborted"
+            :timestamp 1704067380000)]))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode))
+          (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc _cmd cb) (setq rpc-callback cb))))
+            (pi-coding-agent--load-session-history 'mock-proc nil chat-buf))
+          (funcall rpc-callback
+                   `(:success t :data (:messages ,mock-messages)))
+          ;; Should use the non-aborted assistant message's usage
+          (with-current-buffer chat-buf
+            (should pi-coding-agent--last-usage)
+            (should (equal (plist-get pi-coding-agent--last-usage :input) 100))
+            (should (equal (plist-get pi-coding-agent--last-usage :output) 50))))
       (when (buffer-live-p chat-buf)
         (kill-buffer chat-buf)))))
 
