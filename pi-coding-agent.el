@@ -927,28 +927,40 @@ Shown when the session starts without a configured model/API key."
 
 (defun pi-coding-agent--cleanup-on-kill ()
   "Clean up resources when chat buffer is killed.
-Also kills the linked input buffer."
+Also kills the linked input buffer.
+
+Note: This runs from `kill-buffer-hook', which executes AFTER the kill
+decision is made.  For proper cancellation support, use `pi-coding-agent-quit'
+which asks upfront before any buffers are touched."
   (when (derived-mode-p 'pi-coding-agent-chat-mode)
+    ;; Clean up process first (before killing input buffer)
+    (when pi-coding-agent--process
+      (pi-coding-agent--unregister-display-handler pi-coding-agent--process)
+      (when (process-live-p pi-coding-agent--process)
+        (delete-process pi-coding-agent--process)))
     ;; Kill linked input buffer
     (when (and pi-coding-agent--input-buffer (buffer-live-p pi-coding-agent--input-buffer))
       (let ((input-buf pi-coding-agent--input-buffer))
         ;; Clear reference to avoid infinite recursion
         (setq pi-coding-agent--input-buffer nil)
-        (kill-buffer input-buf)))
-    ;; Clean up process
-    (when pi-coding-agent--process
-      (pi-coding-agent--unregister-display-handler pi-coding-agent--process)
-      (when (process-live-p pi-coding-agent--process)
-        (delete-process pi-coding-agent--process)))))
+        (kill-buffer input-buf)))))
 
 (defun pi-coding-agent--cleanup-input-on-kill ()
   "Clean up when input buffer is killed.
-Also kills the linked chat buffer (which handles process cleanup)."
+Also kills the linked chat buffer (which handles process cleanup).
+
+Note: This runs from `kill-buffer-hook', which executes AFTER the kill
+decision is made.  For proper cancellation support, use `pi-coding-agent-quit'
+which asks upfront before any buffers are touched."
   (when (derived-mode-p 'pi-coding-agent-input-mode)
     (when (and pi-coding-agent--chat-buffer (buffer-live-p pi-coding-agent--chat-buffer))
-      (let ((chat-buf pi-coding-agent--chat-buffer))
+      (let* ((chat-buf pi-coding-agent--chat-buffer)
+             (proc (buffer-local-value 'pi-coding-agent--process chat-buf)))
         ;; Clear reference to avoid infinite recursion
         (setq pi-coding-agent--chat-buffer nil)
+        ;; Disable process query to prevent prompting (we're already committed)
+        (when (and proc (process-live-p proc))
+          (set-process-query-on-exit-flag proc nil))
         (kill-buffer chat-buf)))))
 
 (defun pi-coding-agent--register-display-handler (process)
@@ -1140,19 +1152,35 @@ Only works when streaming is in progress."
 (defun pi-coding-agent-quit ()
   "Close the current pi session.
 Kills both chat and input buffers, terminates the process,
-and removes the input window (merging its space with adjacent windows)."
+and removes the input window (merging its space with adjacent windows).
+
+If a process is running, asks for confirmation first.  If the user
+cancels, the session remains intact."
   (interactive)
-  (let ((chat-buf (pi-coding-agent--get-chat-buffer))
-        (input-buf (pi-coding-agent--get-input-buffer))
-        (input-windows nil))
+  (let* ((chat-buf (pi-coding-agent--get-chat-buffer))
+         (input-buf (pi-coding-agent--get-input-buffer))
+         (proc (when (buffer-live-p chat-buf)
+                 (buffer-local-value 'pi-coding-agent--process chat-buf)))
+         (proc-live (and proc (process-live-p proc)))
+         (input-windows nil))
+    ;; Ask user ONCE if there's a live process - abort entirely if cancelled
+    (when (and proc-live
+               (process-query-on-exit-flag proc)
+               (not (yes-or-no-p "Pi session has a running process; quit anyway? ")))
+      (user-error "Quit cancelled"))
+    ;; User confirmed (or no process) - disable query flag to prevent double-ask
+    (when proc-live
+      (set-process-query-on-exit-flag proc nil))
     ;; Collect windows showing the input buffer (we'll delete these)
     (when (buffer-live-p input-buf)
       (setq input-windows (get-buffer-window-list input-buf nil t)))
-    ;; Kill buffers (this also cleans up process via hooks)
-    (when (buffer-live-p input-buf)
-      (kill-buffer input-buf))
+    ;; Kill chat buffer first - its cleanup hook will kill input buffer
+    ;; This avoids the input->chat->confirm->fail->orphaned-input problem
     (when (buffer-live-p chat-buf)
       (kill-buffer chat-buf))
+    ;; Input buffer should already be dead from cleanup hook, but ensure it
+    (when (buffer-live-p input-buf)
+      (kill-buffer input-buf))
     ;; Delete input windows only (merges space with neighbors)
     (dolist (win input-windows)
       (when (window-live-p win)

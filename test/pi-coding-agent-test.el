@@ -258,6 +258,87 @@ not relying on current buffer context which may change before callback executes.
     (should-not (get-buffer "*pi-coding-agent-chat:/tmp/pi-coding-agent-test-quit/*"))
     (should-not (get-buffer "*pi-coding-agent-input:/tmp/pi-coding-agent-test-quit/*"))))
 
+(ert-deftest pi-coding-agent-test-quit-cancelled-preserves-session ()
+  "When user cancels quit confirmation, both buffers remain intact and linked."
+  (let* ((dir "/tmp/pi-coding-agent-test-quit-cancel/")
+         (chat-name (concat "*pi-coding-agent-chat:" dir "*"))
+         (input-name (concat "*pi-coding-agent-input:" dir "*"))
+         (fake-proc nil))
+    (make-directory dir t)
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pi-coding-agent--start-process)
+               (lambda (_)
+                 ;; Create a real process that triggers kill confirmation
+                 (setq fake-proc (start-process "pi-test-quit" nil "cat"))
+                 (set-process-query-on-exit-flag fake-proc t)
+                 fake-proc))
+              ((symbol-function 'pi-coding-agent--display-buffers) #'ignore))
+      (unwind-protect
+          (progn
+            (let ((default-directory dir))
+              (pi-coding-agent))
+            ;; Associate process with chat buffer (as the real code does)
+            (with-current-buffer chat-name
+              (set-process-buffer fake-proc (current-buffer)))
+            ;; User says "no" to quit confirmation - expect user-error
+            (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) nil)))
+              (with-current-buffer input-name
+                (should-error (pi-coding-agent-quit) :type 'user-error)))
+            ;; Both buffers should still exist
+            (should (get-buffer chat-name))
+            (should (get-buffer input-name))
+            ;; Buffers should still be linked
+            (with-current-buffer chat-name
+              (should (eq (pi-coding-agent--get-input-buffer)
+                          (get-buffer input-name))))
+            (with-current-buffer input-name
+              (should (eq (pi-coding-agent--get-chat-buffer)
+                          (get-buffer chat-name)))))
+        ;; Cleanup
+        (when (and fake-proc (process-live-p fake-proc))
+          (delete-process fake-proc))
+        (ignore-errors (kill-buffer chat-name))
+        (ignore-errors (kill-buffer input-name))))))
+
+(ert-deftest pi-coding-agent-test-quit-confirmed-kills-both ()
+  "When user confirms quit, both buffers are killed without double-prompting."
+  (let* ((dir "/tmp/pi-coding-agent-test-quit-confirm/")
+         (chat-name (concat "*pi-coding-agent-chat:" dir "*"))
+         (input-name (concat "*pi-coding-agent-input:" dir "*"))
+         (fake-proc nil)
+         (prompt-count 0))
+    (make-directory dir t)
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pi-coding-agent--start-process)
+               (lambda (_)
+                 (setq fake-proc (start-process "pi-test-quit" nil "cat"))
+                 (set-process-query-on-exit-flag fake-proc t)
+                 fake-proc))
+              ((symbol-function 'pi-coding-agent--display-buffers) #'ignore))
+      (unwind-protect
+          (progn
+            (let ((default-directory dir))
+              (pi-coding-agent))
+            (with-current-buffer chat-name
+              (set-process-buffer fake-proc (current-buffer)))
+            ;; User says "yes" - count how many times we're asked
+            (cl-letf (((symbol-function 'yes-or-no-p)
+                       (lambda (_)
+                         (cl-incf prompt-count)
+                         t)))
+              (with-current-buffer input-name
+                (pi-coding-agent-quit)))
+            ;; Both buffers should be gone
+            (should-not (get-buffer chat-name))
+            (should-not (get-buffer input-name))
+            ;; Should only be asked once (not twice due to cross-linked hooks)
+            (should (<= prompt-count 1)))
+        ;; Cleanup
+        (when (and fake-proc (process-live-p fake-proc))
+          (delete-process fake-proc))
+        (ignore-errors (kill-buffer chat-name))
+        (ignore-errors (kill-buffer input-name))))))
+
 (ert-deftest pi-coding-agent-test-kill-chat-kills-input ()
   "Killing chat buffer also kills input buffer."
   (pi-coding-agent-test-with-mock-session "/tmp/pi-coding-agent-test-linked/"
