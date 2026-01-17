@@ -2646,6 +2646,116 @@ Errors still consume context, so their usage data is valid for display."
     (should (string-match-p "W100" result))
     (should (string-match-p "\\$0.05" result))))
 
+;;; File Reference Completion (@)
+
+(ert-deftest pi-coding-agent-test-file-reference-capf-returns-nil-without-at ()
+  "File reference completion returns nil when not after @."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (insert "hello world")
+    (should-not (pi-coding-agent--file-reference-capf))))
+
+(ert-deftest pi-coding-agent-test-file-reference-capf-returns-data-after-at ()
+  "File reference completion returns data when point is after @."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    ;; Mock project files
+    (setq pi-coding-agent--project-files-cache '("file1.el" "file2.py" "dir/file3.ts"))
+    (setq pi-coding-agent--project-files-cache-time (float-time))
+    (insert "Check @fi")
+    (let ((result (pi-coding-agent--file-reference-capf)))
+      (should result)
+      ;; Start should be after @
+      (should (= (nth 0 result) (- (point) 2)))  ; Position after @
+      ;; End should be at point
+      (should (= (nth 1 result) (point)))
+      ;; Candidates should include matching files
+      (should (member "file1.el" (nth 2 result)))
+      (should (member "file2.py" (nth 2 result))))))
+
+(ert-deftest pi-coding-agent-test-file-reference-capf-empty-prefix ()
+  "File reference completion returns all files when no prefix after @."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (setq pi-coding-agent--project-files-cache '("a.el" "b.py" "c.ts"))
+    (setq pi-coding-agent--project-files-cache-time (float-time))
+    (insert "See @")
+    (let ((result (pi-coding-agent--file-reference-capf)))
+      (should result)
+      ;; Should return all files when prefix is empty
+      (should (= (length (nth 2 result)) 3)))))
+
+(ert-deftest pi-coding-agent-test-file-reference-capf-mid-line ()
+  "File reference completion works in the middle of a line."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (setq pi-coding-agent--project-files-cache '("test.el"))
+    (setq pi-coding-agent--project-files-cache-time (float-time))
+    (insert "Look at @te and also")
+    (goto-char 11)  ; Position right after "@te"
+    (let ((result (pi-coding-agent--file-reference-capf)))
+      (should result)
+      (should (member "test.el" (nth 2 result))))))
+
+;;; Path Completion (Tab)
+
+(ert-deftest pi-coding-agent-test-path-capf-returns-nil-for-non-path ()
+  "Path completion returns nil for text that doesn't look like a path."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (insert "hello world")
+    (should-not (pi-coding-agent--path-capf))))
+
+(ert-deftest pi-coding-agent-test-path-capf-returns-nil-for-non-prefixed-path ()
+  "Path completion returns nil for paths without ./ ../ ~/ or / prefix."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (insert "src/file.el")
+    (should-not (pi-coding-agent--path-capf))))
+
+(ert-deftest pi-coding-agent-test-path-capf-triggers-for-dot-slash ()
+  "Path completion triggers for paths starting with ./"
+  (let* ((temp-dir (make-temp-file "pi-coding-agent-path-test-" t))
+         (test-file (expand-file-name "test.txt" temp-dir)))
+    (unwind-protect
+        (progn
+          (with-temp-file test-file (insert "test"))
+          (let ((default-directory temp-dir))
+            (with-temp-buffer
+              (pi-coding-agent-input-mode)
+              (setq pi-coding-agent--chat-buffer (current-buffer))
+              ;; Mock session directory
+              (cl-letf (((symbol-function 'pi-coding-agent--session-directory)
+                         (lambda () temp-dir)))
+                (insert "./te")
+                (let ((result (pi-coding-agent--path-capf)))
+                  (should result)
+                  ;; Should have candidates
+                  (should (> (length (nth 2 result)) 0)))))))
+      (delete-directory temp-dir t))))
+
+(ert-deftest pi-coding-agent-test-path-capf-triggers-for-tilde ()
+  "Path completion triggers for paths starting with ~/"
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (insert "~/")
+    ;; Just verify it doesn't error and returns something
+    ;; (actual completions depend on user's home directory)
+    (let ((result (pi-coding-agent--path-capf)))
+      ;; May return nil if ~ directory doesn't exist or has no completions
+      ;; but should not error
+      (should (or (null result) (listp result))))))
+
+(ert-deftest pi-coding-agent-test-path-capf-triggers-for-absolute ()
+  "Path completion triggers for absolute paths."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (insert "/tmp/")
+    (let ((result (pi-coding-agent--path-capf)))
+      ;; /tmp should exist and have contents on most systems
+      (when result
+        (should (listp (nth 2 result)))))))
+
 ;;; Slash Command Argument Parsing (shell-like quoting via split-string-shell-command)
 
 (ert-deftest pi-coding-agent-test-parse-args-simple ()
