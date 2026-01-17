@@ -2871,36 +2871,38 @@ Triggers when @ is typed, provides completion of project files."
 
 ;;;; Editor Features: Path Completion
 
+(defun pi-coding-agent--path-prefix-p (path)
+  "Check if PATH has a completable prefix (./, ../, ~/, or /)."
+  (or (string-prefix-p "./" path)
+      (string-prefix-p "../" path)
+      (string-prefix-p "~/" path)
+      (string-prefix-p "/" path)))
+
+(defun pi-coding-agent--path-completions (path)
+  "Return file completion candidates for PATH, or nil if directory invalid."
+  (let* ((dir (file-name-directory path))
+         (base (file-name-nondirectory path))
+         (expanded-dir (expand-file-name (or dir "") (pi-coding-agent--session-directory))))
+    (when (file-directory-p expanded-dir)
+      (mapcar (lambda (f) (concat (or dir "") f))
+              (cl-remove-if (lambda (f) (member f '("." "..")))
+                            (file-name-all-completions base expanded-dir))))))
+
 (defun pi-coding-agent--path-capf ()
   "Completion-at-point function for file paths.
 Completes paths starting with ./, ../, ~/, or /."
-  (let ((bounds (bounds-of-thing-at-point 'filename)))
-    (when bounds
-      (let* ((start (car bounds))
-             (end (cdr bounds))
-             (path (buffer-substring-no-properties start end)))
-        ;; Only trigger for path-like strings
-        (when (or (string-prefix-p "./" path)
-                  (string-prefix-p "../" path)
-                  (string-prefix-p "~/" path)
-                  (string-prefix-p "/" path))
-          (let* ((dir (file-name-directory path))
-                 (base (file-name-nondirectory path))
-                 (expanded-dir (expand-file-name (or dir "") (pi-coding-agent--session-directory)))
-                 (candidates
-                  (when (file-directory-p expanded-dir)
-                    (mapcar (lambda (f)
-                              (concat (or dir "") f))
-                            (cl-remove-if
-                             (lambda (f) (member f '("." "..")))
-                             (file-name-all-completions base expanded-dir))))))
-            (when candidates
-              (list start end candidates
-                    :exclusive 'no
-                    :annotation-function
-                    (lambda (c)
-                      (if (file-directory-p (expand-file-name c (pi-coding-agent--session-directory)))
-                          " (dir)" " (file)"))))))))))
+  (when-let* ((bounds (bounds-of-thing-at-point 'filename))
+              (start (car bounds))
+              (end (cdr bounds))
+              (path (buffer-substring-no-properties start end))
+              ((pi-coding-agent--path-prefix-p path))
+              (candidates (pi-coding-agent--path-completions path)))
+    (list start end candidates
+          :exclusive 'no
+          :annotation-function
+          (lambda (c)
+            (if (file-directory-p (expand-file-name c (pi-coding-agent--session-directory)))
+                " (dir)" " (file)")))))
 
 (transient-define-prefix pi-coding-agent-menu ()
   "Pi coding agent menu."
