@@ -4,7 +4,7 @@ EMACS ?= emacs
 BATCH = $(EMACS) --batch -L .
 
 # Pi CLI version - update in workflows too when changing
-PI_VERSION ?= 0.30.2
+PI_VERSION ?= 0.48.0
 PI_BIN ?= .cache/pi/node_modules/.bin/pi
 PI_BIN_DIR = $(abspath $(dir $(PI_BIN)))
 

@@ -2367,7 +2367,7 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
                               (count (if (vectorp messages) (length messages) 0)))
                          (pi-coding-agent--display-session-history messages chat-buf)
                          ;; Restore context usage from last assistant message
-                         ;; (ensures context % displays correctly after resume/branch)
+                         ;; (ensures context % displays correctly after resume/fork)
                          (when (buffer-live-p chat-buf)
                            (with-current-buffer chat-buf
                              (setq pi-coding-agent--last-usage
@@ -2623,8 +2623,8 @@ Shows PID, status, and session file."
                              (message "Pi: No assistant message to copy")))
                        (message "Pi: Failed to get message"))))))
 
-(defun pi-coding-agent--format-branch-message (msg &optional index)
-  "Format MSG for display in branch selector.
+(defun pi-coding-agent--format-fork-message (msg &optional index)
+  "Format MSG for display in fork selector.
 MSG is a plist with :entryId and :text.
 INDEX is the display index (1-based) for the message."
   (let* ((text (or (plist-get msg :text) ""))
@@ -2633,32 +2633,32 @@ INDEX is the display index (1-based) for the message."
         (format "%d: %s" index preview)
       preview)))
 
-(defun pi-coding-agent-branch ()
-  "Branch conversation from a previous user message.
-Shows a selector of user messages and creates a branch from the selected one."
+(defun pi-coding-agent-fork ()
+  "Fork conversation from a previous user message.
+Shows a selector of user messages and creates a fork from the selected one."
   (interactive)
   (when-let ((proc (pi-coding-agent--get-process)))
-    (pi-coding-agent--rpc-async proc '(:type "get_branch_messages")
+    (pi-coding-agent--rpc-async proc '(:type "get_fork_messages")
                    (lambda (response)
                      (if (plist-get response :success)
                          (let* ((data (plist-get response :data))
                                 (messages (plist-get data :messages)))
                            ;; Note: messages is a vector from JSON, use seq-empty-p not null
                            (if (seq-empty-p messages)
-                               (message "Pi: No messages to branch from")
-                             (pi-coding-agent--show-branch-selector proc messages)))
-                       (message "Pi: Failed to get branch messages"))))))
+                               (message "Pi: No messages to fork from")
+                             (pi-coding-agent--show-fork-selector proc messages)))
+                       (message "Pi: Failed to get fork messages"))))))
 
-(defun pi-coding-agent--show-branch-selector (proc messages)
-  "Show selector for MESSAGES and branch on selection.
+(defun pi-coding-agent--show-fork-selector (proc messages)
+  "Show selector for MESSAGES and fork on selection.
 PROC is the pi process.
-MESSAGES is a vector of plists from get_branch_messages."
+MESSAGES is a vector of plists from get_fork_messages."
   (let* ((index 0)
          ;; Reverse so most recent messages appear first (upstream sends chronological order)
          (reversed-messages (reverse (append messages nil)))
          (formatted (mapcar (lambda (msg)
                               (setq index (1+ index))
-                              (cons (pi-coding-agent--format-branch-message msg index) msg))
+                              (cons (pi-coding-agent--format-fork-message msg index) msg))
                             reversed-messages))
          (choice-strings (mapcar #'car formatted))
          ;; Use completion table with metadata to preserve our sort order
@@ -2675,12 +2675,12 @@ MESSAGES is a vector of plists from get_branch_messages."
          (input-buf (pi-coding-agent--get-input-buffer)))
     (when selected
       (let ((entry-id (plist-get selected :entryId)))
-        (pi-coding-agent--rpc-async proc (list :type "branch" :entryId entry-id)
+        (pi-coding-agent--rpc-async proc (list :type "fork" :entryId entry-id)
                        (lambda (response)
                          (if (plist-get response :success)
                              (let* ((data (plist-get response :data))
                                     (text (plist-get data :text)))
-                               ;; Reload and display the branched session
+                               ;; Reload and display the forked session
                                (pi-coding-agent--load-session-history
                                 proc
                                 (lambda (count)
@@ -2783,7 +2783,7 @@ with argument substitution.  Otherwise return TEXT unchanged."
     ("q" "quit" pi-coding-agent-quit)]
    ["Context"
     ("c" "compact" pi-coding-agent-compact)
-    ("b" "branch" pi-coding-agent-branch)]]
+    ("f" "fork" pi-coding-agent-fork)]]
   [["Model"
     ("m" "select" pi-coding-agent-select-model)
     ("t" "thinking" pi-coding-agent-cycle-thinking)]

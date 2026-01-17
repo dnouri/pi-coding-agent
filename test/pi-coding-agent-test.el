@@ -2053,44 +2053,44 @@ Regression test for issue #32: JIT font-lock doesn't fontify expanded content."
                               (buffer-substring-no-properties
                                (line-beginning-position) (line-end-position)))))))
 
-(ert-deftest pi-coding-agent-test-format-branch-message ()
-  "Branch message formatted with index and preview."
+(ert-deftest pi-coding-agent-test-format-fork-message ()
+  "Fork message formatted with index and preview."
   (let ((msg '(:entryId "abc-123" :text "Hello world, this is a test")))
     ;; With index
-    (let ((result (pi-coding-agent--format-branch-message msg 2)))
+    (let ((result (pi-coding-agent--format-fork-message msg 2)))
       (should (string-match-p "2:" result))
       (should (string-match-p "Hello world" result)))
     ;; Without index
-    (let ((result (pi-coding-agent--format-branch-message msg)))
+    (let ((result (pi-coding-agent--format-fork-message msg)))
       (should (string-match-p "Hello world" result))
       (should-not (string-match-p ":" result)))))
 
-(ert-deftest pi-coding-agent-test-branch-detects-empty-messages-vector ()
-  "Branch correctly detects empty messages vector from RPC.
+(ert-deftest pi-coding-agent-test-fork-detects-empty-messages-vector ()
+  "Fork correctly detects empty messages vector from RPC.
 JSON arrays are parsed as vectors, and (null []) is nil, not t.
-The branch code must use seq-empty-p or length check."
+The fork code must use seq-empty-p or length check."
   (let ((rpc-called nil)
         (message-shown nil))
     (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
               ((symbol-function 'pi-coding-agent--rpc-async)
                (lambda (_proc cmd cb)
                  (setq rpc-called t)
-                 ;; Simulate response with empty vector (no messages to branch from)
+                 ;; Simulate response with empty vector (no messages to fork from)
                  (funcall cb '(:success t :data (:messages [])))))
               ((symbol-function 'message)
                (lambda (fmt &rest args)
                  (when (string-match-p "No messages" fmt)
                    (setq message-shown t)))))
-      (pi-coding-agent-branch)
+      (pi-coding-agent-fork)
       (should rpc-called)
-      ;; Should show "No messages to branch from", not call completing-read
+      ;; Should show "No messages to fork from", not call completing-read
       (should message-shown))))
 
-(ert-deftest pi-coding-agent-test-format-branch-message-handles-nil-text ()
-  "Format branch message handles nil text gracefully."
+(ert-deftest pi-coding-agent-test-format-fork-message-handles-nil-text ()
+  "Format fork message handles nil text gracefully."
   (let ((msg '(:entryId "abc-123" :text nil)))
     ;; Should not error, should return something displayable
-    (let ((result (pi-coding-agent--format-branch-message msg 1)))
+    (let ((result (pi-coding-agent--format-fork-message msg 1)))
       (should (stringp result)))))
 
 (ert-deftest pi-coding-agent-test-load-session-history-uses-provided-buffer ()
@@ -2119,7 +2119,7 @@ This ensures history loads correctly when callback runs in arbitrary context."
 
 (ert-deftest pi-coding-agent-test-load-session-history-restores-context-usage ()
   "load-session-history sets last-usage from final assistant message.
-This ensures context percentage is displayed correctly after resume/branch.
+This ensures context percentage is displayed correctly after resume/fork.
 Regression test: context showed 0% after resuming because usage wasn't extracted."
   (let* ((chat-buf (generate-new-buffer "*pi-coding-agent-chat:test-usage/*"))
          (rpc-callback nil)

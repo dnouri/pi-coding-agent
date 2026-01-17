@@ -111,7 +111,7 @@ For multiple sessions in the same directory, use =C-u M-x pi= to create a named 
 | =q=           | chat    | Quit session            |
 
 Press =C-c C-p= to access the full menu with model selection, thinking level,
-session management (new, resume, branch, export), statistics, and custom commands.
+session management (new, resume, fork, export), statistics, and custom commands.
 
 * Tips & Tricks
 
@@ -143,10 +143,10 @@ unfold. Use =S-TAB= to cycle visibility of all turns at once.
 Each project directory gets its own session automatically. To run multiple
 sessions in the same directory, use =C-u M-x pi= to create a named session.
 
-Resume (=C-c C-r=) and branch (=C-c C-p b=) present a selection menu:
+Resume (=C-c C-r=) and fork (=C-c C-p f=) present a selection menu:
 pick from previous sessions or conversation messages to start from.
 
-** 🌿 Branching and Context Management
+** 🌿 Forking and Context Management
 
 When a conversation gets long, the AI's context window fills up. The menu
 (=C-c C-p=) offers tools to manage this:
@@ -155,7 +155,7 @@ When a conversation gets long, the AI's context window fills up. The menu
   preserving key information. Use when context is filling up. If you don't
   compact manually, pi does it automatically when needed.
 
-- *Branch* (=b=): Creates a new session starting from a previous message.
+- *Fork* (=f=): Creates a new session starting from a previous message.
   Go back to any point and take the conversation in a new direction.
 
 - *Export* (=e=): Saves the conversation as an HTML file for sharing or
@@ -219,7 +219,7 @@ GitHub Actions runs on every push:
 - =test-integration.yml= - Integration tests with Docker Ollama
 - =test-gui.yml= - GUI tests with xvfb virtual framebuffer
 
-Nightly builds test against multiple pi versions (0.30.2, latest, and main branch).
+Nightly builds test against multiple pi versions (0.48.0, latest, and main branch).
 
 * Links
 

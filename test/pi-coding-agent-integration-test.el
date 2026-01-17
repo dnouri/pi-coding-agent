@@ -246,12 +246,12 @@ This test verifies the RPC protocol works, not full LLM interaction."
              (after-count (plist-get (plist-get after :data) :messageCount)))
         (should (= after-count 0))))))
 
-(ert-deftest pi-coding-agent-integration-get-branch-messages-returns-entry-id ()
-  "get_branch_messages returns messages with entryId field (not entryIndex).
-Catches API breaking changes in the branch message format."
+(ert-deftest pi-coding-agent-integration-get-fork-messages-returns-entry-id ()
+  "get_fork_messages returns messages with entryId field (not entryIndex).
+Catches API breaking changes in the fork message format."
   (pi-coding-agent-integration-with-process
     ;; Empty session should return empty messages array
-    (let ((response (pi-coding-agent--rpc-sync proc '(:type "get_branch_messages") pi-coding-agent-test-rpc-timeout)))
+    (let ((response (pi-coding-agent--rpc-sync proc '(:type "get_fork_messages") pi-coding-agent-test-rpc-timeout)))
       (should (plist-get response :success))
       (let ((messages (plist-get (plist-get response :data) :messages)))
         (should (vectorp messages))
