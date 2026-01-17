@@ -96,19 +96,20 @@ For multiple sessions in the same directory, use =C-u M-x pi= to create a named 
 
 * Key Bindings
 
-| Key           | Context | Description             |
-|---------------+---------+-------------------------|
-| =C-c C-c=     | input   | Send prompt             |
-| =C-c C-k=     | input   | Abort streaming         |
-| =C-c C-p=     | both    | Open menu               |
-| =C-c C-r=     | input   | Resume session          |
-| =M-p= / =M-n= | input   | History navigation      |
-| =C-r=         | input   | Search history          |
-| =TAB=         | input   | Complete slash commands |
-| =n= / =p=     | chat    | Navigate messages       |
-| =TAB=         | chat    | Toggle section          |
-| =S-TAB=       | chat    | Cycle all folds         |
-| =q=           | chat    | Quit session            |
+| Key           | Context | Description                       |
+|---------------+---------+-----------------------------------|
+| =C-c C-c=     | input   | Send prompt                       |
+| =C-c C-k=     | input   | Abort streaming                   |
+| =C-c C-p=     | both    | Open menu                         |
+| =C-c C-r=     | input   | Resume session                    |
+| =M-p= / =M-n= | input   | History navigation                |
+| =C-r=         | input   | Search history                    |
+| =TAB=         | input   | Complete paths, @files, /commands |
+| =@=           | input   | File reference (search)           |
+| =n= / =p=     | chat    | Navigate messages                 |
+| =TAB=         | chat    | Toggle section                    |
+| =S-TAB=       | chat    | Cycle all folds                   |
+| =q=           | chat    | Quit session                      |
 
 Press =C-c C-p= to access the full menu with model selection, thinking level,
 session management (new, resume, fork, export), statistics, and custom commands.
@@ -124,6 +125,15 @@ stays put while the AI responds above.
 
 Slash commands (=/command=) work with completion: type =/= then =TAB= to
 see available commands, including your custom ones from =~/.pi/commands/=.
+
+** 📎 Editor Features
+
+Several features match the TUI experience:
+
+- *File reference (@)*: Type =@= to search project files. Respects =.gitignore=.
+  Results are cached for 30 seconds to keep completion fast.
+
+- *Path completion (Tab)*: Complete relative paths like =./=, =../=, =~/=.
 
 ** 🔧 Tool Output
 

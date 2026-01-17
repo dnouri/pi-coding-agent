@@ -47,11 +47,17 @@
 ;;     C-c C-r        Resume session
 ;;     M-p / M-n      History navigation
 ;;     C-r            Search history
+;;     TAB            Path/file completion
+;;     @              File reference (search project files)
 ;;
 ;;   Chat buffer:
 ;;     n / p          Navigate messages
 ;;     TAB            Toggle tool output
 ;;     C-c C-p        Open menu
+;;
+;; Editor Features:
+;;   - File reference (@): Type @ to search project files (respects .gitignore)
+;;   - Path completion (Tab): Complete relative paths, ../, ~/, etc.
 ;;
 ;; Press C-c C-p for the full transient menu with model selection,
 ;; thinking level, session management, and custom commands.
@@ -432,7 +438,12 @@ Restores saved input when moving past newest entry."
   "Major mode for composing pi prompts."
   :group 'pi-coding-agent
   (setq-local header-line-format '(:eval (pi-coding-agent--header-line-string)))
+  ;; Completion-at-point functions (order matters: first match wins)
   (add-hook 'completion-at-point-functions #'pi-coding-agent--slash-capf nil t)
+  (add-hook 'completion-at-point-functions #'pi-coding-agent--file-reference-capf nil t)
+  (add-hook 'completion-at-point-functions #'pi-coding-agent--path-capf nil t)
+  ;; Auto-trigger completion after @ is typed
+  (add-hook 'post-self-insert-hook #'pi-coding-agent--maybe-complete-at nil t)
   (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-input-on-kill nil t))
 
 ;;;; Session Directory Detection
@@ -2768,6 +2779,130 @@ with argument substitution.  Otherwise return TEXT unchanged."
            (cmd (cdr (assoc choice choices))))
       (when cmd
         (pi-coding-agent--run-custom-command cmd)))))
+
+;;;; Editor Features: File Reference (@)
+
+(defun pi-coding-agent--maybe-complete-at ()
+  "Trigger completion after @.
+Called from `post-self-insert-hook'."
+  (when (eq last-command-event ?@)
+    (run-at-time 0 nil #'pi-coding-agent--complete-file-reference)))
+
+(defun pi-coding-agent--complete-file-reference ()
+  "Complete file reference after @."
+  (let* ((files (pi-coding-agent--get-project-files))
+         (choice (completing-read "File: " files nil nil)))
+    (when (and choice (not (string-empty-p choice)))
+      (insert choice))))
+
+(defvar-local pi-coding-agent--project-files-cache nil
+  "Cached list of project files for @ completion.")
+
+(defvar-local pi-coding-agent--project-files-cache-time nil
+  "Time when project files cache was last updated.")
+
+(defconst pi-coding-agent--project-files-cache-ttl 30
+  "Seconds before project files cache expires.")
+
+(defconst pi-coding-agent--file-exclude-patterns
+  '(".git" "node_modules" ".elpa" "target" "build" "__pycache__" ".venv" "dist")
+  "Directory names to exclude when listing files with find.")
+
+(defun pi-coding-agent--get-project-files ()
+  "Get list of project files, respecting .gitignore.
+Uses cache if available and not expired."
+  (let ((now (float-time)))
+    (when (or (null pi-coding-agent--project-files-cache)
+              (null pi-coding-agent--project-files-cache-time)
+              (> (- now pi-coding-agent--project-files-cache-time)
+                 pi-coding-agent--project-files-cache-ttl))
+      (setq pi-coding-agent--project-files-cache
+            (pi-coding-agent--list-project-files))
+      (setq pi-coding-agent--project-files-cache-time now))
+    pi-coding-agent--project-files-cache))
+
+(defun pi-coding-agent--list-project-files ()
+  "List project files using git ls-files or find.
+Respects .gitignore when in a git repository."
+  (let* ((dir (pi-coding-agent--session-directory))
+         (default-directory dir))
+    (condition-case nil
+        ;; Try git ls-files first (respects .gitignore)
+        (let ((output (shell-command-to-string
+                       "git ls-files --cached --others --exclude-standard 2>/dev/null")))
+          (if (string-empty-p output)
+              ;; Fallback to find if git fails or no files
+              (pi-coding-agent--list-files-with-find dir)
+            (split-string output "\n" t)))
+      (error (pi-coding-agent--list-files-with-find dir)))))
+
+(defun pi-coding-agent--list-files-with-find (dir)
+  "List files in DIR using find.
+Excludes directories listed in `pi-coding-agent--file-exclude-patterns'."
+  (let* ((default-directory dir)
+         (prune-expr (mapconcat (lambda (p) (format "-name '%s'" p))
+                                pi-coding-agent--file-exclude-patterns
+                                " -o "))
+         (cmd (format "find . \\( %s \\) -prune -o -type f -print 2>/dev/null | sed 's|^\\./||'"
+                      prune-expr)))
+    (split-string (shell-command-to-string cmd) "\n" t)))
+
+(defun pi-coding-agent--file-reference-capf ()
+  "Completion-at-point function for @file references.
+Triggers when @ is typed, provides completion of project files."
+  (when-let* ((at-pos (save-excursion
+                        (when (search-backward "@" (line-beginning-position) t)
+                          (point)))))
+    (let* ((start (1+ at-pos))
+           (end (point))
+           (prefix (buffer-substring-no-properties start end))
+           (files (pi-coding-agent--get-project-files))
+           ;; Filter files containing prefix as substring
+           (candidates (if (string-empty-p prefix)
+                           files
+                         (cl-remove-if-not
+                          (lambda (f) (string-match-p (regexp-quote prefix) f))
+                          files))))
+      (when candidates
+        (list start end candidates
+              :exclusive 'no
+              :annotation-function (lambda (_) " (file)")
+              :company-kind (lambda (_) 'file))))))
+
+;;;; Editor Features: Path Completion
+
+(defun pi-coding-agent--path-prefix-p (path)
+  "Check if PATH has a completable prefix (./, ../, ~/, or /)."
+  (or (string-prefix-p "./" path)
+      (string-prefix-p "../" path)
+      (string-prefix-p "~/" path)
+      (string-prefix-p "/" path)))
+
+(defun pi-coding-agent--path-completions (path)
+  "Return file completion candidates for PATH, or nil if directory invalid."
+  (let* ((dir (file-name-directory path))
+         (base (file-name-nondirectory path))
+         (expanded-dir (expand-file-name (or dir "") (pi-coding-agent--session-directory))))
+    (when (file-directory-p expanded-dir)
+      (mapcar (lambda (f) (concat (or dir "") f))
+              (cl-remove-if (lambda (f) (member f '("." "..")))
+                            (file-name-all-completions base expanded-dir))))))
+
+(defun pi-coding-agent--path-capf ()
+  "Completion-at-point function for file paths.
+Completes paths starting with ./, ../, ~/, or /."
+  (when-let* ((bounds (bounds-of-thing-at-point 'filename))
+              (start (car bounds))
+              (end (cdr bounds))
+              (path (buffer-substring-no-properties start end))
+              ((pi-coding-agent--path-prefix-p path))
+              (candidates (pi-coding-agent--path-completions path)))
+    (list start end candidates
+          :exclusive 'no
+          :annotation-function
+          (lambda (c)
+            (if (file-directory-p (expand-file-name c (pi-coding-agent--session-directory)))
+                " (dir)" " (file)")))))
 
 (transient-define-prefix pi-coding-agent-menu ()
   "Pi coding agent menu."
