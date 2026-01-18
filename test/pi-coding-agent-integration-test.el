@@ -261,5 +261,148 @@ Catches API breaking changes in the fork message format."
             (should (plist-get first-msg :entryId))
             (should-not (plist-get first-msg :entryIndex))))))))
 
+;;; Message Queuing Tests
+;;
+;; Only steering uses pi's RPC API.  Follow-up uses a local queue in Emacs,
+;; so there's no integration test for it (tested in unit tests instead).
+
+(ert-deftest pi-coding-agent-integration-steer-queues-and-delivers ()
+  "Steer message is queued during streaming and delivered after current tool.
+Verifies:
+1. steer RPC command succeeds
+2. message_start with role=user is emitted when delivered
+3. The steering message text appears in the event"
+  (pi-coding-agent-integration-with-process
+    (let ((events nil)
+          (got-agent-end nil)
+          (user-message-events nil))
+      (push (lambda (e)
+              (push e events)
+              (when (and (equal (plist-get e :type) "message_start")
+                         (equal (plist-get (plist-get e :message) :role) "user"))
+                (push e user-message-events))
+              (when (equal (plist-get e :type) "agent_end")
+                (setq got-agent-end t)))
+            pi-coding-agent--event-handlers)
+      ;; Send initial prompt
+      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "Say: working") #'ignore)
+      ;; Wait a moment for streaming to start, then queue steering
+      (sleep-for 0.5)
+      (let ((queue-response (pi-coding-agent--rpc-sync proc
+                              '(:type "steer" :message "Say: queued-steer-test")
+                              pi-coding-agent-test-rpc-timeout)))
+        (should (plist-get queue-response :success)))
+      ;; Wait for agent_end
+      (with-timeout (pi-coding-agent-test-integration-timeout
+                     (ert-fail "Timeout waiting for steering message delivery"))
+        (while (not got-agent-end)
+          (accept-process-output proc 0.1)))
+      ;; Verify we got TWO message_start events with role=user
+      (should (= (length user-message-events) 2))
+      ;; Verify the steering message text appears
+      (let ((queued-msg (seq-find
+                         (lambda (e)
+                           (let* ((msg (plist-get e :message))
+                                  (content (plist-get msg :content)))
+                             (and content
+                                  (> (length content) 0)
+                                  (string-match-p "queued-steer-test"
+                                                  (or (plist-get (aref content 0) :text) "")))))
+                         user-message-events)))
+        (should queued-msg)))))
+
+;; Note: Follow-up messages use a local Emacs queue (not pi's RPC follow_up),
+;; so there's no integration test for follow-up.  This is simpler and more
+;; responsive - the message is displayed immediately when queued, and sent
+;; to pi on agent_end.  See unit tests for follow-up queue behavior.
+
+(ert-deftest pi-coding-agent-integration-steering-display-not-corrupted ()
+  "Steering message display should not corrupt ongoing assistant output.
+When user sends steering while assistant is streaming, the user message
+should appear cleanly after the current assistant output, not interleaved.
+
+This tests for a bug where the user message header and assistant text
+got mixed together like:
+  > The user wants me to count from 1 to
+  You · 01:32
+  ===========
+  STOP NOW
+  10 slowly...  <- WRONG: '10 slowly' is assistant text after user msg!"
+  (pi-coding-agent-integration-with-process
+    (let* ((chat-buf (generate-new-buffer "*pi-integration-steer-display*"))
+           (input-buf (generate-new-buffer "*pi-integration-steer-input*"))
+           (got-agent-end nil)
+           (final-content nil))
+      (unwind-protect
+          (progn
+            ;; Set up buffers
+            (with-current-buffer chat-buf
+              (pi-coding-agent-chat-mode)
+              (setq pi-coding-agent--process proc)
+              (setq pi-coding-agent--input-buffer input-buf)
+              (setq pi-coding-agent--status 'idle))
+            (with-current-buffer input-buf
+              (pi-coding-agent-input-mode)
+              (setq pi-coding-agent--chat-buffer chat-buf))
+            
+            ;; Register display handler that uses the real display code
+            (process-put proc 'pi-coding-agent-display-handler
+                         (lambda (event)
+                           (with-current-buffer chat-buf
+                             (pi-coding-agent--handle-display-event event))
+                           (when (equal (plist-get event :type) "agent_end")
+                             (setq got-agent-end t))))
+            
+            ;; Send initial prompt that will generate substantial output
+            (with-current-buffer input-buf
+              (insert "Count slowly from 1 to 20, one number per line.")
+              (pi-coding-agent-send))
+            
+            ;; Wait for streaming to start and some content to appear
+            (with-timeout (5 (ert-fail "Timeout waiting for streaming to start"))
+              (while (with-current-buffer chat-buf
+                       (< (buffer-size) 100))
+                (accept-process-output proc 0.1)))
+            
+            ;; Now send steering while streaming is in progress
+            (with-current-buffer input-buf
+              (insert "XYZZY-STOP-MARKER")
+              (pi-coding-agent-queue-steering))
+            
+            ;; Wait for completion
+            (with-timeout (pi-coding-agent-test-integration-timeout
+                           (ert-fail "Timeout waiting for agent_end"))
+              (while (not got-agent-end)
+                (accept-process-output proc 0.1)))
+            
+            ;; Capture final content
+            (setq final-content (with-current-buffer chat-buf
+                                  (buffer-substring-no-properties (point-min) (point-max))))
+            
+            ;; Find the steering message
+            (let ((steer-msg-pos (string-match "XYZZY-STOP-MARKER" final-content)))
+              (should steer-msg-pos)
+              
+              ;; Verify proper header order: "You" header should precede the steering message
+              (let ((you-header-before-steer
+                     (string-match "You ·" (substring final-content 0 steer-msg-pos))))
+                (should you-header-before-steer))
+              
+              ;; After the steering message, we should see "Assistant" header (not interleaved text)
+              (let* ((after-msg-start (+ steer-msg-pos (length "XYZZY-STOP-MARKER")))
+                     (after-msg-end (min (+ after-msg-start 200) (length final-content)))
+                     (text-after-msg (substring final-content after-msg-start after-msg-end)))
+                ;; Should see Assistant header after the steering message (possibly with newlines)
+                (should (string-match-p "Assistant" text-after-msg))
+                ;; Should NOT see lowercase continuation of previous assistant output
+                ;; (would indicate interleaving bug)
+                (should-not (string-match-p "^[a-z]" text-after-msg))
+                ;; Should NOT see a number at the start (from the counting task)
+                (should-not (string-match-p "^[0-9]" text-after-msg)))))
+        
+        ;; Cleanup
+        (when (buffer-live-p chat-buf) (kill-buffer chat-buf))
+        (when (buffer-live-p input-buf) (kill-buffer input-buf))))))
+
 (provide 'pi-coding-agent-integration-test)
 ;;; pi-coding-agent-integration-test.el ends here

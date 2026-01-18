@@ -41,9 +41,8 @@
 ;;
 ;; Key Bindings:
 ;;   Input buffer:
-;;     C-c C-c        Send prompt
-;;     C-c C-s        Queue steering message (interrupts after current tool)
-;;     C-c C-q        Queue follow-up message (sent after agent completes)
+;;     C-c C-c        Send prompt (queues as follow-up if busy)
+;;     C-c C-s        Queue steering (interrupts after current tool; busy only)
 ;;     C-c C-k        Abort streaming
 ;;     C-c C-p        Open menu
 ;;     C-c C-r        Resume session
@@ -61,8 +60,8 @@
 ;;   - File reference (@): Type @ to search project files (respects .gitignore)
 ;;   - Path completion (Tab): Complete relative paths, ../, ~/, etc.
 ;;   - Message queuing: Submit messages while agent is working:
-;;       C-c C-s  queues steering message (delivered after current tool)
-;;       C-c C-q  queues follow-up message (delivered after agent completes)
+;;       C-c C-c  queues follow-up (delivered after agent completes)
+;;       C-c C-s  queues steering (interrupts after current tool)
 ;;
 ;; Press C-c C-p for the full transient menu with model selection,
 ;; thinking level, session management, and custom commands.
@@ -352,9 +351,8 @@ This is a read-only buffer showing the conversation history."
     (define-key map (kbd "<C-up>") #'pi-coding-agent-previous-input)
     (define-key map (kbd "<C-down>") #'pi-coding-agent-next-input)
     (define-key map (kbd "C-r") #'pi-coding-agent-history-search)
-    ;; Message queuing
+    ;; Message queuing (steering only - follow-up handled by C-c C-c)
     (define-key map (kbd "C-c C-s") #'pi-coding-agent-queue-steering)
-    (define-key map (kbd "C-c C-q") #'pi-coding-agent-queue-followup)
     map)
   "Keymap for `pi-coding-agent-input-mode'.")
 
@@ -577,6 +575,18 @@ Set by display-tool-start, used by display-tool-end.")
 (defvar-local pi-coding-agent--assistant-header-shown nil
   "Non-nil if Assistant header has been shown for current prompt.
 Used to avoid duplicate headers during retry sequences.")
+
+(defvar-local pi-coding-agent--followup-queue nil
+  "List of follow-up messages queued while agent is busy.
+Messages are added when user sends while streaming.
+On agent_end, the first message is popped and sent as a normal prompt.
+This is simpler than using pi's RPC follow_up command.")
+
+(defvar-local pi-coding-agent--awaiting-user-echo nil
+  "Non-nil when we've displayed a user message locally and await pi's echo.
+Set when displaying a user message (normal send, follow-up).
+Cleared when we receive message_start role=user from pi.
+When nil and we receive message_start role=user, we display it (steering).")
 
 (defvar-local pi-coding-agent--fontify-timer nil
   "Idle timer for periodic fontification during streaming.
@@ -854,8 +864,11 @@ CONTENT is ignored - we use what was already streamed."
           (set-marker pi-coding-agent--streaming-marker (point)))))))
 
 (defun pi-coding-agent--display-agent-end ()
-  "Display end of agent turn.
+  "Display end of agent turn and process follow-up queue.
 Note: status is set to `idle' by the event handler."
+  ;; Reset counter that tracks locally-displayed messages awaiting echo.
+  ;; Ensures clean state for next turn (e.g., if abort occurred before echo arrived).
+  (setq pi-coding-agent--awaiting-user-echo nil)
   (let ((inhibit-read-only t))
     ;; Clean up pending tool overlay if abort happened mid-tool
     (pi-coding-agent--tool-overlay-finalize 'pi-coding-agent-tool-block-error)
@@ -880,7 +893,28 @@ Note: status is set to `idle' by the event handler."
         (insert "\n\n"))))
   (pi-coding-agent--spinner-stop)
   (pi-coding-agent--fontify-timer-stop)
-  (pi-coding-agent--refresh-header))
+  (pi-coding-agent--refresh-header)
+  ;; Check follow-up queue and send next message if any
+  (pi-coding-agent--process-followup-queue))
+
+(defun pi-coding-agent--process-followup-queue ()
+  "Pop first message from follow-up queue and send it.
+Does nothing if queue is empty.  Messages are processed in FIFO order."
+  (when pi-coding-agent--followup-queue
+    ;; `push' adds to front, so oldest message is at end - use `last' for FIFO
+    (let ((text (car (last pi-coding-agent--followup-queue))))
+      (setq pi-coding-agent--followup-queue (butlast pi-coding-agent--followup-queue))
+      (let ((expanded (pi-coding-agent--expand-slash-command text)))
+        ;; Display message locally and track for echo suppression
+        (pi-coding-agent--display-user-message expanded (current-time))
+        (setq pi-coding-agent--awaiting-user-echo t)
+        ;; Set up for new turn
+        (setq pi-coding-agent--status 'sending)
+        (setq pi-coding-agent--assistant-header-shown nil)
+        (pi-coding-agent--spinner-start)
+        (force-mode-line-update)
+        ;; Send to pi
+        (pi-coding-agent--send-prompt expanded)))))
 
 (defun pi-coding-agent--display-retry-start (event)
   "Display retry notice from auto_retry_start EVENT.
@@ -1026,9 +1060,30 @@ Updates buffer-local state and renders display updates."
     ("agent_start"
      (pi-coding-agent--display-agent-start))
     ("message_start"
-     ;; Reset markers for each new message to avoid clobbering tool output
-     (setq pi-coding-agent--message-start-marker (copy-marker (point-max) nil))
-     (setq pi-coding-agent--streaming-marker (copy-marker (point-max) t)))
+     (let ((message (plist-get event :message)))
+       (if (equal (plist-get message :role) "user")
+           ;; User message from pi - check if we displayed it locally
+           (if pi-coding-agent--awaiting-user-echo
+               ;; We displayed locally (normal send, follow-up) - skip this echo
+               (setq pi-coding-agent--awaiting-user-echo nil)
+             ;; Not displayed locally (steering) - display now
+             (let ((content (plist-get message :content))
+                   (timestamp (plist-get message :timestamp)))
+               (when content
+                 (let ((text (pi-coding-agent--extract-user-message-text content)))
+                   (when text
+                     (pi-coding-agent--display-user-message
+                      text
+                      (pi-coding-agent--ms-to-time timestamp))
+                     ;; Reset so next assistant message shows its header
+                     (setq pi-coding-agent--assistant-header-shown nil))))))
+         ;; Assistant message - show header if needed, reset markers
+         (unless pi-coding-agent--assistant-header-shown
+           (pi-coding-agent--append-to-chat
+            (concat "\n" (pi-coding-agent--make-separator "Assistant" 'pi-coding-agent-assistant-label) "\n"))
+           (setq pi-coding-agent--assistant-header-shown t))
+         (setq pi-coding-agent--message-start-marker (copy-marker (point-max) nil))
+         (setq pi-coding-agent--streaming-marker (copy-marker (point-max) t)))))
     ("message_update"
      (when-let* ((msg-event (plist-get event :assistantMessageEvent))
                  (event-type (plist-get msg-event :type)))
@@ -1109,11 +1164,10 @@ Updates buffer-local state and renders display updates."
 (defun pi-coding-agent-send ()
   "Send the current input buffer contents to pi.
 Clears the input buffer after sending.  Does nothing if buffer is empty.
-If pi is currently streaming, shows a message and preserves input.
+If pi is currently streaming, adds to local follow-up queue.
 Slash commands are expanded before display and sending."
   (interactive)
   (let* ((text (string-trim (buffer-string)))
-         (expanded (pi-coding-agent--expand-slash-command text))
          (chat-buf (pi-coding-agent--get-chat-buffer))
          (streaming (and chat-buf
                          (buffer-local-value 'pi-coding-agent--status chat-buf)
@@ -1122,23 +1176,32 @@ Slash commands are expanded before display and sending."
     (cond
      ;; Empty input - do nothing
      ((string-empty-p text) nil)
-     ;; Streaming - block send, preserve input
+     ;; Streaming - add to local follow-up queue
      (streaming
-      (message "Pi: Please wait for response to complete"))
-     ;; Normal send
-     (t
-      ;; Add to history and reset navigation state (save original for recall)
       (pi-coding-agent--history-add text)
       (setq pi-coding-agent--input-ring-index nil
             pi-coding-agent--input-saved nil)
       (erase-buffer)
+      ;; Add to queue in chat buffer
       (with-current-buffer chat-buf
-        (pi-coding-agent--display-user-message expanded (current-time))
-        (setq pi-coding-agent--status 'sending)
-        (setq pi-coding-agent--assistant-header-shown nil)  ; Reset for new prompt
-        (pi-coding-agent--spinner-start)
-        (force-mode-line-update))
-      (pi-coding-agent--send-prompt expanded)))))
+        (push text pi-coding-agent--followup-queue))
+      (message "Pi: Message queued (will send after current response)"))
+     ;; Normal send
+     (t
+      (let ((expanded (pi-coding-agent--expand-slash-command text)))
+        ;; Add to history and reset navigation state
+        (pi-coding-agent--history-add text)
+        (setq pi-coding-agent--input-ring-index nil
+              pi-coding-agent--input-saved nil)
+        (erase-buffer)
+        (with-current-buffer chat-buf
+          (pi-coding-agent--display-user-message expanded (current-time))
+          (setq pi-coding-agent--awaiting-user-echo t)
+          (setq pi-coding-agent--status 'sending)
+          (setq pi-coding-agent--assistant-header-shown nil)
+          (pi-coding-agent--spinner-start)
+          (force-mode-line-update))
+        (pi-coding-agent--send-prompt expanded))))))
 
 (defun pi-coding-agent--send-prompt (text)
   "Send TEXT as a prompt to the pi process.
@@ -1387,6 +1450,13 @@ Optimized for the common case of a single text block."
                          ""))
                      content-blocks "")))
     ""))
+
+(defun pi-coding-agent--extract-user-message-text (content)
+  "Extract text from user message CONTENT.
+CONTENT is a vector of content blocks from a user message.
+Returns the concatenated text, or nil if empty."
+  (let ((text (pi-coding-agent--extract-text-from-content content)))
+    (unless (string-empty-p text) text)))
 
 (defun pi-coding-agent--get-tail-lines (content n)
   "Get last N lines from CONTENT by scanning backward.
@@ -2770,6 +2840,7 @@ Prompts for arguments if the command content contains placeholders."
            (expanded (pi-coding-agent--substitute-args content args)))
       (with-current-buffer chat-buf
         (pi-coding-agent--display-user-message (format "/%s %s" name args-string) (current-time))
+        (setq pi-coding-agent--awaiting-user-echo t)
         (setq pi-coding-agent--status 'sending)
         (pi-coding-agent--spinner-start)
         (force-mode-line-update))
@@ -2957,105 +3028,72 @@ Completes paths starting with ./, ../, ~/, or /."
                 " (dir)" " (file)")))))
 ;;;; Editor Features: Message Queuing
 ;;
-;; Message queuing uses the pi RPC API's dedicated commands:
-;;   - `steer`: Interrupt after current tool, remaining tools cancelled
-;;   - `follow_up`: Wait until agent finishes all work
+;; Message queuing has two paths:
 ;;
-;; Pi handles the queueing internally.  The Emacs side just sends the
-;; appropriate RPC command and displays the queued message visually.
+;; 1. Follow-up (C-c C-c while busy): Uses local queue in Emacs.
+;;    - Message added to `pi-coding-agent--followup-queue'
+;;    - On agent_end, first message is popped and sent as normal prompt
+;;    - Displayed locally immediately (like normal sends)
+;;    - Pi's echo via message_start is ignored (flag tracks this)
+;;
+;; 2. Steering (C-c C-s while busy): Uses pi's RPC `steer` command.
+;;    - Pi intercepts between tool calls to deliver steering
+;;    - NOT displayed locally - waits for pi's echo via message_start
+;;    - This ensures steering appears at correct position (after current
+;;      assistant output completes, avoiding display corruption)
 
-(defface pi-coding-agent-queued-label
-  '((t :inherit font-lock-comment-face :slant italic))
-  "Face for queued message labels in chat."
-  :group 'pi-coding-agent)
-
-(defun pi-coding-agent--display-queued-message (text type)
-  "Display queued message TEXT of TYPE in chat buffer.
-TYPE is :steer or :follow-up.  Shows as a dimmed/italic indicator."
-  (let ((type-str (if (eq type :steer) "steering" "follow-up")))
-    (pi-coding-agent--append-to-chat
-     (concat "\n"
-             (propertize (format "┄┄┄ Queued (%s) ┄┄┄" type-str)
-                         'face 'pi-coding-agent-queued-label)
-             "\n"
-             (propertize text 'face 'pi-coding-agent-queued-label)
-             "\n"))))
-
-(defun pi-coding-agent--send-steer (text)
+(defun pi-coding-agent--send-steer-message (text)
   "Send TEXT as a steering message via RPC.
-Steering interrupts after current tool execution."
+Returns t if message was sent, nil if process unavailable.
+Shows error message if RPC fails."
   (let ((proc (pi-coding-agent--get-process)))
-    (when (and proc (process-live-p proc))
-      (pi-coding-agent--rpc-async proc
-                                  (list :type "steer" :message text)
-                                  #'ignore))))
-
-(defun pi-coding-agent--send-follow-up (text)
-  "Send TEXT as a follow-up message via RPC.
-Follow-up waits until agent finishes all work."
-  (let ((proc (pi-coding-agent--get-process)))
-    (when (and proc (process-live-p proc))
-      (pi-coding-agent--rpc-async proc
-                                  (list :type "follow_up" :message text)
-                                  #'ignore))))
+    (if (and proc (process-live-p proc))
+        (progn
+          (pi-coding-agent--rpc-async proc
+                                      (list :type "steer" :message text)
+                                      (lambda (response)
+                                        (unless (eq (plist-get response :success) t)
+                                          (message "Pi: Steering failed: %s"
+                                                   (or (plist-get response :error) "unknown error")))))
+          t)
+      (message "Pi: Cannot send steering - process unavailable")
+      nil)))
 
 (defun pi-coding-agent-queue-steering ()
-  "Queue current input as a steering message.
+  "Send current input as a steering message.
 Steering messages are delivered after the current tool execution,
-interrupting any remaining tools.  If agent is idle, sends as normal prompt."
+interrupting any remaining tools.  Only works when agent is busy.
+Unlike normal sends, steering is NOT displayed locally - pi will echo
+it back via message_start at the correct position (after current
+assistant output completes)."
   (interactive)
   (let ((text (string-trim (buffer-string))))
-    (when (not (string-empty-p text))
+    (unless (string-empty-p text)
       (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
         (when chat-buf
-          ;; Add to history and reset navigation state
-          (pi-coding-agent--history-add text)
-          (setq pi-coding-agent--input-ring-index nil
-                pi-coding-agent--input-saved nil)
-          (with-current-buffer chat-buf
-            (if (eq pi-coding-agent--status 'idle)
-                ;; Idle: send as normal prompt
-                (progn
-                  (pi-coding-agent--display-user-message text (current-time))
-                  (setq pi-coding-agent--status 'sending)
-                  (setq pi-coding-agent--assistant-header-shown nil)
-                  (pi-coding-agent--spinner-start)
-                  (force-mode-line-update)
-                  (pi-coding-agent--send-prompt text))
-              ;; Busy: send via RPC steer command
-              (pi-coding-agent--display-queued-message text :steer)
-              (pi-coding-agent--send-steer text)
-              (message "Pi: Steering message queued")))
-          (erase-buffer))))))
+          (let ((status (buffer-local-value 'pi-coding-agent--status chat-buf)))
+            (if (eq status 'idle)
+                ;; Idle - refuse (nothing to interrupt)
+                (message "Pi: Nothing to interrupt - use C-c C-c to send")
+              ;; Busy - send via RPC (don't display locally)
+              (let ((expanded (pi-coding-agent--expand-slash-command text)))
+                ;; Add to history
+                (pi-coding-agent--history-add text)
+                (setq pi-coding-agent--input-ring-index nil
+                      pi-coding-agent--input-saved nil)
+                (erase-buffer)
+                ;; Don't display locally - pi will echo back via message_start
+                ;; at the correct position (after current assistant turn)
+                ;; Send via RPC (steering requires pi to intercept between tools)
+                (pi-coding-agent--send-steer-message expanded)
+                (message "Pi: Steering message sent")))))))))
 
 (defun pi-coding-agent-queue-followup ()
   "Queue current input as a follow-up message.
-Follow-up messages are delivered only after the agent finishes all work.
-If agent is idle, sends as normal prompt."
+Obsolete: Use `pi-coding-agent-send' (C-c C-c) instead, which now
+automatically queues as follow-up when the agent is busy."
   (interactive)
-  (let ((text (string-trim (buffer-string))))
-    (when (not (string-empty-p text))
-      (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
-        (when chat-buf
-          ;; Add to history and reset navigation state
-          (pi-coding-agent--history-add text)
-          (setq pi-coding-agent--input-ring-index nil
-                pi-coding-agent--input-saved nil)
-          (with-current-buffer chat-buf
-            (if (eq pi-coding-agent--status 'idle)
-                ;; Idle: send as normal prompt
-                (progn
-                  (pi-coding-agent--display-user-message text (current-time))
-                  (setq pi-coding-agent--status 'sending)
-                  (setq pi-coding-agent--assistant-header-shown nil)
-                  (pi-coding-agent--spinner-start)
-                  (force-mode-line-update)
-                  (pi-coding-agent--send-prompt text))
-              ;; Busy: send via RPC follow_up command
-              (pi-coding-agent--display-queued-message text :follow-up)
-              (pi-coding-agent--send-follow-up text)
-              (message "Pi: Follow-up message queued")))
-          (erase-buffer))))))
+  (pi-coding-agent-send))
 
 (transient-define-prefix pi-coding-agent-menu ()
   "Pi coding agent menu."
@@ -3076,10 +3114,11 @@ If agent is idle, sends as normal prompt."
     ("m" "select" pi-coding-agent-select-model)
     ("t" "thinking" pi-coding-agent-cycle-thinking)]
    ["Info"
-    ("s" "stats" pi-coding-agent-session-stats)
+    ("S" "stats" pi-coding-agent-session-stats)
     ("y" "copy last" pi-coding-agent-copy-last-message)]]
   [["Actions"
     ("RET" "send" pi-coding-agent-send)
+    ("s" "steer" pi-coding-agent-queue-steering)
     ("k" "abort" pi-coding-agent-abort)]])
 
 (defun pi-coding-agent-refresh-commands ()
