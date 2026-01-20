@@ -3315,3 +3315,31 @@ This validates that our hook-based tests are meaningful."
         (let ((inhibit-read-only t))
           (insert "Normal insert"))
         (should hook-called)))))
+
+(ert-deftest pi-coding-agent-test-markdown-backward-search-limit ()
+  "The markdown backward search limit improves fontification performance.
+In large buffers with many code blocks, markdown-find-previous-block
+scans backward through all text properties, causing O(n) slowdown.
+The advice limits this scan to `pi-coding-agent-markdown-search-limit' bytes."
+  ;; Verify the advice is installed
+  (should (advice-member-p #'pi-coding-agent--limit-markdown-backward-search
+                           'markdown-find-previous-prop))
+  
+  ;; Test that the limit only applies in pi-coding-agent-chat-mode
+  (with-temp-buffer
+    (insert (make-string 100000 ?x))  ;; 100KB buffer
+    ;; Add a property ONLY far from end (outside 30KB limit)
+    (put-text-property 10000 10001 'markdown-gfm-block-begin t)
+    (goto-char (point-max))
+    
+    ;; In non-pi buffer, should find the property (no limit)
+    (let ((result (markdown-find-previous-prop 'markdown-gfm-block-begin)))
+      (should result)
+      (should (= (car result) 10000)))
+    
+    ;; In pi-coding-agent-chat-mode, should NOT find it (outside 30KB limit)
+    (pi-coding-agent-chat-mode)
+    (goto-char (point-max))
+    (let ((result (markdown-find-previous-prop 'markdown-gfm-block-begin)))
+      ;; Result should be nil or the limit position, not the property
+      (should-not (and result (= (car result) 10000))))))
