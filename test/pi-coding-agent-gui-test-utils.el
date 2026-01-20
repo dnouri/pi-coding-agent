@@ -19,6 +19,7 @@
 (require 'ert)
 (require 'pi-coding-agent)
 (require 'pi-coding-agent-test-common)
+(require 'seq)
 
 ;; Disable "Buffer has running process" prompts in tests
 (remove-hook 'kill-buffer-query-functions #'process-kill-buffer-query-function)
@@ -283,6 +284,20 @@ is what determines if the window will auto-scroll during streaming."
   "Return t if chat buffer contains TEXT."
   (when-let ((content (pi-coding-agent-gui-test-chat-content)))
     (string-match-p (regexp-quote text) content)))
+
+(defun pi-coding-agent-gui-test-chat-text-in-tool-block-p (text)
+  "Return t if TEXT appears inside a tool block overlay."
+  (when-let ((buf (plist-get pi-coding-agent-gui-test--session :chat-buffer)))
+    (with-current-buffer buf
+      (save-excursion
+        (goto-char (point-min))
+        (let ((found nil))
+          (while (and (not found) (search-forward text nil t))
+            (let ((pos (match-beginning 0)))
+              (setq found
+                    (seq-some (lambda (ov) (overlay-get ov 'pi-coding-agent-tool-block))
+                              (overlays-at pos)))))
+          found)))))
 
 (defun pi-coding-agent-gui-test-chat-matches (regexp)
   "Return t if chat buffer matches REGEXP."
