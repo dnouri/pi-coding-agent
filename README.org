@@ -98,7 +98,8 @@ For multiple sessions in the same directory, use =C-u M-x pi= to create a named 
 
 | Key           | Context | Description                       |
 |---------------+---------+-----------------------------------|
-| =C-c C-c=     | input   | Send prompt                       |
+| =C-c C-c=     | input   | Send (queues if busy)             |
+| =C-c C-s=     | input   | Queue steering message (busy only)|
 | =C-c C-k=     | input   | Abort streaming                   |
 | =C-c C-p=     | both    | Open menu                         |
 | =C-c C-r=     | input   | Resume session                    |
@@ -134,6 +135,11 @@ Several features match the TUI experience:
   Results are cached for 30 seconds to keep completion fast.
 
 - *Path completion (Tab)*: Complete relative paths like =./=, =../=, =~/=.
+
+- *Message queuing*: Submit messages while the agent is working:
+  - =C-c C-c= queues a /follow-up/ message, delivered after the agent finishes
+  - =C-c C-s= queues a /steering/ message, delivered after current tool
+    (interrupts remaining tools; only works when agent is busy)
 
 ** 🔧 Tool Output
 

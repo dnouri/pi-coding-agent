@@ -261,5 +261,63 @@ Catches API breaking changes in the fork message format."
             (should (plist-get first-msg :entryId))
             (should-not (plist-get first-msg :entryIndex))))))))
 
+;;; Message Queuing Tests
+;;
+;; Only steering uses pi's RPC API.  Follow-up uses a local queue in Emacs,
+;; so there's no integration test for it (tested in unit tests instead).
+
+(ert-deftest pi-coding-agent-integration-steer-queues-and-delivers ()
+  "Steer message is queued during streaming and delivered after current tool.
+Verifies:
+1. steer RPC command succeeds
+2. message_start with role=user is emitted when delivered
+3. The steering message text appears in the event"
+  (pi-coding-agent-integration-with-process
+    (let ((events nil)
+          (got-agent-end nil)
+          (user-message-events nil))
+      (push (lambda (e)
+              (push e events)
+              (when (and (equal (plist-get e :type) "message_start")
+                         (equal (plist-get (plist-get e :message) :role) "user"))
+                (push e user-message-events))
+              (when (equal (plist-get e :type) "agent_end")
+                (setq got-agent-end t)))
+            pi-coding-agent--event-handlers)
+      ;; Send initial prompt
+      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "Say: working") #'ignore)
+      ;; Wait a moment for streaming to start, then queue steering
+      (sleep-for 0.5)
+      (let ((queue-response (pi-coding-agent--rpc-sync proc
+                              '(:type "steer" :message "Say: queued-steer-test")
+                              pi-coding-agent-test-rpc-timeout)))
+        (should (plist-get queue-response :success)))
+      ;; Wait for agent_end
+      (with-timeout (pi-coding-agent-test-integration-timeout
+                     (ert-fail "Timeout waiting for steering message delivery"))
+        (while (not got-agent-end)
+          (accept-process-output proc 0.1)))
+      ;; Verify we got TWO message_start events with role=user
+      (should (= (length user-message-events) 2))
+      ;; Verify the steering message text appears
+      (let ((queued-msg (seq-find
+                         (lambda (e)
+                           (let* ((msg (plist-get e :message))
+                                  (content (plist-get msg :content)))
+                             (and content
+                                  (> (length content) 0)
+                                  (string-match-p "queued-steer-test"
+                                                  (or (plist-get (aref content 0) :text) "")))))
+                         user-message-events)))
+        (should queued-msg)))))
+
+;; Note: Follow-up messages use a local Emacs queue (not pi's RPC follow_up),
+;; so there's no integration test for follow-up.  This is simpler and more
+;; responsive - the message is displayed immediately when queued, and sent
+;; to pi on agent_end.  See unit tests for follow-up queue behavior.
+;;
+;; Display interleaving (steering message corrupting streaming output) is
+;; tested via unit test: pi-coding-agent-test-steering-display-not-interleaved
+
 (provide 'pi-coding-agent-integration-test)
 ;;; pi-coding-agent-integration-test.el ends here

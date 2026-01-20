@@ -460,30 +460,41 @@ not relying on current buffer context which may change before callback executes.
           (pi-coding-agent-send)
           (should-not send-called))))))
 
-(ert-deftest pi-coding-agent-test-send-blocked-while-streaming ()
-  "pi-coding-agent-send is blocked while streaming, input preserved."
-  (let ((send-called nil)
+(ert-deftest pi-coding-agent-test-send-queues-locally-while-streaming ()
+  "pi-coding-agent-send adds to local queue while streaming, no RPC sent."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-stream*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-queue-stream-input*"))
+        (rpc-called nil)
         (message-shown nil))
-    (pi-coding-agent-test-with-mock-session "/tmp/pi-coding-agent-test-send-streaming/"
-      (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
-                 (lambda (_) (setq send-called t)))
-                ((symbol-function 'message)
-                 (lambda (fmt &rest _) 
-                   (when (and fmt (string-match-p "wait" fmt))
-                     (setq message-shown t)))))
-        ;; Set streaming status in chat buffer
-        (with-current-buffer "*pi-coding-agent-chat:/tmp/pi-coding-agent-test-send-streaming/*"
-          (setq pi-coding-agent--status 'streaming))
-        ;; Try to send while streaming
-        (with-current-buffer "*pi-coding-agent-input:/tmp/pi-coding-agent-test-send-streaming/*"
-          (insert "My message")
-          (pi-coding-agent-send)
-          ;; Should NOT have sent
-          (should-not send-called)
-          ;; Should have shown message
-          (should message-shown)
-          ;; Input should be preserved
-          (should (string= (buffer-string) "My message")))))))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'streaming)
+            (setq pi-coding-agent--input-buffer input-buf)
+            (setq pi-coding-agent--followup-queue nil))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "My message")
+            (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_proc _cmd _cb) (setq rpc-called t)))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest _)
+                         (when (and fmt (string-match-p "queued" (downcase fmt)))
+                           (setq message-shown t)))))
+              (pi-coding-agent-send))
+            ;; Should NOT have called RPC (local queue instead)
+            (should-not rpc-called)
+            ;; Should have added to local queue in chat buffer
+            (with-current-buffer chat-buf
+              (should (equal pi-coding-agent--followup-queue '("My message"))))
+            ;; Should have shown queued message
+            (should message-shown)
+            ;; Input should be cleared (message accepted)
+            (should (string-empty-p (buffer-string)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
 
 ;;; Response Display
 
@@ -1948,6 +1959,737 @@ which is just a success message."
     (should (eq (key-binding "n") 'pi-coding-agent-next-message))
     (should (eq (key-binding "p") 'pi-coding-agent-previous-message))
     (should (eq (key-binding (kbd "TAB")) 'pi-coding-agent-toggle-tool-section))))
+
+;;; Message Queuing
+
+(ert-deftest pi-coding-agent-test-queue-steering-when-streaming-sends-steer ()
+  "Queue steering sends steer RPC command when agent is streaming."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-steer*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-queue-steer-input*"))
+        (sent-command nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'streaming)
+            (setq pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "Please stop and focus on X")
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                      ((symbol-function 'process-live-p) (lambda (_) t))
+                      ((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_proc cmd _cb) (setq sent-command cmd))))
+              (pi-coding-agent-queue-steering))
+            ;; Should send steer command
+            (should sent-command)
+            (should (equal (plist-get sent-command :type) "steer"))
+            (should (equal (plist-get sent-command :message) "Please stop and focus on X"))
+            ;; Input should be cleared
+            (should (string-empty-p (buffer-string)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-queue-followup-uses-local-queue ()
+  "Queue follow-up adds to local queue, no RPC sent."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-followup*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-queue-followup-input*"))
+        (rpc-called nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'streaming)
+            (setq pi-coding-agent--input-buffer input-buf)
+            (setq pi-coding-agent--followup-queue nil))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "After you're done, also do Y")
+            (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_proc _cmd _cb) (setq rpc-called t))))
+              (pi-coding-agent-queue-followup))
+            ;; Should NOT call RPC
+            (should-not rpc-called)
+            ;; Should add to local queue
+            (with-current-buffer chat-buf
+              (should (member "After you're done, also do Y" pi-coding-agent--followup-queue)))
+            ;; Input should be cleared
+            (should (string-empty-p (buffer-string)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-queue-steering-when-idle-refuses ()
+  "Queue steering refuses when agent is idle (nothing to interrupt)."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-steer-idle*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-queue-steer-idle-input*"))
+        (sent-anything nil)
+        (message-shown nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle)
+            (setq pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "Do something")
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                      ((symbol-function 'process-live-p) (lambda (_) t))
+                      ((symbol-function 'pi-coding-agent--send-prompt)
+                       (lambda (_) (setq sent-anything t)))
+                      ((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_proc _cmd _cb) (setq sent-anything t)))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest _)
+                         (when (and fmt (string-match-p "nothing\\|idle\\|C-c C-c" (downcase fmt)))
+                           (setq message-shown t)))))
+              (pi-coding-agent-queue-steering))
+            ;; Should NOT send anything
+            (should-not sent-anything)
+            ;; Should show message about using C-c C-c instead
+            (should message-shown)
+            ;; Input should be preserved (not accepted)
+            (should (equal (buffer-string) "Do something"))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-queue-followup-when-idle-sends-prompt ()
+  "Queue follow-up sends as normal prompt when agent is idle."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-followup-idle*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-queue-followup-idle-input*"))
+        (sent-prompt nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle)
+            (setq pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "Do something else")
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                      ((symbol-function 'process-live-p) (lambda (_) t))
+                      ((symbol-function 'pi-coding-agent--send-prompt)
+                       (lambda (text) (setq sent-prompt text)))
+                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore))
+              (pi-coding-agent-queue-followup))
+            ;; Should send as normal prompt
+            (should (equal sent-prompt "Do something else"))
+            ;; Input should be cleared
+            (should (string-empty-p (buffer-string)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-queue-steering-adds-to-history ()
+  "Queue steering adds input to history."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-hist*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-queue-hist-input*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'streaming)
+            (setq pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (setq pi-coding-agent--input-ring (make-ring 10))
+            (insert "History test message")
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                      ((symbol-function 'process-live-p) (lambda (_) t))
+                      ((symbol-function 'pi-coding-agent--rpc-async) #'ignore))
+              (pi-coding-agent-queue-steering))
+            ;; Should be in history
+            (should (not (ring-empty-p pi-coding-agent--input-ring)))
+            (should (equal (ring-ref pi-coding-agent--input-ring 0) "History test message"))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-queue-empty-input-does-nothing ()
+  "Queue with empty input does nothing."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-empty*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-queue-empty-input*"))
+        (command-sent nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'streaming)
+            (setq pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            ;; Empty input (just whitespace)
+            (insert "   \n  ")
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                      ((symbol-function 'process-live-p) (lambda (_) t))
+                      ((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_proc _cmd _cb) (setq command-sent t))))
+              (pi-coding-agent-queue-steering))
+            ;; Should not send anything
+            (should-not command-sent)))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-steering-shows-minibuffer-message ()
+  "Steering shows feedback in minibuffer but is NOT displayed locally.
+Unlike normal sends, steering waits for pi's echo to display at the
+correct position in the conversation."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-display*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-queue-display-input*"))
+        (message-shown nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'streaming)
+            (setq pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "My steering message")
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                      ((symbol-function 'process-live-p) (lambda (_) t))
+                      ((symbol-function 'pi-coding-agent--rpc-async) #'ignore)
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest _)
+                         (when (and fmt (string-match-p "steering\\|sent" (downcase fmt)))
+                           (setq message-shown t)))))
+              (pi-coding-agent-queue-steering)))
+          ;; Should show minibuffer message
+          (should message-shown)
+          ;; Steering is NOT displayed locally - will be displayed when pi echoes it back
+          (with-current-buffer chat-buf
+            (should-not (string-match-p "My steering message" (buffer-string)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-input-mode-has-queue-keybindings ()
+  "Input mode has C-c C-s for steering (C-c C-c handles follow-up)."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (should (eq (key-binding (kbd "C-c C-s")) 'pi-coding-agent-queue-steering))
+    ;; C-c C-c handles follow-up when streaming (no separate C-c C-q)
+    (should (eq (key-binding (kbd "C-c C-c")) 'pi-coding-agent-send))))
+
+(ert-deftest pi-coding-agent-test-queue-handles-rpc-error ()
+  "Queue handles RPC error response by showing message to user."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-error*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-queue-error-input*"))
+        (captured-callback nil)
+        (error-shown nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'streaming)
+            (setq pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "Test message")
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                      ((symbol-function 'process-live-p) (lambda (_) t))
+                      ((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_proc _cmd cb) (setq captured-callback cb)))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (when (and fmt (string-match-p "error\\|fail" (downcase fmt)))
+                           (setq error-shown t)))))
+              (pi-coding-agent-queue-steering)
+              ;; Simulate error response from RPC
+              (when captured-callback
+                (funcall captured-callback '(:success :false :error "Queue limit reached")))))
+          ;; Should have shown an error message
+          (should error-shown))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-queue-with-dead-process-shows-error ()
+  "Queue with dead process shows error message."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-dead*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-queue-dead-input*"))
+        (error-shown nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'streaming)
+            (setq pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "Test message")
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () nil))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (when (and fmt (string-match-p "process\\|unavailable\\|error" (downcase fmt)))
+                           (setq error-shown t)))))
+              (pi-coding-agent-queue-steering)))
+          ;; Should have shown an error about unavailable process
+          (should error-shown))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-send-when-idle-expands-slash-commands ()
+  "C-c C-c when idle expands slash commands."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-send-slash*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-send-slash-input*"))
+        (sent-prompt nil)
+        (pi-coding-agent--file-commands '((:name "greet" :content "Hello $@!"))))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle)
+            (setq pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "/greet world")
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                      ((symbol-function 'process-live-p) (lambda (_) t))
+                      ((symbol-function 'pi-coding-agent--send-prompt)
+                       (lambda (text) (setq sent-prompt text)))
+                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore))
+              (pi-coding-agent-send))
+            ;; Should have expanded the slash command
+            (should (equal sent-prompt "Hello world!"))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+;; Note: pi-coding-agent-test-send-queues-locally-while-streaming covers this case
+
+(ert-deftest pi-coding-agent-test-steering-when-idle-refuses ()
+  "C-c C-s when idle shows message and does nothing."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-steer-idle*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-steer-idle-input*"))
+        (send-called nil)
+        (message-shown nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle)
+            (setq pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "Steer message")
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                      ((symbol-function 'process-live-p) (lambda (_) t))
+                      ((symbol-function 'pi-coding-agent--send-prompt)
+                       (lambda (_) (setq send-called t)))
+                      ((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_proc _cmd _cb) (setq send-called t)))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest _)
+                         (when (and fmt (string-match-p "idle\\|nothing\\|use" (downcase fmt)))
+                           (setq message-shown t)))))
+              (pi-coding-agent-queue-steering))
+            ;; Should NOT have sent anything
+            (should-not send-called)
+            ;; Should have shown a message
+            (should message-shown)
+            ;; Input should be preserved
+            (should (equal (buffer-string) "Steer message"))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-message-start-user-echo-ignored-when-displayed-locally ()
+  "message_start role=user is ignored when we already displayed the message locally.
+Uses awaiting-user-echo flag to track whether to display or skip."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent--status 'streaming)
+          (pi-coding-agent--state nil)
+          ;; Simulate that we displayed a message locally (normal send)
+          (pi-coding-agent--awaiting-user-echo t)
+          (initial-content (buffer-string)))
+      ;; Simulate receiving message_start for a user message (pi echoing back)
+      (pi-coding-agent--handle-display-event
+       '(:type "message_start"
+         :message (:role "user"
+                   :content [(:type "text" :text "Should not appear")]
+                   :timestamp 1704067200000)))
+      ;; Buffer should be unchanged - we displayed locally, so skip the echo
+      (should (equal (buffer-string) initial-content))
+      (should-not (string-match-p "Should not appear" (buffer-string)))
+      ;; Flag should be cleared
+      (should-not pi-coding-agent--awaiting-user-echo))))
+
+(ert-deftest pi-coding-agent-test-message-start-user-displayed-when-not-local ()
+  "message_start role=user IS displayed when flag is nil (steering case).
+Steering messages are not displayed locally - they're displayed from the echo."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent--status 'streaming)
+          (pi-coding-agent--state nil)
+          ;; Flag is nil - no locally displayed message pending
+          (pi-coding-agent--awaiting-user-echo nil))
+      ;; Simulate receiving message_start for a steering message
+      (pi-coding-agent--handle-display-event
+       '(:type "message_start"
+         :message (:role "user"
+                   :content [(:type "text" :text "Steering message here")]
+                   :timestamp 1704067200000)))
+      ;; Should be displayed since flag was nil
+      (should (string-match-p "Steering message here" (buffer-string)))
+      ;; Flag should still be nil
+      (should-not pi-coding-agent--awaiting-user-echo))))
+
+(ert-deftest pi-coding-agent-test-steering-display-not-interleaved ()
+  "Steering message during streaming appears cleanly, not interleaved.
+When user sends steering while assistant is streaming, the sequence is:
+1. Current assistant output ends cleanly
+2. User steering message with header appears
+3. New assistant turn begins with its own header
+
+This tests for a bug where user message header and assistant text got
+mixed together like:
+  > ...count from 1 to
+  You · 01:32
+  ===========
+  STOP NOW
+  10 slowly...  <- WRONG: '10 slowly' is assistant text after user msg!"
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent--status 'streaming)
+          (pi-coding-agent--state nil)
+          (pi-coding-agent--awaiting-user-echo nil)
+          (pi-coding-agent--assistant-header-shown nil))
+      ;; Simulate initial prompt response - assistant starts streaming
+      (pi-coding-agent--handle-display-event '(:type "agent_start"))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_start" :message (:role "assistant")))
+      ;; Stream some content
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "text_delta" :delta "Counting: 1, 2, 3, ")))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "text_delta" :delta "4, 5, 6, ")))
+
+      ;; Now user sends steering - this comes as message_start with role=user
+      ;; (steering messages are displayed from pi's echo, not locally)
+      (pi-coding-agent--handle-display-event
+       '(:type "message_start"
+         :message (:role "user"
+                   :content [(:type "text" :text "STOP-MARKER")]
+                   :timestamp 1704067200000)))
+
+      ;; Assistant continues with new turn after steering
+      (setq pi-coding-agent--assistant-header-shown nil)  ; Reset for new turn
+      (pi-coding-agent--handle-display-event '(:type "agent_start"))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_start" :message (:role "assistant")))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "text_delta" :delta "OK, stopping.")))
+      (pi-coding-agent--handle-display-event '(:type "agent_end"))
+
+      ;; Now verify the buffer structure
+      (let ((content (buffer-string)))
+        ;; All expected content should be present
+        (should (string-match-p "Counting: 1, 2, 3, 4, 5, 6," content))
+        (should (string-match-p "STOP-MARKER" content))
+        (should (string-match-p "OK, stopping" content))
+
+        ;; Find positions to verify order
+        (let ((first-assistant-pos (string-match "Counting:" content))
+              (steering-pos (string-match "STOP-MARKER" content))
+              (second-response-pos (string-match "OK, stopping" content)))
+          ;; Order must be: first-assistant < steering < second-response
+          (should (< first-assistant-pos steering-pos))
+          (should (< steering-pos second-response-pos))
+
+          ;; "You" header must appear before the steering message
+          (let ((you-header-pos (string-match "You" content)))
+            (should you-header-pos)
+            (should (< you-header-pos steering-pos)))
+
+          ;; After STOP-MARKER, we should see "Assistant" header before second response
+          (let* ((after-steering (substring content steering-pos))
+                 (assistant-after-steering (string-match "Assistant" after-steering)))
+            (should assistant-after-steering)))
+
+        ;; Verify NO interleaving: counting text should NOT appear after STOP-MARKER
+        (let* ((steering-pos (string-match "STOP-MARKER" content))
+               (after-steering (substring content (+ steering-pos (length "STOP-MARKER")))))
+          ;; Should NOT see counting continuation after the steering message
+          (should-not (string-match-p "^[0-9]" (string-trim-left after-steering)))
+          (should-not (string-match-p "^, [0-9]" (string-trim-left after-steering))))))))
+
+(ert-deftest pi-coding-agent-test-awaiting-echo-flag-tracks-display ()
+  "The awaiting-user-echo flag tracks locally displayed messages.
+- Normal send sets flag to t
+- message_start role=user clears flag to nil
+- Steering doesn't set flag (displayed from echo)
+- agent_end clears flag to nil"
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-echo-flag*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-echo-flag-input*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle)
+            (setq pi-coding-agent--input-buffer input-buf)
+            ;; Flag starts as nil
+            (should-not pi-coding-agent--awaiting-user-echo))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "First message")
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                      ((symbol-function 'process-live-p) (lambda (_) t))
+                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore)
+                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore))
+              (pi-coding-agent-send)))
+          ;; After normal send, flag should be t
+          (with-current-buffer chat-buf
+            (should pi-coding-agent--awaiting-user-echo)
+            ;; Simulate pi echo - flag clears to nil
+            (pi-coding-agent--handle-display-event
+             '(:type "message_start"
+               :message (:role "user" :content [(:type "text" :text "First message")])))
+            (should-not pi-coding-agent--awaiting-user-echo)
+            ;; Now simulate steering (doesn't set flag)
+            (setq pi-coding-agent--status 'streaming))
+          (with-current-buffer input-buf
+            (erase-buffer)
+            (insert "Steer this")
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                      ((symbol-function 'process-live-p) (lambda (_) t))
+                      ((symbol-function 'pi-coding-agent--rpc-async) #'ignore))
+              (pi-coding-agent-queue-steering)))
+          ;; Flag still nil (steering doesn't set it)
+          (with-current-buffer chat-buf
+            (should-not pi-coding-agent--awaiting-user-echo)
+            ;; agent_end clears to nil (in case of edge cases)
+            (setq pi-coding-agent--awaiting-user-echo t)  ; Simulate weird state
+            (pi-coding-agent--display-agent-end)
+            (should-not pi-coding-agent--awaiting-user-echo)))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-normal-send-not-duplicated-by-message-start ()
+  "Normal send should not be duplicated when message_start arrives.
+When user sends a message normally (idle state), we display it immediately.
+When pi echoes it back via message_start, we should NOT display it again."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-no-dup*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-no-dup-input*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle)
+            (setq pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "Hello pi")
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                      ((symbol-function 'process-live-p) (lambda (_) t))
+                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore)
+                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore))
+              (pi-coding-agent-send)))
+          ;; Now simulate pi echoing the message back via message_start
+          (with-current-buffer chat-buf
+            (pi-coding-agent--handle-display-event
+             '(:type "message_start"
+               :message (:role "user"
+                         :content [(:type "text" :text "Hello pi")]
+                         :timestamp 1704067200000)))
+            ;; Count occurrences of "Hello pi" - should be exactly 1
+            (let ((count 0)
+                  (start 0))
+              (while (string-match "Hello pi" (buffer-string) start)
+                (setq count (1+ count))
+                (setq start (match-end 0)))
+              (should (= count 1)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-agent-end-sends-queued-followup ()
+  "agent_end pops from followup queue and sends as normal prompt.
+When user queues a follow-up (busy state), it goes to local queue.
+On agent_end, we pop from queue and send (which displays the message)."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-agent-end-queue*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-agent-end-queue-input*"))
+        (sent-prompt nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'streaming)
+            (setq pi-coding-agent--input-buffer input-buf)
+            (setq pi-coding-agent--followup-queue nil)
+            ;; Simulate some prior content
+            (let ((inhibit-read-only t))
+              (insert "Assistant\n=========\nSome response...\n")))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "My follow-up question")
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                      ((symbol-function 'process-live-p) (lambda (_) t)))
+              (pi-coding-agent-send)))  ; Adds to local queue when streaming
+          ;; Message should be in queue, not in chat yet
+          (with-current-buffer chat-buf
+            (should (equal pi-coding-agent--followup-queue '("My follow-up question")))
+            (should-not (string-match-p "My follow-up question" (buffer-string))))
+          ;; Now simulate agent_end - this should pop queue and send
+          (with-current-buffer chat-buf
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                      ((symbol-function 'process-live-p) (lambda (_) t))
+                      ((symbol-function 'pi-coding-agent--send-prompt)
+                       (lambda (text) (setq sent-prompt text)))
+                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore)
+                      ((symbol-function 'pi-coding-agent--spinner-stop) #'ignore)
+                      ((symbol-function 'pi-coding-agent--fontify-timer-stop) #'ignore)
+                      ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
+              (pi-coding-agent--handle-display-event '(:type "agent_end")))
+            ;; Queue should be empty now
+            (should (null pi-coding-agent--followup-queue))
+            ;; Should have sent the queued message
+            (should (equal sent-prompt "My follow-up question"))
+            ;; Message should now be displayed in chat
+            (should (string-match-p "My follow-up question" (buffer-string)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-followup-queue-fifo-order ()
+  "Multiple follow-ups are processed in FIFO order."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-fifo*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-fifo-input*"))
+        (sent-prompts nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'streaming)
+            (setq pi-coding-agent--input-buffer input-buf)
+            (setq pi-coding-agent--followup-queue nil))
+          ;; Queue three messages while busy
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (dolist (msg '("First message" "Second message" "Third message"))
+              (erase-buffer)
+              (insert msg)
+              (pi-coding-agent-send)))
+          ;; All three should be in queue
+          (with-current-buffer chat-buf
+            (should (= 3 (length pi-coding-agent--followup-queue))))
+          ;; Now simulate agent_end three times, capturing what gets sent
+          (with-current-buffer chat-buf
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                      ((symbol-function 'process-live-p) (lambda (_) t))
+                      ((symbol-function 'pi-coding-agent--send-prompt)
+                       (lambda (text) (push text sent-prompts)))
+                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore)
+                      ((symbol-function 'pi-coding-agent--spinner-stop) #'ignore)
+                      ((symbol-function 'pi-coding-agent--fontify-timer-stop) #'ignore)
+                      ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
+              ;; First agent_end
+              (pi-coding-agent--handle-display-event '(:type "agent_end"))
+              ;; Second agent_end
+              (pi-coding-agent--handle-display-event '(:type "agent_end"))
+              ;; Third agent_end
+              (pi-coding-agent--handle-display-event '(:type "agent_end")))
+            ;; Should have sent all three in FIFO order (sent-prompts is reversed)
+            (should (equal (reverse sent-prompts)
+                           '("First message" "Second message" "Third message")))
+            ;; Queue should be empty
+            (should (null pi-coding-agent--followup-queue))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-steering-displayed-from-echo ()
+  "Steering is NOT displayed locally - it's displayed when pi echoes it back.
+This ensures steering appears at the correct position in the conversation
+(after the current assistant output completes)."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-steer-echo*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-steer-echo-input*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'streaming)
+            (setq pi-coding-agent--input-buffer input-buf)
+            (let ((inhibit-read-only t))
+              (insert "Assistant\n=========\nWorking on something...\n")))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "Stop and do something else")
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                      ((symbol-function 'process-live-p) (lambda (_) t))
+                      ((symbol-function 'pi-coding-agent--rpc-async) #'ignore))
+              (pi-coding-agent-queue-steering)))
+          ;; Steering is NOT displayed when sent (unlike normal sends)
+          (with-current-buffer chat-buf
+            (should-not (string-match-p "Stop and do something else" (buffer-string)))
+            ;; Flag should still be nil (steering doesn't set it)
+            (should-not pi-coding-agent--awaiting-user-echo))
+          ;; Simulate pi echoing the steering message back via message_start
+          (with-current-buffer chat-buf
+            (pi-coding-agent--handle-display-event
+             '(:type "message_start"
+               :message (:role "user"
+                         :content [(:type "text" :text "Stop and do something else")]
+                         :timestamp 1704067200000)))
+            ;; NOW it should be displayed (from the echo)
+            (should (string-match-p "Stop and do something else" (buffer-string)))
+            ;; Should be displayed exactly once
+            (let ((count 0)
+                  (start 0))
+              (while (string-match "Stop and do something else" (buffer-string) start)
+                (setq count (1+ count))
+                (setq start (match-end 0)))
+              (should (= count 1)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-steering-echo-followed-by-assistant-shows-header ()
+  "After steering message, the next assistant message shows its header.
+This tests the full flow: steering echo resets the flag, then the next
+message_start role=assistant displays the 'Assistant' header."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent--status 'streaming)
+          (pi-coding-agent--awaiting-user-echo nil)
+          ;; Simulate that first assistant header was already shown
+          (pi-coding-agent--assistant-header-shown t))
+      ;; First, some assistant content is already in the buffer
+      (let ((inhibit-read-only t))
+        (insert "Assistant\n=========\nPrevious response...\n"))
+      ;; Simulate steering message echo from pi
+      (pi-coding-agent--handle-display-event
+       '(:type "message_start"
+         :message (:role "user"
+                   :content [(:type "text" :text "Stop it")]
+                   :timestamp 1704067200000)))
+      ;; Steering message should be displayed
+      (should (string-match-p "Stop it" (buffer-string)))
+      ;; Flag should be reset
+      (should-not pi-coding-agent--assistant-header-shown)
+      ;; Now simulate the assistant's response to steering
+      (pi-coding-agent--handle-display-event
+       '(:type "message_start"
+         :message (:role "assistant")))
+      ;; Now we should see TWO "Assistant" headers in the buffer
+      (let ((count 0)
+            (start 0)
+            (content (buffer-string)))
+        (while (string-match "Assistant\n=+" content start)
+          (setq count (1+ count))
+          (setq start (match-end 0)))
+        (should (= count 2))))))
 
 (provide 'pi-coding-agent-test)
 ;;; pi-coding-agent-test.el ends here
