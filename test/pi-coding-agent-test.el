@@ -2342,6 +2342,88 @@ Steering messages are not displayed locally - they're displayed from the echo."
       ;; Flag should still be nil
       (should-not pi-coding-agent--awaiting-user-echo))))
 
+(ert-deftest pi-coding-agent-test-steering-display-not-interleaved ()
+  "Steering message during streaming appears cleanly, not interleaved.
+When user sends steering while assistant is streaming, the sequence is:
+1. Current assistant output ends cleanly
+2. User steering message with header appears
+3. New assistant turn begins with its own header
+
+This tests for a bug where user message header and assistant text got
+mixed together like:
+  > ...count from 1 to
+  You · 01:32
+  ===========
+  STOP NOW
+  10 slowly...  <- WRONG: '10 slowly' is assistant text after user msg!"
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent--status 'streaming)
+          (pi-coding-agent--state nil)
+          (pi-coding-agent--awaiting-user-echo nil)
+          (pi-coding-agent--assistant-header-shown nil))
+      ;; Simulate initial prompt response - assistant starts streaming
+      (pi-coding-agent--handle-display-event '(:type "agent_start"))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_start" :message (:role "assistant")))
+      ;; Stream some content
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "text_delta" :delta "Counting: 1, 2, 3, ")))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "text_delta" :delta "4, 5, 6, ")))
+
+      ;; Now user sends steering - this comes as message_start with role=user
+      ;; (steering messages are displayed from pi's echo, not locally)
+      (pi-coding-agent--handle-display-event
+       '(:type "message_start"
+         :message (:role "user"
+                   :content [(:type "text" :text "STOP-MARKER")]
+                   :timestamp 1704067200000)))
+
+      ;; Assistant continues with new turn after steering
+      (setq pi-coding-agent--assistant-header-shown nil)  ; Reset for new turn
+      (pi-coding-agent--handle-display-event '(:type "agent_start"))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_start" :message (:role "assistant")))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "text_delta" :delta "OK, stopping.")))
+      (pi-coding-agent--handle-display-event '(:type "agent_end"))
+
+      ;; Now verify the buffer structure
+      (let ((content (buffer-string)))
+        ;; All expected content should be present
+        (should (string-match-p "Counting: 1, 2, 3, 4, 5, 6," content))
+        (should (string-match-p "STOP-MARKER" content))
+        (should (string-match-p "OK, stopping" content))
+
+        ;; Find positions to verify order
+        (let ((first-assistant-pos (string-match "Counting:" content))
+              (steering-pos (string-match "STOP-MARKER" content))
+              (second-response-pos (string-match "OK, stopping" content)))
+          ;; Order must be: first-assistant < steering < second-response
+          (should (< first-assistant-pos steering-pos))
+          (should (< steering-pos second-response-pos))
+
+          ;; "You" header must appear before the steering message
+          (let ((you-header-pos (string-match "You" content)))
+            (should you-header-pos)
+            (should (< you-header-pos steering-pos)))
+
+          ;; After STOP-MARKER, we should see "Assistant" header before second response
+          (let* ((after-steering (substring content steering-pos))
+                 (assistant-after-steering (string-match "Assistant" after-steering)))
+            (should assistant-after-steering)))
+
+        ;; Verify NO interleaving: counting text should NOT appear after STOP-MARKER
+        (let* ((steering-pos (string-match "STOP-MARKER" content))
+               (after-steering (substring content (+ steering-pos (length "STOP-MARKER")))))
+          ;; Should NOT see counting continuation after the steering message
+          (should-not (string-match-p "^[0-9]" (string-trim-left after-steering)))
+          (should-not (string-match-p "^, [0-9]" (string-trim-left after-steering))))))))
+
 (ert-deftest pi-coding-agent-test-awaiting-echo-flag-tracks-display ()
   "The awaiting-user-echo flag tracks locally displayed messages.
 - Normal send sets flag to t
