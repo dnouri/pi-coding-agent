@@ -102,8 +102,8 @@ breaking auto-scroll for subsequent turns."
             (pi-coding-agent-gui-test-send (format "Read the file %s" test-file))
             ;; Tool header proves tool was invoked
             (should (pi-coding-agent-gui-test-chat-matches "^read "))
-            ;; File content should appear in tool output
-            (should (pi-coding-agent-gui-test-chat-contains "XYZ123")))
+            ;; File content should appear inside the tool output block
+            (should (pi-coding-agent-gui-test-chat-text-in-tool-block-p "XYZ123")))
         (pi-coding-agent-gui-test-delete-temp-file test-file)))))
 
 (ert-deftest pi-coding-agent-gui-test-tool-overlay-bounded ()

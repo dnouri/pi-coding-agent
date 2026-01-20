@@ -8,6 +8,7 @@
 
 (require 'ert)
 (require 'pi-coding-agent)
+(require 'pi-coding-agent-test-common)
 
 ;;; Test Utilities
 
@@ -2230,11 +2231,15 @@ and then re-sorted alphabetically by completing-read."
     (unwind-protect
         (progn
           (make-directory session-dir t)
-          ;; Create "old" file first
-          (with-temp-file old-file (insert "{}"))
-          (sleep-for 0.1)  ; Ensure different mtime
-          ;; Create "new" file second (more recent mtime despite earlier filename)
-          (with-temp-file new-file (insert "{}"))
+          (let* ((now (current-time))
+                 (old-time (time-subtract now (seconds-to-time 10)))
+                 (new-time (time-subtract now (seconds-to-time 5))))
+            ;; Create "old" file first
+            (with-temp-file old-file (insert "{}"))
+            (set-file-times old-file old-time)
+            ;; Create "new" file second (more recent mtime despite earlier filename)
+            (with-temp-file new-file (insert "{}"))
+            (set-file-times new-file new-time))
           ;; Directly call directory-files and sort logic to test sorting
           (let* ((files (directory-files session-dir t "\\.jsonl$"))
                  (sorted (sort files
@@ -3148,8 +3153,7 @@ display-agent-end must finalize the pending overlay with error face."
                                            :model (:name "test-model")))
             ;; Set up dead process
             (let ((dead-proc (start-process "test-dead" nil "true")))
-              (while (process-live-p dead-proc)
-                (sleep-for 0.01))
+              (should (pi-coding-agent-test-wait-for-process-exit dead-proc))
               (setq pi-coding-agent--process dead-proc))
             ;; Mock functions
             (cl-letf (((symbol-function 'pi-coding-agent--start-process)
@@ -3217,8 +3221,7 @@ display-agent-end must finalize the pending overlay with error face."
             (setq pi-coding-agent--state '(:model (:name "test-model")))
             ;; Dead process
             (let ((dead-proc (start-process "test-dead" nil "true")))
-              (while (process-live-p dead-proc)
-                (sleep-for 0.01))
+              (should (pi-coding-agent-test-wait-for-process-exit dead-proc))
               (setq pi-coding-agent--process dead-proc))
             (cl-letf (((symbol-function 'message)
                        (lambda (fmt &rest _args)
@@ -3240,8 +3243,7 @@ display-agent-end must finalize the pending overlay with error face."
             (setq pi-coding-agent--input-buffer input-buf)
             ;; Set up dead process
             (let ((dead-proc (start-process "test-dead" nil "true")))
-              (while (process-live-p dead-proc)
-                (sleep-for 0.01))
+              (should (pi-coding-agent-test-wait-for-process-exit dead-proc))
               (setq pi-coding-agent--process dead-proc)))
           (with-current-buffer input-buf
             (pi-coding-agent-input-mode)

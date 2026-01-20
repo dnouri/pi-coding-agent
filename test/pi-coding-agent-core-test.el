@@ -218,7 +218,14 @@
           (unwind-protect
               (progn
                 (pi-coding-agent--rpc-async fake-proc '(:type "get_state") #'ignore)
-                (sleep-for pi-coding-agent-test-poll-interval)
+                (should
+                 (pi-coding-agent-test-wait-until
+                  (lambda ()
+                    (with-current-buffer output-buffer
+                      (> (buffer-size) 0)))
+                  pi-coding-agent-test-short-wait
+                  pi-coding-agent-test-poll-interval
+                  fake-proc))
                 (with-current-buffer output-buffer
                   (let* ((sent (buffer-string))
                          (json (json-parse-string (string-trim sent) :object-type 'plist)))
@@ -524,6 +531,24 @@
     (pi-coding-agent--update-state-from-event '(:type "agent_end" :messages []))
     (should (eq pi-coding-agent--status 'idle))
     (should (eq (plist-get pi-coding-agent--state :is-retrying) nil))))
+
+;;;; Test Utilities
+
+(ert-deftest pi-coding-agent-test-wait-until-succeeds ()
+  "wait-until returns the predicate value when it becomes true."
+  (let ((flag nil))
+    (run-at-time 0.05 nil (lambda () (setq flag t)))
+    (let ((result (pi-coding-agent-test-wait-until (lambda () flag) 0.5 0.01)))
+      (should (eq result t)))))
+
+(ert-deftest pi-coding-agent-test-wait-until-times-out ()
+  "wait-until returns nil when the predicate stays false."
+  (let ((result (pi-coding-agent-test-wait-until (lambda () nil) 0.05 0.01)))
+    (should (null result))))
+
+(ert-deftest pi-coding-agent-test-format-elapsed-rounds-to-millis ()
+  "Elapsed formatter rounds to milliseconds with suffix."
+  (should (equal (pi-coding-agent-test-format-elapsed 1.23456) "1.235s")))
 
 (provide 'pi-coding-agent-core-test)
 ;;; pi-coding-agent-core-test.el ends here

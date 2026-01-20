@@ -19,6 +19,7 @@
 (require 'ert)
 (require 'pi-coding-agent)
 (require 'pi-coding-agent-test-common)
+(require 'seq)
 
 ;; Disable "Buffer has running process" prompts in tests
 (remove-hook 'kill-buffer-query-functions #'process-kill-buffer-query-function)
@@ -47,24 +48,34 @@ Returns session plist."
   (let ((default-directory (or dir "/tmp/")))
     (delete-other-windows)
     (pi-coding-agent)
-    (sit-for 2)  ;; sit-for allows redisplay (sleep-for blocks it)
-    (let* ((chat-buf (get-buffer (format "*pi-coding-agent-chat:%s*" default-directory)))
-           (input-buf (and chat-buf (with-current-buffer chat-buf pi-coding-agent--input-buffer)))
-           (proc (and chat-buf (with-current-buffer chat-buf pi-coding-agent--process))))
-      (when (and chat-buf proc)
-        ;; Set model and disable thinking for faster tests
-        (with-current-buffer chat-buf
-          (pi-coding-agent--rpc-sync proc
-                        `(:type "set_model"
-                          :provider ,(plist-get pi-coding-agent-gui-test-model :provider)
-                          :modelId ,(plist-get pi-coding-agent-gui-test-model :modelId)))
-          (pi-coding-agent--rpc-sync proc '(:type "set_thinking_level" :level "off")))
-        (sit-for 1)
-        (setq pi-coding-agent-gui-test--session
-              (list :chat-buffer chat-buf
-                    :input-buffer input-buf
-                    :process proc
-                    :directory default-directory))))))
+    (let* ((chat-buffer-name (format "*pi-coding-agent-chat:%s*" default-directory)))
+      (should
+       (pi-coding-agent-test-wait-until
+        (lambda ()
+          (let* ((chat-buf (get-buffer chat-buffer-name))
+                 (input-buf (and chat-buf (with-current-buffer chat-buf pi-coding-agent--input-buffer)))
+                 (proc (and chat-buf (with-current-buffer chat-buf pi-coding-agent--process))))
+            (and (buffer-live-p chat-buf)
+                 (buffer-live-p input-buf)
+                 (process-live-p proc))))
+        pi-coding-agent-test-gui-timeout
+        pi-coding-agent-test-poll-interval))
+      (let* ((chat-buf (get-buffer chat-buffer-name))
+             (input-buf (and chat-buf (with-current-buffer chat-buf pi-coding-agent--input-buffer)))
+             (proc (and chat-buf (with-current-buffer chat-buf pi-coding-agent--process))))
+        (when (and chat-buf proc)
+          ;; Set model and disable thinking for faster tests
+          (with-current-buffer chat-buf
+            (pi-coding-agent--rpc-sync proc
+                          `(:type "set_model"
+                            :provider ,(plist-get pi-coding-agent-gui-test-model :provider)
+                            :modelId ,(plist-get pi-coding-agent-gui-test-model :modelId)))
+            (pi-coding-agent--rpc-sync proc '(:type "set_thinking_level" :level "off")))
+          (setq pi-coding-agent-gui-test--session
+                (list :chat-buffer chat-buf
+                      :input-buffer input-buf
+                      :process proc
+                      :directory default-directory)))))))
 
 (defun pi-coding-agent-gui-test-end-session ()
   "End the current test session."
@@ -127,26 +138,75 @@ Checks for both 'sending (waiting for response to start) and
 (defun pi-coding-agent-gui-test-wait-for-idle (&optional timeout)
   "Wait until streaming stops, up to TIMEOUT seconds."
   (let ((timeout (or timeout pi-coding-agent-test-gui-timeout))
-        (start (float-time)))
-    (while (and (pi-coding-agent-gui-test-streaming-p)
-                (< (- (float-time) start) timeout))
-      (sit-for 0.5))
-    (not (pi-coding-agent-gui-test-streaming-p))))
+        (proc (plist-get pi-coding-agent-gui-test--session :process)))
+    (let ((done (pi-coding-agent-test-wait-until
+                 (lambda () (not (pi-coding-agent-gui-test-streaming-p)))
+                 timeout
+                 pi-coding-agent-test-poll-interval
+                 proc)))
+      (when done
+        (redisplay))
+      done)))
+
+(defun pi-coding-agent-gui-test-wait-for-chat-settled (&optional timeout)
+  "Wait until the chat buffer stops changing.
+Returns non-nil if the buffer is stable before TIMEOUT."
+  (let* ((timeout (or timeout pi-coding-agent-test-rpc-timeout))
+         (proc (plist-get pi-coding-agent-gui-test--session :process))
+         (chat-buf (plist-get pi-coding-agent-gui-test--session :chat-buffer)))
+    (when (buffer-live-p chat-buf)
+      (let ((last-tick (with-current-buffer chat-buf
+                         (buffer-chars-modified-tick))))
+        (pi-coding-agent-test-wait-until
+         (lambda ()
+           (let ((tick (with-current-buffer chat-buf
+                         (buffer-chars-modified-tick))))
+             (if (= tick last-tick)
+                 t
+               (setq last-tick tick)
+               nil)))
+         timeout
+         pi-coding-agent-test-poll-interval
+         proc)))))
+
+(defun pi-coding-agent-gui-test-wait-for-send-start (initial-tick &optional timeout)
+  "Wait until a send starts or the chat buffer changes.
+INITIAL-TICK is the chat buffer's `buffer-chars-modified-tick' before sending."
+  (let ((timeout (or timeout pi-coding-agent-test-rpc-timeout))
+        (proc (plist-get pi-coding-agent-gui-test--session :process))
+        (chat-buf (plist-get pi-coding-agent-gui-test--session :chat-buffer)))
+    (pi-coding-agent-test-wait-until
+     (lambda ()
+       (or (pi-coding-agent-gui-test-streaming-p)
+           (and initial-tick
+                (buffer-live-p chat-buf)
+                (/= (with-current-buffer chat-buf
+                      (buffer-chars-modified-tick))
+                    initial-tick))))
+     timeout
+     pi-coding-agent-test-poll-interval
+     proc)))
 
 ;;;; Sending Messages
 
 (defun pi-coding-agent-gui-test-send (text &optional no-wait)
   "Send TEXT to pi. Waits for response unless NO-WAIT is t."
   (pi-coding-agent-gui-test-ensure-session)
-  (let ((input-buf (plist-get pi-coding-agent-gui-test--session :input-buffer)))
+  (let* ((input-buf (plist-get pi-coding-agent-gui-test--session :input-buffer))
+         (chat-buf (plist-get pi-coding-agent-gui-test--session :chat-buffer))
+         (initial-tick (and (buffer-live-p chat-buf)
+                            (with-current-buffer chat-buf
+                              (buffer-chars-modified-tick)))))
     (when input-buf
       (with-current-buffer input-buf
         (erase-buffer)
         (insert text)
-        (pi-coding-agent-send))))
-  (unless no-wait
-    (sit-for 1)
-    (pi-coding-agent-gui-test-wait-for-idle)))
+        (pi-coding-agent-send)))
+    (unless no-wait
+      (should (pi-coding-agent-gui-test-wait-for-send-start initial-tick))
+      (should (pi-coding-agent-gui-test-wait-for-idle))
+      (should (pi-coding-agent-gui-test-wait-for-chat-settled))
+      (redisplay))))
 
 (defun pi-coding-agent-gui-test-send-no-tools (text)
   "Send TEXT asking the AI to respond without using tools."
@@ -203,7 +263,7 @@ is what determines if the window will auto-scroll during streaming."
       (with-current-buffer buf
         (goto-char (point-max))
         (scroll-down lines)
-        (sit-for 0.1)))))
+        (redisplay)))))
 
 (defun pi-coding-agent-gui-test-scroll-to-end ()
   "Scroll chat window to end."
@@ -224,6 +284,20 @@ is what determines if the window will auto-scroll during streaming."
   "Return t if chat buffer contains TEXT."
   (when-let ((content (pi-coding-agent-gui-test-chat-content)))
     (string-match-p (regexp-quote text) content)))
+
+(defun pi-coding-agent-gui-test-chat-text-in-tool-block-p (text)
+  "Return t if TEXT appears inside a tool block overlay."
+  (when-let ((buf (plist-get pi-coding-agent-gui-test--session :chat-buffer)))
+    (with-current-buffer buf
+      (save-excursion
+        (goto-char (point-min))
+        (let ((found nil))
+          (while (and (not found) (search-forward text nil t))
+            (let ((pos (match-beginning 0)))
+              (setq found
+                    (seq-some (lambda (ov) (overlay-get ov 'pi-coding-agent-tool-block))
+                              (overlays-at pos)))))
+          found)))))
 
 (defun pi-coding-agent-gui-test-chat-matches (regexp)
   "Return t if chat buffer matches REGEXP."
@@ -276,7 +350,7 @@ Inserts dummy content directly (no LLM calls) for speed."
           (dotimes (i (- target-lines (pi-coding-agent-gui-test-chat-lines)))
             (insert (format "Dummy line %d for scroll testing.\n" (1+ i))))
           (set-window-point win (point-max))))
-      (sit-for 0.1))
+      (redisplay))
     t))
 
 ;;;; File Utilities (for tool tests)
