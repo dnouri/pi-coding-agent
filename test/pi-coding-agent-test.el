@@ -26,6 +26,13 @@ Automatically cleans up chat and input buffers."
          (ignore-errors (kill-buffer (pi-coding-agent--chat-buffer-name ,dir nil)))
          (ignore-errors (kill-buffer (pi-coding-agent--input-buffer-name ,dir nil)))))))
 
+(defun pi-coding-agent-test--slash-completions ()
+  "Return slash command completion candidates for current input buffer."
+  (erase-buffer)
+  (insert "/")
+  (let ((completion (pi-coding-agent--slash-capf)))
+    (nth 2 completion)))
+
 ;;; Buffer Naming
 
 (ert-deftest pi-coding-agent-test-buffer-name-chat ()
@@ -2397,6 +2404,37 @@ Regression test for #27: history was shared across all sessions."
       (should (= (nth 1 result) 4))  ; End at point
       (should (member "test-cmd" (nth 2 result))))))
 
+(ert-deftest pi-coding-agent-test-slash-commands-isolated-per-session ()
+  "Project slash commands are scoped per session."
+  (let* ((dir-a "/tmp/pi-coding-agent-test-commands-a/")
+         (dir-b "/tmp/pi-coding-agent-test-commands-b/")
+         (command-a (list :name "project-a-cmd" :description "A" :content "A" :source "project"))
+         (command-b (list :name "project-b-cmd" :description "B" :content "B" :source "project"))
+         (command-map `((,dir-a . (,command-a))
+                        (,dir-b . (,command-b))))
+         (pi-coding-agent--file-commands nil))
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
+              ((symbol-function 'pi-coding-agent--display-buffers) #'ignore)
+              ((symbol-function 'pi-coding-agent--discover-file-commands)
+               (lambda (dir) (alist-get dir command-map nil nil #'equal))))
+      (let* ((chat-a (let ((default-directory dir-a))
+                       (pi-coding-agent--setup-session dir-a nil)))
+             (input-a (buffer-local-value 'pi-coding-agent--input-buffer chat-a))
+             (chat-b (let ((default-directory dir-b))
+                       (pi-coding-agent--setup-session dir-b nil)))
+             (input-b (buffer-local-value 'pi-coding-agent--input-buffer chat-b)))
+        (unwind-protect
+            (let ((completions-a (with-current-buffer input-a
+                                   (setq default-directory dir-a)
+                                   (pi-coding-agent-test--slash-completions)))
+                  (completions-b (with-current-buffer input-b
+                                   (setq default-directory dir-b)
+                                   (pi-coding-agent-test--slash-completions))))
+              (should (equal (list completions-a completions-b)
+                             '(("project-a-cmd") ("project-b-cmd")))))
+          (mapc #'kill-buffer (list input-a chat-a input-b chat-b)))))))
+
 ;;; Input Buffer Slash Execution
 
 (ert-deftest pi-coding-agent-test-expand-slash-command-known ()
@@ -2516,6 +2554,61 @@ arbitrary buffer context (e.g., process sentinel)."
     (setq pi-coding-agent--state '(:model (:name "claude-sonnet-4" :id "model-123")))
     (let ((header (pi-coding-agent--header-line-string)))
       (should (string-match-p "sonnet-4" header)))))
+
+(ert-deftest pi-coding-agent-test-menu-model-description-buffer-local ()
+  "Menu model description uses buffer-local model."
+  (let ((buf-a (generate-new-buffer "*pi-coding-agent-chat:model-a*"))
+        (buf-b (generate-new-buffer "*pi-coding-agent-chat:model-b*")))
+    (unwind-protect
+        (let (desc-a desc-b)
+          (with-current-buffer buf-a
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--state '(:model (:name "Alpha")))
+            (setq desc-a (pi-coding-agent--menu-model-description)))
+          (with-current-buffer buf-b
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--state '(:model (:name "Beta")))
+            (setq desc-b (pi-coding-agent--menu-model-description)))
+          (should (equal (list desc-a desc-b)
+                         '("Model: Alpha" "Model: Beta"))))
+      (mapc #'kill-buffer (list buf-a buf-b)))))
+
+(ert-deftest pi-coding-agent-test-select-model-updates-current-session-only ()
+  "Selecting a model updates only the current session."
+  (let* ((buf-a (generate-new-buffer "*pi-coding-agent-chat:model-select-a*"))
+         (buf-b (generate-new-buffer "*pi-coding-agent-chat:model-select-b*"))
+         (available-models (list (list :id "model-a" :name "Model A" :provider "test")
+                                 (list :id "model-b" :name "Model B" :provider "test")))
+         (selected-model (list :id "model-b" :name "Model B" :provider "test")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'pi-coding-agent--rpc-sync)
+                   (lambda (&rest _) (list :success t :data (list :models available-models))))
+                  ((symbol-function 'pi-coding-agent--rpc-async)
+                   (lambda (_proc _cmd callback)
+                     (funcall callback (list :success t :command "set_model" :data selected-model))))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) "Model B")))
+          (with-current-buffer buf-a
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--process :proc-a)
+            (setq pi-coding-agent--state '(:model (:name "Model A" :id "model-a"))))
+          (with-current-buffer buf-b
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--process :proc-b)
+            (setq pi-coding-agent--state '(:model (:name "Model B-old" :id "model-b-old"))))
+          (with-current-buffer buf-a
+            (pi-coding-agent-select-model))
+          (let ((model-a (with-current-buffer buf-a
+                           (plist-get (plist-get pi-coding-agent--state :model) :name)))
+                (model-b (with-current-buffer buf-b
+                           (plist-get (plist-get pi-coding-agent--state :model) :name))))
+            (should (equal (list model-a model-b)
+                           '("Model B" "Model B-old")))))
+      (mapc (lambda (buf)
+              (with-current-buffer buf
+                (setq pi-coding-agent--process nil))
+              (kill-buffer buf))
+            (list buf-a buf-b)))))
 
 (ert-deftest pi-coding-agent-test-update-state-refreshes-header ()
   "Updating state should trigger header-line refresh."

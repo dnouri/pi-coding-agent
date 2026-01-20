@@ -2032,8 +2032,9 @@ optional command files that may not exist or may have permission issues."
             (error nil))))
       (nreverse commands))))
 
-(defvar pi-coding-agent--file-commands nil
-  "Cached list of discovered file-based slash commands.")
+(defvar-local pi-coding-agent--file-commands nil
+  "Cached list of discovered file-based slash commands.
+Stored per session buffer to avoid leaking project commands.")
 
 (defun pi-coding-agent--discover-file-commands (dir)
   "Discover file-based slash commands for session in DIR.
@@ -2043,6 +2044,17 @@ Returns list of command plists."
         (project-dir (expand-file-name ".pi/commands/" dir)))
     (append (pi-coding-agent--load-commands-from-dir user-dir "user")
             (pi-coding-agent--load-commands-from-dir project-dir "project"))))
+
+(defun pi-coding-agent--set-file-commands (commands)
+  "Set COMMANDS for the current session buffers."
+  (setq pi-coding-agent--file-commands commands)
+  (let ((chat-buf (pi-coding-agent--get-chat-buffer))
+        (input-buf (pi-coding-agent--get-input-buffer)))
+    (dolist (buf (list chat-buf input-buf))
+      (when (and (buffer-live-p buf)
+                 (not (eq buf (current-buffer))))
+        (with-current-buffer buf
+          (setq pi-coding-agent--file-commands commands))))))
 
 ;;;; Slash Command Argument Handling
 
@@ -2727,7 +2739,8 @@ Prompts for arguments if the command content contains placeholders."
 (defun pi-coding-agent--ensure-file-commands ()
   "Ensure pi-coding-agent--file-commands is populated for current session."
   (unless pi-coding-agent--file-commands
-    (setq pi-coding-agent--file-commands (pi-coding-agent--discover-file-commands (pi-coding-agent--session-directory)))))
+    (pi-coding-agent--set-file-commands
+     (pi-coding-agent--discover-file-commands (pi-coding-agent--session-directory)))))
 
 (defun pi-coding-agent--slash-capf ()
   "Completion-at-point function for /commands in input buffer.
@@ -2938,25 +2951,25 @@ Completes paths starting with ./, ../, ~/, or /."
 (defun pi-coding-agent--rebuild-custom-commands (dir)
   "Rebuild custom command entries in transient menu for DIR."
   ;; Discover and sort commands alphabetically
-  (setq pi-coding-agent--file-commands
-        (sort (pi-coding-agent--discover-file-commands dir)
-              (lambda (a b)
-                (string< (plist-get a :name) (plist-get b :name)))))
-  ;; Remove existing custom group (index 4 if it exists)
-  (ignore-errors (transient-remove-suffix 'pi-coding-agent-menu '(4)))
-  ;; Add custom commands as a new two-column group after Actions (index 3)
-  (when pi-coding-agent--file-commands
-    (let* ((cmds (seq-take pi-coding-agent--file-commands 9))
-           (mid (ceiling (length cmds) 2))
-           (col1-cmds (seq-take cmds mid))
-           (col2-cmds (seq-drop cmds mid))
-           (col1 (pi-coding-agent--build-command-column "Custom" col1-cmds 1))
-           (col2 (pi-coding-agent--build-command-column "" col2-cmds (1+ (length col1-cmds)))))
-      (if col2-cmds
-          ;; Two columns
-          (transient-append-suffix 'pi-coding-agent-menu '(3) (vector col1 col2))
-        ;; Single column
-        (transient-append-suffix 'pi-coding-agent-menu '(3) col1)))))
+  (let ((commands (sort (pi-coding-agent--discover-file-commands dir)
+                        (lambda (a b)
+                          (string< (plist-get a :name) (plist-get b :name))))))
+    (pi-coding-agent--set-file-commands commands)
+    ;; Remove existing custom group (index 4 if it exists)
+    (ignore-errors (transient-remove-suffix 'pi-coding-agent-menu '(4)))
+    ;; Add custom commands as a new two-column group after Actions (index 3)
+    (when commands
+      (let* ((cmds (seq-take commands 9))
+             (mid (ceiling (length cmds) 2))
+             (col1-cmds (seq-take cmds mid))
+             (col2-cmds (seq-drop cmds mid))
+             (col1 (pi-coding-agent--build-command-column "Custom" col1-cmds 1))
+             (col2 (pi-coding-agent--build-command-column "" col2-cmds (1+ (length col1-cmds)))))
+        (if col2-cmds
+            ;; Two columns
+            (transient-append-suffix 'pi-coding-agent-menu '(3) (vector col1 col2))
+          ;; Single column
+          (transient-append-suffix 'pi-coding-agent-menu '(3) col1))))))
 
 (defun pi-coding-agent--build-command-column (title cmds start-key)
   "Build a transient column vector with TITLE and CMDS starting at START-KEY."
