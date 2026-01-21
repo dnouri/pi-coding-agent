@@ -1331,6 +1331,185 @@ then proper highlighting once block is closed."
       (should (memq 'diff-indicator-added
                     (mapcar (lambda (ov) (overlay-get ov 'face)) ovs))))))
 
+;;; File Navigation (visit-file)
+
+(ert-deftest pi-coding-agent-test-diff-line-at-point-added ()
+  "Should parse line number from added diff line."
+  (with-temp-buffer
+    (insert "+ 7     added line content")
+    (goto-char (point-min))
+    (should (= 7 (pi-coding-agent--diff-line-at-point)))))
+
+(ert-deftest pi-coding-agent-test-diff-line-at-point-removed ()
+  "Should parse line number from removed diff line."
+  (with-temp-buffer
+    (insert "-12     removed line content")
+    (goto-char (point-min))
+    (should (= 12 (pi-coding-agent--diff-line-at-point)))))
+
+(ert-deftest pi-coding-agent-test-diff-line-at-point-context ()
+  "Should return nil for context lines (no +/-)."
+  (with-temp-buffer
+    (insert "  7     context line")
+    (goto-char (point-min))
+    (should-not (pi-coding-agent--diff-line-at-point))))
+
+(ert-deftest pi-coding-agent-test-diff-line-at-point-mid-line ()
+  "Should work when point is anywhere on the line."
+  (with-temp-buffer
+    (insert "+ 42    some code here")
+    (goto-char 15)  ;; Middle of line
+    (should (= 42 (pi-coding-agent--diff-line-at-point)))))
+
+(ert-deftest pi-coding-agent-test-code-block-line-at-point-first-line ()
+  "Should return 1 for first line of code block content."
+  (with-temp-buffer
+    (insert "```python\nfirst line\nsecond line\n```")
+    (goto-char (point-min))
+    (forward-line 1)  ;; On "first line"
+    (should (= 1 (pi-coding-agent--code-block-line-at-point)))))
+
+(ert-deftest pi-coding-agent-test-code-block-line-at-point-third-line ()
+  "Should return correct line for later lines."
+  (with-temp-buffer
+    (insert "```python\nline one\nline two\nline three\n```")
+    (goto-char (point-min))
+    (forward-line 3)  ;; On "line three"
+    (should (= 3 (pi-coding-agent--code-block-line-at-point)))))
+
+(ert-deftest pi-coding-agent-test-code-block-line-at-point-on-fence ()
+  "Should return nil when on the fence line itself."
+  (with-temp-buffer
+    (insert "```python\ncontent\n```")
+    (goto-char (point-min))  ;; On opening fence
+    (should-not (pi-coding-agent--code-block-line-at-point))))
+
+(ert-deftest pi-coding-agent-test-code-block-line-at-point-no-fence ()
+  "Should return nil when not in a code block."
+  (with-temp-buffer
+    (insert "just plain text\nno fences here")
+    (goto-char (point-min))
+    (should-not (pi-coding-agent--code-block-line-at-point))))
+
+(ert-deftest pi-coding-agent-test-tool-overlay-stores-path ()
+  "Tool overlay should store the file path for navigation."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "read" '(:path "/tmp/test.py"))
+    ;; The pending overlay should have the path
+    (should pi-coding-agent--pending-tool-overlay)
+    (should (equal "/tmp/test.py"
+                   (overlay-get pi-coding-agent--pending-tool-overlay
+                                'pi-coding-agent-tool-path)))))
+
+(ert-deftest pi-coding-agent-test-tool-overlay-stores-path-after-finalize ()
+  "Tool overlay should preserve path after finalization."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "edit" '(:path "/tmp/edit.el"))
+    (pi-coding-agent--display-tool-end "edit" '(:path "/tmp/edit.el")
+                          '((:type "text" :text "done"))
+                          '(:diff "+ 1     new line")
+                          nil)
+    ;; Find the finalized overlay
+    (goto-char (point-min))
+    (let ((ov (seq-find (lambda (o) (overlay-get o 'pi-coding-agent-tool-block))
+                        (overlays-in (point-min) (point-max)))))
+      (should ov)
+      (should (equal "/tmp/edit.el" (overlay-get ov 'pi-coding-agent-tool-path))))))
+
+(ert-deftest pi-coding-agent-test-tool-overlay-stores-offset ()
+  "Tool overlay should store read offset for line calculation."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "read" '(:path "/tmp/file.py" :offset 50))
+    (pi-coding-agent--display-tool-end "read" '(:path "/tmp/file.py" :offset 50)
+                          '((:type "text" :text "content"))
+                          nil nil)
+    ;; Find the finalized overlay
+    (let ((ov (seq-find (lambda (o) (overlay-get o 'pi-coding-agent-tool-block))
+                        (overlays-in (point-min) (point-max)))))
+      (should ov)
+      (should (= 50 (overlay-get ov 'pi-coding-agent-tool-offset))))))
+
+(ert-deftest pi-coding-agent-test-tool-overlay-offset-defaults-nil ()
+  "Tool overlay offset should be nil when not specified."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "read" '(:path "/tmp/file.py"))
+    (pi-coding-agent--display-tool-end "read" '(:path "/tmp/file.py")
+                          '((:type "text" :text "content"))
+                          nil nil)
+    (let ((ov (seq-find (lambda (o) (overlay-get o 'pi-coding-agent-tool-block))
+                        (overlays-in (point-min) (point-max)))))
+      (should ov)
+      (should-not (overlay-get ov 'pi-coding-agent-tool-offset)))))
+
+(ert-deftest pi-coding-agent-test-visit-file-from-edit-diff ()
+  "visit-file should navigate to correct line from edit diff."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "edit" '(:path "/tmp/test.el"))
+    (pi-coding-agent--display-tool-end "edit" '(:path "/tmp/test.el")
+                          '((:type "text" :text "done"))
+                          '(:diff "+ 42    (defun foo ())")
+                          nil)
+    ;; Move to the diff line
+    (goto-char (point-min))
+    (search-forward "+ 42")
+    ;; Mock find-file-other-window to create a buffer with enough lines
+    ;; Note: goto-char and forward-line are bytecode ops, can't be mocked
+    (let (opened-file)
+      (cl-letf (((symbol-function 'find-file-other-window)
+                 (lambda (path)
+                   (setq opened-file path)
+                   ;; Create a fake buffer with enough lines and switch to it
+                   (set-buffer (get-buffer-create "*test-target*"))
+                   (erase-buffer)
+                   (dotimes (_ 100) (insert "line\n"))
+                   (goto-char (point-min))
+                   (current-buffer))))
+        (pi-coding-agent-visit-file))
+      (should (equal "/tmp/test.el" opened-file))
+      ;; Check we're on line 42 (line-number-at-pos is 1-indexed)
+      (should (= 42 (line-number-at-pos)))
+      (ignore-errors (kill-buffer "*test-target*")))))
+
+(ert-deftest pi-coding-agent-test-visit-file-no-path-errors ()
+  "visit-file should error when not on a tool block with path."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "Just some text, no tool block"))
+    (goto-char (point-min))
+    (should-error (pi-coding-agent-visit-file) :type 'user-error)))
+
+(ert-deftest pi-coding-agent-test-visit-file-read-with-offset ()
+  "visit-file should use offset for read tool line calculation."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "read" '(:path "/tmp/big.py" :offset 100))
+    (pi-coding-agent--display-tool-end "read" '(:path "/tmp/big.py" :offset 100)
+                          '((:type "text" :text "line 100\nline 101\nline 102"))
+                          nil nil)
+    ;; Move to line 2 of the code block content (should be file line 101)
+    (goto-char (point-min))
+    (search-forward "```")
+    (forward-line 2)  ;; On "line 101"
+    ;; Note: goto-char and forward-line are bytecode ops, can't be mocked
+    (cl-letf (((symbol-function 'find-file-other-window)
+               (lambda (_path)
+                 ;; Create a fake buffer with enough lines and switch to it
+                 (set-buffer (get-buffer-create "*test-target*"))
+                 (erase-buffer)
+                 (dotimes (_ 200) (insert "line\n"))
+                 (goto-char (point-min))
+                 (current-buffer))))
+      (pi-coding-agent-visit-file))
+    ;; Line 2 in code block + offset 100 - 1 = 101
+    (should (= 101 (line-number-at-pos)))
+    (ignore-errors (kill-buffer "*test-target*"))))
+
 ;;; Visual Line Truncation Tests
 
 (ert-deftest pi-coding-agent-test-truncate-visual-lines-simple ()

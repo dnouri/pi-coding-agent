@@ -110,6 +110,7 @@ For multiple sessions in the same directory, use =C-u M-x pi= to create a named 
 | =n= / =p=     | chat    | Navigate messages                 |
 | =TAB=         | chat    | Toggle section                    |
 | =S-TAB=       | chat    | Cycle all folds                   |
+| =RET=         | chat    | Visit file at point (other window)|
 | =q=           | chat    | Quit session                      |
 
 Press =C-c C-p= to access the full menu with model selection, thinking level,
@@ -148,6 +149,10 @@ preview of the first few lines visible. Press =TAB= on a tool block to
 expand and see everything. File operations (read, write, edit) show full
 syntax highlighting, and edit diffs highlight what changed. Long-running
 commands stream output live so you can watch progress.
+
+Press =RET= on any line within a tool block to open the file at that line
+number. By default, the file opens in the other window so you can keep the
+chat visible. Use =C-u RET= to open in the same window instead.
 
 ** 📁 Folding Turns
 
@@ -193,7 +198,8 @@ Example configuration with =use-package=:
   (pi-coding-agent-tool-preview-lines 10)         ; Lines shown before collapsing tool output
   (pi-coding-agent-bash-preview-lines 5)          ; Lines shown for bash output
   (pi-coding-agent-context-warning-threshold 70)  ; Warn when context exceeds this %
-  (pi-coding-agent-context-error-threshold 90))   ; Critical when context exceeds this %
+  (pi-coding-agent-context-error-threshold 90)    ; Critical when context exceeds this %
+  (pi-coding-agent-visit-file-other-window t))    ; RET opens file in other window (nil for same)
 #+end_src
 
 * Testing
