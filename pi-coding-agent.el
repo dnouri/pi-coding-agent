@@ -54,6 +54,7 @@
 ;;   Chat buffer:
 ;;     n / p          Navigate messages
 ;;     TAB            Toggle tool output
+;;     RET            Visit file at point (from tool blocks)
 ;;     C-c C-p        Open menu
 ;;
 ;; Editor Features:
@@ -125,6 +126,14 @@ Prevents huge single-line outputs from blowing up the chat buffer."
 (defcustom pi-coding-agent-context-error-threshold 90
   "Context usage percentage at which to show error color."
   :type 'natnum
+  :group 'pi-coding-agent)
+
+(defcustom pi-coding-agent-visit-file-other-window t
+  "Whether to open files in other window when visiting from tool blocks.
+When non-nil, RET on a line in tool output opens in other window.
+When nil, RET opens in the same window.
+Prefix arg toggles the behavior."
+  :type 'boolean
   :group 'pi-coding-agent)
 
 ;;;; Faces
@@ -279,6 +288,8 @@ Returns nil if the extension is not recognized."
     (define-key map (kbd "p") #'pi-coding-agent-previous-message)
     (define-key map (kbd "TAB") #'pi-coding-agent-toggle-tool-section)
     (define-key map (kbd "<tab>") #'pi-coding-agent-toggle-tool-section)
+    (define-key map (kbd "RET") #'pi-coding-agent-visit-file)
+    (define-key map (kbd "<return>") #'pi-coding-agent-visit-file)
     map)
   "Keymap for `pi-coding-agent-chat-mode'.")
 
@@ -1378,14 +1389,17 @@ Returns a plist with:
             ;; Report hidden lines; truncated first line means there's hidden content even with 1 line
             :hidden-lines (if (and truncated-first-line (= hidden 0)) 1 hidden)))))
 
-(defun pi-coding-agent--tool-overlay-create (tool-name)
+(defun pi-coding-agent--tool-overlay-create (tool-name &optional path)
   "Create overlay for tool block TOOL-NAME at point.
+Optional PATH stores the file path for navigation.
 Returns the overlay.  The overlay uses rear-advance so it
 automatically extends when content is inserted at its end."
   (let ((ov (make-overlay (point) (point) nil nil t)))
     (overlay-put ov 'pi-coding-agent-tool-block t)
     (overlay-put ov 'pi-coding-agent-tool-name tool-name)
     (overlay-put ov 'face 'pi-coding-agent-tool-block-pending)
+    (when path
+      (overlay-put ov 'pi-coding-agent-tool-path path))
     ov))
 
 (defun pi-coding-agent--tool-overlay-finalize (face)
@@ -1398,22 +1412,31 @@ it from extending to subsequent content.  Sets pending overlay to nil."
           (tool-name (overlay-get pi-coding-agent--pending-tool-overlay
                                   'pi-coding-agent-tool-name))
           (header-end (overlay-get pi-coding-agent--pending-tool-overlay
-                                   'pi-coding-agent-header-end)))
+                                   'pi-coding-agent-header-end))
+          (path (overlay-get pi-coding-agent--pending-tool-overlay
+                             'pi-coding-agent-tool-path))
+          (offset (overlay-get pi-coding-agent--pending-tool-overlay
+                               'pi-coding-agent-tool-offset)))
       (delete-overlay pi-coding-agent--pending-tool-overlay)
       (let ((ov (make-overlay start end nil nil nil)))  ; rear-advance=nil
         (overlay-put ov 'pi-coding-agent-tool-block t)
         (overlay-put ov 'pi-coding-agent-tool-name tool-name)
         (overlay-put ov 'pi-coding-agent-header-end header-end)
+        (when path
+          (overlay-put ov 'pi-coding-agent-tool-path path))
+        (when offset
+          (overlay-put ov 'pi-coding-agent-tool-offset offset))
         (overlay-put ov 'face face)))
     (setq pi-coding-agent--pending-tool-overlay nil)))
 
 (defun pi-coding-agent--display-tool-start (tool-name args)
   "Display header for tool TOOL-NAME with ARGS and create overlay."
-  (let* ((header (pcase tool-name
+  (let* ((path (pi-coding-agent--tool-path args))
+         (header (pcase tool-name
                    ("bash" (format "$ %s" (or (plist-get args :command) "...")))
-                   ("read" (format "read %s" (or (pi-coding-agent--tool-path args) "...")))
-                   ("write" (format "write %s" (or (pi-coding-agent--tool-path args) "...")))
-                   ("edit" (format "edit %s" (or (pi-coding-agent--tool-path args) "...")))
+                   ("read" (format "read %s" (or path "...")))
+                   ("write" (format "write %s" (or path "...")))
+                   ("edit" (format "edit %s" (or path "...")))
                    (_ tool-name)))
          (header-display (propertize header 'face 'pi-coding-agent-tool-command))
          (inhibit-read-only t))
@@ -1425,8 +1448,9 @@ it from extending to subsequent content.  Sets pending overlay to nil."
                   (forward-line -1)
                   (looking-at-p "^$"))
           (insert "\n"))
-        ;; Create overlay at start of tool block
-        (setq pi-coding-agent--pending-tool-overlay (pi-coding-agent--tool-overlay-create tool-name))
+        ;; Create overlay at start of tool block, storing path for navigation
+        (setq pi-coding-agent--pending-tool-overlay
+              (pi-coding-agent--tool-overlay-create tool-name path))
         (insert header-display "\n")
         ;; Store header end position for correct deletion in updates
         ;; (header may span multiple lines if command contains newlines)
@@ -1605,6 +1629,11 @@ Shows preview lines with expandable toggle for long output."
       ;; Error indicator
       (when is-error
         (insert (propertize "[error]" 'face 'pi-coding-agent-tool-error) "\n"))
+      ;; Store offset for read tool (used for line number calculation)
+      (when-let ((offset (plist-get args :offset)))
+        (when pi-coding-agent--pending-tool-overlay
+          (overlay-put pi-coding-agent--pending-tool-overlay
+                       'pi-coding-agent-tool-offset offset)))
       ;; Finalize overlay - replace with non-rear-advance version
       (pi-coding-agent--tool-overlay-finalize
        (if is-error 'pi-coding-agent-tool-block-error 'pi-coding-agent-tool-block-success))
@@ -1707,6 +1736,65 @@ Works anywhere inside a tool block overlay."
           (markdown-cycle))
       ;; Not in a tool block
       (markdown-cycle))))
+
+;;;; File Navigation
+
+(defun pi-coding-agent--diff-line-at-point ()
+  "Extract line number from diff line at point.
+Returns the line number if point is on a +/- diff line, nil otherwise.
+Diff format: [+-] LINENUM content (e.g., '+ 7     code' or '-12     code')."
+  (save-excursion
+    (beginning-of-line)
+    (when (looking-at "^[+-] *\\([0-9]+\\)")
+      (string-to-number (match-string 1)))))
+
+(defun pi-coding-agent--code-block-line-at-point ()
+  "Return line number within code block content at point.
+Searches backward for opening fence (```), counts lines from there.
+Returns nil if not inside a code block or if on the fence line itself."
+  (save-excursion
+    (let ((orig-line (line-number-at-pos)))
+      (beginning-of-line)
+      (when (re-search-backward "^```" nil t)
+        (let ((fence-line (line-number-at-pos)))
+          ;; Only return line number if we're after the fence line
+          (when (> orig-line fence-line)
+            (- orig-line fence-line)))))))
+
+(defun pi-coding-agent--tool-line-at-point (overlay)
+  "Calculate file line number at point for tool OVERLAY.
+For edit diffs: parse line from +/- format.
+For read/write: count lines in code block + offset."
+  (let ((tool-name (overlay-get overlay 'pi-coding-agent-tool-name))
+        (offset (or (overlay-get overlay 'pi-coding-agent-tool-offset) 1)))
+    (or
+     ;; Edit diff format: explicit line number
+     (and (equal tool-name "edit") (pi-coding-agent--diff-line-at-point))
+     ;; Code block position + offset
+     (when-let ((block-line (pi-coding-agent--code-block-line-at-point)))
+       (+ block-line (1- offset)))
+     ;; Fallback to line 1
+     1)))
+
+(defun pi-coding-agent-visit-file (&optional toggle)
+  "Visit the file associated with the tool block at point.
+If on a diff line, go to the corresponding line number.
+For read/write, go to the line within the displayed content.
+By default, uses `pi-coding-agent-visit-file-other-window' to decide
+whether to open in another window.  With prefix arg TOGGLE, invert
+that behavior."
+  (interactive "P")
+  (if-let* ((ov (seq-find (lambda (o) (overlay-get o 'pi-coding-agent-tool-block))
+                          (overlays-at (point))))
+            (path (overlay-get ov 'pi-coding-agent-tool-path)))
+      (let* ((line (pi-coding-agent--tool-line-at-point ov))
+             (use-other-window (if toggle
+                                   (not pi-coding-agent-visit-file-other-window)
+                                 pi-coding-agent-visit-file-other-window)))
+        (funcall (if use-other-window #'find-file-other-window #'find-file) path)
+        (goto-char (point-min))
+        (forward-line (1- line)))
+    (user-error "No file at point")))
 
 ;;;; Diff Overlay Highlighting
 
