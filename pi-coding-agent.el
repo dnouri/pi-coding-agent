@@ -350,10 +350,18 @@ This is a read-only buffer showing the conversation history."
 
   (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-on-kill nil t))
 
+(defun pi-coding-agent-complete ()
+  "Complete at point, suppressing help text in the *Completions* buffer.
+This wraps `completion-at-point' with `completion-show-help' bound to nil,
+removing the instructional header that would otherwise appear."
+  (interactive)
+  (let ((completion-show-help nil))
+    (completion-at-point)))
+
 (defvar pi-coding-agent-input-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'pi-coding-agent-send)
-    (define-key map (kbd "TAB") #'completion-at-point)
+    (define-key map (kbd "TAB") #'pi-coding-agent-complete)
     (define-key map (kbd "C-c C-k") #'pi-coding-agent-abort)
     (define-key map (kbd "C-c C-p") #'pi-coding-agent-menu)
     (define-key map (kbd "C-c C-r") #'pi-coding-agent-resume-session)
@@ -3310,7 +3318,8 @@ Triggers when @ is typed, provides completion of project files."
          (expanded-dir (expand-file-name (or dir "") (pi-coding-agent--session-directory))))
     (when (file-directory-p expanded-dir)
       (mapcar (lambda (f) (concat (or dir "") f))
-              (cl-remove-if (lambda (f) (member f '("." "..")))
+              ;; Exclude current/parent dir entries (with and without trailing slash)
+              (cl-remove-if (lambda (f) (member f '("." ".." "./" "../")))
                             (file-name-all-completions base expanded-dir))))))
 
 (defun pi-coding-agent--path-capf ()

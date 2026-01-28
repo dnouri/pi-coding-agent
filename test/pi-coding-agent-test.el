@@ -4404,6 +4404,27 @@ Errors still consume context, so their usage data is valid for display."
       (when result
         (should (listp (nth 2 result)))))))
 
+(ert-deftest pi-coding-agent-test-path-completions-excludes-dot-entries ()
+  "Path completions should not include ./ or ../ entries."
+  (let* ((temp-dir (make-temp-file "pi-coding-agent-path-test-" t))
+         (subdir (expand-file-name "subdir" temp-dir)))
+    (unwind-protect
+        (progn
+          (make-directory subdir)
+          (cl-letf (((symbol-function 'pi-coding-agent--session-directory)
+                     (lambda () temp-dir)))
+            (let ((completions (pi-coding-agent--path-completions "./")))
+              ;; Should have the subdir
+              (should (member "./subdir/" completions))
+              ;; Should NOT have ./ or ../
+              (should-not (member "./" completions))
+              (should-not (member "./../" completions))
+              (should-not (member "././" completions)))))
+      (delete-directory temp-dir t))))
+
+(ert-deftest pi-coding-agent-test-complete-command-exists ()
+  "pi-coding-agent-complete should be an interactive command."
+  (should (commandp 'pi-coding-agent-complete)))
 
 
 (ert-deftest pi-coding-agent-test-tool-start-creates-overlay ()
