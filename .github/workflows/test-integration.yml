@@ -6,7 +6,7 @@ on:
   pull_request:
 
 env:
-  PI_VERSION: '0.48.0'
+  PI_VERSION: '0.50.1'
 
 jobs:
   test:

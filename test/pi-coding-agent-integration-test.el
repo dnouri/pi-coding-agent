@@ -88,6 +88,39 @@ Sets up event dispatching through pi-coding-agent--event-handlers list."
            (data (plist-get response :data)))
       (should (plist-get data :thinkingLevel)))))
 
+;; NOTE: get_commands RPC requires pi > 0.50.1
+;; These tests skip gracefully if the RPC is not available.
+
+(ert-deftest pi-coding-agent-integration-get-commands-succeeds ()
+  "get_commands returns successful response."
+  (pi-coding-agent-integration-with-process
+    (sleep-for 1)
+    (let ((response (pi-coding-agent--rpc-sync proc '(:type "get_commands"))))
+      ;; Skip if RPC not available (pi <= 0.50.1)
+      (unless response
+        (ert-skip "get_commands RPC not available (requires pi > 0.50.1)"))
+      (should response)
+      (should (eq (plist-get response :success) t))
+      (should (plist-get response :data)))))
+
+(ert-deftest pi-coding-agent-integration-get-commands-returns-valid-structure ()
+  "get_commands returns commands array with valid structure."
+  (pi-coding-agent-integration-with-process
+    (sleep-for 1)
+    (let ((response (pi-coding-agent--rpc-sync proc '(:type "get_commands"))))
+      ;; Skip if RPC not available (pi <= 0.50.1)
+      (unless response
+        (ert-skip "get_commands RPC not available (requires pi > 0.50.1)"))
+      (let* ((data (plist-get response :data))
+             (commands (plist-get data :commands)))
+        ;; Commands should be a vector (JSON array)
+        (should (vectorp commands))
+        ;; If there are commands, verify structure
+        (when (> (length commands) 0)
+          (let ((first-cmd (aref commands 0)))
+            (should (plist-get first-cmd :name))
+            (should (plist-get first-cmd :source))))))))
+
 ;;; Event Sequence Tests (HIGH value)
 
 (ert-deftest pi-coding-agent-integration-prompt-generates-events ()
@@ -318,6 +351,111 @@ Verifies:
 ;;
 ;; Display interleaving (steering message corrupting streaming output) is
 ;; tested via unit test: pi-coding-agent-test-steering-display-not-interleaved
+;;
+;; Extension UI requests (extension_ui_request events) are tested via unit
+;; tests only.  A true integration test would require a pi extension that
+;; makes UI requests, which is outside the scope of core functionality.
+;; See: pi-coding-agent-test-extension-ui-* tests in pi-coding-agent-test.el
+
+;;; Session Name Tests
+
+(ert-deftest pi-coding-agent-integration-session-name-persists-across-resume ()
+  "Session name set via set-session-name persists and appears in resume picker.
+Verifies the full flow:
+1. Start session, send a prompt to materialize the session file
+2. Set a session name
+3. Read file and verify session_info entry was written
+4. Call session-metadata and verify name is extracted
+5. Call format-session-choice and verify name appears in display"
+  (pi-coding-agent-integration-with-process
+    ;; Send a prompt to create the session file (it's created lazily)
+    (let ((got-agent-end nil))
+      (push (lambda (e)
+              (when (equal (plist-get e :type) "agent_end")
+                (setq got-agent-end t)))
+            pi-coding-agent--event-handlers)
+      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "Say: test") #'ignore)
+      (with-timeout (pi-coding-agent-test-integration-timeout
+                     (ert-fail "Timeout waiting for prompt"))
+        (while (not got-agent-end)
+          (accept-process-output proc 0.1))))
+    ;; Now get session file from state
+    (let* ((state-response (pi-coding-agent--rpc-sync proc '(:type "get_state") pi-coding-agent-test-rpc-timeout))
+           (session-file (plist-get (plist-get state-response :data) :sessionFile)))
+      (should session-file)
+      (should (file-exists-p session-file))
+      ;; Create a chat buffer to hold state (needed for set-session-name)
+      (let ((chat-buf (get-buffer-create "*pi-integration-test-session-name*")))
+        (unwind-protect
+            (progn
+              (with-current-buffer chat-buf
+                (pi-coding-agent-chat-mode)
+                (setq pi-coding-agent--state (list :session-file session-file))
+                ;; Set the session name
+                (pi-coding-agent-set-session-name "Integration Test Session"))
+              ;; Verify file contains session_info with our name
+              (with-temp-buffer
+                (insert-file-contents session-file)
+                (should (string-match-p "session_info" (buffer-string)))
+                (should (string-match-p "Integration Test Session" (buffer-string))))
+              ;; Verify metadata extraction works
+              (let ((metadata (pi-coding-agent--session-metadata session-file)))
+                (should metadata)
+                (should (equal (plist-get metadata :session-name) "Integration Test Session")))
+              ;; Verify format-session-choice uses the name
+              (let ((choice (pi-coding-agent--format-session-choice session-file)))
+                (should (string-match-p "Integration Test Session" (car choice)))))
+          (kill-buffer chat-buf))))))
+
+(ert-deftest pi-coding-agent-integration-session-name-cleared-with-null ()
+  "Clearing session name writes JSON null and metadata returns nil.
+Verifies:
+1. Send a prompt to materialize session file
+2. Set a name, then clear it with empty string
+3. File contains proper JSON null (not string \"null\")
+4. Metadata extraction returns nil for session-name"
+  (pi-coding-agent-integration-with-process
+    ;; Send a prompt to create the session file
+    (let ((got-agent-end nil))
+      (push (lambda (e)
+              (when (equal (plist-get e :type) "agent_end")
+                (setq got-agent-end t)))
+            pi-coding-agent--event-handlers)
+      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "Say: test") #'ignore)
+      (with-timeout (pi-coding-agent-test-integration-timeout
+                     (ert-fail "Timeout waiting for prompt"))
+        (while (not got-agent-end)
+          (accept-process-output proc 0.1))))
+    ;; Now get session file and test
+    (let* ((state-response (pi-coding-agent--rpc-sync proc '(:type "get_state") pi-coding-agent-test-rpc-timeout))
+           (session-file (plist-get (plist-get state-response :data) :sessionFile)))
+      (should session-file)
+      (should (file-exists-p session-file))
+      (let ((chat-buf (get-buffer-create "*pi-integration-test-clear-name*")))
+        (unwind-protect
+            (progn
+              (with-current-buffer chat-buf
+                (pi-coding-agent-chat-mode)
+                (setq pi-coding-agent--state (list :session-file session-file))
+                ;; Set then clear
+                (pi-coding-agent-set-session-name "Temporary Name")
+                (pi-coding-agent-set-session-name ""))
+              ;; Verify file has JSON null, not string "null"
+              (with-temp-buffer
+                (insert-file-contents session-file)
+                (goto-char (point-max))
+                (search-backward "session_info")
+                (beginning-of-line)
+                (let ((line (buffer-substring-no-properties (point) (line-end-position))))
+                  ;; Should have :null pattern (JSON null)
+                  (should (string-match-p "\"name\":null" line))
+                  ;; Should NOT have string "null"
+                  (should-not (string-match-p "\"name\":\"null\"" line))))
+              ;; Metadata should return nil for name
+              (let ((metadata (pi-coding-agent--session-metadata session-file)))
+                (should metadata)
+                (should (null (plist-get metadata :session-name)))))
+          (kill-buffer chat-buf))))))
 
 (provide 'pi-coding-agent-integration-test)
 ;;; pi-coding-agent-integration-test.el ends here

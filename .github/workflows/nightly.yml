@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pi_version: ['0.48.0', 'latest', 'main']
+        pi_version: ['0.50.1', 'latest', 'main']
     services:
       ollama:
         image: ollama/ollama:latest
@@ -82,7 +82,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pi_version: ['0.48.0', 'latest', 'main']
+        pi_version: ['0.50.1', 'latest', 'main']
     services:
       ollama:
         image: ollama/ollama:latest

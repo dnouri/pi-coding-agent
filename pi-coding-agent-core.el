@@ -211,10 +211,21 @@ Verification is needed when:
   "Return t if VALUE represents JSON false."
   (eq value :false))
 
+(defun pi-coding-agent--json-null-p (value)
+  "Return t if VALUE represents JSON null.
+`json-parse-string' decodes JSON null as the keyword :null."
+  (eq value :null))
+
 (defun pi-coding-agent--normalize-boolean (value)
   "Convert JSON boolean VALUE to Elisp boolean.
 JSON true (t) stays t, JSON false (:false) becomes nil."
   (if (pi-coding-agent--json-false-p value) nil value))
+
+(defun pi-coding-agent--normalize-string-or-null (value)
+  "Return VALUE if it's a string, nil otherwise.
+Use when reading JSON fields that may be null or string.
+JSON null (:null) and non-strings become nil."
+  (and (stringp value) value))
 
 (defun pi-coding-agent--update-state-from-event (event)
   "Update status and state based on EVENT.

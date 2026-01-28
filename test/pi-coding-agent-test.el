@@ -28,10 +28,10 @@ Automatically cleans up chat and input buffers."
          (ignore-errors (kill-buffer (pi-coding-agent--input-buffer-name ,dir nil)))))))
 
 (defun pi-coding-agent-test--slash-completions ()
-  "Return slash command completion candidates for current input buffer."
+  "Return command completion candidates for current input buffer."
   (erase-buffer)
   (insert "/")
-  (let ((completion (pi-coding-agent--slash-capf)))
+  (let ((completion (pi-coding-agent--command-capf)))
     (nth 2 completion)))
 
 ;;; Buffer Naming
@@ -161,6 +161,47 @@ Automatically cleans up chat and input buffers."
     (pi-coding-agent--clear-chat-buffer)
     ;; Usage should be reset
     (should (null pi-coding-agent--last-usage))))
+
+(ert-deftest pi-coding-agent-test-clear-chat-buffer-resets-session-state ()
+  "Clearing chat buffer resets all session-specific state."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    ;; Set various session state as if we had an active session
+    (setq pi-coding-agent--session-name "My Named Session"
+          pi-coding-agent--cached-stats '(:messages 10 :cost 0.05)
+          pi-coding-agent--last-usage '(:input 5000 :output 1000)
+          pi-coding-agent--assistant-header-shown t
+          pi-coding-agent--followup-queue '("pending message")
+          pi-coding-agent--local-user-message "user text"
+          pi-coding-agent--aborted t
+          pi-coding-agent--extension-status '(("ext1" . "status"))
+          pi-coding-agent--message-start-marker (point-marker)
+          pi-coding-agent--streaming-marker (point-marker)
+          pi-coding-agent--in-code-block t
+          pi-coding-agent--in-thinking-block t
+          pi-coding-agent--line-parse-state 'code-fence
+          pi-coding-agent--pending-tool-overlay (make-overlay 1 1))
+    ;; Add entry to tool-args-cache
+    (puthash "tool-1" '(:path "/test") pi-coding-agent--tool-args-cache)
+    ;; Clear the buffer
+    (pi-coding-agent--clear-chat-buffer)
+    ;; All session state should be reset
+    (should (null pi-coding-agent--session-name))
+    (should (null pi-coding-agent--cached-stats))
+    (should (null pi-coding-agent--last-usage))
+    (should (null pi-coding-agent--assistant-header-shown))
+    (should (null pi-coding-agent--followup-queue))
+    (should (null pi-coding-agent--local-user-message))
+    (should (null pi-coding-agent--aborted))
+    (should (null pi-coding-agent--extension-status))
+    (should (null pi-coding-agent--message-start-marker))
+    (should (null pi-coding-agent--streaming-marker))
+    (should (null pi-coding-agent--in-code-block))
+    (should (null pi-coding-agent--in-thinking-block))
+    (should (eq pi-coding-agent--line-parse-state 'line-start))
+    (should (null pi-coding-agent--pending-tool-overlay))
+    ;; Tool args cache should be empty
+    (should (= 0 (hash-table-count pi-coding-agent--tool-args-cache)))))
 
 (ert-deftest pi-coding-agent-test-new-session-clears-buffer-from-different-context ()
   "New session callback clears chat buffer even when called from different buffer.
@@ -911,11 +952,11 @@ then proper highlighting once block is closed."
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
-(ert-deftest pi-coding-agent-test-send-displays-expanded-slash-command ()
-  "Sending a slash command displays the EXPANDED text in chat, not the original."
+(ert-deftest pi-coding-agent-test-send-slash-command-not-displayed-locally ()
+  "Slash commands are NOT displayed locally - pi sends back expanded content.
+This avoids showing both the command and its expansion."
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-chat*"))
-        (input-buf (get-buffer-create "*pi-coding-agent-test-input*"))
-        (pi-coding-agent--file-commands '((:name "greet" :content "Hello $@!"))))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-input*")))
     (unwind-protect
         (progn
           (with-current-buffer chat-buf
@@ -928,10 +969,92 @@ then proper highlighting once block is closed."
             ;; Mock the process to avoid actual RPC
             (setq pi-coding-agent--process nil)
             (pi-coding-agent-send))
-          ;; Check chat buffer has EXPANDED text, not original slash command
+          ;; Check chat buffer does NOT have the command - pi will send expanded content
           (with-current-buffer chat-buf
-            (should (string-match-p "Hello world!" (buffer-string)))
-            (should-not (string-match-p "/greet" (buffer-string)))))
+            (should-not (string-match-p "/greet" (buffer-string)))
+            ;; local-user-message should be nil for slash commands
+            (should-not pi-coding-agent--local-user-message)))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-slash-command-after-abort-no-duplicate-headers ()
+  "Sending slash command after abort should not show duplicate Assistant headers.
+Regression test for bug where:
+1. Assistant streams, user aborts
+2. User types /fix-tests in input buffer  
+3. Two 'Assistant' headers appear before the user message
+
+The fix: don't set assistant-header-shown to nil when sending slash commands,
+since we don't display them locally. Let pi's message_start handle it."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-abort-cmd*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-abort-cmd-input*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--input-buffer input-buf)
+            (setq pi-coding-agent--status 'idle)
+            ;; Simulate state after an aborted assistant turn:
+            ;; - assistant-header-shown is t (header was shown for aborted turn)
+            (setq pi-coding-agent--assistant-header-shown t)
+            (let ((inhibit-read-only t))
+              (insert "Assistant\n=========\nSome content...\n\n[Aborted]\n\n")))
+          
+          ;; User sends a slash command from input buffer
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "/fix-tests")
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                      ((symbol-function 'process-live-p) (lambda (_) t))
+                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore)
+                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore))
+              (pi-coding-agent-send)))
+          
+          ;; KEY ASSERTION: assistant-header-shown should still be t
+          ;; because we didn't display anything locally for slash commands
+          (with-current-buffer chat-buf
+            (should pi-coding-agent--assistant-header-shown)
+            
+            ;; Now simulate pi's response sequence
+            ;; 1. agent_start - should NOT add header (already shown)
+            (pi-coding-agent--handle-display-event '(:type "agent_start"))
+            
+            ;; Count Assistant headers - should still be just 1
+            (let ((count 0)
+                  (content (buffer-string)))
+              (with-temp-buffer
+                (insert content)
+                (goto-char (point-min))
+                (while (search-forward "Assistant\n=========" nil t)
+                  (setq count (1+ count))))
+              (should (= count 1)))
+            
+            ;; 2. message_start with user role (expanded template)
+            (pi-coding-agent--handle-display-event
+             '(:type "message_start"
+               :message (:role "user"
+                         :content [(:type "text" :text "Your task is to fix tests...")]
+                         :timestamp 1704067200000)))
+            
+            ;; ISSUE #5: Verify expanded content is actually displayed
+            (should (string-match-p "Your task is to fix tests" (buffer-string)))
+            
+            ;; 3. message_start with assistant role
+            (pi-coding-agent--handle-display-event
+             '(:type "message_start"
+               :message (:role "assistant")))
+            
+            ;; Final count: should be exactly 2 Assistant headers
+            ;; (one from aborted turn, one from new turn)
+            (let ((count 0)
+                  (content (buffer-string)))
+              (with-temp-buffer
+                (insert content)
+                (goto-char (point-min))
+                (while (search-forward "Assistant\n=========" nil t)
+                  (setq count (1+ count))))
+              (should (= count 2)))))
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
@@ -1147,6 +1270,213 @@ then proper highlighting once block is closed."
     (should (string-match-p "No models available" (buffer-string)))
     (should (string-match-p "API key" (buffer-string)))
     (should (string-match-p "pi --login" (buffer-string)))))
+
+;;; Extension UI Request Handling
+
+(ert-deftest pi-coding-agent-test-extension-ui-notify ()
+  "extension_ui_request notify method shows message."
+  (let ((message-shown nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (setq message-shown (apply #'format fmt args)))))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (let ((pi-coding-agent--process nil))
+          (pi-coding-agent--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-1"
+             :method "notify"
+             :message "Extension loaded successfully"
+             :notifyType "info")))
+        (should message-shown)
+        (should (string-match-p "Extension loaded successfully" message-shown))))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-confirm-yes ()
+  "extension_ui_request confirm method uses yes-or-no-p and sends response."
+  (let ((response-sent nil))
+    (cl-letf (((symbol-function 'yes-or-no-p)
+               (lambda (_prompt) t))
+              ((symbol-function 'pi-coding-agent--rpc-async)
+               (lambda (_proc msg _cb)
+                 (setq response-sent msg))))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (let ((pi-coding-agent--process t))
+          (pi-coding-agent--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-2"
+             :method "confirm"
+             :title "Delete file?"
+             :message "This cannot be undone")))
+        (should response-sent)
+        (should (equal (plist-get response-sent :type) "extension_ui_response"))
+        (should (equal (plist-get response-sent :id) "req-2"))
+        (should (eq (plist-get response-sent :confirmed) t))))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-confirm-no ()
+  "extension_ui_request confirm method sends confirmed:false when user declines."
+  (let ((response-sent nil))
+    (cl-letf (((symbol-function 'yes-or-no-p)
+               (lambda (_prompt) nil))
+              ((symbol-function 'pi-coding-agent--rpc-async)
+               (lambda (_proc msg _cb)
+                 (setq response-sent msg))))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (let ((pi-coding-agent--process t))
+          (pi-coding-agent--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-3"
+             :method "confirm"
+             :title "Delete?"
+             :message "Are you sure?")))
+        (should response-sent)
+        ;; :json-false is the correct encoding for JSON false in json-encode
+        (should (eq (plist-get response-sent :confirmed) :json-false))))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-select ()
+  "extension_ui_request select method uses completing-read and sends response."
+  (let ((response-sent nil))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt options &rest _args)
+                 (car options)))  ; Return first option
+              ((symbol-function 'pi-coding-agent--rpc-async)
+               (lambda (_proc msg _cb)
+                 (setq response-sent msg))))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (let ((pi-coding-agent--process t))
+          (pi-coding-agent--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-4"
+             :method "select"
+             :title "Pick one:"
+             :options ["Option A" "Option B" "Option C"])))
+        (should response-sent)
+        (should (equal (plist-get response-sent :type) "extension_ui_response"))
+        (should (equal (plist-get response-sent :id) "req-4"))
+        (should (equal (plist-get response-sent :value) "Option A"))))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-input ()
+  "extension_ui_request input method uses read-string and sends response."
+  (let ((response-sent nil))
+    (cl-letf (((symbol-function 'read-string)
+               (lambda (_prompt &optional _initial) "user input"))
+              ((symbol-function 'pi-coding-agent--rpc-async)
+               (lambda (_proc msg _cb)
+                 (setq response-sent msg))))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (let ((pi-coding-agent--process t))
+          (pi-coding-agent--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-5"
+             :method "input"
+             :title "Enter name:"
+             :placeholder "John Doe")))
+        (should response-sent)
+        (should (equal (plist-get response-sent :type) "extension_ui_response"))
+        (should (equal (plist-get response-sent :id) "req-5"))
+        (should (equal (plist-get response-sent :value) "user input"))))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-set-editor-text ()
+  "extension_ui_request set_editor_text inserts text into input buffer."
+  (let ((input-buf (get-buffer-create "*pi-test-input*")))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (setq pi-coding-agent--input-buffer input-buf)
+          (with-current-buffer input-buf
+            (erase-buffer))
+          (pi-coding-agent--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-6"
+             :method "set_editor_text"
+             :text "Prefilled text"))
+          (should (equal (with-current-buffer input-buf (buffer-string))
+                         "Prefilled text")))
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-set-status ()
+  "extension_ui_request setStatus updates extension status storage."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--extension-status nil)
+    (pi-coding-agent--handle-extension-ui-request
+     '(:type "extension_ui_request"
+       :id "req-7"
+       :method "setStatus"
+       :statusKey "my-ext"
+       :statusText "Processing..."))
+    (should (equal (cdr (assoc "my-ext" pi-coding-agent--extension-status))
+                   "Processing..."))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-set-status-clear ()
+  "extension_ui_request setStatus with nil clears the status."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--extension-status '(("my-ext" . "Old status")))
+    (pi-coding-agent--handle-extension-ui-request
+     '(:type "extension_ui_request"
+       :id "req-8"
+       :method "setStatus"
+       :statusKey "my-ext"
+       :statusText nil))
+    (should-not (assoc "my-ext" pi-coding-agent--extension-status))))
+
+(ert-deftest pi-coding-agent-test-header-format-extension-status ()
+  "Extension status formats correctly in header-line."
+  ;; Empty status returns empty string
+  (should (equal (pi-coding-agent--header-format-extension-status nil) ""))
+  ;; Single status
+  (let ((result (pi-coding-agent--header-format-extension-status '(("ext1" . "Processing...")))))
+    (should (string-match-p "│" result))
+    (should (string-match-p "Processing" result)))
+  ;; Multiple statuses joined with separator
+  (let ((result (pi-coding-agent--header-format-extension-status
+                 '(("ext1" . "Status 1") ("ext2" . "Status 2")))))
+    (should (string-match-p "│" result))
+    (should (string-match-p "Status 1" result))
+    (should (string-match-p "Status 2" result))
+    (should (string-match-p "·" result))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-unknown-cancels ()
+  "extension_ui_request with unknown method sends cancelled response."
+  (let ((response-sent nil))
+    (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+               (lambda (_proc msg _cb)
+                 (setq response-sent msg))))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (let ((pi-coding-agent--process t))
+          (pi-coding-agent--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-9"
+             :method "setWidget"
+             :widgetKey "my-ext"
+             :widgetLines ["Line 1"])))
+        (should response-sent)
+        (should (equal (plist-get response-sent :type) "extension_ui_response"))
+        (should (equal (plist-get response-sent :id) "req-9"))
+        (should (eq (plist-get response-sent :cancelled) t))))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-editor-cancels ()
+  "extension_ui_request editor method sends cancelled (not supported)."
+  (let ((response-sent nil))
+    (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+               (lambda (_proc msg _cb)
+                 (setq response-sent msg))))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (let ((pi-coding-agent--process t))
+          (pi-coding-agent--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-10"
+             :method "editor"
+             :title "Edit:"
+             :prefill "some text")))
+        (should response-sent)
+        (should (eq (plist-get response-sent :cancelled) t))))))
 
 ;;; Tool Output
 
@@ -2414,12 +2744,11 @@ correct position in the conversation."
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
-(ert-deftest pi-coding-agent-test-send-when-idle-expands-slash-commands ()
-  "C-c C-c when idle expands slash commands."
+(ert-deftest pi-coding-agent-test-send-when-idle-sends-literal-commands ()
+  "C-c C-c when idle sends commands literally (pi expands)."
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-send-slash*"))
         (input-buf (get-buffer-create "*pi-coding-agent-test-send-slash-input*"))
-        (sent-prompt nil)
-        (pi-coding-agent--file-commands '((:name "greet" :content "Hello $@!"))))
+        (sent-prompt nil))
     (unwind-protect
         (progn
           (with-current-buffer chat-buf
@@ -2436,8 +2765,8 @@ correct position in the conversation."
                        (lambda (text) (setq sent-prompt text)))
                       ((symbol-function 'pi-coding-agent--spinner-start) #'ignore))
               (pi-coding-agent-send))
-            ;; Should have expanded the slash command
-            (should (equal sent-prompt "Hello world!"))))
+            ;; Should send literal command (pi handles expansion)
+            (should (equal sent-prompt "/greet world"))))
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
@@ -2480,46 +2809,82 @@ correct position in the conversation."
       (kill-buffer input-buf))))
 
 (ert-deftest pi-coding-agent-test-message-start-user-echo-ignored-when-displayed-locally ()
-  "message_start role=user is ignored when we already displayed the message locally.
-Uses awaiting-user-echo flag to track whether to display or skip."
+  "message_start role=user is ignored when we already displayed the same message locally.
+Uses local-user-message to track what we displayed for comparison."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (let ((pi-coding-agent--status 'streaming)
           (pi-coding-agent--state nil)
-          ;; Simulate that we displayed a message locally (normal send)
-          (pi-coding-agent--awaiting-user-echo t)
+          ;; Simulate that we displayed this message locally (normal send)
+          (pi-coding-agent--local-user-message "Same message")
           (initial-content (buffer-string)))
-      ;; Simulate receiving message_start for a user message (pi echoing back)
+      ;; Simulate receiving message_start for a user message (pi echoing back same text)
       (pi-coding-agent--handle-display-event
        '(:type "message_start"
          :message (:role "user"
-                   :content [(:type "text" :text "Should not appear")]
+                   :content [(:type "text" :text "Same message")]
                    :timestamp 1704067200000)))
-      ;; Buffer should be unchanged - we displayed locally, so skip the echo
+      ;; Buffer should be unchanged - pi's echo matches local display, so skip
       (should (equal (buffer-string) initial-content))
-      (should-not (string-match-p "Should not appear" (buffer-string)))
-      ;; Flag should be cleared
-      (should-not pi-coding-agent--awaiting-user-echo))))
+      (should-not (string-match-p "Same message" (buffer-string)))
+      ;; Variable should be cleared
+      (should-not pi-coding-agent--local-user-message))))
+
+(ert-deftest pi-coding-agent-test-message-start-user-displayed-when-different ()
+  "message_start role=user IS displayed when pi's text differs from local.
++This handles slash command expansion: user types '/greet', pi sends 'Hello!'."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent--status 'streaming)
+          (pi-coding-agent--state nil)
+          (pi-coding-agent--local-user-message "/greet world")
+          (initial-content (buffer-string)))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_start"
+         :message (:role "user"
+                   :content [(:type "text" :text "Hello world!")]
+                   :timestamp 1704067200000)))
+      ;; Should be displayed since text differs (expanded template)
+      (should (string-match-p "Hello world!" (buffer-string)))
+      (should-not pi-coding-agent--local-user-message))))
+
+(ert-deftest pi-coding-agent-test-message-start-user-skipped-when-template-equals-command ()
+  "Edge case: if template expands to exactly the command text, we skip display.
+This is rare but possible - the local display is already correct."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent--status 'streaming)
+          (pi-coding-agent--state nil)
+          (pi-coding-agent--local-user-message "/echo hello")
+          (initial-content (buffer-string)))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_start"
+         :message (:role "user"
+                   :content [(:type "text" :text "/echo hello")]
+                   :timestamp 1704067200000)))
+      ;; Should NOT be displayed - text matches what we displayed locally
+      (should (equal (buffer-string) initial-content))
+      (should-not pi-coding-agent--local-user-message))))
 
 (ert-deftest pi-coding-agent-test-message-start-user-displayed-when-not-local ()
-  "message_start role=user IS displayed when flag is nil (steering case).
+  "message_start role=user IS displayed when local-user-message is nil (steering case).
 Steering messages are not displayed locally - they're displayed from the echo."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (let ((pi-coding-agent--status 'streaming)
           (pi-coding-agent--state nil)
-          ;; Flag is nil - no locally displayed message pending
-          (pi-coding-agent--awaiting-user-echo nil))
+          ;; Variable is nil - no locally displayed message pending
+          (pi-coding-agent--local-user-message nil))
       ;; Simulate receiving message_start for a steering message
       (pi-coding-agent--handle-display-event
        '(:type "message_start"
          :message (:role "user"
                    :content [(:type "text" :text "Steering message here")]
                    :timestamp 1704067200000)))
-      ;; Should be displayed since flag was nil
+      ;; Should be displayed since local-user-message was nil
       (should (string-match-p "Steering message here" (buffer-string)))
-      ;; Flag should still be nil
-      (should-not pi-coding-agent--awaiting-user-echo))))
+      ;; Variable should still be nil
+      (should-not pi-coding-agent--local-user-message))))
 
 (ert-deftest pi-coding-agent-test-steering-display-not-interleaved ()
   "Steering message during streaming appears cleanly, not interleaved.
@@ -2539,7 +2904,7 @@ mixed together like:
     (pi-coding-agent-chat-mode)
     (let ((pi-coding-agent--status 'streaming)
           (pi-coding-agent--state nil)
-          (pi-coding-agent--awaiting-user-echo nil)
+          (pi-coding-agent--local-user-message nil)
           (pi-coding-agent--assistant-header-shown nil))
       ;; Simulate initial prompt response - assistant starts streaming
       (pi-coding-agent--handle-display-event '(:type "agent_start"))
@@ -2603,12 +2968,12 @@ mixed together like:
           (should-not (string-match-p "^[0-9]" (string-trim-left after-steering)))
           (should-not (string-match-p "^, [0-9]" (string-trim-left after-steering))))))))
 
-(ert-deftest pi-coding-agent-test-awaiting-echo-flag-tracks-display ()
-  "The awaiting-user-echo flag tracks locally displayed messages.
-- Normal send sets flag to t
-- message_start role=user clears flag to nil
-- Steering doesn't set flag (displayed from echo)
-- agent_end clears flag to nil"
+(ert-deftest pi-coding-agent-test-local-user-message-tracks-display ()
+  "The local-user-message variable tracks locally displayed messages.
+- Normal send stores the text
+- message_start role=user clears it to nil
+- Steering doesn't set it (displayed from echo)
+- agent_end clears it to nil"
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-echo-flag*"))
         (input-buf (get-buffer-create "*pi-coding-agent-test-echo-flag-input*")))
     (unwind-protect
@@ -2617,8 +2982,8 @@ mixed together like:
             (pi-coding-agent-chat-mode)
             (setq pi-coding-agent--status 'idle)
             (setq pi-coding-agent--input-buffer input-buf)
-            ;; Flag starts as nil
-            (should-not pi-coding-agent--awaiting-user-echo))
+            ;; Variable starts as nil
+            (should-not pi-coding-agent--local-user-message))
           (with-current-buffer input-buf
             (pi-coding-agent-input-mode)
             (setq pi-coding-agent--chat-buffer chat-buf)
@@ -2628,15 +2993,15 @@ mixed together like:
                       ((symbol-function 'pi-coding-agent--send-prompt) #'ignore)
                       ((symbol-function 'pi-coding-agent--spinner-start) #'ignore))
               (pi-coding-agent-send)))
-          ;; After normal send, flag should be t
+          ;; After normal send, variable should store the message text
           (with-current-buffer chat-buf
-            (should pi-coding-agent--awaiting-user-echo)
-            ;; Simulate pi echo - flag clears to nil
+            (should (equal pi-coding-agent--local-user-message "First message"))
+            ;; Simulate pi echo - variable clears to nil
             (pi-coding-agent--handle-display-event
              '(:type "message_start"
                :message (:role "user" :content [(:type "text" :text "First message")])))
-            (should-not pi-coding-agent--awaiting-user-echo)
-            ;; Now simulate steering (doesn't set flag)
+            (should-not pi-coding-agent--local-user-message)
+            ;; Now simulate steering (doesn't set it)
             (setq pi-coding-agent--status 'streaming))
           (with-current-buffer input-buf
             (erase-buffer)
@@ -2645,13 +3010,13 @@ mixed together like:
                       ((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'pi-coding-agent--rpc-async) #'ignore))
               (pi-coding-agent-queue-steering)))
-          ;; Flag still nil (steering doesn't set it)
+          ;; Variable still nil (steering doesn't set it)
           (with-current-buffer chat-buf
-            (should-not pi-coding-agent--awaiting-user-echo)
+            (should-not pi-coding-agent--local-user-message)
             ;; agent_end clears to nil (in case of edge cases)
-            (setq pi-coding-agent--awaiting-user-echo t)  ; Simulate weird state
+            (setq pi-coding-agent--local-user-message "test")  ; Simulate weird state
             (pi-coding-agent--display-agent-end)
-            (should-not pi-coding-agent--awaiting-user-echo)))
+            (should-not pi-coding-agent--local-user-message)))
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
@@ -2813,8 +3178,8 @@ This ensures steering appears at the correct position in the conversation
           ;; Steering is NOT displayed when sent (unlike normal sends)
           (with-current-buffer chat-buf
             (should-not (string-match-p "Stop and do something else" (buffer-string)))
-            ;; Flag should still be nil (steering doesn't set it)
-            (should-not pi-coding-agent--awaiting-user-echo))
+            ;; local-user-message should still be nil (steering doesn't set it)
+            (should-not pi-coding-agent--local-user-message))
           ;; Simulate pi echoing the steering message back via message_start
           (with-current-buffer chat-buf
             (pi-coding-agent--handle-display-event
@@ -2841,7 +3206,7 @@ message_start role=assistant displays the 'Assistant' header."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (let ((pi-coding-agent--status 'streaming)
-          (pi-coding-agent--awaiting-user-echo nil)
+          (pi-coding-agent--local-user-message nil)
           ;; Simulate that first assistant header was already shown
           (pi-coding-agent--assistant-header-shown t))
       ;; First, some assistant content is already in the buffer
@@ -3212,6 +3577,196 @@ and then re-sorted alphabetically by completing-read."
             (should (equal (plist-get metadata :message-count) 0))))
       (delete-file temp-file))))
 
+(ert-deftest pi-coding-agent-test-session-metadata-extracts-session-name ()
+  "pi-coding-agent--session-metadata extracts session name from session_info entry."
+  (let ((temp-file (make-temp-file "pi-coding-agent-test-session" nil ".jsonl")))
+    (unwind-protect
+        (progn
+          (with-temp-file temp-file
+            (insert "{\"type\":\"session\",\"id\":\"test\"}\n")
+            (insert "{\"type\":\"message\",\"id\":\"m1\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}}\n")
+            (insert "{\"type\":\"session_info\",\"id\":\"si1\",\"name\":\"Refactor auth module\"}\n"))
+          (let ((metadata (pi-coding-agent--session-metadata temp-file)))
+            (should metadata)
+            (should (equal (plist-get metadata :session-name) "Refactor auth module"))))
+      (delete-file temp-file))))
+
+(ert-deftest pi-coding-agent-test-session-metadata-uses-latest-session-name ()
+  "pi-coding-agent--session-metadata uses the most recent session_info name."
+  (let ((temp-file (make-temp-file "pi-coding-agent-test-session" nil ".jsonl")))
+    (unwind-protect
+        (progn
+          (with-temp-file temp-file
+            (insert "{\"type\":\"session\",\"id\":\"test\"}\n")
+            (insert "{\"type\":\"session_info\",\"id\":\"si1\",\"name\":\"Old name\"}\n")
+            (insert "{\"type\":\"message\",\"id\":\"m1\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}}\n")
+            (insert "{\"type\":\"session_info\",\"id\":\"si2\",\"name\":\"New name\"}\n"))
+          (let ((metadata (pi-coding-agent--session-metadata temp-file)))
+            (should metadata)
+            (should (equal (plist-get metadata :session-name) "New name"))))
+      (delete-file temp-file))))
+
+(ert-deftest pi-coding-agent-test-session-metadata-ignores-null-name ()
+  "pi-coding-agent--session-metadata treats null name as cleared (no name)."
+  (let ((temp-file (make-temp-file "pi-coding-agent-test-session" nil ".jsonl")))
+    (unwind-protect
+        (progn
+          (with-temp-file temp-file
+            (insert "{\"type\":\"session\",\"id\":\"test\"}\n")
+            (insert "{\"type\":\"session_info\",\"id\":\"si1\",\"name\":\"My Session\"}\n")
+            (insert "{\"type\":\"message\",\"id\":\"m1\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}}\n")
+            ;; User cleared the session name - null means no name
+            (insert "{\"type\":\"session_info\",\"id\":\"si2\",\"name\":null}\n"))
+          (let ((metadata (pi-coding-agent--session-metadata temp-file)))
+            (should metadata)
+            ;; Should be nil, not :null
+            (should (null (plist-get metadata :session-name)))))
+      (delete-file temp-file))))
+
+(ert-deftest pi-coding-agent-test-format-session-choice-fallback-on-cleared-name ()
+  "pi-coding-agent--format-session-choice falls back to message when name cleared."
+  (let ((temp-file (make-temp-file "pi-coding-agent-test-session" nil ".jsonl")))
+    (unwind-protect
+        (progn
+          (with-temp-file temp-file
+            (insert "{\"type\":\"session\",\"id\":\"test\"}\n")
+            (insert "{\"type\":\"message\",\"id\":\"m1\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello world\"}]}}\n")
+            (insert "{\"type\":\"session_info\",\"id\":\"si1\",\"name\":\"My Project\"}\n")
+            ;; Name was cleared
+            (insert "{\"type\":\"session_info\",\"id\":\"si2\",\"name\":null}\n"))
+          (let ((choice (pi-coding-agent--format-session-choice temp-file)))
+            ;; Should fall back to first message, not crash
+            (should (string-match-p "Hello world" (car choice)))
+            (should-not (string-match-p "My Project" (car choice)))))
+      (delete-file temp-file))))
+
+(ert-deftest pi-coding-agent-test-format-session-choice-prefers-name ()
+  "pi-coding-agent--format-session-choice uses session name when available."
+  (let ((temp-file (make-temp-file "pi-coding-agent-test-session" nil ".jsonl")))
+    (unwind-protect
+        (progn
+          (with-temp-file temp-file
+            (insert "{\"type\":\"session\",\"id\":\"test\"}\n")
+            (insert "{\"type\":\"message\",\"id\":\"m1\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello world\"}]}}\n")
+            (insert "{\"type\":\"session_info\",\"id\":\"si1\",\"name\":\"My Project\"}\n"))
+          (let ((choice (pi-coding-agent--format-session-choice temp-file)))
+            ;; Should show session name, not first message
+            (should (string-match-p "My Project" (car choice)))
+            (should-not (string-match-p "Hello world" (car choice)))))
+      (delete-file temp-file))))
+
+(ert-deftest pi-coding-agent-test-header-line-includes-session-name ()
+  "pi-coding-agent--header-line-string includes session name when set."
+  (let ((chat-buf (get-buffer-create "*pi-test-header-session-name*")))
+    (unwind-protect
+        (with-current-buffer chat-buf
+          (pi-coding-agent-chat-mode)
+          (setq pi-coding-agent--state '(:model (:name "test-model") :thinking-level "high"))
+          ;; Without session name
+          (setq pi-coding-agent--session-name nil)
+          (let ((header (pi-coding-agent--header-line-string)))
+            (should-not (string-match-p "My Session" header)))
+          ;; With session name
+          (setq pi-coding-agent--session-name "My Session")
+          (let ((header (pi-coding-agent--header-line-string)))
+            (should (string-match-p "My Session" header))
+            ;; Should have separator before session name
+            (should (string-match-p "│" header))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-header-line-truncates-long-session-name ()
+  "pi-coding-agent--header-line-string truncates long session names."
+  (let ((chat-buf (get-buffer-create "*pi-test-header-truncate*")))
+    (unwind-protect
+        (with-current-buffer chat-buf
+          (pi-coding-agent-chat-mode)
+          (setq pi-coding-agent--state '(:model (:name "test-model")))
+          ;; Set a very long session name (longer than 30 chars)
+          (setq pi-coding-agent--session-name "This is a very long session name that should be truncated")
+          (let ((header (pi-coding-agent--header-line-string)))
+            ;; Should contain truncated version with ellipsis
+            (should (string-match-p "This is a very long session" header))
+            (should (string-match-p "…" header))
+            ;; Should NOT contain the full name
+            (should-not (string-match-p "truncated$" header))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-set-session-name-writes-to-file ()
+  "pi-coding-agent-set-session-name appends session_info entry to file."
+  (let ((temp-file (make-temp-file "pi-coding-agent-test-session" nil ".jsonl"))
+        (chat-buf (get-buffer-create "*pi-test-set-name*")))
+    (unwind-protect
+        (progn
+          ;; Create initial session file
+          (with-temp-file temp-file
+            (insert "{\"type\":\"session\",\"id\":\"test\"}\n"))
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--state (list :session-file temp-file))
+            ;; Set the name
+            (pi-coding-agent-set-session-name "My Test Session"))
+          ;; Verify file was updated
+          (with-temp-buffer
+            (insert-file-contents temp-file)
+            (should (string-match-p "session_info" (buffer-string)))
+            (should (string-match-p "My Test Session" (buffer-string))))
+          ;; Verify cache was updated
+          (should (equal (buffer-local-value 'pi-coding-agent--session-name chat-buf)
+                         "My Test Session")))
+      (delete-file temp-file)
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-set-session-name-clears-with-empty ()
+  "pi-coding-agent-set-session-name clears name when given empty string."
+  (let ((chat-buf (get-buffer-create "*pi-test-clear-name*"))
+        (temp-file (make-temp-file "pi-coding-agent-test-session" nil ".jsonl")))
+    (unwind-protect
+        (progn
+          (with-temp-file temp-file
+            (insert "{\"type\":\"session\",\"id\":\"test\"}\n"))
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--state (list :session-file temp-file))
+            (setq pi-coding-agent--session-name "Old Name")
+            ;; Clear with empty string
+            (pi-coding-agent-set-session-name ""))
+          ;; Cache should be nil
+          (should (null (buffer-local-value 'pi-coding-agent--session-name chat-buf))))
+      (delete-file temp-file)
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-set-session-name-writes-json-null ()
+  "pi-coding-agent-set-session-name writes JSON null (not string) when clearing."
+  (let ((chat-buf (get-buffer-create "*pi-test-json-null*"))
+        (temp-file (make-temp-file "pi-coding-agent-test-session" nil ".jsonl")))
+    (unwind-protect
+        (progn
+          (with-temp-file temp-file
+            (insert "{\"type\":\"session\",\"id\":\"test\"}\n"))
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--state (list :session-file temp-file))
+            (setq pi-coding-agent--session-name "Old Name")
+            ;; Clear with empty string
+            (pi-coding-agent-set-session-name ""))
+          ;; Verify JSON has proper null (not string "null")
+          (with-temp-buffer
+            (insert-file-contents temp-file)
+            (goto-char (point-min))
+            (search-forward "session_info")
+            (beginning-of-line)
+            (let* ((line (buffer-substring-no-properties (point) (line-end-position)))
+                   (data (json-parse-string line :object-type 'plist))
+                   (name (plist-get data :name)))
+              ;; Should be :null (from JSON null), not the string "null"
+              (should (eq name :null))
+              ;; File should contain ":null" pattern (JSON null)
+              (should (string-match-p "\"name\":null" line))
+              ;; File should NOT contain "name":"null" (string)
+              (should-not (string-match-p "\"name\":\"null\"" line)))))
+      (delete-file temp-file)
+      (kill-buffer chat-buf))))
+
 ;;; Input History
 
 (ert-deftest pi-coding-agent-test-history-add-to-ring ()
@@ -3303,89 +3858,39 @@ Regression test for #27: history was shared across all sessions."
 
 ;;; Input Buffer Slash Completion
 
-(ert-deftest pi-coding-agent-test-slash-capf-returns-nil-without-slash ()
+(ert-deftest pi-coding-agent-test-command-capf-returns-nil-without-slash ()
   "Completion returns nil when not after slash."
   (with-temp-buffer
     (pi-coding-agent-input-mode)
     (insert "hello")
-    (should-not (pi-coding-agent--slash-capf))))
+    (should-not (pi-coding-agent--command-capf))))
 
-(ert-deftest pi-coding-agent-test-slash-capf-returns-nil-at-line-start ()
+(ert-deftest pi-coding-agent-test-command-capf-returns-nil-at-line-start ()
   "Completion returns nil when point is at beginning of line."
   (with-temp-buffer
     (pi-coding-agent-input-mode)
     (insert "/test")
     (goto-char (line-beginning-position))
-    (should-not (pi-coding-agent--slash-capf))))
+    (should-not (pi-coding-agent--command-capf))))
 
-(ert-deftest pi-coding-agent-test-slash-capf-returns-completion-data ()
+(ert-deftest pi-coding-agent-test-command-capf-returns-completion-data ()
   "Completion returns data when after slash at start of line."
   (with-temp-buffer
     (pi-coding-agent-input-mode)
-    (setq pi-coding-agent--file-commands '((:name "test-cmd" :description "Test")))
+    (setq pi-coding-agent--commands '((:name "test-cmd" :description "Test")))
     (insert "/te")
-    (let ((result (pi-coding-agent--slash-capf)))
+    (let ((result (pi-coding-agent--command-capf)))
       (should result)
       (should (= (nth 0 result) 2))  ; Start after /
       (should (= (nth 1 result) 4))  ; End at point
       (should (member "test-cmd" (nth 2 result))))))
 
-(ert-deftest pi-coding-agent-test-slash-commands-isolated-per-session ()
-  "Project slash commands are scoped per session."
-  (let* ((dir-a "/tmp/pi-coding-agent-test-commands-a/")
-         (dir-b "/tmp/pi-coding-agent-test-commands-b/")
-         (command-a (list :name "project-a-cmd" :description "A" :content "A" :source "project"))
-         (command-b (list :name "project-b-cmd" :description "B" :content "B" :source "project"))
-         (command-map `((,dir-a . (,command-a))
-                        (,dir-b . (,command-b))))
-         (pi-coding-agent--file-commands nil))
-    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
-              ((symbol-function 'pi-coding-agent--display-buffers) #'ignore)
-              ((symbol-function 'pi-coding-agent--discover-file-commands)
-               (lambda (dir) (alist-get dir command-map nil nil #'equal))))
-      (let* ((chat-a (let ((default-directory dir-a))
-                       (pi-coding-agent--setup-session dir-a nil)))
-             (input-a (buffer-local-value 'pi-coding-agent--input-buffer chat-a))
-             (chat-b (let ((default-directory dir-b))
-                       (pi-coding-agent--setup-session dir-b nil)))
-             (input-b (buffer-local-value 'pi-coding-agent--input-buffer chat-b)))
-        (unwind-protect
-            (let ((completions-a (with-current-buffer input-a
-                                   (setq default-directory dir-a)
-                                   (pi-coding-agent-test--slash-completions)))
-                  (completions-b (with-current-buffer input-b
-                                   (setq default-directory dir-b)
-                                   (pi-coding-agent-test--slash-completions))))
-              (should (equal (list completions-a completions-b)
-                             '(("project-a-cmd") ("project-b-cmd")))))
-          (mapc #'kill-buffer (list input-a chat-a input-b chat-b)))))))
 
-;;; Input Buffer Slash Execution
 
-(ert-deftest pi-coding-agent-test-expand-slash-command-known ()
-  "Known slash command expands to content with args."
-  (let ((pi-coding-agent--file-commands '((:name "test" :content "Do $@ please"))))
-    (should (equal (pi-coding-agent--expand-slash-command "/test foo bar")
-                   "Do foo bar please"))))
-
-(ert-deftest pi-coding-agent-test-expand-slash-command-unknown ()
-  "Unknown slash command returns original text."
-  (let ((pi-coding-agent--file-commands '()))
-    (should (equal (pi-coding-agent--expand-slash-command "/unknown foo")
-                   "/unknown foo"))))
-
-(ert-deftest pi-coding-agent-test-expand-slash-command-not-slash ()
-  "Non-slash text returns unchanged."
-  (let ((pi-coding-agent--file-commands '((:name "test" :content "content"))))
-    (should (equal (pi-coding-agent--expand-slash-command "hello world")
-                   "hello world"))))
-
-(ert-deftest pi-coding-agent-test-send-prompt-expands-slash-command ()
-  "pi-coding-agent--send-prompt expands slash commands before sending to process.
-This ensures all send paths get expansion, not just pi-coding-agent-send."
+(ert-deftest pi-coding-agent-test-send-prompt-sends-literal ()
+  "pi-coding-agent--send-prompt sends text literally (no expansion).
+Pi handles command expansion on the server side."
   (let* ((rpc-message nil)
-         (pi-coding-agent--file-commands '((:name "greet" :content "Hello $@!")))
          (fake-proc (start-process "test" nil "cat")))
     (unwind-protect
         (cl-letf (((symbol-function 'pi-coding-agent--get-process)
@@ -3393,10 +3898,9 @@ This ensures all send paths get expansion, not just pi-coding-agent-send."
                   ((symbol-function 'pi-coding-agent--rpc-async)
                    (lambda (_proc msg _cb) (setq rpc-message msg))))
           (pi-coding-agent--send-prompt "/greet world")
-          (should (equal (plist-get rpc-message :message) "Hello world!")))
+          ;; Should send literal /greet world, NOT expanded
+          (should (equal (plist-get rpc-message :message) "/greet world")))
       (delete-process fake-proc))))
-
-
 
 (ert-deftest pi-coding-agent-test-format-session-stats ()
   "Format session stats returns readable string."
@@ -3775,133 +4279,7 @@ Errors still consume context, so their usage data is valid for display."
       (when result
         (should (listp (nth 2 result)))))))
 
-;;; Slash Command Argument Parsing (shell-like quoting via split-string-shell-command)
 
-(ert-deftest pi-coding-agent-test-parse-args-simple ()
-  "Parse simple space-separated arguments."
-  (should (equal (pi-coding-agent--parse-command-args "foo bar baz")
-                 '("foo" "bar" "baz"))))
-
-(ert-deftest pi-coding-agent-test-parse-args-empty ()
-  "Parse empty string returns empty list."
-  (should (equal (pi-coding-agent--parse-command-args "") nil)))
-
-(ert-deftest pi-coding-agent-test-parse-args-whitespace-only ()
-  "Parse whitespace-only string returns empty list."
-  (should (equal (pi-coding-agent--parse-command-args "   ") nil)))
-
-(ert-deftest pi-coding-agent-test-parse-args-quoted-double ()
-  "Parse double-quoted arguments preserves spaces."
-  (should (equal (pi-coding-agent--parse-command-args "foo \"bar baz\" qux")
-                 '("foo" "bar baz" "qux"))))
-
-(ert-deftest pi-coding-agent-test-parse-args-quoted-single ()
-  "Parse single-quoted arguments preserves spaces."
-  (should (equal (pi-coding-agent--parse-command-args "foo 'bar baz' qux")
-                 '("foo" "bar baz" "qux"))))
-
-(ert-deftest pi-coding-agent-test-parse-args-extra-whitespace ()
-  "Parse handles multiple spaces between arguments."
-  (should (equal (pi-coding-agent--parse-command-args "foo   bar")
-                 '("foo" "bar"))))
-
-(ert-deftest pi-coding-agent-test-parse-args-escaped-quote ()
-  "Parse handles escaped quotes inside double-quoted strings."
-  (should (equal (pi-coding-agent--parse-command-args "foo \"bar\\\"baz\" qux")
-                 '("foo" "bar\"baz" "qux"))))
-
-(ert-deftest pi-coding-agent-test-parse-args-escaped-space ()
-  "Parse handles backslash-escaped spaces outside quotes."
-  (should (equal (pi-coding-agent--parse-command-args "foo\\ bar baz")
-                 '("foo bar" "baz"))))
-
-(ert-deftest pi-coding-agent-test-parse-args-mixed-quotes ()
-  "Parse handles mixed single and double quotes."
-  (should (equal (pi-coding-agent--parse-command-args "\"foo\" 'bar'")
-                 '("foo" "bar"))))
-
-;;; Slash Command Argument Substitution
-
-(ert-deftest pi-coding-agent-test-substitute-args-positional ()
-  "Substitute positional arguments $1, $2, etc."
-  (should (equal (pi-coding-agent--substitute-args "Hello $1 and $2" '("world" "friend"))
-                 "Hello world and friend")))
-
-(ert-deftest pi-coding-agent-test-substitute-args-all ()
-  "Substitute $@ with all arguments joined."
-  (should (equal (pi-coding-agent--substitute-args "Args: $@" '("one" "two" "three"))
-                 "Args: one two three")))
-
-(ert-deftest pi-coding-agent-test-substitute-args-missing ()
-  "Missing positional arguments become empty string."
-  (should (equal (pi-coding-agent--substitute-args "Hello $1 and $2" '("world"))
-                 "Hello world and ")))
-
-(ert-deftest pi-coding-agent-test-substitute-args-no-placeholders ()
-  "Content without placeholders returned unchanged."
-  (should (equal (pi-coding-agent--substitute-args "Hello world" '("ignored"))
-                 "Hello world")))
-
-;;; Slash Command Frontmatter Parsing
-
-(ert-deftest pi-coding-agent-test-parse-frontmatter-with-description ()
-  "Parse YAML frontmatter with description."
-  (let ((result (pi-coding-agent--parse-frontmatter "---
-description: Test command
----
-Command content here")))
-    (should (equal (plist-get result :description) "Test command"))
-    (should (equal (plist-get result :content) "Command content here"))))
-
-(ert-deftest pi-coding-agent-test-parse-frontmatter-no-frontmatter ()
-  "Content without frontmatter returns full content."
-  (let ((result (pi-coding-agent--parse-frontmatter "Just content\nNo frontmatter")))
-    (should (null (plist-get result :description)))
-    (should (equal (plist-get result :content) "Just content\nNo frontmatter"))))
-
-(ert-deftest pi-coding-agent-test-parse-frontmatter-empty-description ()
-  "Frontmatter with empty description."
-  (let ((result (pi-coding-agent--parse-frontmatter "---
-description:
----
-Content")))
-    (should (equal (plist-get result :description) ""))
-    (should (equal (plist-get result :content) "Content"))))
-
-;;; Slash Command Discovery
-
-(ert-deftest pi-coding-agent-test-discover-commands-from-directory ()
-  "Discover commands from a directory with .md files."
-  (let* ((temp-dir (make-temp-file "pi-coding-agent-commands-" t))
-         (cmd-file (expand-file-name "test-cmd.md" temp-dir)))
-    (unwind-protect
-        (progn
-          (with-temp-file cmd-file
-            (insert "---\ndescription: A test command\n---\nDo the thing"))
-          (let ((commands (pi-coding-agent--load-commands-from-dir temp-dir "user")))
-            (should (= (length commands) 1))
-            (let ((cmd (car commands)))
-              (should (equal (plist-get cmd :name) "test-cmd"))
-              (should (string-match-p "test command" (plist-get cmd :description)))
-              (should (equal (plist-get cmd :content) "Do the thing")))))
-      (delete-directory temp-dir t))))
-
-(ert-deftest pi-coding-agent-test-discover-commands-missing-directory ()
-  "Missing directory returns empty list."
-  (should (equal (pi-coding-agent--load-commands-from-dir "/nonexistent/path" "user") '())))
-
-(ert-deftest pi-coding-agent-test-discover-commands-description-from-content ()
-  "When no frontmatter description, use first line of content."
-  (let* ((temp-dir (make-temp-file "pi-coding-agent-commands-" t))
-         (cmd-file (expand-file-name "no-desc.md" temp-dir)))
-    (unwind-protect
-        (progn
-          (with-temp-file cmd-file
-            (insert "First line becomes description\nMore content"))
-          (let* ((commands (pi-coding-agent--load-commands-from-dir temp-dir "user"))
-                 (cmd (car commands)))
-            (should (string-match-p "First line" (plist-get cmd :description)))))
-      (delete-directory temp-dir t))))
 
 (ert-deftest pi-coding-agent-test-tool-start-creates-overlay ()
   "tool_execution_start creates an overlay with pending face."
@@ -4059,8 +4437,8 @@ display-agent-end must finalize the pending overlay with error face."
 
 ;;; Reconnect Tests
 
-(ert-deftest pi-coding-agent-test-recover-restarts-process ()
-  "Reconnect starts new process when old process is dead."
+(ert-deftest pi-coding-agent-test-reload-restarts-process ()
+  "Reload starts new process when old process is dead."
   (let* ((started-new-process nil)
          (switch-session-called nil)
          (session-path-used nil)
@@ -4086,8 +4464,8 @@ display-agent-end must finalize the pending overlay with error face."
                          (when (equal (plist-get msg :type) "switch_session")
                            (setq switch-session-called t
                                  session-path-used (plist-get msg :sessionPath))))))
-              ;; Call reconnect
-              (pi-coding-agent-recover)
+              ;; Call reload
+              (pi-coding-agent-reload)
               ;; Verify
               (should started-new-process)
               (should switch-session-called)
@@ -4098,11 +4476,11 @@ display-agent-end must finalize the pending overlay with error face."
             (delete-process pi-coding-agent--process)))
         (kill-buffer chat-buf)))))
 
-(ert-deftest pi-coding-agent-test-recover-works-when-process-alive ()
-  "Recover restarts even when process is alive (handles hung process)."
+(ert-deftest pi-coding-agent-test-reload-works-when-process-alive ()
+  "Reload restarts even when process is alive (handles hung process)."
   (let* ((started-new-process nil)
          (old-process-killed nil)
-         (chat-buf (get-buffer-create "*pi-coding-agent-test-recover-alive-chat*")))
+         (chat-buf (get-buffer-create "*pi-coding-agent-test-reload-alive-chat*")))
     (unwind-protect
         (progn
           (with-current-buffer chat-buf
@@ -4118,8 +4496,8 @@ display-agent-end must finalize the pending overlay with error face."
                            (start-process "test-new" nil "cat")))
                         ((symbol-function 'pi-coding-agent--rpc-async)
                          (lambda (_proc _msg _cb) nil)))
-                ;; Call recover
-                (pi-coding-agent-recover)
+                ;; Call reload
+                (pi-coding-agent-reload)
                 ;; Verify - SHOULD start new process even when old was alive
                 (should started-new-process)
                 ;; Old process should be killed
@@ -4130,8 +4508,8 @@ display-agent-end must finalize the pending overlay with error face."
             (delete-process pi-coding-agent--process)))
         (kill-buffer chat-buf)))))
 
-(ert-deftest pi-coding-agent-test-recover-fails-without-session-file ()
-  "Reconnect shows error when no session file in state."
+(ert-deftest pi-coding-agent-test-reload-fails-without-session-file ()
+  "Reload shows error when no session file in state."
   (let* ((error-shown nil)
          (chat-buf (get-buffer-create "*pi-coding-agent-test-reconnect-no-session*")))
     (unwind-protect
@@ -4148,7 +4526,7 @@ display-agent-end must finalize the pending overlay with error face."
                        (lambda (fmt &rest _args)
                          (when (string-match-p "No session" fmt)
                            (setq error-shown t)))))
-              (pi-coding-agent-recover)
+              (pi-coding-agent-reload)
               (should error-shown))))
       (when (buffer-live-p chat-buf)
         (kill-buffer chat-buf)))))
@@ -4264,3 +4642,111 @@ The advice limits this scan to `pi-coding-agent-markdown-search-limit' bytes."
     (let ((result (markdown-find-previous-prop 'markdown-gfm-block-begin)))
       ;; Result should be nil or the limit position, not the property
       (should-not (and result (= (car result) 10000))))))
+
+;;; Slash Commands via RPC (get_commands)
+
+(ert-deftest pi-coding-agent-test-fetch-commands-parses-response ()
+  "fetch-commands extracts command list from RPC response."
+  (let* ((callback-result nil)
+         (mock-response '(:success t
+                          :data (:commands
+                                 [(:name "fix-tests" :description "Fix tests" :source "template")
+                                  (:name "session-name" :description "Set name" :source "extension")])))
+         (fake-proc (start-process "test" nil "cat")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                   (lambda (_proc _msg callback)
+                     (funcall callback mock-response))))
+          (pi-coding-agent--fetch-commands fake-proc
+            (lambda (commands)
+              (setq callback-result commands)))
+          ;; Verify commands were extracted correctly
+          (should (= (length callback-result) 2))
+          (should (equal (plist-get (car callback-result) :name) "fix-tests"))
+          (should (equal (plist-get (cadr callback-result) :source) "extension")))
+      (delete-process fake-proc))))
+
+(ert-deftest pi-coding-agent-test-fetch-commands-handles-failure ()
+  "fetch-commands does not call callback on RPC failure."
+  (let* ((callback-called nil)
+         (mock-response '(:success :false :error "Connection failed"))
+         (fake-proc (start-process "test" nil "cat")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                   (lambda (_proc _msg callback)
+                     (funcall callback mock-response))))
+          (pi-coding-agent--fetch-commands fake-proc
+            (lambda (_) (setq callback-called t)))
+          (should-not callback-called))
+      (delete-process fake-proc))))
+
+(ert-deftest pi-coding-agent-test-set-commands-propagates-to-input ()
+  "set-commands propagates commands to input buffer."
+  (with-temp-buffer
+    (let* ((input-buf (generate-new-buffer "*test-input*"))
+           (pi-coding-agent--input-buffer input-buf)
+           (commands '((:name "test" :description "Test cmd" :source "template"))))
+      (unwind-protect
+          (progn
+            (pi-coding-agent--set-commands commands)
+            ;; Verify local variable set in current buffer
+            (should (equal pi-coding-agent--commands commands))
+            ;; Verify propagated to input buffer
+            (should (equal (buffer-local-value 'pi-coding-agent--commands input-buf)
+                           commands)))
+        (kill-buffer input-buf)))))
+
+(ert-deftest pi-coding-agent-test-command-capf-uses-commands ()
+  "command-capf completion uses pi-coding-agent--commands."
+  (with-temp-buffer
+    (let ((pi-coding-agent--commands
+           '((:name "fix-tests" :description "Fix" :source "template")
+             (:name "review" :description "Review" :source "template"))))
+      (insert "/")
+      (let ((completion (pi-coding-agent--command-capf)))
+        (should completion)
+        ;; Third element is the completion candidates
+        (should (member "fix-tests" (nth 2 completion)))
+        (should (member "review" (nth 2 completion)))))))
+
+(ert-deftest pi-coding-agent-test-run-custom-command-sends-literal ()
+  "run-custom-command sends literal /command text, not expanded."
+  (let* ((sent-message nil)
+         (fake-proc (start-process "test" nil "cat"))
+         (cmd '(:name "greet" :description "Greet" :source "template")))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (let ((pi-coding-agent--process fake-proc))
+            (cl-letf (((symbol-function 'pi-coding-agent--get-chat-buffer)
+                       (lambda () (current-buffer)))
+                      ((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_proc msg _cb)
+                         (setq sent-message (plist-get msg :message))))
+                      ((symbol-function 'read-string)
+                       (lambda (_prompt) "world")))
+              (pi-coding-agent--run-custom-command cmd)
+              ;; Should send literal /greet world, NOT expanded template
+              (should (equal sent-message "/greet world")))))
+      (delete-process fake-proc))))
+
+(ert-deftest pi-coding-agent-test-run-custom-command-empty-args ()
+  "run-custom-command with empty args sends just /command."
+  (let* ((sent-message nil)
+         (fake-proc (start-process "test" nil "cat"))
+         (cmd '(:name "compact" :description "Compact" :source "extension")))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (let ((pi-coding-agent--process fake-proc))
+            (cl-letf (((symbol-function 'pi-coding-agent--get-chat-buffer)
+                       (lambda () (current-buffer)))
+                      ((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_proc msg _cb)
+                         (setq sent-message (plist-get msg :message))))
+                      ((symbol-function 'read-string)
+                       (lambda (_prompt) "")))
+              (pi-coding-agent--run-custom-command cmd)
+              ;; Should send just /compact without trailing space
+              (should (equal sent-message "/compact")))))
+      (delete-process fake-proc))))
