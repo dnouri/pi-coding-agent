@@ -3970,7 +3970,7 @@ Regression test for #27: history was shared across all sessions."
     (should-not (pi-coding-agent--command-capf))))
 
 (ert-deftest pi-coding-agent-test-command-capf-returns-completion-data ()
-  "Completion returns data when after slash at start of line."
+  "Completion returns data when after slash at start of buffer."
   (with-temp-buffer
     (pi-coding-agent-input-mode)
     (setq pi-coding-agent--commands '((:name "test-cmd" :description "Test")))
@@ -3980,6 +3980,14 @@ Regression test for #27: history was shared across all sessions."
       (should (= (nth 0 result) 2))  ; Start after /
       (should (= (nth 1 result) 4))  ; End at point
       (should (member "test-cmd" (nth 2 result))))))
+
+(ert-deftest pi-coding-agent-test-command-capf-ignores-slash-on-later-lines ()
+  "Completion ignores / on lines after the first (pi only expands at buffer start)."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (setq pi-coding-agent--commands '((:name "test-cmd" :description "Test")))
+    (insert "Some context:\n/te")
+    (should-not (pi-coding-agent--command-capf))))
 
 
 
@@ -4395,12 +4403,11 @@ Errors still consume context, so their usage data is valid for display."
       (should (or (null result) (listp result))))))
 
 (ert-deftest pi-coding-agent-test-path-capf-triggers-for-absolute ()
-  "Path completion triggers for absolute paths."
+  "Path completion triggers for absolute paths not at buffer start."
   (with-temp-buffer
     (pi-coding-agent-input-mode)
-    (insert "/tmp/")
+    (insert "see /tmp/")
     (let ((result (pi-coding-agent--path-capf)))
-      ;; /tmp should exist and have contents on most systems
       (when result
         (should (listp (nth 2 result)))))))
 
@@ -4426,6 +4433,21 @@ Errors still consume context, so their usage data is valid for display."
   "pi-coding-agent-complete should be an interactive command."
   (should (commandp 'pi-coding-agent-complete)))
 
+(ert-deftest pi-coding-agent-test-path-capf-skips-slash-at-buffer-start ()
+  "Path completion skips / at buffer start to allow slash commands."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (insert "/tmp")
+    (should-not (pi-coding-agent--path-capf))))
+
+(ert-deftest pi-coding-agent-test-path-capf-allows-slash-on-later-lines ()
+  "Path completion works for / on lines after the first."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (insert "Check this file:\n/tmp/")
+    (let ((result (pi-coding-agent--path-capf)))
+      (when result
+        (should (listp (nth 2 result)))))))
 
 (ert-deftest pi-coding-agent-test-tool-start-creates-overlay ()
   "tool_execution_start creates an overlay with pending face."
