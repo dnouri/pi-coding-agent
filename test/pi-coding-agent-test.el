@@ -4171,6 +4171,35 @@ Errors still consume context, so their usage data is valid for display."
 
 ;;; File Reference Completion (@)
 
+(ert-deftest pi-coding-agent-test-at-trigger-context ()
+  "@ completion should only trigger at word boundaries, not in emails."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    ;; @ at start of buffer - should trigger
+    (erase-buffer)
+    (insert "@")
+    (should (pi-coding-agent--at-trigger-p))
+    ;; @ after space - should trigger
+    (erase-buffer)
+    (insert "hello @")
+    (should (pi-coding-agent--at-trigger-p))
+    ;; @ after newline - should trigger
+    (erase-buffer)
+    (insert "hello\n@")
+    (should (pi-coding-agent--at-trigger-p))
+    ;; @ after punctuation - should trigger
+    (erase-buffer)
+    (insert "see:@")
+    (should (pi-coding-agent--at-trigger-p))
+    ;; @ after alphanumeric (email) - should NOT trigger
+    (erase-buffer)
+    (insert "user@")
+    (should-not (pi-coding-agent--at-trigger-p))
+    ;; @ in middle of email - should NOT trigger
+    (erase-buffer)
+    (insert "test123@")
+    (should-not (pi-coding-agent--at-trigger-p))))
+
 (ert-deftest pi-coding-agent-test-file-reference-capf-returns-nil-without-at ()
   "File reference completion returns nil when not after @."
   (with-temp-buffer
