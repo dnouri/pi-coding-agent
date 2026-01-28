@@ -3827,7 +3827,7 @@ and then re-sorted alphabetically by completing-read."
     (pi-coding-agent-input-mode)
     (should (eq (key-binding (kbd "M-p")) 'pi-coding-agent-previous-input))
     (should (eq (key-binding (kbd "M-n")) 'pi-coding-agent-next-input))
-    (should (eq (key-binding (kbd "C-r")) 'pi-coding-agent-history-search))))
+    (should (eq (key-binding (kbd "C-r")) 'pi-coding-agent-history-isearch-backward))))
 
 (ert-deftest pi-coding-agent-test-history-isolated-per-buffer ()
   "Input history is isolated per buffer, not shared globally.
@@ -3855,6 +3855,102 @@ Regression test for #27: history was shared across all sessions."
       ;; Cleanup
       (kill-buffer buf1)
       (kill-buffer buf2))))
+
+;;; History Isearch (C-r incremental search)
+
+(ert-deftest pi-coding-agent-test-history-isearch-empty-history-errors ()
+  "pi-coding-agent-history-isearch-backward errors with empty history."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (should-error (pi-coding-agent-history-isearch-backward) :type 'user-error)))
+
+(ert-deftest pi-coding-agent-test-history-isearch-saves-current-input ()
+  "pi-coding-agent-history-isearch-backward saves current buffer content."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (pi-coding-agent--history-add "old command")
+    (insert "my current input")
+    ;; Mock isearch-backward to avoid actually starting isearch
+    (cl-letf (((symbol-function 'isearch-backward) #'ignore))
+      (pi-coding-agent-history-isearch-backward))
+    (should (equal pi-coding-agent--history-isearch-saved-input "my current input"))))
+
+(ert-deftest pi-coding-agent-test-history-isearch-sets-active-flag ()
+  "pi-coding-agent-history-isearch-backward sets the active flag."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (pi-coding-agent--history-add "old command")
+    (cl-letf (((symbol-function 'isearch-backward) #'ignore))
+      (pi-coding-agent-history-isearch-backward))
+    (should pi-coding-agent--history-isearch-active)))
+
+(ert-deftest pi-coding-agent-test-history-isearch-end-restores-on-quit ()
+  "pi-coding-agent--history-isearch-end restores input when isearch is quit."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (setq pi-coding-agent--history-isearch-active t)
+    (setq pi-coding-agent--history-isearch-saved-input "original input")
+    (erase-buffer)
+    (insert "some history item")
+    ;; Simulate isearch quit
+    (let ((isearch-mode-end-hook-quit t))
+      (pi-coding-agent--history-isearch-end))
+    (should (equal (buffer-string) "original input"))
+    (should-not pi-coding-agent--history-isearch-active)))
+
+(ert-deftest pi-coding-agent-test-history-isearch-end-keeps-on-accept ()
+  "pi-coding-agent--history-isearch-end keeps history item when accepted."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (setq pi-coding-agent--history-isearch-active t)
+    (setq pi-coding-agent--history-isearch-saved-input "original input")
+    (erase-buffer)
+    (insert "chosen history item")
+    ;; Simulate isearch accept (quit is nil)
+    (let ((isearch-mode-end-hook-quit nil))
+      (pi-coding-agent--history-isearch-end))
+    (should (equal (buffer-string) "chosen history item"))
+    (should-not pi-coding-agent--history-isearch-active)))
+
+(ert-deftest pi-coding-agent-test-history-isearch-goto-index ()
+  "pi-coding-agent--history-isearch-goto loads history item into buffer."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (pi-coding-agent--history-add "first")
+    (pi-coding-agent--history-add "second")
+    (pi-coding-agent--history-add "third")
+    (insert "current")
+    (pi-coding-agent--history-isearch-goto 1)  ; "second" (0=third, 1=second)
+    (should (equal (buffer-string) "second"))
+    (should (= pi-coding-agent--history-isearch-index 1))))
+
+(ert-deftest pi-coding-agent-test-history-isearch-hook-added ()
+  "isearch-mode-hook is set up in pi-coding-agent-input-mode."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (should (memq 'pi-coding-agent--history-isearch-setup isearch-mode-hook))))
+
+(ert-deftest pi-coding-agent-test-history-isearch-goto-nil-restores-saved ()
+  "pi-coding-agent--history-isearch-goto with nil index restores saved input."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (pi-coding-agent--history-add "history item")
+    (setq pi-coding-agent--history-isearch-saved-input "my original input")
+    (insert "something else")
+    (pi-coding-agent--history-isearch-goto nil)
+    (should (equal (buffer-string) "my original input"))
+    (should (null pi-coding-agent--history-isearch-index))))
+
+(ert-deftest pi-coding-agent-test-history-isearch-goto-empty-saved-input ()
+  "pi-coding-agent--history-isearch-goto with nil index and empty saved input."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (pi-coding-agent--history-add "history item")
+    (setq pi-coding-agent--history-isearch-saved-input "")
+    (insert "something else")
+    (pi-coding-agent--history-isearch-goto nil)
+    (should (equal (buffer-string) ""))
+    (should (null pi-coding-agent--history-isearch-index))))
 
 ;;; Input Buffer Slash Completion
 
