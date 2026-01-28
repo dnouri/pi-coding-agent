@@ -1,10 +1,10 @@
 ;;; pi-coding-agent-core.el --- Core functionality for pi-coding-agent -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2025 Daniel Nouri
+;; Copyright (C) 2026 Daniel Nouri
 
 ;; Author: Daniel Nouri <daniel.nouri@gmail.com>
 ;; Maintainer: Daniel Nouri <daniel.nouri@gmail.com>
-;; URL: https://github.com/dnouri/pi.el
+;; URL: https://github.com/dnouri/pi-coding-agent
 ;; Keywords: ai llm ai-pair-programming tools
 ;; Version: 0.1.0
 

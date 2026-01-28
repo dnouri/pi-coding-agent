@@ -1,12 +1,12 @@
 ;;; pi-coding-agent.el --- Emacs frontend for pi coding agent -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2025 Daniel Nouri
+;; Copyright (C) 2026 Daniel Nouri
 
 ;; Author: Daniel Nouri <daniel.nouri@gmail.com>
 ;; Maintainer: Daniel Nouri <daniel.nouri@gmail.com>
-;; URL: https://github.com/dnouri/pi.el
+;; URL: https://github.com/dnouri/pi-coding-agent
 ;; Keywords: ai llm ai-pair-programming tools
-;; Version: 1.1.0
+;; Version: 1.2.0
 ;; Package-Requires: ((emacs "28.1") (markdown-mode "2.6") (transient "0.3.7"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -2100,7 +2100,7 @@ Displays warnings for missing dependencies."
 
 ;;;; Startup Header
 
-(defconst pi-coding-agent-version "1.1.0"
+(defconst pi-coding-agent-version "1.2.0"
   "Version of pi-coding-agent.")
 
 (defun pi-coding-agent--get-pi-coding-agent-version ()
