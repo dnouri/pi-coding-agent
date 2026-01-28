@@ -32,15 +32,20 @@ help:
 # Dependencies
 # ============================================================
 
-# Install package dependencies from MELPA (markdown-mode)
+# Install package dependencies
+# Note: Emacs 28 has transient 0.3.6 built-in, but we need 0.3.7+ for
+# transient-parse-suffixes (added in Emacs 29). For Emacs 28, we pass
+# the pkg-desc to package-install (bypasses built-in check, handles deps).
 deps:
 	@$(BATCH) \
 		--eval "(require 'package)" \
 		--eval "(push '(\"melpa\" . \"https://melpa.org/packages/\") package-archives)" \
 		--eval "(package-initialize)" \
+		--eval "(package-refresh-contents)" \
 		--eval "(unless (package-installed-p 'markdown-mode) \
-		          (package-refresh-contents) \
 		          (package-install 'markdown-mode))" \
+		--eval "(when (< emacs-major-version 29) \
+		          (package-install (cadr (assq 'transient package-archive-contents))))" \
 		--eval "(message \"Dependencies installed\")"
 
 # ============================================================
