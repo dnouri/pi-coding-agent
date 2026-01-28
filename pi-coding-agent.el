@@ -3085,10 +3085,21 @@ Uses commands from pi's `get_commands' RPC."
 
 ;;;; Editor Features: File Reference (@)
 
+(defun pi-coding-agent--at-trigger-p ()
+  "Return non-nil if @ at point should trigger file completion.
+Returns nil when @ follows an alphanumeric character (like in emails).
+Assumes point is right after the @."
+  (or (< (point) 3)  ; @ at buffer start or position 2 (no char before @)
+      (save-excursion
+        (backward-char 2)  ; Move to char before @
+        (looking-at-p "[^[:alnum:]]"))))
+
 (defun pi-coding-agent--maybe-complete-at ()
-  "Trigger completion after @.
-Called from `post-self-insert-hook'."
-  (when (eq last-command-event ?@)
+  "Trigger completion after @ if at word boundary.
+Called from `post-self-insert-hook'.
+Does not trigger when @ follows alphanumeric (e.g., in email addresses)."
+  (when (and (eq last-command-event ?@)
+             (pi-coding-agent--at-trigger-p))
     (run-at-time 0 nil #'pi-coding-agent--complete-file-reference)))
 
 (defun pi-coding-agent--complete-file-reference ()
