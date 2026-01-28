@@ -353,7 +353,7 @@ This is a read-only buffer showing the conversation history."
 (defvar pi-coding-agent-input-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'pi-coding-agent-send)
-    (define-key map (kbd "TAB") #'completion-at-point)
+    (define-key map (kbd "TAB") #'pi-coding-agent-complete)
     (define-key map (kbd "C-c C-k") #'pi-coding-agent-abort)
     (define-key map (kbd "C-c C-p") #'pi-coding-agent-menu)
     (define-key map (kbd "C-c C-r") #'pi-coding-agent-resume-session)
@@ -3093,6 +3093,12 @@ Assumes point is right after the @."
       (save-excursion
         (backward-char 2)  ; Move to char before @
         (looking-at-p "[^[:alnum:]]"))))
+
+(defun pi-coding-agent-complete ()
+  "Complete at point without showing help text in *Completions* buffer."
+  (interactive)
+  (let ((completion-show-help nil))
+    (completion-at-point)))
 
 (defun pi-coding-agent--maybe-complete-at ()
   "Trigger completion after @ if at word boundary.
