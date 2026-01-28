@@ -3175,11 +3175,11 @@ Sends the literal /command text to pi, which handles expansion."
 
 (defun pi-coding-agent--command-capf ()
   "Completion-at-point function for /commands in input buffer.
-Returns completion data when point is after / at start of line.
+Returns completion data when point is after / at start of buffer.
 Uses commands from pi's `get_commands' RPC."
-  (when (and (eq (char-after (line-beginning-position)) ?/)
-             (not (bolp)))
-    (let* ((start (1+ (line-beginning-position)))
+  (when (and (eq (char-after (point-min)) ?/)
+             (> (point) (point-min)))
+    (let* ((start (1+ (point-min)))
            (end (point))
            (commands (mapcar (lambda (cmd) (plist-get cmd :name))
                              pi-coding-agent--commands)))
@@ -3324,12 +3324,15 @@ Triggers when @ is typed, provides completion of project files."
 
 (defun pi-coding-agent--path-capf ()
   "Completion-at-point function for file paths.
-Completes paths starting with ./, ../, ~/, or /."
+Completes paths starting with ./, ../, ~/, or /.
+Skips / at buffer start to allow slash command completion."
   (when-let* ((bounds (bounds-of-thing-at-point 'filename))
               (start (car bounds))
               (end (cdr bounds))
               (path (buffer-substring-no-properties start end))
               ((pi-coding-agent--path-prefix-p path))
+              ((not (and (string-prefix-p "/" path)
+                         (= start (point-min)))))
               (candidates (pi-coding-agent--path-completions path)))
     (list start end candidates
           :exclusive 'no
