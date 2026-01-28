@@ -47,7 +47,7 @@
 ;;     C-c C-p        Open menu
 ;;     C-c C-r        Resume session
 ;;     M-p / M-n      History navigation
-;;     C-r            Search history
+;;     C-r            Incremental history search (like readline)
 ;;     TAB            Path/file completion
 ;;     @              File reference (search project files)
 ;;
@@ -361,7 +361,7 @@ This is a read-only buffer showing the conversation history."
     (define-key map (kbd "M-n") #'pi-coding-agent-next-input)
     (define-key map (kbd "<C-up>") #'pi-coding-agent-previous-input)
     (define-key map (kbd "<C-down>") #'pi-coding-agent-next-input)
-    (define-key map (kbd "C-r") #'pi-coding-agent-history-search)
+    (define-key map (kbd "C-r") #'pi-coding-agent-history-isearch-backward)
     ;; Message queuing (steering only - follow-up handled by C-c C-c)
     (define-key map (kbd "C-c C-s") #'pi-coding-agent-queue-steering)
     map)
@@ -382,6 +382,16 @@ This is a read-only buffer showing the conversation history."
 
 (defvar-local pi-coding-agent--input-saved nil
   "Saved input before starting history navigation.")
+
+;; History isearch state (for C-r incremental search)
+(defvar-local pi-coding-agent--history-isearch-active nil
+  "Non-nil when history isearch is active.")
+
+(defvar-local pi-coding-agent--history-isearch-saved-input nil
+  "Saved input before starting history isearch.")
+
+(defvar-local pi-coding-agent--history-isearch-index nil
+  "Current history index during isearch.")
 
 (defun pi-coding-agent--input-ring ()
   "Return the input ring, creating if necessary."
@@ -437,19 +447,118 @@ Restores saved input when moving past newest entry."
       (setq pi-coding-agent--input-ring-index new-index)
       (insert (ring-ref (pi-coding-agent--input-ring) new-index)))))
 
-(defun pi-coding-agent-history-search ()
-  "Search input history with completion."
+;;;; History Isearch
+
+(defun pi-coding-agent-history-isearch-backward ()
+  "Search input history backward using isearch.
+Incrementally search through history with matches appearing
+directly in the input buffer, like readline."
   (interactive)
-  (let* ((ring (pi-coding-agent--input-ring))
-         (entries (when (not (ring-empty-p ring))
-                    (ring-elements ring)))
-         (choice (completing-read "History: " entries nil t)))
-    (when (and choice (not (string-empty-p choice)))
-      (delete-region (point-min) (point-max))
-      (insert choice)
-      ;; Reset history navigation state
-      (setq pi-coding-agent--input-ring-index nil
-            pi-coding-agent--input-saved nil))))
+  (let ((ring (pi-coding-agent--input-ring)))
+    (when (ring-empty-p ring)
+      (user-error "No history"))
+    ;; Save current input before starting (like comint-stored-incomplete-input)
+    (setq pi-coding-agent--history-isearch-active t
+          pi-coding-agent--history-isearch-saved-input (buffer-string)
+          pi-coding-agent--history-isearch-index nil)
+    (isearch-backward nil t)))
+
+(defun pi-coding-agent--history-isearch-setup ()
+  "Configure isearch for history searching."
+  (when pi-coding-agent--history-isearch-active
+    (setq isearch-message-prefix-add "history ")
+    (setq-local isearch-search-fun-function
+                #'pi-coding-agent--history-isearch-search-fun)
+    (setq-local isearch-wrap-function
+                #'pi-coding-agent--history-isearch-wrap)
+    (setq-local isearch-push-state-function
+                #'pi-coding-agent--history-isearch-push-state)
+    (setq-local isearch-lazy-count nil)
+    (add-hook 'isearch-mode-end-hook
+              #'pi-coding-agent--history-isearch-end nil t)))
+
+(defun pi-coding-agent--history-isearch-end ()
+  "Clean up after history isearch ends.
+Restore original input if isearch was quit, keep history item if accepted."
+  ;; Clean up isearch customizations
+  (setq isearch-message-prefix-add nil)
+  (setq-local isearch-search-fun-function #'isearch-search-fun-default)
+  (setq-local isearch-wrap-function nil)
+  (setq-local isearch-push-state-function nil)
+  (kill-local-variable 'isearch-lazy-count)
+  (remove-hook 'isearch-mode-end-hook #'pi-coding-agent--history-isearch-end t)
+  ;; Restore original input if quit (C-g), keep history item if accepted
+  (when isearch-mode-end-hook-quit
+    (delete-region (point-min) (point-max))
+    (insert (or pi-coding-agent--history-isearch-saved-input "")))
+  ;; Reset state (unless suspended for later resume)
+  (unless isearch-suspended
+    (setq pi-coding-agent--history-isearch-active nil
+          pi-coding-agent--history-isearch-saved-input nil
+          pi-coding-agent--history-isearch-index nil)))
+
+(defun pi-coding-agent--history-isearch-goto (index)
+  "Load history item at INDEX into the buffer.
+If INDEX is nil, restore saved input (current line content before search)."
+  (setq pi-coding-agent--history-isearch-index index)
+  (delete-region (point-min) (point-max))
+  (if (and index (not (ring-empty-p (pi-coding-agent--input-ring))))
+      (insert (ring-ref (pi-coding-agent--input-ring) index))
+    ;; Restore saved input when index is nil
+    (when (and pi-coding-agent--history-isearch-saved-input
+               (> (length pi-coding-agent--history-isearch-saved-input) 0))
+      (insert pi-coding-agent--history-isearch-saved-input))))
+
+(defun pi-coding-agent--history-isearch-search-fun ()
+  "Return search function for history isearch.
+First searches current buffer text, then cycles through history."
+  (lambda (string bound noerror)
+    (let ((search-fun (isearch-search-fun-default))
+          (ring (pi-coding-agent--input-ring))
+          found)
+      (or
+       (funcall search-fun string bound noerror)
+       (unless bound
+         (condition-case nil
+             (progn
+               (while (not found)
+                 (cond
+                  (isearch-forward
+                   (when (null pi-coding-agent--history-isearch-index)
+                     (error "End of history; no next item"))
+                   (let ((new-idx (1- pi-coding-agent--history-isearch-index)))
+                     (if (< new-idx 0)
+                         (pi-coding-agent--history-isearch-goto nil)
+                       (pi-coding-agent--history-isearch-goto new-idx)))
+                   (goto-char (point-min)))
+                  (t
+                   (let* ((cur-idx (or pi-coding-agent--history-isearch-index -1))
+                          (new-idx (1+ cur-idx)))
+                     (when (>= new-idx (ring-length ring))
+                       (error "Beginning of history; no preceding item"))
+                     (pi-coding-agent--history-isearch-goto new-idx))
+                   (goto-char (point-max))))
+                 (setq isearch-barrier (point)
+                       isearch-opoint (point))
+                 (setq found (funcall search-fun string nil noerror)))
+               (point))
+           (error nil)))))))
+
+(defun pi-coding-agent--history-isearch-wrap ()
+  "Wrap history isearch to beginning/end of history.
+For forward search: go to oldest history item.
+For backward search: go to current input (nil index)."
+  (pi-coding-agent--history-isearch-goto
+   (if isearch-forward
+       (1- (ring-length (pi-coding-agent--input-ring)))
+     nil))
+  (goto-char (if isearch-forward (point-min) (point-max))))
+
+(defun pi-coding-agent--history-isearch-push-state ()
+  "Save history index for isearch state restoration."
+  (let ((index pi-coding-agent--history-isearch-index))
+    (lambda (_cmd)
+      (pi-coding-agent--history-isearch-goto index))))
 
 (define-derived-mode pi-coding-agent-input-mode text-mode "Pi-Input"
   "Major mode for composing pi prompts."
@@ -461,6 +570,8 @@ Restores saved input when moving past newest entry."
   (add-hook 'completion-at-point-functions #'pi-coding-agent--path-capf nil t)
   ;; Auto-trigger completion after @ is typed
   (add-hook 'post-self-insert-hook #'pi-coding-agent--maybe-complete-at nil t)
+  ;; History isearch setup (C-r incremental search)
+  (add-hook 'isearch-mode-hook #'pi-coding-agent--history-isearch-setup nil t)
   (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-input-on-kill nil t))
 
 ;;;; Session Directory Detection

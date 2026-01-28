@@ -104,7 +104,7 @@ For multiple sessions in the same directory, use =C-u M-x pi= to create a named 
 | =C-c C-p=     | both    | Open menu                         |
 | =C-c C-r=     | input   | Resume session                    |
 | =M-p= / =M-n= | input   | History navigation                |
-| =C-r=         | input   | Search history                    |
+| =C-r=         | input   | Incremental history search        |
 | =TAB=         | input   | Complete paths, @files, /commands |
 | =@=           | input   | File reference (search)           |
 | =n= / =p=     | chat    | Navigate messages                 |
