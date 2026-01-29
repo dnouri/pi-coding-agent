@@ -29,6 +29,11 @@
 (defvar pi-coding-agent-gui-test-model '(:provider "ollama" :modelId "qwen3:1.7b")
   "Model to use for tests. Supports tool calling.")
 
+(defvar pi-coding-agent-gui-test-extension-path
+  (expand-file-name "fixtures/test-extension.ts"
+                    (file-name-directory (or load-file-name buffer-file-name)))
+  "Path to the test extension for integration tests.")
+
 ;;;; Session State
 
 (defvar pi-coding-agent-gui-test--session nil
@@ -128,12 +133,13 @@ Ends any existing session first, starts new one, cleans up after."
 ;;;; Waiting
 
 (defun pi-coding-agent-gui-test-streaming-p ()
-  "Return t if currently streaming or sending.
-Checks for both 'sending (waiting for response to start) and
-'streaming (receiving response) to avoid race conditions."
+  "Return t if currently streaming.
+Note: We only check for `streaming' status, not `sending'.
+Extension commands that don't trigger LLM turns should return to idle
+immediately without going through streaming state."
   (when-let ((chat-buf (plist-get pi-coding-agent-gui-test--session :chat-buffer)))
     (with-current-buffer chat-buf
-      (memq pi-coding-agent--status '(sending streaming)))))
+      (eq pi-coding-agent--status 'streaming))))
 
 (defun pi-coding-agent-gui-test-wait-for-idle (&optional timeout)
   "Wait until streaming stops, up to TIMEOUT seconds."

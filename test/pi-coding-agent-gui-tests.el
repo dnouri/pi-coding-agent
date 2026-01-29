@@ -153,5 +153,57 @@ multiple turns, tool uses, and streaming responses."
                             triple-newline-pos context-visible))))
       (should-not triple-newline-pos))))
 
+;;;; Extension Command Tests
+
+(ert-deftest pi-coding-agent-gui-test-extension-command-returns-to-idle ()
+  "Extension command without LLM turn returns to idle immediately.
+This tests that extension commands that don't call pi.sendMessage() with
+triggerTurn:true properly return control without leaving status stuck.
+
+Regression test for: spinner/status stuck at 'sending' when extension
+commands don't trigger agent_start/agent_end events."
+  (let ((pi-coding-agent-extra-args
+         (list "-e" pi-coding-agent-gui-test-extension-path
+               "--no-extensions")))
+    (pi-coding-agent-gui-test-with-fresh-session
+      ;; Send the no-op extension command with no-wait since it produces no output
+      ;; and doesn't trigger streaming (the standard send waits for buffer change)
+      (pi-coding-agent-gui-test-send "/test-noop" t)
+      ;; Give pi a moment to process the command
+      (sleep-for 0.5)
+      ;; Should be idle - not stuck in 'sending' or 'streaming'
+      (should (pi-coding-agent-gui-test-wait-for-idle 2)))))
+
+(ert-deftest pi-coding-agent-gui-test-extension-custom-message-displayed ()
+  "Extension command that sends custom message displays content in chat.
+Tests that pi.sendMessage() with display:true shows content in the chat buffer."
+  (let ((pi-coding-agent-extra-args
+         (list "-e" pi-coding-agent-gui-test-extension-path
+               "--no-extensions")))
+    (pi-coding-agent-gui-test-with-fresh-session
+      ;; Send the test-message command which calls pi.sendMessage()
+      (pi-coding-agent-gui-test-send "/test-message" t)
+      ;; Wait for the message to appear
+      (sleep-for 1)
+      ;; The custom message content should be in the chat buffer
+      (should (pi-coding-agent-gui-test-chat-contains "Test message from extension")))))
+
+(ert-deftest pi-coding-agent-gui-test-extension-confirm-response-displayed ()
+  "Extension confirm dialog response triggers follow-up message display.
+Tests that after ctx.ui.confirm() returns, the subsequent pi.sendMessage()
+is properly displayed in the chat buffer."
+  (let ((pi-coding-agent-extra-args
+         (list "-e" pi-coding-agent-gui-test-extension-path
+               "--no-extensions")))
+    (pi-coding-agent-gui-test-with-fresh-session
+      ;; Mock yes-or-no-p to return t (user confirms)
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_prompt) t)))
+        ;; Send the test-confirm command
+        (pi-coding-agent-gui-test-send "/test-confirm" t)
+        ;; Wait for the follow-up message to appear
+        (sleep-for 2)
+        ;; The follow-up message should be in the chat buffer
+        (should (pi-coding-agent-gui-test-chat-contains "CONFIRMED"))))))
+
 (provide 'pi-coding-agent-gui-tests)
 ;;; pi-coding-agent-gui-tests.el ends here
