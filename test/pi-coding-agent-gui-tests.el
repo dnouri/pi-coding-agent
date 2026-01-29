@@ -37,7 +37,7 @@
     (should-not (pi-coding-agent-gui-test-at-end-p))
     (let ((line-before (pi-coding-agent-gui-test-top-line-number)))
       (should (> line-before 1))
-      (pi-coding-agent-gui-test-send "Say: ok")
+      (pi-coding-agent-gui-test-send "/no_think Say: ok")
       (should (= line-before (pi-coding-agent-gui-test-top-line-number))))))
 
 (ert-deftest pi-coding-agent-gui-test-scroll-preserved-tool-use ()
@@ -51,7 +51,8 @@
             (should-not (pi-coding-agent-gui-test-at-end-p))
             (let ((line-before (pi-coding-agent-gui-test-top-line-number)))
               (should (> line-before 1))
-              (pi-coding-agent-gui-test-send (format "Read %s" test-file))
+              ;; /no_think prevents qwen3 from skipping tool calls
+              (pi-coding-agent-gui-test-send (format "/no_think Read %s" test-file))
               (should (= line-before (pi-coding-agent-gui-test-top-line-number)))))
         (pi-coding-agent-gui-test-delete-temp-file test-file)))))
 
@@ -67,7 +68,7 @@ breaking auto-scroll for subsequent turns."
     ;; Explicitly scroll to end (main test purpose) and verify auto-scroll works
     (pi-coding-agent-gui-test-scroll-to-end)
     (should (pi-coding-agent-gui-test-at-end-p))
-    (pi-coding-agent-gui-test-send "Say: ok")
+    (pi-coding-agent-gui-test-send "/no_think Say: ok")
     (should (pi-coding-agent-gui-test-at-end-p))))
 
 ;;;; Window Management Tests
