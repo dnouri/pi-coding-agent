@@ -1296,8 +1296,8 @@ since we don't display them locally. Let pi's message_start handle it."
   (let ((response-sent nil))
     (cl-letf (((symbol-function 'yes-or-no-p)
                (lambda (_prompt) t))
-              ((symbol-function 'pi-coding-agent--rpc-async)
-               (lambda (_proc msg _cb)
+              ((symbol-function 'pi-coding-agent--send-extension-ui-response)
+               (lambda (_proc msg)
                  (setq response-sent msg))))
       (with-temp-buffer
         (pi-coding-agent-chat-mode)
@@ -1318,8 +1318,8 @@ since we don't display them locally. Let pi's message_start handle it."
   (let ((response-sent nil))
     (cl-letf (((symbol-function 'yes-or-no-p)
                (lambda (_prompt) nil))
-              ((symbol-function 'pi-coding-agent--rpc-async)
-               (lambda (_proc msg _cb)
+              ((symbol-function 'pi-coding-agent--send-extension-ui-response)
+               (lambda (_proc msg)
                  (setq response-sent msg))))
       (with-temp-buffer
         (pi-coding-agent-chat-mode)
@@ -1340,8 +1340,8 @@ since we don't display them locally. Let pi's message_start handle it."
     (cl-letf (((symbol-function 'completing-read)
                (lambda (_prompt options &rest _args)
                  (car options)))  ; Return first option
-              ((symbol-function 'pi-coding-agent--rpc-async)
-               (lambda (_proc msg _cb)
+              ((symbol-function 'pi-coding-agent--send-extension-ui-response)
+               (lambda (_proc msg)
                  (setq response-sent msg))))
       (with-temp-buffer
         (pi-coding-agent-chat-mode)
@@ -1362,8 +1362,8 @@ since we don't display them locally. Let pi's message_start handle it."
   (let ((response-sent nil))
     (cl-letf (((symbol-function 'read-string)
                (lambda (_prompt &optional _initial) "user input"))
-              ((symbol-function 'pi-coding-agent--rpc-async)
-               (lambda (_proc msg _cb)
+              ((symbol-function 'pi-coding-agent--send-extension-ui-response)
+               (lambda (_proc msg)
                  (setq response-sent msg))))
       (with-temp-buffer
         (pi-coding-agent-chat-mode)

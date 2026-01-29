@@ -1042,15 +1042,17 @@ Note: status is set to `idle' by the event handler."
   "Prepare chat buffer state and send TEXT to pi.
 For slash commands: don't display locally, let pi send expanded content.
 For regular text: display locally for responsiveness.
-Must be called with chat buffer current."
+Must be called with chat buffer current.
+
+Note: We do NOT change status or start spinner here.  Status transitions
+are driven by events from pi (agent_start -> streaming, agent_end -> idle).
+This ensures extension commands that don\\='t trigger LLM turns return to
+idle immediately without getting stuck in a sending state."
   (let ((is-command (string-prefix-p "/" text)))
     (unless is-command
       (pi-coding-agent--display-user-message text (current-time))
       (setq pi-coding-agent--local-user-message text)
       (setq pi-coding-agent--assistant-header-shown nil))
-    (setq pi-coding-agent--status 'sending)
-    (pi-coding-agent--spinner-start)
-    (force-mode-line-update)
     (pi-coding-agent--send-prompt text)))
 
 (defun pi-coding-agent--process-followup-queue ()
@@ -1135,14 +1137,15 @@ Shows success or final failure with raw error."
   (let* ((id (plist-get event :id))
          (title (plist-get event :title))
          (msg (plist-get event :message))
-         (prompt (format "%s: %s " title msg))
+         ;; Don't add colon if title already ends with one
+         (separator (if (string-suffix-p ":" title) " " ": "))
+         (prompt (format "%s%s%s " title separator msg))
          (confirmed (yes-or-no-p prompt)))
     (when proc
-      (pi-coding-agent--rpc-async proc
+      (pi-coding-agent--send-extension-ui-response proc
                      (list :type "extension_ui_response"
                            :id id
-                           :confirmed (if confirmed t :json-false))
-                     #'ignore))))
+                           :confirmed (if confirmed t :json-false))))))
 
 (defun pi-coding-agent--extension-ui-select (event proc)
   "Handle select method from EVENT, responding via PROC."
@@ -1151,11 +1154,10 @@ Shows success or final failure with raw error."
          (options (append (plist-get event :options) nil))
          (selected (completing-read (concat title " ") options nil t)))
     (when proc
-      (pi-coding-agent--rpc-async proc
+      (pi-coding-agent--send-extension-ui-response proc
                      (list :type "extension_ui_response"
                            :id id
-                           :value selected)
-                     #'ignore))))
+                           :value selected)))))
 
 (defun pi-coding-agent--extension-ui-input (event proc)
   "Handle input method from EVENT, responding via PROC."
@@ -1164,11 +1166,10 @@ Shows success or final failure with raw error."
          (placeholder (plist-get event :placeholder))
          (value (read-string (concat title " ") placeholder)))
     (when proc
-      (pi-coding-agent--rpc-async proc
+      (pi-coding-agent--send-extension-ui-response proc
                      (list :type "extension_ui_response"
                            :id id
-                           :value value)
-                     #'ignore))))
+                           :value value)))))
 
 (defun pi-coding-agent--extension-ui-set-editor-text (event)
   "Handle set_editor_text method from EVENT."
@@ -1300,32 +1301,44 @@ Updates buffer-local state and renders display updates."
     ("agent_start"
      (pi-coding-agent--display-agent-start))
     ("message_start"
-     (let ((message (plist-get event :message)))
-       (if (equal (plist-get message :role) "user")
-           ;; User message from pi - check if we displayed it locally
-           (let* ((content (plist-get message :content))
-                  (timestamp (plist-get message :timestamp))
-                  (text (when content
-                          (pi-coding-agent--extract-user-message-text content)))
-                  (local-msg pi-coding-agent--local-user-message))
-             ;; Clear local tracking
-             (setq pi-coding-agent--local-user-message nil)
-             ;; Display if: no local message, OR pi's message differs (expanded template)
-             (when (and text
-                        (or (null local-msg)
-                            (not (string= text local-msg))))
-               (pi-coding-agent--display-user-message
-                text
-                (pi-coding-agent--ms-to-time timestamp))
-               ;; Reset so next assistant message shows its header
-               (setq pi-coding-agent--assistant-header-shown nil)))
-         ;; Assistant message - show header if needed, reset markers
-         (unless pi-coding-agent--assistant-header-shown
-           (pi-coding-agent--append-to-chat
-            (concat "\n" (pi-coding-agent--make-separator "Assistant" 'pi-coding-agent-assistant-label) "\n"))
-           (setq pi-coding-agent--assistant-header-shown t))
-         (setq pi-coding-agent--message-start-marker (copy-marker (point-max) nil))
-         (setq pi-coding-agent--streaming-marker (copy-marker (point-max) t)))))
+     (let* ((message (plist-get event :message))
+            (role (plist-get message :role)))
+       (pcase role
+         ("user"
+          ;; User message from pi - check if we displayed it locally
+          (let* ((content (plist-get message :content))
+                 (timestamp (plist-get message :timestamp))
+                 (text (when content
+                         (pi-coding-agent--extract-user-message-text content)))
+                 (local-msg pi-coding-agent--local-user-message))
+            ;; Clear local tracking
+            (setq pi-coding-agent--local-user-message nil)
+            ;; Display if: no local message, OR pi's message differs (expanded template)
+            (when (and text
+                       (or (null local-msg)
+                           (not (string= text local-msg))))
+              (pi-coding-agent--display-user-message
+               text
+               (pi-coding-agent--ms-to-time timestamp))
+              ;; Reset so next assistant message shows its header
+              (setq pi-coding-agent--assistant-header-shown nil))))
+         ("custom"
+          ;; Custom message from extension (e.g., /pisay)
+          ;; Display content directly if display flag is set
+          (when (plist-get message :display)
+            (let ((content (plist-get message :content)))
+              (when (and content (stringp content) (> (length content) 0))
+                (pi-coding-agent--append-to-chat (concat "\n" content "\n"))
+                ;; Reset so next assistant message shows its header
+                (setq pi-coding-agent--assistant-header-shown nil)))))
+         (_
+          ;; Assistant message - show header if needed, reset markers
+          (unless pi-coding-agent--assistant-header-shown
+            (pi-coding-agent--append-to-chat
+             (concat "\n" (pi-coding-agent--make-separator "Assistant" 'pi-coding-agent-assistant-label) "\n"))
+            (setq pi-coding-agent--assistant-header-shown t))
+          (setq pi-coding-agent--message-start-marker (copy-marker (point-max) nil))
+          (setq pi-coding-agent--streaming-marker (copy-marker (point-max) t))))))
     ("message_update"
      (when-let* ((msg-event (plist-get event :assistantMessageEvent))
                  (event-type (plist-get msg-event :type)))

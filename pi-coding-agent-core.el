@@ -96,6 +96,13 @@ CALLBACK is called with the response plist when received."
     (puthash id callback pending)
     (process-send-string process (pi-coding-agent--encode-command full-command))))
 
+(defun pi-coding-agent--send-extension-ui-response (process response)
+  "Send extension UI RESPONSE to pi PROCESS.
+Unlike `pi-coding-agent--rpc-async', this preserves the :id in RESPONSE
+as-is, which is required for extension UI responses that must echo back
+the original request ID."
+  (process-send-string process (pi-coding-agent--encode-command response)))
+
 (defun pi-coding-agent--rpc-sync (process command &optional timeout)
   "Send COMMAND to pi PROCESS synchronously, returning the response.
 Blocks until response is received or TIMEOUT seconds elapse.
@@ -167,13 +174,21 @@ containing EVENT, then clears this process's pending requests table."
                pending)
       (clrhash pending))))
 
+(defvar pi-coding-agent-extra-args nil
+  "Extra arguments to pass to the pi command.
+A list of strings that will be appended to the base command.
+
+Example: (setq pi-coding-agent-extra-args \\='(\"-e\" \"/path/to/ext.ts\"))
+
+This is useful for testing extensions or passing additional flags.")
+
 (defun pi-coding-agent--start-process (directory)
   "Start pi RPC process in DIRECTORY.
 Returns the process object."
   (let ((default-directory directory))
     (make-process
      :name "pi"
-     :command '("pi" "--mode" "rpc")
+     :command `("pi" "--mode" "rpc" ,@pi-coding-agent-extra-args)
      :connection-type 'pipe
      :filter #'pi-coding-agent--process-filter
      :sentinel #'pi-coding-agent--process-sentinel)))
@@ -182,8 +197,14 @@ Returns the process object."
 
 (defvar-local pi-coding-agent--status 'idle
   "Current status of the pi session (buffer-local in chat buffer).
-One of: `idle', `sending', `streaming', `compacting'.
-This is the single source of truth for session activity state.")
+One of: `idle', `streaming', `compacting'.
+This is the single source of truth for session activity state.
+
+Status transitions are driven by events from pi:
+- `idle' -> `streaming' on agent_start
+- `streaming' -> `idle' on agent_end
+- `idle' -> `compacting' on auto_compaction_start
+- `compacting' -> `idle' on auto_compaction_end")
 
 (defvar-local pi-coding-agent--state nil
   "Current state of the pi session (buffer-local in chat buffer).
@@ -199,7 +220,7 @@ A plist with keys like :model, :thinking-level, :messages, etc.")
   "Return t if state should be verified with get_state.
 Verification is needed when:
 - State and timestamp exist
-- Session is idle (not streaming, sending, or compacting)
+- Session is idle (not streaming or compacting)
 - Timestamp is older than `pi-coding-agent--state-verify-interval' seconds."
   (and pi-coding-agent--state
        pi-coding-agent--state-timestamp
