@@ -99,7 +99,8 @@ breaking auto-scroll for subsequent turns."
     (let ((test-file (pi-coding-agent-gui-test-create-temp-file "tool-test.txt" "XYZ123\n")))
       (unwind-protect
           (progn
-            (pi-coding-agent-gui-test-send (format "Read the file %s" test-file))
+            ;; /no_think prevents qwen3 from using internal reasoning that skips tool calls
+            (pi-coding-agent-gui-test-send (format "/no_think Read the file %s" test-file))
             ;; Tool header proves tool was invoked
             (should (pi-coding-agent-gui-test-chat-matches "^read "))
             ;; File content should appear inside the tool output block
@@ -114,9 +115,9 @@ Regression test: overlay with rear-advance was extending to subsequent content."
       (unwind-protect
           (progn
             ;; Ask to read file AND say something after
-            ;; Be explicit about using the tool - small models may skip it otherwise
+            ;; /no_think prevents qwen3 from using internal reasoning that skips tool calls
             (pi-coding-agent-gui-test-send
-             (format "Call the read tool on %s and show me its contents. After the tool output, say ENDMARKER." test-file))
+             (format "/no_think Call the read tool on %s and show me its contents. After the tool output, say ENDMARKER." test-file))
             ;; Wait for both tool output and the text response
             (should (pi-coding-agent-gui-test-chat-contains "BEFORE"))
             (should (pi-coding-agent-gui-test-chat-contains "ENDMARKER"))
