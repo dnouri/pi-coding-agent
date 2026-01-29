@@ -133,10 +133,7 @@ Ends any existing session first, starts new one, cleans up after."
 ;;;; Waiting
 
 (defun pi-coding-agent-gui-test-streaming-p ()
-  "Return t if currently streaming.
-Note: We only check for `streaming' status, not `sending'.
-Extension commands that don't trigger LLM turns should return to idle
-immediately without going through streaming state."
+  "Return t if status is `streaming'."
   (when-let ((chat-buf (plist-get pi-coding-agent-gui-test--session :chat-buffer)))
     (with-current-buffer chat-buf
       (eq pi-coding-agent--status 'streaming))))

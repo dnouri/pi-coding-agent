@@ -1043,11 +1043,7 @@ Note: status is set to `idle' by the event handler."
 For slash commands: don't display locally, let pi send expanded content.
 For regular text: display locally for responsiveness.
 Must be called with chat buffer current.
-
-Note: We do NOT change status or start spinner here.  Status transitions
-are driven by events from pi (agent_start -> streaming, agent_end -> idle).
-This ensures extension commands that don\\='t trigger LLM turns return to
-idle immediately without getting stuck in a sending state."
+Status transitions are handled by pi events (agent_start, agent_end)."
   (let ((is-command (string-prefix-p "/" text)))
     (unless is-command
       (pi-coding-agent--display-user-message text (current-time))

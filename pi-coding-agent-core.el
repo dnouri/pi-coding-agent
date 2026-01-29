@@ -98,9 +98,8 @@ CALLBACK is called with the response plist when received."
 
 (defun pi-coding-agent--send-extension-ui-response (process response)
   "Send extension UI RESPONSE to pi PROCESS.
-Unlike `pi-coding-agent--rpc-async', this preserves the :id in RESPONSE
-as-is, which is required for extension UI responses that must echo back
-the original request ID."
+RESPONSE must include the original :id from the request, as pi uses
+this to match responses to pending promises."
   (process-send-string process (pi-coding-agent--encode-command response)))
 
 (defun pi-coding-agent--rpc-sync (process command &optional timeout)
