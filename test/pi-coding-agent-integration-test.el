@@ -135,7 +135,7 @@ Sets up event dispatching through pi-coding-agent--event-handlers list."
                 (setq got-agent-end t)))
             pi-coding-agent--event-handlers)
       ;; Send minimal prompt
-      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "Say OK") #'ignore)
+      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "/no_think Say OK") #'ignore)
       ;; Wait for agent_end
       (with-timeout (pi-coding-agent-test-integration-timeout
                      (ert-fail "Timeout waiting for agent_end"))
@@ -155,7 +155,7 @@ Sets up event dispatching through pi-coding-agent--event-handlers list."
               (when (equal (plist-get e :type) "agent_end")
                 (setq got-agent-end t)))
             pi-coding-agent--event-handlers)
-      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "Say hi") #'ignore)
+      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "/no_think Say hi") #'ignore)
       (with-timeout (pi-coding-agent-test-integration-timeout
                      (ert-fail "Timeout"))
         (while (not got-agent-end)
@@ -174,7 +174,7 @@ Sets up event dispatching through pi-coding-agent--event-handlers list."
               (when (equal (plist-get e :type) "agent_end")
                 (setq got-agent-end t)))
             pi-coding-agent--event-handlers)
-      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "Say hello") #'ignore)
+      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "/no_think Say hello") #'ignore)
       (with-timeout (pi-coding-agent-test-integration-timeout
                      (ert-fail "Timeout"))
         (while (not got-agent-end)
@@ -198,7 +198,7 @@ Sets up event dispatching through pi-coding-agent--event-handlers list."
               (when (equal (plist-get e :type) "agent_end")
                 (setq got-agent-end t)))
             pi-coding-agent--event-handlers)
-      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "Say: done") #'ignore)
+      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "/no_think Say: done") #'ignore)
       (with-timeout (pi-coding-agent-test-integration-timeout
                      (ert-fail "Timeout"))
         (while (not got-agent-end)
@@ -219,7 +219,7 @@ Sets up event dispatching through pi-coding-agent--event-handlers list."
               (when (equal (plist-get e :type) "agent_end")
                 (setq got-agent-end t)))
             pi-coding-agent--event-handlers)
-      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "Say: hello") #'ignore)
+      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "/no_think Say: hello") #'ignore)
       (with-timeout (pi-coding-agent-test-integration-timeout
                      (ert-fail "Timeout"))
         (while (not got-agent-end)
@@ -243,7 +243,7 @@ Sets up event dispatching through pi-coding-agent--event-handlers list."
             pi-coding-agent--event-handlers)
       ;; Send a prompt that will generate a long response
       (pi-coding-agent--rpc-async proc
-                     '(:type "prompt" :message "Count from 1 to 100 slowly")
+                     '(:type "prompt" :message "/no_think Count from 1 to 100 slowly")
                      #'ignore)
       ;; Wait for streaming to start
       (with-timeout (pi-coding-agent-test-rpc-timeout (ert-fail "Timeout waiting for agent_start"))
@@ -318,11 +318,11 @@ Verifies:
                 (setq got-agent-end t)))
             pi-coding-agent--event-handlers)
       ;; Send initial prompt
-      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "Say: working") #'ignore)
+      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "/no_think Say: working") #'ignore)
       ;; Wait a moment for streaming to start, then queue steering
       (sleep-for 0.5)
       (let ((queue-response (pi-coding-agent--rpc-sync proc
-                              '(:type "steer" :message "Say: queued-steer-test")
+                              '(:type "steer" :message "/no_think Say: queued-steer-test")
                               pi-coding-agent-test-rpc-timeout)))
         (should (plist-get queue-response :success)))
       ;; Wait for agent_end
@@ -374,7 +374,7 @@ Verifies the full flow:
               (when (equal (plist-get e :type) "agent_end")
                 (setq got-agent-end t)))
             pi-coding-agent--event-handlers)
-      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "Say: test") #'ignore)
+      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "/no_think Say: test") #'ignore)
       (with-timeout (pi-coding-agent-test-integration-timeout
                      (ert-fail "Timeout waiting for prompt"))
         (while (not got-agent-end)
@@ -421,7 +421,7 @@ Verifies:
               (when (equal (plist-get e :type) "agent_end")
                 (setq got-agent-end t)))
             pi-coding-agent--event-handlers)
-      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "Say: test") #'ignore)
+      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "/no_think Say: test") #'ignore)
       (with-timeout (pi-coding-agent-test-integration-timeout
                      (ert-fail "Timeout waiting for prompt"))
         (while (not got-agent-end)
