@@ -391,8 +391,11 @@ Verifies the full flow:
               (with-current-buffer chat-buf
                 (pi-coding-agent-chat-mode)
                 (setq pi-coding-agent--state (list :session-file session-file))
-                ;; Set the session name
-                (pi-coding-agent-set-session-name "Integration Test Session"))
+                (setq pi-coding-agent--process proc)  ; Associate process with buffer
+                ;; Set the session name via RPC
+                (pi-coding-agent-set-session-name "Integration Test Session")
+                ;; Wait for async RPC to complete
+                (accept-process-output proc 1.0))
               ;; Verify file contains session_info with our name
               (with-temp-buffer
                 (insert-file-contents session-file)
@@ -407,55 +410,8 @@ Verifies the full flow:
                 (should (string-match-p "Integration Test Session" (car choice)))))
           (kill-buffer chat-buf))))))
 
-(ert-deftest pi-coding-agent-integration-session-name-cleared-with-null ()
-  "Clearing session name writes JSON null and metadata returns nil.
-Verifies:
-1. Send a prompt to materialize session file
-2. Set a name, then clear it with empty string
-3. File contains proper JSON null (not string \"null\")
-4. Metadata extraction returns nil for session-name"
-  (pi-coding-agent-integration-with-process
-    ;; Send a prompt to create the session file
-    (let ((got-agent-end nil))
-      (push (lambda (e)
-              (when (equal (plist-get e :type) "agent_end")
-                (setq got-agent-end t)))
-            pi-coding-agent--event-handlers)
-      (pi-coding-agent--rpc-async proc '(:type "prompt" :message "/no_think Say: test") #'ignore)
-      (with-timeout (pi-coding-agent-test-integration-timeout
-                     (ert-fail "Timeout waiting for prompt"))
-        (while (not got-agent-end)
-          (accept-process-output proc 0.1))))
-    ;; Now get session file and test
-    (let* ((state-response (pi-coding-agent--rpc-sync proc '(:type "get_state") pi-coding-agent-test-rpc-timeout))
-           (session-file (plist-get (plist-get state-response :data) :sessionFile)))
-      (should session-file)
-      (should (file-exists-p session-file))
-      (let ((chat-buf (get-buffer-create "*pi-integration-test-clear-name*")))
-        (unwind-protect
-            (progn
-              (with-current-buffer chat-buf
-                (pi-coding-agent-chat-mode)
-                (setq pi-coding-agent--state (list :session-file session-file))
-                ;; Set then clear
-                (pi-coding-agent-set-session-name "Temporary Name")
-                (pi-coding-agent-set-session-name ""))
-              ;; Verify file has JSON null, not string "null"
-              (with-temp-buffer
-                (insert-file-contents session-file)
-                (goto-char (point-max))
-                (search-backward "session_info")
-                (beginning-of-line)
-                (let ((line (buffer-substring-no-properties (point) (line-end-position))))
-                  ;; Should have :null pattern (JSON null)
-                  (should (string-match-p "\"name\":null" line))
-                  ;; Should NOT have string "null"
-                  (should-not (string-match-p "\"name\":\"null\"" line))))
-              ;; Metadata should return nil for name
-              (let ((metadata (pi-coding-agent--session-metadata session-file)))
-                (should metadata)
-                (should (null (plist-get metadata :session-name)))))
-          (kill-buffer chat-buf))))))
+;; Note: "clear session name" test removed - empty string now shows current name
+;; instead of clearing (consistent with TUI /name behavior). See unit tests for coverage.
 
 (provide 'pi-coding-agent-integration-test)
 ;;; pi-coding-agent-integration-test.el ends here

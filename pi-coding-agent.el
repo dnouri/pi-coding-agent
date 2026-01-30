@@ -2910,36 +2910,37 @@ using the cached session file."
 
 (defun pi-coding-agent-set-session-name (name)
   "Set the session NAME for the current session.
-The name is displayed in the resume picker and header-line.
-With empty NAME, clears the session name."
+The name is displayed in the resume picker and header-line."
   (interactive
-   (list (read-string "Session name (empty to clear): "
-                      (or pi-coding-agent--session-name ""))))
-  (let* ((chat-buf (pi-coding-agent--get-chat-buffer))
-         (state (and chat-buf (buffer-local-value 'pi-coding-agent--state chat-buf)))
-         (session-file (and state (plist-get state :session-file))))
-    (cond
-     ((not session-file)
-      (message "Pi: No session file - cannot set name"))
-     (t
-      (let* ((entry (list :type "session_info"
-                          :id (format "%08x" (random (expt 16 8)))
-                          :parentId nil
-                          :timestamp (format-time-string "%Y-%m-%dT%H:%M:%S.000Z" nil t)
-                          :name (if (string-empty-p name) nil name)))
-             (json-line (concat (json-encode entry) "\n")))
-        ;; Append to session file
-        (with-temp-buffer
-          (insert json-line)
-          (append-to-file (point-min) (point-max) session-file))
-        ;; Update local cache
-        (when (buffer-live-p chat-buf)
-          (with-current-buffer chat-buf
-            (setq pi-coding-agent--session-name (if (string-empty-p name) nil name))
-            (force-mode-line-update t)))
-        (if (string-empty-p name)
-            (message "Pi: Session name cleared")
-          (message "Pi: Session name set to \"%s\"" name)))))))
+   (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+     (list (read-string "Session name: "
+                        (or (and chat-buf
+                                 (buffer-local-value 'pi-coding-agent--session-name chat-buf))
+                            "")))))
+  (let* ((trimmed-name (string-trim name))
+         (chat-buf (pi-coding-agent--get-chat-buffer)))
+    (if (string-empty-p trimmed-name)
+        ;; Consistent with TUI /name behavior
+        (let ((current-name (and chat-buf
+                                 (buffer-local-value 'pi-coding-agent--session-name chat-buf))))
+          (if current-name
+              (message "Pi: Session name: %s" current-name)
+            (message "Pi: No session name set")))
+      (let ((proc (pi-coding-agent--get-process)))
+        (unless proc
+          (user-error "No pi process running"))
+        (pi-coding-agent--rpc-async proc
+            (list :type "set_session_name" :name trimmed-name)
+            (lambda (response)
+              (if (plist-get response :success)
+                  (progn
+                    (when (buffer-live-p chat-buf)
+                      (with-current-buffer chat-buf
+                        (setq pi-coding-agent--session-name trimmed-name)
+                        (force-mode-line-update t)))
+                    (message "Pi: Session name set to \"%s\"" trimmed-name))
+                (message "Pi: Failed to set session name: %s"
+                         (or (plist-get response :error) "unknown error")))))))))
 
 (defun pi-coding-agent-select-model ()
   "Select a model interactively."

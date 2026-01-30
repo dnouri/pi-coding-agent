@@ -3691,80 +3691,174 @@ and then re-sorted alphabetically by completing-read."
             (should-not (string-match-p "truncated$" header))))
       (kill-buffer chat-buf))))
 
-(ert-deftest pi-coding-agent-test-set-session-name-writes-to-file ()
-  "pi-coding-agent-set-session-name appends session_info entry to file."
-  (let ((temp-file (make-temp-file "pi-coding-agent-test-session" nil ".jsonl"))
-        (chat-buf (get-buffer-create "*pi-test-set-name*")))
+(ert-deftest pi-coding-agent-test-set-session-name-empty-shows-current ()
+  "pi-coding-agent-set-session-name with empty string shows current name."
+  (let ((chat-buf (get-buffer-create "*pi-test-show-name*"))
+        (messages nil))
     (unwind-protect
         (progn
-          ;; Create initial session file
-          (with-temp-file temp-file
-            (insert "{\"type\":\"session\",\"id\":\"test\"}\n"))
           (with-current-buffer chat-buf
             (pi-coding-agent-chat-mode)
-            (setq pi-coding-agent--state (list :session-file temp-file))
-            ;; Set the name
-            (pi-coding-agent-set-session-name "My Test Session"))
-          ;; Verify file was updated
-          (with-temp-buffer
-            (insert-file-contents temp-file)
-            (should (string-match-p "session_info" (buffer-string)))
-            (should (string-match-p "My Test Session" (buffer-string))))
-          ;; Verify cache was updated
+            (setq pi-coding-agent--session-name "My Session"))
+          ;; Capture message output
+          (cl-letf (((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (push (apply #'format fmt args) messages))))
+            (with-current-buffer chat-buf
+              (pi-coding-agent-set-session-name "")))
+          ;; Should show current name, not change it
           (should (equal (buffer-local-value 'pi-coding-agent--session-name chat-buf)
-                         "My Test Session")))
-      (delete-file temp-file)
+                         "My Session"))
+          (should (member "Pi: Session name: My Session" messages)))
       (kill-buffer chat-buf))))
 
-(ert-deftest pi-coding-agent-test-set-session-name-clears-with-empty ()
-  "pi-coding-agent-set-session-name clears name when given empty string."
-  (let ((chat-buf (get-buffer-create "*pi-test-clear-name*"))
-        (temp-file (make-temp-file "pi-coding-agent-test-session" nil ".jsonl")))
+(ert-deftest pi-coding-agent-test-set-session-name-empty-no-name-shows-message ()
+  "pi-coding-agent-set-session-name with empty string and no name shows message."
+  (let ((chat-buf (get-buffer-create "*pi-test-no-name*"))
+        (messages nil))
     (unwind-protect
         (progn
-          (with-temp-file temp-file
-            (insert "{\"type\":\"session\",\"id\":\"test\"}\n"))
           (with-current-buffer chat-buf
             (pi-coding-agent-chat-mode)
-            (setq pi-coding-agent--state (list :session-file temp-file))
-            (setq pi-coding-agent--session-name "Old Name")
-            ;; Clear with empty string
-            (pi-coding-agent-set-session-name ""))
-          ;; Cache should be nil
-          (should (null (buffer-local-value 'pi-coding-agent--session-name chat-buf))))
-      (delete-file temp-file)
+            (setq pi-coding-agent--session-name nil))
+          ;; Capture message output
+          (cl-letf (((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (push (apply #'format fmt args) messages))))
+            (with-current-buffer chat-buf
+              (pi-coding-agent-set-session-name "")))
+          (should (member "Pi: No session name set" messages)))
       (kill-buffer chat-buf))))
 
-(ert-deftest pi-coding-agent-test-set-session-name-writes-json-null ()
-  "pi-coding-agent-set-session-name writes JSON null (not string) when clearing."
-  (let ((chat-buf (get-buffer-create "*pi-test-json-null*"))
-        (temp-file (make-temp-file "pi-coding-agent-test-session" nil ".jsonl")))
+(ert-deftest pi-coding-agent-test-set-session-name-no-process-errors ()
+  "pi-coding-agent-set-session-name errors when no process is running."
+  (let ((chat-buf (get-buffer-create "*pi-test-no-proc*")))
     (unwind-protect
         (progn
-          (with-temp-file temp-file
-            (insert "{\"type\":\"session\",\"id\":\"test\"}\n"))
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode))
+          ;; Mock pi-coding-agent--get-process to return nil
+          (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                     (lambda () nil)))
+            (should-error
+             (with-current-buffer chat-buf
+               (pi-coding-agent-set-session-name "New Name"))
+             :type 'user-error)))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-set-session-name-sends-rpc ()
+  "pi-coding-agent-set-session-name sends correct RPC command."
+  (let ((chat-buf (get-buffer-create "*pi-test-rpc*"))
+        (pi-coding-agent--request-id-counter 0)
+        (output-buffer (generate-new-buffer " *test-output*")))
+    (unwind-protect
+        (let ((fake-proc (start-process "cat" output-buffer "cat")))
+          (unwind-protect
+              (progn
+                (with-current-buffer chat-buf
+                  (pi-coding-agent-chat-mode))
+                ;; Mock get-process and get-chat-buffer
+                (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                           (lambda () fake-proc))
+                          ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                           (lambda () chat-buf)))
+                  (pi-coding-agent-set-session-name "Test Session"))
+                ;; Wait for output
+                (pi-coding-agent-test-wait-until
+                 (lambda ()
+                   (with-current-buffer output-buffer
+                     (> (buffer-size) 0)))
+                 1.0 0.05 fake-proc)
+                ;; Verify JSON sent
+                (with-current-buffer output-buffer
+                  (let* ((sent (buffer-string))
+                         (json (json-parse-string (string-trim sent) :object-type 'plist)))
+                    (should (equal (plist-get json :type) "set_session_name"))
+                    (should (equal (plist-get json :name) "Test Session")))))
+            (delete-process fake-proc)))
+      (kill-buffer output-buffer)
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-set-session-name-trims-whitespace ()
+  "pi-coding-agent-set-session-name trims whitespace from name."
+  (let ((chat-buf (get-buffer-create "*pi-test-trim*"))
+        (pi-coding-agent--request-id-counter 0)
+        (output-buffer (generate-new-buffer " *test-output*")))
+    (unwind-protect
+        (let ((fake-proc (start-process "cat" output-buffer "cat")))
+          (unwind-protect
+              (progn
+                (with-current-buffer chat-buf
+                  (pi-coding-agent-chat-mode))
+                ;; Mock get-process and get-chat-buffer
+                (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                           (lambda () fake-proc))
+                          ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                           (lambda () chat-buf)))
+                  (pi-coding-agent-set-session-name "  Trimmed Name  "))
+                ;; Wait for output
+                (pi-coding-agent-test-wait-until
+                 (lambda ()
+                   (with-current-buffer output-buffer
+                     (> (buffer-size) 0)))
+                 1.0 0.05 fake-proc)
+                ;; Verify JSON sent has trimmed name
+                (with-current-buffer output-buffer
+                  (let* ((sent (buffer-string))
+                         (json (json-parse-string (string-trim sent) :object-type 'plist)))
+                    (should (equal (plist-get json :name) "Trimmed Name")))))
+            (delete-process fake-proc)))
+      (kill-buffer output-buffer)
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-set-session-name-whitespace-only-shows-current ()
+  "pi-coding-agent-set-session-name with whitespace-only shows current name."
+  (let ((chat-buf (get-buffer-create "*pi-test-ws*"))
+        (messages nil))
+    (unwind-protect
+        (progn
           (with-current-buffer chat-buf
             (pi-coding-agent-chat-mode)
-            (setq pi-coding-agent--state (list :session-file temp-file))
-            (setq pi-coding-agent--session-name "Old Name")
-            ;; Clear with empty string
-            (pi-coding-agent-set-session-name ""))
-          ;; Verify JSON has proper null (not string "null")
-          (with-temp-buffer
-            (insert-file-contents temp-file)
-            (goto-char (point-min))
-            (search-forward "session_info")
-            (beginning-of-line)
-            (let* ((line (buffer-substring-no-properties (point) (line-end-position)))
-                   (data (json-parse-string line :object-type 'plist))
-                   (name (plist-get data :name)))
-              ;; Should be :null (from JSON null), not the string "null"
-              (should (eq name :null))
-              ;; File should contain ":null" pattern (JSON null)
-              (should (string-match-p "\"name\":null" line))
-              ;; File should NOT contain "name":"null" (string)
-              (should-not (string-match-p "\"name\":\"null\"" line)))))
-      (delete-file temp-file)
+            (setq pi-coding-agent--session-name "Existing Name"))
+          ;; Capture message output
+          (cl-letf (((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (push (apply #'format fmt args) messages))))
+            (with-current-buffer chat-buf
+              (pi-coding-agent-set-session-name "   ")))  ; whitespace only
+          ;; Should show current name, not try to set
+          (should (equal (buffer-local-value 'pi-coding-agent--session-name chat-buf)
+                         "Existing Name"))
+          (should (member "Pi: Session name: Existing Name" messages)))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-set-session-name-rpc-failure-shows-error ()
+  "pi-coding-agent-set-session-name shows error on RPC failure."
+  (let ((chat-buf (get-buffer-create "*pi-test-fail*"))
+        (messages nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--session-name "Old Name"))
+          ;; Mock RPC to call callback with failure
+          (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                     (lambda () 'fake-proc))
+                    ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                     (lambda () chat-buf))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc _cmd callback)
+                       (funcall callback '(:success nil :error "test error"))))
+                    ((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (push (apply #'format fmt args) messages))))
+            (with-current-buffer chat-buf
+              (pi-coding-agent-set-session-name "New Name")))
+          ;; Name should NOT be updated
+          (should (equal (buffer-local-value 'pi-coding-agent--session-name chat-buf)
+                         "Old Name"))
+          ;; Error message should be shown
+          (should (member "Pi: Failed to set session name: test error" messages)))
       (kill-buffer chat-buf))))
 
 ;;; Input History
