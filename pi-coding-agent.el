@@ -1051,11 +1051,11 @@ The /compact command is handled specially by calling `pi-coding-agent-compact'.
 Must be called with chat buffer current.
 Status transitions are handled by pi events (agent_start, agent_end)."
   (cond
-   ;; /compact is handled locally because RPC mode doesn't process it as a slash command
+   ;; /compact is handled locally, invoking `pi-coding-agent-compact' directly
    ((or (string= text "/compact")
         (string-prefix-p "/compact " text))
     (let ((args (when (string-prefix-p "/compact " text)
-                  (string-trim (substring text 9)))))
+                  (string-trim (substring text (length "/compact "))))))
       (pi-coding-agent-compact (and args (not (string-empty-p args)) args))))
    ;; Other slash commands: don't display locally, send to pi
    ((string-prefix-p "/" text)
@@ -1438,8 +1438,8 @@ Updates buffer-local state and renders display updates."
 (defun pi-coding-agent-send ()
   "Send the current input buffer contents to pi.
 Clears the input buffer after sending.  Does nothing if buffer is empty.
-If pi is currently busy (streaming or compacting), adds to local follow-up queue.
-The /compact command is handled locally; other slash commands are sent to pi."
+If pi is busy (streaming or compacting), adds to local follow-up queue.
+The /compact command is handled locally; other slash commands sent to pi."
   (interactive)
   (let* ((text (string-trim (buffer-string)))
          (chat-buf (pi-coding-agent--get-chat-buffer))

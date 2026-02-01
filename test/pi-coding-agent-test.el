@@ -586,8 +586,8 @@ not relying on current buffer context which may change before callback executes.
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
-(ert-deftest pi-coding-agent-test-slash-compact-calls-compact-function ()
-  "/compact in input buffer should call pi-coding-agent-compact, not send as prompt."
+(ert-deftest pi-coding-agent-test-slash-compact-handled-locally-not-sent-as-prompt ()
+  "/compact in input buffer invokes pi-coding-agent-compact locally, not sent to pi."
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-slash-compact*"))
         (input-buf (get-buffer-create "*pi-coding-agent-test-slash-compact-input*"))
         (compact-called nil)
@@ -643,8 +643,9 @@ not relying on current buffer context which may change before callback executes.
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
-(ert-deftest pi-coding-agent-test-auto-compaction-end-processes-followup-queue ()
-  "auto_compaction_end processes followup queue (sends queued message)."
+(ert-deftest pi-coding-agent-test-auto-compaction-success-sends-queued-messages ()
+  "auto_compaction_end with aborted=false processes followup queue.
+Uses :false (JSON false representation) to verify boolean normalization."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (let ((sent-text nil))
@@ -652,8 +653,6 @@ not relying on current buffer context which may change before callback executes.
       (setq pi-coding-agent--followup-queue '("queued message"))
       (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
                  (lambda (text) (setq sent-text text))))
-        ;; Simulate auto_compaction_end event (successful completion)
-        ;; Note: JSON false is represented as :false in elisp
         (pi-coding-agent--handle-display-event
          '(:type "auto_compaction_end"
            :aborted :false
