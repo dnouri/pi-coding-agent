@@ -10,7 +10,7 @@ PI_BIN_DIR = $(abspath $(dir $(PI_BIN)))
 
 .PHONY: test test-unit test-integration test-integration-ci test-gui test-gui-ci test-all
 .PHONY: check compile lint lint-checkdoc lint-package clean clean-cache help
-.PHONY: ollama-start ollama-stop ollama-status setup-pi setup-models deps
+.PHONY: ollama-start ollama-stop ollama-status setup-pi setup-models deps install-hooks
 
 help:
 	@echo "Targets:"
@@ -20,6 +20,7 @@ help:
 	@echo "  make test-gui         GUI tests (local, starts Ollama)"
 	@echo "  make lint             Checkdoc + package-lint"
 	@echo "  make check            Compile, lint, unit tests (pre-commit)"
+	@echo "  make install-hooks    Set up git pre-commit hook"
 	@echo "  make clean            Remove generated files"
 	@echo ""
 	@echo "CI targets:"
@@ -64,6 +65,10 @@ test-unit: compile test
 # ============================================================
 # Setup helpers
 # ============================================================
+
+install-hooks:
+	@git config core.hooksPath hooks
+	@echo "Git hooks installed (using hooks/)"
 
 setup-pi:
 	@if [ -x "$(PI_BIN)" ]; then \
