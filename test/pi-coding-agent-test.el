@@ -780,6 +780,30 @@ The hidden === provides visual spacing when `markdown-hide-markup' is t."
         (pi-coding-agent-abort)
         (should (null sent-command))))))
 
+(ert-deftest pi-coding-agent-test-abort-clears-followup-queue ()
+  "Aborting clears the follow-up queue so queued messages are not sent.
+When user aborts, they want to stop everything - including queued messages."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t)
+          (message-was-sent nil))
+      (insert "Some streaming content")
+      ;; Set up state as if we're streaming with a queued message
+      (setq pi-coding-agent--aborted t
+            pi-coding-agent--followup-queue '("queued message that should be discarded"))
+      ;; Mock send functions to detect if queue processing sends the message
+      (cl-letf (((symbol-function 'pi-coding-agent--prepare-and-send)
+                 (lambda (_text) (setq message-was-sent t)))
+                ((symbol-function 'pi-coding-agent--spinner-stop) #'ignore)
+                ((symbol-function 'pi-coding-agent--fontify-timer-stop) #'ignore)
+                ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
+        ;; Simulate agent_end arriving after abort
+        (pi-coding-agent--display-agent-end)
+        ;; Queue should be empty (either cleared or not processed)
+        (should (null pi-coding-agent--followup-queue))
+        ;; Key assertion: queued message should NOT have been sent
+        (should-not message-was-sent)))))
+
 ;;; Kill Buffer Protection
 
 (ert-deftest pi-coding-agent-test-handler-removed-on-kill ()
