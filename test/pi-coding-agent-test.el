@@ -3371,6 +3371,45 @@ Regression test for issue #32: JIT font-lock doesn't fontify expanded content."
                               (buffer-substring-no-properties
                                (line-beginning-position) (line-end-position)))))))
 
+(ert-deftest pi-coding-agent-test-toggle-preserves-window-scroll ()
+  "Toggle collapse/expand should preserve window scroll when viewing content before tool.
+When window shows content BEFORE the tool block, toggle should not jump away."
+  (let ((buf (generate-new-buffer "*test-toggle-scroll*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (pi-coding-agent-chat-mode)
+            ;; Add some content before the tool block
+            (let ((inhibit-read-only t))
+              (insert "Header line 1\nHeader line 2\nHeader line 3\n\n"))
+            ;; Create tool output with many lines
+            (pi-coding-agent--display-tool-start "read" '(:path "test.el"))
+            (pi-coding-agent--display-tool-end
+             "read" nil
+             `((:type "text"
+                :text ,(mapconcat (lambda (n) (format "Line %03d content" n))
+                                  (number-sequence 1 50) "\n")))
+             nil nil))
+          ;; Display buffer in a window so we can test scroll
+          (let ((win (display-buffer buf)))
+            (when win
+              (with-selected-window win
+                ;; Position window at the header (before tool block)
+                (goto-char (point-min))
+                (recenter 0)
+                (let ((start-before (window-start win)))
+                  ;; Expand the tool content
+                  (search-forward "..." nil t)
+                  (pi-coding-agent-toggle-tool-section)
+                  ;; Window should not have jumped
+                  (should (= (window-start win) start-before))
+                  ;; Now collapse
+                  (search-forward "[-]" nil t)
+                  (pi-coding-agent-toggle-tool-section)
+                  ;; Window should still be at same position
+                  (should (= (window-start win) start-before)))))))
+      (kill-buffer buf))))
+
 (ert-deftest pi-coding-agent-test-format-fork-message ()
   "Fork message formatted with index and preview."
   (let ((msg '(:entryId "abc-123" :text "Hello world, this is a test")))

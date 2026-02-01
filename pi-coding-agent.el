@@ -1878,7 +1878,8 @@ Shows preview lines with expandable toggle for long output."
       (insert "\n"))))
 
 (defun pi-coding-agent--toggle-tool-output (button)
-  "Toggle between preview and full content for BUTTON."
+  "Toggle between preview and full content for BUTTON.
+Preserves window scroll position during the toggle."
   (let* ((inhibit-read-only t)
          (expanded (button-get button 'pi-coding-agent-expanded))
          (full-content (button-get button 'pi-coding-agent-full-content))
@@ -1895,8 +1896,18 @@ Shows preview lines with expandable toggle for long output."
                   (ov (seq-find (lambda (o) (overlay-get o 'pi-coding-agent-tool-block))
                                 (overlays-at (point))))
                   (header-end (overlay-get ov 'pi-coding-agent-header-end)))
-        ;; Content starts after header (which may span multiple lines)
-        (let ((content-start header-end))
+        ;; Save window positions relative to content-start
+        ;; Windows before the tool block: save absolute position
+        ;; Windows inside tool block: will use header position after toggle
+        (let* ((content-start header-end)
+               (block-start (car bounds))
+               (saved-windows
+                (mapcar (lambda (w)
+                          (let ((ws (window-start w)))
+                            (list w ws (window-point w)
+                                  ;; Flag: was window-start before content area?
+                                  (< ws content-start))))
+                        (get-buffer-window-list (current-buffer) nil t))))
           ;; Delete from content start to after button
           (delete-region content-start (1+ btn-end))
           (goto-char content-start)
@@ -1905,8 +1916,23 @@ Shows preview lines with expandable toggle for long output."
            preview-content full-content lang is-edit-diff hidden-count (not expanded))
           ;; Ensure fontification of inserted content (JIT font-lock is lazy)
           (font-lock-ensure content-start (point))
-          ;; Update overlay to include new content (overlay no longer has rear-advance)
-          (move-overlay ov (car bounds) (point)))))))
+          ;; Update overlay to include new content
+          (move-overlay ov block-start (point))
+          ;; Restore window positions
+          (dolist (win-state saved-windows)
+            (let ((win (nth 0 win-state))
+                  (old-start (nth 1 win-state))
+                  (old-point (nth 2 win-state))
+                  (was-before-content (nth 3 win-state)))
+              (when (window-live-p win)
+                (if was-before-content
+                    ;; Window was before tool content - restore exactly
+                    (progn
+                      (set-window-start win old-start t)
+                      (set-window-point win (min old-point (point-max))))
+                  ;; Window was inside tool content - show from block start
+                  (set-window-start win block-start t)
+                  (set-window-point win block-start))))))))))
 
 (defun pi-coding-agent--insert-tool-content-with-toggle
     (preview-content full-content lang is-edit-diff hidden-count expanded)
