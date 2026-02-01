@@ -1010,33 +1010,37 @@ Note: status is set to `idle' by the event handler."
   ;; Reset local message tracker.
   ;; Ensures clean state for next turn (e.g., if abort occurred before echo arrived).
   (setq pi-coding-agent--local-user-message nil)
-  (let ((inhibit-read-only t))
-    ;; Clean up pending tool overlay if abort happened mid-tool
-    (pi-coding-agent--tool-overlay-finalize 'pi-coding-agent-tool-block-error)
-    ;; Show abort indicator if aborted
-    ;; Use scroll preservation so following windows stay at end
-    (when pi-coding-agent--aborted
+  ;; Capture abort state before clearing it - we need to know if we should skip queue
+  (let ((was-aborted pi-coding-agent--aborted))
+    (let ((inhibit-read-only t))
+      ;; Clean up pending tool overlay if abort happened mid-tool
+      (pi-coding-agent--tool-overlay-finalize 'pi-coding-agent-tool-block-error)
+      ;; Show abort indicator if aborted, and clear queued messages
+      ;; User abort means "stop everything" including queued follow-ups
+      (when pi-coding-agent--aborted
+        (pi-coding-agent--with-scroll-preservation
+          (save-excursion
+            (goto-char (point-max))
+            ;; Remove trailing whitespace before adding indicator
+            (skip-chars-backward " \t\n")
+            (delete-region (point) (point-max))
+            (insert "\n\n" (propertize "[Aborted]" 'face 'error) "\n")))
+        (setq pi-coding-agent--aborted nil)
+        (setq pi-coding-agent--followup-queue nil))
+      ;; Add spacing for next turn, avoiding excess blank lines
+      ;; Use scroll preservation so following windows stay at end
       (pi-coding-agent--with-scroll-preservation
         (save-excursion
           (goto-char (point-max))
-          ;; Remove trailing whitespace before adding indicator
-          (skip-chars-backward " \t\n")
+          (skip-chars-backward "\n")
           (delete-region (point) (point-max))
-          (insert "\n\n" (propertize "[Aborted]" 'face 'error) "\n")))
-      (setq pi-coding-agent--aborted nil))
-    ;; Add spacing for next turn, avoiding excess blank lines
-    ;; Use scroll preservation so following windows stay at end
-    (pi-coding-agent--with-scroll-preservation
-      (save-excursion
-        (goto-char (point-max))
-        (skip-chars-backward "\n")
-        (delete-region (point) (point-max))
-        (insert "\n\n"))))
-  (pi-coding-agent--spinner-stop)
-  (pi-coding-agent--fontify-timer-stop)
-  (pi-coding-agent--refresh-header)
-  ;; Check follow-up queue and send next message if any
-  (pi-coding-agent--process-followup-queue))
+          (insert "\n\n"))))
+    (pi-coding-agent--spinner-stop)
+    (pi-coding-agent--fontify-timer-stop)
+    (pi-coding-agent--refresh-header)
+    ;; Check follow-up queue and send next message if any (unless aborted)
+    (unless was-aborted
+      (pi-coding-agent--process-followup-queue))))
 
 (defun pi-coding-agent--prepare-and-send (text)
   "Prepare chat buffer state and send TEXT to pi.
