@@ -1047,14 +1047,25 @@ Note: status is set to `idle' by the event handler."
   "Prepare chat buffer state and send TEXT to pi.
 For slash commands: don't display locally, let pi send expanded content.
 For regular text: display locally for responsiveness.
+The /compact command is handled specially by calling `pi-coding-agent-compact'.
 Must be called with chat buffer current.
 Status transitions are handled by pi events (agent_start, agent_end)."
-  (let ((is-command (string-prefix-p "/" text)))
-    (unless is-command
-      (pi-coding-agent--display-user-message text (current-time))
-      (setq pi-coding-agent--local-user-message text)
-      (setq pi-coding-agent--assistant-header-shown nil))
-    (pi-coding-agent--send-prompt text)))
+  (cond
+   ;; /compact is handled locally because RPC mode doesn't process it as a slash command
+   ((or (string= text "/compact")
+        (string-prefix-p "/compact " text))
+    (let ((args (when (string-prefix-p "/compact " text)
+                  (string-trim (substring text 9)))))
+      (pi-coding-agent-compact (and args (not (string-empty-p args)) args))))
+   ;; Other slash commands: don't display locally, send to pi
+   ((string-prefix-p "/" text)
+    (pi-coding-agent--send-prompt text))
+   ;; Regular text: display locally for responsiveness, then send
+   (t
+    (pi-coding-agent--display-user-message text (current-time))
+    (setq pi-coding-agent--local-user-message text)
+    (setq pi-coding-agent--assistant-header-shown nil)
+    (pi-coding-agent--send-prompt text))))
 
 (defun pi-coding-agent--process-followup-queue ()
   "Pop first message from follow-up queue and send it.
@@ -1399,13 +1410,18 @@ Updates buffer-local state and renders display updates."
     ("auto_compaction_end"
      (pi-coding-agent--spinner-stop)
      (setq pi-coding-agent--status 'idle)
-     (if (plist-get event :aborted)
-         (message "Pi: Auto-compaction cancelled")
+     (if (pi-coding-agent--normalize-boolean (plist-get event :aborted))
+         (progn
+           (message "Pi: Auto-compaction cancelled")
+           ;; Clear queue on abort (user wanted to stop)
+           (setq pi-coding-agent--followup-queue nil))
        (when-let ((result (plist-get event :result)))
          (pi-coding-agent--handle-compaction-success
           (plist-get result :tokensBefore)
           (plist-get result :summary)
-          (pi-coding-agent--ms-to-time (plist-get result :timestamp))))))
+          (pi-coding-agent--ms-to-time (plist-get result :timestamp))))
+       ;; Process followup queue after successful compaction
+       (pi-coding-agent--process-followup-queue)))
     ("agent_end"
      (pi-coding-agent--display-agent-end))
     ("auto_retry_start"
@@ -1422,20 +1438,18 @@ Updates buffer-local state and renders display updates."
 (defun pi-coding-agent-send ()
   "Send the current input buffer contents to pi.
 Clears the input buffer after sending.  Does nothing if buffer is empty.
-If pi is currently streaming, adds to local follow-up queue.
-Slash commands are expanded before display and sending."
+If pi is currently busy (streaming or compacting), adds to local follow-up queue.
+The /compact command is handled locally; other slash commands are sent to pi."
   (interactive)
   (let* ((text (string-trim (buffer-string)))
          (chat-buf (pi-coding-agent--get-chat-buffer))
-         (streaming (and chat-buf
-                         (buffer-local-value 'pi-coding-agent--status chat-buf)
-                         (memq (buffer-local-value 'pi-coding-agent--status chat-buf)
-                               '(streaming sending)))))
+         (status (and chat-buf (buffer-local-value 'pi-coding-agent--status chat-buf)))
+         (busy (and status (memq status '(streaming sending compacting)))))
     (cond
      ;; Empty input - do nothing
      ((string-empty-p text) nil)
-     ;; Streaming - add to local follow-up queue
-     (streaming
+     ;; Busy (streaming or compacting) - add to local follow-up queue
+     (busy
       (pi-coding-agent--history-add text)
       (setq pi-coding-agent--input-ring-index nil
             pi-coding-agent--input-saved nil)
@@ -3113,14 +3127,18 @@ Shows PID, status, and session file."
                status
                (or (and session-file (file-name-nondirectory session-file)) "none"))))))
 
-(defun pi-coding-agent-compact ()
-  "Compact conversation context to reduce token usage."
+(defun pi-coding-agent-compact (&optional custom-instructions)
+  "Compact conversation context to reduce token usage.
+Optional CUSTOM-INSTRUCTIONS provide guidance for the compaction summary."
   (interactive)
   (when-let ((proc (pi-coding-agent--get-process))
              (chat-buf (pi-coding-agent--get-chat-buffer)))
     (message "Pi: Compacting...")
     (pi-coding-agent--spinner-start)
-    (pi-coding-agent--rpc-async proc '(:type "compact")
+    (pi-coding-agent--rpc-async proc
+                   (if custom-instructions
+                       (list :type "compact" :customInstructions custom-instructions)
+                     '(:type "compact"))
                    (lambda (response)
                      ;; Pass chat-buf explicitly (callback may run in arbitrary context)
                      (pi-coding-agent--spinner-stop chat-buf)
