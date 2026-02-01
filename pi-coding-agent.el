@@ -273,10 +273,11 @@ Prefix arg toggles the behavior."
 
 (defun pi-coding-agent--path-to-language (path)
   "Return language name for PATH based on file extension.
-Returns nil if the extension is not recognized."
+Returns \"text\" for unrecognized extensions to ensure consistent fencing."
   (when path
     (let ((ext (downcase (or (file-name-extension path) ""))))
-      (cdr (assoc ext pi-coding-agent--extension-language-alist)))))
+      (or (cdr (assoc ext pi-coding-agent--extension-language-alist))
+          "text"))))
 
 ;;;; Major Modes
 
@@ -1575,56 +1576,68 @@ Checks both :path and :file_path keys for compatibility."
 (defun pi-coding-agent--truncate-to-visual-lines (content max-lines width)
   "Truncate CONTENT to fit within MAX-LINES visual lines at WIDTH.
 Also respects `pi-coding-agent-preview-max-bytes'.
+Strips blank lines for compact display but tracks original line numbers.
 
 Returns a plist with:
   :content      - the truncated content (or original if no truncation)
   :visual-lines - number of visual lines in result
-  :hidden-lines - number of raw lines that were hidden"
-  (let* ((lines (split-string content "\n" t))  ; omit empty strings from trailing newlines
-         (total-raw-lines (length lines))
+  :hidden-lines - raw lines hidden (including stripped blanks)
+  :line-map     - vector mapping displayed line to original line number"
+  (let* ((all-lines (split-string (string-trim-right content "\n+") "\n"))
+         (total-raw-lines (length all-lines))
          (visual-count 0)
          (byte-count 0)
          (max-bytes pi-coding-agent-preview-max-bytes)
          (result-lines nil)
-         (truncated-first-line nil))
-    ;; Accumulate lines until we'd exceed limits
+         (line-map nil)  ; list of original line numbers for kept lines
+         (truncated-first-line nil)
+         (original-line-num 0))
+    ;; Accumulate non-blank lines until we'd exceed limits
     (catch 'done
-      (dolist (line lines)
-        (let* ((line-len (length line))
-               ;; Visual lines: ceiling(length / width), minimum 1
-               (line-visual-lines (max 1 (ceiling (float line-len) width)))
-               (new-visual-count (+ visual-count line-visual-lines))
-               ;; +1 for newline between lines
-               (new-byte-count (+ byte-count line-len (if result-lines 1 0))))
-          ;; Check if adding this line would exceed limits
-          (cond
-           ;; Not first line and exceeds limits: stop
-           ((and result-lines
-                 (or (> new-visual-count max-lines)
-                     (> new-byte-count max-bytes)))
-            (throw 'done nil))
-           ;; First line exceeds limits: truncate it to fit
-           ((and (null result-lines)
-                 (or (> new-visual-count max-lines)
-                     (> new-byte-count max-bytes)))
-            (let* ((max-chars-by-visual (* max-lines width))
-                   (max-chars (min max-chars-by-visual max-bytes)))
-              (setq line (substring line 0 (min line-len max-chars)))
-              (setq line-len (length line))
-              (setq line-visual-lines (max 1 (ceiling (float line-len) width)))
-              (setq new-visual-count line-visual-lines)
-              (setq new-byte-count line-len)
-              (setq truncated-first-line t))))
-          (setq visual-count new-visual-count)
-          (setq byte-count new-byte-count)
-          (push line result-lines))))
+      (dolist (line all-lines)
+        (setq original-line-num (1+ original-line-num))
+        ;; Skip blank lines (they don't count toward visual limit)
+        (unless (string-empty-p line)
+          (let* ((line-len (length line))
+                 ;; Visual lines: ceiling(length / width), minimum 1
+                 (line-visual-lines (max 1 (ceiling (float line-len) width)))
+                 (new-visual-count (+ visual-count line-visual-lines))
+                 ;; +1 for newline between lines
+                 (new-byte-count (+ byte-count line-len (if result-lines 1 0))))
+            ;; Check if adding this line would exceed limits
+            (cond
+             ;; Not first line and exceeds limits: stop
+             ((and result-lines
+                   (or (> new-visual-count max-lines)
+                       (> new-byte-count max-bytes)))
+              (throw 'done nil))
+             ;; First line exceeds limits: truncate it to fit
+             ((and (null result-lines)
+                   (or (> new-visual-count max-lines)
+                       (> new-byte-count max-bytes)))
+              (let* ((max-chars-by-visual (* max-lines width))
+                     (max-chars (min max-chars-by-visual max-bytes)))
+                (setq line (substring line 0 (min line-len max-chars)))
+                (setq line-len (length line))
+                (setq line-visual-lines (max 1 (ceiling (float line-len) width)))
+                (setq new-visual-count line-visual-lines)
+                (setq new-byte-count line-len)
+                (setq truncated-first-line t))))
+            (setq visual-count new-visual-count)
+            (setq byte-count new-byte-count)
+            (push line result-lines)
+            (push original-line-num line-map)))))
     (let* ((kept-lines (nreverse result-lines))
-           ;; Count hidden lines - if first line was truncated, that's conceptually hidden content
-           (hidden (- total-raw-lines (length kept-lines))))
+           (line-map-vec (vconcat (nreverse line-map)))
+           (last-displayed (if (> (length line-map-vec) 0)
+                               (aref line-map-vec (1- (length line-map-vec)))
+                             0))
+           (hidden (- total-raw-lines last-displayed)))
       (list :content (string-join kept-lines "\n")
             :visual-lines visual-count
             ;; Report hidden lines; truncated first line means there's hidden content even with 1 line
-            :hidden-lines (if (and truncated-first-line (= hidden 0)) 1 hidden)))))
+            :hidden-lines (if (and truncated-first-line (= hidden 0)) 1 hidden)
+            :line-map line-map-vec))))
 
 (defun pi-coding-agent--tool-overlay-create (tool-name &optional path)
   "Create overlay for tool block TOOL-NAME at point.
@@ -1653,7 +1666,9 @@ it from extending to subsequent content.  Sets pending overlay to nil."
           (path (overlay-get pi-coding-agent--pending-tool-overlay
                              'pi-coding-agent-tool-path))
           (offset (overlay-get pi-coding-agent--pending-tool-overlay
-                               'pi-coding-agent-tool-offset)))
+                               'pi-coding-agent-tool-offset))
+          (line-map (overlay-get pi-coding-agent--pending-tool-overlay
+                                 'pi-coding-agent-line-map)))
       (delete-overlay pi-coding-agent--pending-tool-overlay)
       (let ((ov (make-overlay start end nil nil nil)))  ; rear-advance=nil
         (overlay-put ov 'pi-coding-agent-tool-block t)
@@ -1663,6 +1678,8 @@ it from extending to subsequent content.  Sets pending overlay to nil."
           (overlay-put ov 'pi-coding-agent-tool-path path))
         (when offset
           (overlay-put ov 'pi-coding-agent-tool-offset offset))
+        (when line-map
+          (overlay-put ov 'pi-coding-agent-line-map line-map))
         (overlay-put ov 'face face)))
     (setq pi-coding-agent--pending-tool-overlay nil)))
 
@@ -1871,6 +1888,11 @@ Shows preview lines with expandable toggle for long output."
         (when pi-coding-agent--pending-tool-overlay
           (overlay-put pi-coding-agent--pending-tool-overlay
                        'pi-coding-agent-tool-offset offset)))
+      ;; Store line map for navigation (maps displayed line to original line)
+      (when-let ((line-map (plist-get truncation :line-map)))
+        (when pi-coding-agent--pending-tool-overlay
+          (overlay-put pi-coding-agent--pending-tool-overlay
+                       'pi-coding-agent-line-map line-map)))
       ;; Finalize overlay - replace with non-rear-advance version
       (pi-coding-agent--tool-overlay-finalize
        (if is-error 'pi-coding-agent-tool-block-error 'pi-coding-agent-tool-block-success))
@@ -2027,16 +2049,27 @@ Returns nil if not inside a code block or if on the fence line itself."
 (defun pi-coding-agent--tool-line-at-point (overlay)
   "Calculate file line number at point for tool OVERLAY.
 For edit diffs: parse line from +/- format.
-For read/write: count lines in code block + offset."
+For read/write: count lines from header + apply line-map for stripped blanks."
   (let ((tool-name (overlay-get overlay 'pi-coding-agent-tool-name))
-        (offset (or (overlay-get overlay 'pi-coding-agent-tool-offset) 1)))
+        (offset (or (overlay-get overlay 'pi-coding-agent-tool-offset) 1))
+        (line-map (overlay-get overlay 'pi-coding-agent-line-map))
+        (header-end (overlay-get overlay 'pi-coding-agent-header-end)))
     (or
      ;; Edit diff format: explicit line number
      (and (equal tool-name "edit") (pi-coding-agent--diff-line-at-point))
-     ;; Code block position + offset
+     ;; Use line-map if available (handles stripped blank lines)
+     (when (and line-map header-end)
+       (save-excursion
+         (let* ((current-line (line-number-at-pos))
+                (header-line (line-number-at-pos header-end))
+                (lines-from-header (- current-line header-line))
+                (map-index (1- lines-from-header)))
+           (when (and (>= map-index 0) (< map-index (length line-map)))
+             (+ (aref line-map map-index) (1- offset))))))
+     ;; Fallback: code block position + offset (for expanded view or no line-map)
      (when-let ((block-line (pi-coding-agent--code-block-line-at-point)))
        (+ block-line (1- offset)))
-     ;; Fallback to line 1
+     ;; Last fallback to line 1
      1)))
 
 (defun pi-coding-agent-visit-file (&optional toggle)
