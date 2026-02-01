@@ -53,6 +53,19 @@ Automatically cleans up chat and input buffers."
   (let ((name (pi-coding-agent--buffer-name :chat (expand-file-name "~/myproject/"))))
     (should (string-match-p "~" name))))
 
+(ert-deftest pi-coding-agent-test-path-to-language-known-extension ()
+  "path-to-language returns correct language for known extensions."
+  (should (equal "python" (pi-coding-agent--path-to-language "/tmp/foo.py")))
+  (should (equal "javascript" (pi-coding-agent--path-to-language "/tmp/bar.js")))
+  (should (equal "emacs-lisp" (pi-coding-agent--path-to-language "/tmp/baz.el"))))
+
+(ert-deftest pi-coding-agent-test-path-to-language-unknown-extension ()
+  "path-to-language returns 'text' for unknown extensions.
+This ensures all files get code fences for consistent display."
+  (should (equal "text" (pi-coding-agent--path-to-language "/tmp/foo.txt")))
+  (should (equal "text" (pi-coding-agent--path-to-language "/tmp/bar.xyz")))
+  (should (equal "text" (pi-coding-agent--path-to-language "/tmp/noext"))))
+
 ;;; Buffer Creation
 
 (ert-deftest pi-coding-agent-test-get-or-create-buffer-creates-new ()
@@ -1862,6 +1875,33 @@ since we don't display them locally. Let pi's message_start handle it."
       (pi-coding-agent-visit-file))
     ;; Line 2 in code block + offset 100 - 1 = 101
     (should (= 101 (line-number-at-pos)))
+    (ignore-errors (kill-buffer "*test-target*"))))
+
+(ert-deftest pi-coding-agent-test-visit-file-accounts-for-stripped-blank-lines ()
+  "visit-file navigates to correct original line even when blank lines stripped.
+File has blanks at lines 3,5. Pressing RET on 'line06' should go to line 6."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    ;; File: line01, line02, (blank), line04, (blank), line06...line15
+    (pi-coding-agent--display-tool-start "read" '(:path "/tmp/test.txt"))
+    (pi-coding-agent--display-tool-end "read" '(:path "/tmp/test.txt")
+                          '((:type "text" :text "line01\nline02\n\nline04\n\nline06\nline07\nline08\nline09\nline10\nline11\nline12\nline13\nline14\nline15"))
+                          nil nil)
+    (goto-char (point-min))
+    (search-forward "line06")
+    (beginning-of-line)
+    ;; Note: forward-line can't be mocked in byte-compiled code (inlined)
+    ;; Instead, check line-number-at-pos after visit-file completes
+    (cl-letf (((symbol-function 'find-file-other-window)
+               (lambda (_path)
+                 (set-buffer (get-buffer-create "*test-target*"))
+                 (erase-buffer)
+                 (dotimes (_ 20) (insert "line\n"))
+                 (goto-char (point-min))
+                 (current-buffer))))
+      (pi-coding-agent-visit-file))
+    ;; Should navigate to line 6, not line 4 (2 blank lines stripped)
+    (should (= 6 (line-number-at-pos)))
     (ignore-errors (kill-buffer "*test-target*"))))
 
 ;;; Visual Line Truncation Tests
