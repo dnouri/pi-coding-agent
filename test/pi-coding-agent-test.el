@@ -550,6 +550,136 @@ not relying on current buffer context which may change before callback executes.
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
+(ert-deftest pi-coding-agent-test-send-queues-locally-while-compacting ()
+  "pi-coding-agent-send adds to local queue while compacting, no RPC sent."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-compact*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-queue-compact-input*"))
+        (rpc-called nil)
+        (message-shown nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'compacting)
+            (setq pi-coding-agent--input-buffer input-buf)
+            (setq pi-coding-agent--followup-queue nil))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "My message during compaction")
+            (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_proc _cmd _cb) (setq rpc-called t)))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest _)
+                         (when (and fmt (string-match-p "queued" (downcase fmt)))
+                           (setq message-shown t)))))
+              (pi-coding-agent-send))
+            ;; Should NOT have called RPC (local queue instead)
+            (should-not rpc-called)
+            ;; Should have added to local queue in chat buffer
+            (with-current-buffer chat-buf
+              (should (equal pi-coding-agent--followup-queue '("My message during compaction"))))
+            ;; Should have shown queued message
+            (should message-shown)
+            ;; Input should be cleared (message accepted)
+            (should (string-empty-p (buffer-string)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-slash-compact-handled-locally-not-sent-as-prompt ()
+  "/compact in input buffer invokes pi-coding-agent-compact locally, not sent to pi."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-slash-compact*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-slash-compact-input*"))
+        (compact-called nil)
+        (compact-args nil)
+        (prompt-sent nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle)
+            (setq pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "/compact")
+            (cl-letf (((symbol-function 'pi-coding-agent-compact)
+                       (lambda (&optional args) (setq compact-called t compact-args args)))
+                      ((symbol-function 'pi-coding-agent--send-prompt)
+                       (lambda (_) (setq prompt-sent t))))
+              (pi-coding-agent-send))
+            ;; Should have called compact function with no args
+            (should compact-called)
+            (should (null compact-args))
+            ;; Should NOT have sent as prompt
+            (should-not prompt-sent)
+            ;; Input should be cleared
+            (should (string-empty-p (buffer-string)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-slash-compact-with-args-passes-instructions ()
+  "/compact with args passes custom instructions to compact function."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-slash-compact-args*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-slash-compact-args-input*"))
+        (compact-called nil)
+        (compact-args nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle)
+            (setq pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "/compact focus on the API design decisions")
+            (cl-letf (((symbol-function 'pi-coding-agent-compact)
+                       (lambda (&optional args) (setq compact-called t compact-args args))))
+              (pi-coding-agent-send))
+            ;; Should have called compact function with custom instructions
+            (should compact-called)
+            (should (equal compact-args "focus on the API design decisions"))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-auto-compaction-success-sends-queued-messages ()
+  "auto_compaction_end with aborted=false processes followup queue.
+Uses :false (JSON false representation) to verify boolean normalization."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((sent-text nil))
+      (setq pi-coding-agent--status 'compacting)
+      (setq pi-coding-agent--followup-queue '("queued message"))
+      (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
+                 (lambda (text) (setq sent-text text))))
+        (pi-coding-agent--handle-display-event
+         '(:type "auto_compaction_end"
+           :aborted :false
+           :result (:tokensBefore 1000 :summary "Summary" :timestamp 1234567890000))))
+      ;; Queue should be empty after processing
+      (should (null pi-coding-agent--followup-queue))
+      ;; The queued message should have been sent
+      (should (equal sent-text "queued message")))))
+
+(ert-deftest pi-coding-agent-test-auto-compaction-end-aborted-clears-queue ()
+  "auto_compaction_end when aborted clears followup queue without sending."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((sent-text nil))
+      (setq pi-coding-agent--status 'compacting)
+      (setq pi-coding-agent--followup-queue '("queued message"))
+      (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
+                 (lambda (text) (setq sent-text text))))
+        ;; Simulate auto_compaction_end event (aborted)
+        (pi-coding-agent--handle-display-event
+         '(:type "auto_compaction_end"
+           :aborted t)))
+      ;; Queue should be cleared (user cancelled)
+      (should (null pi-coding-agent--followup-queue))
+      ;; No message should have been sent
+      (should (null sent-text)))))
+
 ;;; Response Display
 
 (ert-deftest pi-coding-agent-test-append-to-chat-inserts-text ()
@@ -5097,9 +5227,10 @@ The advice limits this scan to `pi-coding-agent-markdown-search-limit' bytes."
 
 (ert-deftest pi-coding-agent-test-run-custom-command-empty-args ()
   "run-custom-command with empty args sends just /command."
+  ;; Note: Use "mycommand" not "compact" to avoid collision with built-in /compact handling
   (let* ((sent-message nil)
          (fake-proc (start-process "test" nil "cat"))
-         (cmd '(:name "compact" :description "Compact" :source "extension")))
+         (cmd '(:name "mycommand" :description "My Command" :source "extension")))
     (unwind-protect
         (with-temp-buffer
           (pi-coding-agent-chat-mode)
@@ -5112,6 +5243,6 @@ The advice limits this scan to `pi-coding-agent-markdown-search-limit' bytes."
                       ((symbol-function 'read-string)
                        (lambda (_prompt) "")))
               (pi-coding-agent--run-custom-command cmd)
-              ;; Should send just /compact without trailing space
-              (should (equal sent-message "/compact")))))
+              ;; Should send just /mycommand without trailing space
+              (should (equal sent-message "/mycommand")))))
       (delete-process fake-proc))))
