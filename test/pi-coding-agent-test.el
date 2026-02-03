@@ -217,36 +217,45 @@ This ensures all files get code fences for consistent display."
     (should (= 0 (hash-table-count pi-coding-agent--tool-args-cache)))))
 
 (ert-deftest pi-coding-agent-test-new-session-clears-buffer-from-different-context ()
-  "New session callback clears chat buffer even when called from different buffer.
+  "New session clears buffer and updates state even when callback runs elsewhere.
 This tests that the async callback properly captures the chat buffer reference,
-not relying on current buffer context which may change before callback executes."
+not relying on current buffer context which may change before callback executes.
+Also verifies that the new session-file is stored in state for reload to work."
   (let ((chat-buf (generate-new-buffer "*pi-coding-agent-chat:/tmp/test-new-session/*"))
         (captured-callback nil))
     (unwind-protect
         (progn
-          ;; Set up chat buffer with content
+          ;; Set up chat buffer with content and old state
           (with-current-buffer chat-buf
             (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--state '(:session-file "/tmp/old-session.jsonl"))
             (let ((inhibit-read-only t))
               (insert "Existing conversation content\nMore content here")))
-          ;; Mock the RPC to capture the callback
+          ;; Mock the RPC to capture the new_session callback and handle get_state
           (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
                     ((symbol-function 'pi-coding-agent--get-chat-buffer) (lambda () chat-buf))
                     ((symbol-function 'pi-coding-agent--rpc-async)
-                     (lambda (_proc _cmd cb) (setq captured-callback cb)))
+                     (lambda (_proc cmd cb)
+                       (cond
+                        ((equal (plist-get cmd :type) "new_session")
+                         (setq captured-callback cb))
+                        ((equal (plist-get cmd :type) "get_state")
+                         (funcall cb '(:success t :data (:sessionFile "/tmp/new-session.jsonl")))))))
                     ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
             ;; Call new-session from the chat buffer
             (with-current-buffer chat-buf
-              (pi-coding-agent-new-session)))
-          ;; Now simulate the async callback being called from a DIFFERENT buffer
-          ;; (This is what happens in practice - callbacks run in arbitrary contexts)
-          (with-temp-buffer
-            (funcall captured-callback '(:success t :data (:cancelled :false))))
-          ;; The chat buffer should have been cleared
+              (pi-coding-agent-new-session))
+            ;; Simulate callback being called from a DIFFERENT buffer
+            ;; (This is what happens in practice - callbacks run in arbitrary contexts)
+            (with-temp-buffer
+              (funcall captured-callback '(:success t :data (:cancelled :false)))))
+          ;; Verify buffer was cleared
           (with-current-buffer chat-buf
             (should-not (string-match-p "Existing conversation" (buffer-string)))
-            ;; Should show startup header instead
-            (should (string-match-p "C-c C-c" (buffer-string)))))
+            (should (string-match-p "C-c C-c" (buffer-string)))
+            ;; Verify state was updated with new session file (the actual bug fix)
+            (should (equal (plist-get pi-coding-agent--state :session-file)
+                           "/tmp/new-session.jsonl"))))
       (when (buffer-live-p chat-buf)
         (kill-buffer chat-buf)))))
 
@@ -4483,6 +4492,38 @@ arbitrary buffer context (e.g., process sentinel)."
         ;; Header string should reflect new state
         (should (string-match-p "new-model" header-after))
         (should (string-match-p "high" header-after))))))
+
+(ert-deftest pi-coding-agent-test-apply-state-response-updates-buffer ()
+  "Apply state response updates buffer-local variables in correct buffer."
+  (let ((chat-buf (generate-new-buffer "*test-apply-state*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--state nil
+                  pi-coding-agent--status nil))
+          ;; Call from a different buffer to verify buffer context handling
+          (with-temp-buffer
+            (pi-coding-agent--apply-state-response
+             chat-buf
+             '(:success t :data (:isStreaming :false
+                                 :sessionFile "/tmp/test.jsonl"
+                                 :model "test-model"))))
+          ;; Verify state was updated in chat-buf, not temp buffer
+          (with-current-buffer chat-buf
+            (should (eq pi-coding-agent--status 'idle))
+            (should (equal (plist-get pi-coding-agent--state :session-file)
+                           "/tmp/test.jsonl"))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-apply-state-response-handles-dead-buffer ()
+  "Apply state response handles dead buffer gracefully."
+  (let ((chat-buf (generate-new-buffer "*test-dead-buf*")))
+    (kill-buffer chat-buf)
+    ;; Should not error when buffer is dead
+    (pi-coding-agent--apply-state-response
+     chat-buf
+     '(:success t :data (:sessionFile "/tmp/test.jsonl")))))
 
 (ert-deftest pi-coding-agent-test-header-line-model-is-clickable ()
   "Model name in header-line has click properties."
