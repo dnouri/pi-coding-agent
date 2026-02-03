@@ -1554,19 +1554,16 @@ Strips markdown syntax that `markdown-hide-markup' would hide:
 - Links: [text](url) -> text
 - Images: ![alt](url) -> alt
 - Bold: **text** -> text
-- Italic: *text* -> text (but not inside words)
-- Code: `text` -> text"
-  ;; Process in order: links/images first (contain other syntax), then inline
+- Italic: *text* -> text
+- Code: `text` -> text
+
+Order matters: images before links (both use brackets), bold before
+italic (both use asterisks)."
   (let ((result s))
-    ;; Images: ![alt](url) -> alt
     (setq result (replace-regexp-in-string "!\\[\\([^]]*\\)\\]([^)]*)" "\\1" result))
-    ;; Links: [text](url) -> text
     (setq result (replace-regexp-in-string "\\[\\([^]]*\\)\\]([^)]*)" "\\1" result))
-    ;; Bold: **text** -> text
     (setq result (replace-regexp-in-string "\\*\\*\\([^*]+\\)\\*\\*" "\\1" result))
-    ;; Italic: *text* -> text (standalone, not **bold**)
-    (setq result (replace-regexp-in-string "\\(?:^\\|[^*]\\)\\*\\([^*]+\\)\\*\\(?:[^*]\\|$\\)" "\\1" result))
-    ;; Inline code: `text` -> text
+    (setq result (replace-regexp-in-string "\\*\\([^* \t\n]+\\)\\*" "\\1" result))
     (setq result (replace-regexp-in-string "`\\([^`]+\\)`" "\\1" result))
     (string-width result)))
 
