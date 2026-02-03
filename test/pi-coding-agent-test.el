@@ -5287,3 +5287,127 @@ The advice limits this scan to `pi-coding-agent-markdown-search-limit' bytes."
               ;; Should send just /mycommand without trailing space
               (should (equal sent-message "/mycommand")))))
       (delete-process fake-proc))))
+
+;;; Table Alignment with Hidden Markup
+
+(defun pi-coding-agent-test--table-col-width (buffer-content)
+  "Extract first column width from table separator in BUFFER-CONTENT."
+  (let* ((lines (split-string buffer-content "\n"))
+         (sep-line (cl-find-if (lambda (l) (string-match-p "^|[-|]+|$" l)) lines)))
+    (when (and sep-line (string-match "^|\\([-]+\\)|" sep-line))
+      (length (match-string 1 sep-line)))))
+
+(ert-deftest pi-coding-agent-test-table-alignment-with-links ()
+  "Column sized for visible link text, not raw [text](url) syntax."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-message-delta
+     "| Issue | Title |\n|---|---|\n| [#1](http://example.com/1) | Fix bug |\n")
+    (pi-coding-agent--render-complete-message)
+    (let ((col-width (pi-coding-agent-test--table-col-width (buffer-string))))
+      (should col-width)
+      (should (< col-width 15)))))
+
+(ert-deftest pi-coding-agent-test-table-alignment-with-bold ()
+  "Column sized for visible bold text, not raw **text** syntax."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-message-delta
+     "| X |\n|---|\n| **VeryLongBold** |\n")
+    (pi-coding-agent--render-complete-message)
+    (let ((col-width (pi-coding-agent-test--table-col-width (buffer-string))))
+      (should col-width)
+      (should (<= col-width 15)))))
+
+(ert-deftest pi-coding-agent-test-table-alignment-with-images ()
+  "Column sized for image alt text, not raw ![alt](url) syntax."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-message-delta
+     "| Image | Name |\n|---|---|\n| ![Logo](http://example.com/logo.png) | Test |\n")
+    (pi-coding-agent--render-complete-message)
+    (let ((col-width (pi-coding-agent-test--table-col-width (buffer-string))))
+      (should col-width)
+      (should (< col-width 15)))))
+
+(ert-deftest pi-coding-agent-test-table-alignment-with-inline-code ()
+  "Column sized for code content, not raw \`code\` syntax."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-message-delta
+     "| X |\n|---|\n| `verylongcommand` |\n")
+    (pi-coding-agent--render-complete-message)
+    (let ((col-width (pi-coding-agent-test--table-col-width (buffer-string))))
+      (should col-width)
+      (should (<= col-width 18)))))
+
+(ert-deftest pi-coding-agent-test-table-alignment-multiple-links ()
+  "Column sized for combined visible link texts."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-message-delta
+     "| Related |\n|---|\n| [A](http://a.com), [B](http://b.com) |\n")
+    (pi-coding-agent--render-complete-message)
+    (let ((col-width (pi-coding-agent-test--table-col-width (buffer-string))))
+      (should col-width)
+      (should (< col-width 15)))))
+
+(ert-deftest pi-coding-agent-test-markdown-visible-width-links ()
+  "Visible width strips link URLs correctly."
+  (should (= (pi-coding-agent--markdown-visible-width "[text](http://example.com)")
+             (string-width "text")))
+  (should (= (pi-coding-agent--markdown-visible-width "[#123](http://github.com/issues/123)")
+             (string-width "#123")))
+  ;; Multiple links
+  (should (= (pi-coding-agent--markdown-visible-width "[A](http://a.com), [B](http://b.com)")
+             (string-width "A, B"))))
+
+(ert-deftest pi-coding-agent-test-markdown-visible-width-images ()
+  "Visible width strips image URLs correctly."
+  (should (= (pi-coding-agent--markdown-visible-width "![alt text](http://example.com/img.png)")
+             (string-width "alt text"))))
+
+(ert-deftest pi-coding-agent-test-markdown-visible-width-bold ()
+  "Visible width strips bold markers correctly."
+  (should (= (pi-coding-agent--markdown-visible-width "**bold**")
+             (string-width "bold")))
+  (should (= (pi-coding-agent--markdown-visible-width "normal **bold** normal")
+             (string-width "normal bold normal"))))
+
+(ert-deftest pi-coding-agent-test-markdown-visible-width-code ()
+  "Visible width strips inline code backticks correctly."
+  (should (= (pi-coding-agent--markdown-visible-width "`code`")
+             (string-width "code")))
+  (should (= (pi-coding-agent--markdown-visible-width "run `ls -la` command")
+             (string-width "run ls -la command"))))
+
+(ert-deftest pi-coding-agent-test-markdown-visible-width-plain ()
+  "Visible width returns plain text unchanged."
+  (should (= (pi-coding-agent--markdown-visible-width "plain text")
+             (string-width "plain text")))
+  (should (= (pi-coding-agent--markdown-visible-width "12345")
+             5)))
+
+(ert-deftest pi-coding-agent-test-markdown-visible-width-italic ()
+  "Visible width strips italic markers correctly."
+  (should (= (pi-coding-agent--markdown-visible-width "*italic*")
+             (string-width "italic")))
+  (should (= (pi-coding-agent--markdown-visible-width "normal *italic* text")
+             (string-width "normal italic text"))))
+
+(ert-deftest pi-coding-agent-test-table-alignment-with-italic ()
+  "Column sized for visible italic text, not raw *text* syntax."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-message-delta
+     "| X |\n|---|\n| *VeryLongItalic* |\n")
+    (pi-coding-agent--render-complete-message)
+    (let ((col-width (pi-coding-agent-test--table-col-width (buffer-string))))
+      (should col-width)
+      (should (<= col-width 17)))))

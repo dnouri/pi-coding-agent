@@ -1548,14 +1548,37 @@ cancels, the session remains intact."
       (when (window-live-p win)
         (ignore-errors (delete-window win))))))
 
+(defun pi-coding-agent--markdown-visible-width (s)
+  "Return display width of S with markdown markup removed.
+Strips markdown syntax that `markdown-hide-markup' would hide:
+- Links: [text](url) -> text
+- Images: ![alt](url) -> alt
+- Bold: **text** -> text
+- Italic: *text* -> text
+- Code: `text` -> text
+
+Order matters: images before links (both use brackets), bold before
+italic (both use asterisks)."
+  (let ((result s))
+    (setq result (replace-regexp-in-string "!\\[\\([^]]*\\)\\]([^)]*)" "\\1" result))
+    (setq result (replace-regexp-in-string "\\[\\([^]]*\\)\\]([^)]*)" "\\1" result))
+    (setq result (replace-regexp-in-string "\\*\\*\\([^*]+\\)\\*\\*" "\\1" result))
+    (setq result (replace-regexp-in-string "\\*\\([^* \t\n]+\\)\\*" "\\1" result))
+    (setq result (replace-regexp-in-string "`\\([^`]+\\)`" "\\1" result))
+    (string-width result)))
+
 (defun pi-coding-agent--align-tables-in-region (start end)
-  "Align all markdown tables between START and END."
+  "Align all markdown tables between START and END.
+Uses visible text width for column sizing, accounting for hidden markup."
   (save-excursion
     (goto-char start)
     (while (and (< (point) end)
                 (re-search-forward "^|" end t))
       (when (markdown-table-at-point-p)
-        (markdown-table-align)))))
+        ;; Override markdown's string-width to use visible width
+        (cl-letf (((symbol-function 'markdown--string-width)
+                   #'pi-coding-agent--markdown-visible-width))
+          (markdown-table-align))))))
 
 (defun pi-coding-agent--render-complete-message ()
   "Finalize completed message by applying font-lock and aligning tables.
