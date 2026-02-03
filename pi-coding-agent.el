@@ -2498,6 +2498,18 @@ Accesses state from the linked chat buffer."
                              (with-selected-window win
                                (force-mode-line-update))))))))))
 
+(defun pi-coding-agent--apply-state-response (chat-buf response)
+  "Apply get_state RESPONSE to CHAT-BUF.
+Updates buffer-local state variables and refreshes mode-line.
+Safely handles dead buffers by checking liveness first."
+  (when (and (plist-get response :success)
+             (buffer-live-p chat-buf))
+    (with-current-buffer chat-buf
+      (let ((new-state (pi-coding-agent--extract-state-from-response response)))
+        (setq pi-coding-agent--status (plist-get new-state :status)
+              pi-coding-agent--state new-state))
+      (force-mode-line-update t))))
+
 ;;;; Slash Commands via RPC
 
 (defvar-local pi-coding-agent--commands nil
@@ -2559,6 +2571,10 @@ COMMANDS is a list of plists with :name, :description, :source."
                              (with-current-buffer chat-buf
                                (pi-coding-agent--clear-chat-buffer)
                                (pi-coding-agent--refresh-header))
+                             ;; Refresh state to get new session-file
+                             (pi-coding-agent--rpc-async proc '(:type "get_state")
+                               (lambda (resp)
+                                 (pi-coding-agent--apply-state-response chat-buf resp)))
                              (message "Pi: New session started"))
                          (message "Pi: New session cancelled")))))))
 
@@ -2928,12 +2944,8 @@ using the cached session file."
                                        (pi-coding-agent--update-session-name-from-file session-file)))
                                    ;; Reload state
                                    (pi-coding-agent--rpc-async new-proc '(:type "get_state")
-                                                  (lambda (state-response)
-                                                    (when (plist-get state-response :success)
-                                                      (let ((new-state (pi-coding-agent--extract-state-from-response state-response)))
-                                                        (setq pi-coding-agent--status (plist-get new-state :status)
-                                                              pi-coding-agent--state new-state))
-                                                      (force-mode-line-update t))))
+                                     (lambda (resp)
+                                       (pi-coding-agent--apply-state-response chat-buf resp)))
                                    ;; Reload commands (extensions, templates, skills may have changed)
                                    (pi-coding-agent--fetch-commands new-proc
                                      (lambda (commands)
@@ -2978,6 +2990,10 @@ using the cached session file."
                                      (when (buffer-live-p chat-buf)
                                        (with-current-buffer chat-buf
                                          (pi-coding-agent--update-session-name-from-file selected-path)))
+                                     ;; Refresh state to get new session-file
+                                     (pi-coding-agent--rpc-async proc '(:type "get_state")
+                                       (lambda (resp)
+                                         (pi-coding-agent--apply-state-response chat-buf resp)))
                                      (pi-coding-agent--load-session-history
                                       proc
                                       (lambda (count)
@@ -3237,6 +3253,10 @@ MESSAGES is a vector of plists from get_fork_messages."
                          (if (plist-get response :success)
                              (let* ((data (plist-get response :data))
                                     (text (plist-get data :text)))
+                               ;; Refresh state to get new session-file
+                               (pi-coding-agent--rpc-async proc '(:type "get_state")
+                                 (lambda (resp)
+                                   (pi-coding-agent--apply-state-response chat-buf resp)))
                                ;; Reload and display the forked session
                                (pi-coding-agent--load-session-history
                                 proc
@@ -3788,17 +3808,14 @@ Returns the chat buffer."
           (let ((buf chat-buf)
                 (proc pi-coding-agent--process))  ; Capture for closures
             (pi-coding-agent--rpc-async proc '(:type "get_state")
-                           (lambda (response)
-                             (when (and (plist-get response :success)
-                                        (buffer-live-p buf))
-                               (with-current-buffer buf
-                                 (let ((new-state (pi-coding-agent--extract-state-from-response response)))
-                                   (setq pi-coding-agent--status (plist-get new-state :status)
-                                         pi-coding-agent--state new-state))
-                                 ;; Check if no model available and warn user
-                                 (unless (plist-get pi-coding-agent--state :model)
-                                   (pi-coding-agent--display-no-model-warning))
-                                 (force-mode-line-update t)))))
+              (lambda (response)
+                (pi-coding-agent--apply-state-response buf response)
+                ;; Check if no model available and warn user
+                (when (and (plist-get response :success)
+                           (buffer-live-p buf))
+                  (with-current-buffer buf
+                    (unless (plist-get pi-coding-agent--state :model)
+                      (pi-coding-agent--display-no-model-warning))))))
             ;; Fetch commands via RPC (independent of get_state)
             (pi-coding-agent--fetch-commands proc
               (lambda (commands)
