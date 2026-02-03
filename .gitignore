@@ -16,3 +16,6 @@
 
 # Local scratch directory
 tmp/
+
+# Local pi prompts and config
+.pi/
