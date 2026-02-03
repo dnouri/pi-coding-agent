@@ -5287,3 +5287,140 @@ The advice limits this scan to `pi-coding-agent-markdown-search-limit' bytes."
               ;; Should send just /mycommand without trailing space
               (should (equal sent-message "/mycommand")))))
       (delete-process fake-proc))))
+
+;;; Table Alignment with Hidden Markup
+
+(ert-deftest pi-coding-agent-test-table-alignment-with-links ()
+  "Tables with markdown links align based on visible text, not raw markup.
+Links like [text](url) should be sized for 'text' width, not full syntax."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    ;; Insert table with markdown links
+    ;; [#1](http://example.com/1) = 27 chars raw, but displays as "#1" = 2 chars
+    (pi-coding-agent--display-message-delta
+     "| Issue | Title |\n|---|---|\n| [#1](http://example.com/1) | Fix bug |\n")
+    (pi-coding-agent--render-complete-message)
+    ;; The Issue column should be sized for visible text "#1" (2-5 chars)
+    ;; NOT for the full link syntax (27 chars)
+    ;; Check that the separator isn't massively oversized
+    (let* ((lines (split-string (buffer-string) "\n"))
+           (sep-line (cl-find-if (lambda (l) (string-match-p "^|[-|]+|$" l)) lines)))
+      (when sep-line
+        ;; Extract first column separator width (between first two |)
+        (string-match "^|\\([-]+\\)|" sep-line)
+        (let ((col1-width (length (match-string 1 sep-line))))
+          ;; Should be around 5 chars (for "Issue"), not 27+ chars
+          (should (< col1-width 15)))))))
+
+(ert-deftest pi-coding-agent-test-table-alignment-with-bold ()
+  "Tables with bold text align based on visible text, not markup.
+**text** should be sized for 'text' width, not include the asterisks."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    ;; Use short header "X" so **VeryLongBold** determines column width
+    ;; **VeryLongBold** = 16 chars raw, displays as "VeryLongBold" = 12 chars
+    (pi-coding-agent--display-message-delta
+     "| X |\n|---|\n| **VeryLongBold** |\n")
+    (pi-coding-agent--render-complete-message)
+    (let* ((lines (split-string (buffer-string) "\n"))
+           (sep-line (cl-find-if (lambda (l) (string-match-p "^|[-]+|$" l)) lines)))
+      (when sep-line
+        (string-match "^|\\([-]+\\)|" sep-line)
+        (let ((col-width (length (match-string 1 sep-line))))
+          ;; Should be ~14 chars (for visible "VeryLongBold" + padding)
+          ;; Not 18+ chars (for raw "**VeryLongBold**")
+          (should (<= col-width 15)))))))
+
+(ert-deftest pi-coding-agent-test-table-alignment-with-images ()
+  "Tables with markdown images align based on alt text, not full syntax.
+![alt](url) should be sized for 'alt' width, not full syntax."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    ;; ![Logo](http://example.com/logo.png) = 38 chars, displays as "Logo" = 4 chars
+    (pi-coding-agent--display-message-delta
+     "| Image | Name |\n|---|---|\n| ![Logo](http://example.com/logo.png) | Test |\n")
+    (pi-coding-agent--render-complete-message)
+    (let* ((lines (split-string (buffer-string) "\n"))
+           (sep-line (cl-find-if (lambda (l) (string-match-p "^|[-|]+|$" l)) lines)))
+      (when sep-line
+        (string-match "^|\\([-]+\\)|" sep-line)
+        (let ((col1-width (length (match-string 1 sep-line))))
+          ;; Should be around 5 chars (for "Image"), not 38+ chars
+          (should (< col1-width 15)))))))
+
+(ert-deftest pi-coding-agent-test-table-alignment-with-inline-code ()
+  "Tables with inline code align based on content, not backticks.
+\`code\` should be sized for 'code' width, not include backticks."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    ;; Use short header so code determines width
+    ;; `verylongcommand` = 17 chars raw, displays as "verylongcommand" = 15 chars
+    (pi-coding-agent--display-message-delta
+     "| X |\n|---|\n| `verylongcommand` |\n")
+    (pi-coding-agent--render-complete-message)
+    (let* ((lines (split-string (buffer-string) "\n"))
+           (sep-line (cl-find-if (lambda (l) (string-match-p "^|[-]+|$" l)) lines)))
+      (when sep-line
+        (string-match "^|\\([-]+\\)|" sep-line)
+        (let ((col-width (length (match-string 1 sep-line))))
+          ;; Should be ~17 chars (for visible "verylongcommand" + padding)
+          ;; Not 19+ chars (for raw "`verylongcommand`")
+          (should (<= col-width 18)))))))
+
+(ert-deftest pi-coding-agent-test-table-alignment-multiple-links ()
+  "Tables with multiple links per cell size correctly.
+Each link contributes only its anchor text width."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    ;; [A](http://a.com), [B](http://b.com) = 38 chars, displays as "A, B" = 4 chars
+    (pi-coding-agent--display-message-delta
+     "| Related |\n|---|\n| [A](http://a.com), [B](http://b.com) |\n")
+    (pi-coding-agent--render-complete-message)
+    (let* ((lines (split-string (buffer-string) "\n"))
+           (sep-line (cl-find-if (lambda (l) (string-match-p "^|[-]+|$" l)) lines)))
+      (when sep-line
+        (string-match "^|\\([-]+\\)|" sep-line)
+        (let ((col-width (length (match-string 1 sep-line))))
+          ;; Should be around 7 chars (for "Related"), not 38+ chars
+          (should (< col-width 15)))))))
+
+(ert-deftest pi-coding-agent-test-markdown-visible-width-links ()
+  "Visible width strips link URLs correctly."
+  (should (= (pi-coding-agent--markdown-visible-width "[text](http://example.com)")
+             (string-width "text")))
+  (should (= (pi-coding-agent--markdown-visible-width "[#123](http://github.com/issues/123)")
+             (string-width "#123")))
+  ;; Multiple links
+  (should (= (pi-coding-agent--markdown-visible-width "[A](http://a.com), [B](http://b.com)")
+             (string-width "A, B"))))
+
+(ert-deftest pi-coding-agent-test-markdown-visible-width-images ()
+  "Visible width strips image URLs correctly."
+  (should (= (pi-coding-agent--markdown-visible-width "![alt text](http://example.com/img.png)")
+             (string-width "alt text"))))
+
+(ert-deftest pi-coding-agent-test-markdown-visible-width-bold ()
+  "Visible width strips bold markers correctly."
+  (should (= (pi-coding-agent--markdown-visible-width "**bold**")
+             (string-width "bold")))
+  (should (= (pi-coding-agent--markdown-visible-width "normal **bold** normal")
+             (string-width "normal bold normal"))))
+
+(ert-deftest pi-coding-agent-test-markdown-visible-width-code ()
+  "Visible width strips inline code backticks correctly."
+  (should (= (pi-coding-agent--markdown-visible-width "`code`")
+             (string-width "code")))
+  (should (= (pi-coding-agent--markdown-visible-width "run `ls -la` command")
+             (string-width "run ls -la command"))))
+
+(ert-deftest pi-coding-agent-test-markdown-visible-width-plain ()
+  "Visible width returns plain text unchanged."
+  (should (= (pi-coding-agent--markdown-visible-width "plain text")
+             (string-width "plain text")))
+  (should (= (pi-coding-agent--markdown-visible-width "12345")
+             5)))
