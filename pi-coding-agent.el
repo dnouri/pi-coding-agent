@@ -35,6 +35,11 @@
 ;; Requirements:
 ;;   - pi coding agent installed and in PATH
 ;;
+;; Optional Dependencies:
+;;   - phscroll: Markdown tables that exceed the window width wrap awkwardly.
+;;     phscroll enables horizontal scrolling so tables stay readable.
+;;     Install from: https://github.com/misohena/phscroll
+;;
 ;; Usage:
 ;;   M-x pi           Start a session in current project
 ;;   C-u M-x pi       Start a named session
@@ -75,6 +80,11 @@
 (require 'project)
 (require 'markdown-mode)
 (require 'ansi-color)
+
+;; Optional: phscroll for horizontal table scrolling
+(require 'phscroll nil t)
+(declare-function phscroll-mode "phscroll" (&optional arg))
+(declare-function phscroll-region "phscroll" (beg end))
 
 ;;;; Customization Group
 
@@ -133,6 +143,18 @@ Prevents huge single-line outputs from blowing up the chat buffer."
 When non-nil, RET on a line in tool output opens in other window.
 When nil, RET opens in the same window.
 Prefix arg toggles the behavior."
+  :type 'boolean
+  :group 'pi-coding-agent)
+
+(defcustom pi-coding-agent-table-horizontal-scroll t
+  "Whether to enable horizontal scrolling for wide tables.
+When non-nil and `phscroll' is available, wide tables scroll
+horizontally instead of wrapping awkwardly.
+
+Requires the `phscroll' package (not on MELPA).
+See URL `https://github.com/misohena/phscroll' for installation.
+
+When phscroll is not available, tables wrap like other content."
   :type 'boolean
   :group 'pi-coding-agent)
 
@@ -348,6 +370,10 @@ This is a read-only buffer showing the conversation history."
 
   ;; Add wrap-prefix to blockquotes so wrapped lines show the indicator
   (font-lock-add-keywords nil '((pi-coding-agent--fontify-blockquote-wrap-prefix)) 'append)
+
+  ;; Enable phscroll for horizontal table scrolling if available
+  (when (pi-coding-agent--phscroll-available-p)
+    (phscroll-mode 1))
 
   (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-on-kill nil t))
 
@@ -1551,21 +1577,46 @@ cancels, the session remains intact."
 (defun pi-coding-agent--markdown-visible-width (s)
   "Return display width of S with markdown markup removed.
 Strips markdown syntax that `markdown-hide-markup' would hide:
-- Links: [text](url) -> text
 - Images: ![alt](url) -> alt
+- Links: [text](url) -> text
 - Bold: **text** -> text
 - Italic: *text* -> text
 - Code: `text` -> text
+- Strikethrough: ~~text~~ -> text
 
-Order matters: images before links (both use brackets), bold before
-italic (both use asterisks)."
+Order matters for overlapping patterns: images before links (both
+use brackets), bold before italic (both use asterisks)."
   (let ((result s))
     (setq result (replace-regexp-in-string "!\\[\\([^]]*\\)\\]([^)]*)" "\\1" result))
     (setq result (replace-regexp-in-string "\\[\\([^]]*\\)\\]([^)]*)" "\\1" result))
     (setq result (replace-regexp-in-string "\\*\\*\\([^*]+\\)\\*\\*" "\\1" result))
     (setq result (replace-regexp-in-string "\\*\\([^* \t\n]+\\)\\*" "\\1" result))
     (setq result (replace-regexp-in-string "`\\([^`]+\\)`" "\\1" result))
+    (setq result (replace-regexp-in-string "~~\\([^~]+\\)~~" "\\1" result))
     (string-width result)))
+
+(defun pi-coding-agent--table-pad-cell (cell width fmt)
+  "Pad CELL to WIDTH using format FMT, accounting for hidden markup.
+FMT is one of l (left), r (right), c (center), or nil (left).
+Unlike `format`, this pads based on visible width, not raw length."
+  (let* ((visible-width (pi-coding-agent--markdown-visible-width cell))
+         (padding-needed (max 0 (- width visible-width))))
+    (pcase fmt
+      ('r (concat (make-string padding-needed ?\s) cell))
+      ('c (let ((left-pad (/ padding-needed 2)))
+            (concat (make-string left-pad ?\s)
+                    cell
+                    (make-string (- padding-needed left-pad) ?\s))))
+      (_ (concat cell (make-string padding-needed ?\s))))))
+
+(defun pi-coding-agent--table-align-raw (cells fmtspec widths)
+  "Format CELLS according to FMTSPEC and WIDTHS, using visible width for padding.
+This replaces `markdown-table-align-raw' to handle hidden markdown markup."
+  (string-join
+   (cl-mapcar (lambda (cell fmt width)
+                (concat " " (pi-coding-agent--table-pad-cell cell width fmt) " "))
+              cells fmtspec widths)
+   "|"))
 
 (defun pi-coding-agent--align-tables-in-region (start end)
   "Align all markdown tables between START and END.
@@ -1575,10 +1626,41 @@ Uses visible text width for column sizing, accounting for hidden markup."
     (while (and (< (point) end)
                 (re-search-forward "^|" end t))
       (when (markdown-table-at-point-p)
-        ;; Override markdown's string-width to use visible width
+        ;; Override markdown's functions to use visible width
         (cl-letf (((symbol-function 'markdown--string-width)
-                   #'pi-coding-agent--markdown-visible-width))
+                   #'pi-coding-agent--markdown-visible-width)
+                  ((symbol-function 'markdown-table-align-raw)
+                   #'pi-coding-agent--table-align-raw))
           (markdown-table-align))))))
+
+(defun pi-coding-agent--phscroll-available-p ()
+  "Return non-nil if phscroll is available and enabled."
+  (and pi-coding-agent-table-horizontal-scroll
+       (featurep 'phscroll)))
+
+(defun pi-coding-agent--apply-phscroll-to-tables (start end)
+  "Apply horizontal scrolling to markdown tables between START and END.
+Does nothing if phscroll is not available or not enabled.
+
+Must be called AFTER `font-lock-ensure' so that invisible text
+properties are set on hidden markup.  Phscroll caches character
+widths when regions are created, so markup must already be hidden."
+  (when (pi-coding-agent--phscroll-available-p)
+    (save-excursion
+      (goto-char start)
+      (while (re-search-forward "^|" end t)
+        (let ((table-start (line-beginning-position))
+              table-end)
+          ;; Find end of table (consecutive lines starting with |)
+          ;; Must go to line start since re-search left point after the |
+          (goto-char table-start)
+          (while (and (not (eobp))
+                      (looking-at "^|"))
+            (forward-line 1))
+          (setq table-end (point))
+          ;; Apply phscroll if table has multiple lines
+          (when (> table-end table-start)
+            (phscroll-region table-start table-end)))))))
 
 (defun pi-coding-agent--render-complete-message ()
   "Finalize completed message by applying font-lock and aligning tables.
@@ -1600,7 +1682,9 @@ Ensures message ends with newline for proper spacing."
                 (set-marker pi-coding-agent--streaming-marker (point)))))
           ;; Align any markdown tables in the message
           (pi-coding-agent--align-tables-in-region start (marker-position pi-coding-agent--streaming-marker)))
-        (font-lock-ensure start (marker-position pi-coding-agent--streaming-marker))))))
+        (font-lock-ensure start (marker-position pi-coding-agent--streaming-marker))
+        (let ((inhibit-read-only t))
+          (pi-coding-agent--apply-phscroll-to-tables start (marker-position pi-coding-agent--streaming-marker)))))))
 
 ;;;; Tool Output
 
@@ -2772,7 +2856,9 @@ Ensures markdown structures don't leak to subsequent content."
       (with-current-buffer (pi-coding-agent--get-chat-buffer)
         (let ((inhibit-read-only t))
           (pi-coding-agent--align-tables-in-region start (point-max)))
-        (font-lock-ensure start (point-max)))
+        (font-lock-ensure start (point-max))
+        (let ((inhibit-read-only t))
+          (pi-coding-agent--apply-phscroll-to-tables start (point-max))))
       ;; Ensure we end with newlines to reset markdown context
       ;; Two newlines ends any list/paragraph context
       (pi-coding-agent--append-to-chat "\n\n"))))

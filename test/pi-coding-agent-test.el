@@ -5297,6 +5297,17 @@ The advice limits this scan to `pi-coding-agent-markdown-search-limit' bytes."
     (when (and sep-line (string-match "^|\\([-]+\\)|" sep-line))
       (length (match-string 1 sep-line)))))
 
+(defun pi-coding-agent-test--table-row-visible-widths (buffer-content)
+  "Extract visible widths of all content rows (non-separator) in BUFFER-CONTENT.
+Returns list of visible widths for each row, excluding the separator line."
+  (let ((lines (split-string buffer-content "\n" t))
+        widths)
+    (dolist (line lines)
+      (when (and (string-prefix-p "|" line)
+                 (not (string-match-p "^|[-:|]+|$" line)))
+        (push (pi-coding-agent--markdown-visible-width line) widths)))
+    (nreverse widths)))
+
 (ert-deftest pi-coding-agent-test-table-alignment-with-links ()
   "Column sized for visible link text, not raw [text](url) syntax."
   (with-temp-buffer
@@ -5400,6 +5411,28 @@ The advice limits this scan to `pi-coding-agent-markdown-search-limit' bytes."
   (should (= (pi-coding-agent--markdown-visible-width "normal *italic* text")
              (string-width "normal italic text"))))
 
+(ert-deftest pi-coding-agent-test-markdown-visible-width-strikethrough ()
+  "Visible width strips strikethrough markers correctly."
+  (should (= (pi-coding-agent--markdown-visible-width "~~strike~~")
+             (string-width "strike")))
+  (should (= (pi-coding-agent--markdown-visible-width "normal ~~deleted~~ text")
+             (string-width "normal deleted text")))
+  ;; Numbers with commas (common in tables)
+  (should (= (pi-coding-agent--markdown-visible-width "~~4,752~~")
+             (string-width "4,752"))))
+
+(ert-deftest pi-coding-agent-test-table-alignment-with-strikethrough ()
+  "Table rows with strikethrough align to same width as other rows."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-message-delta
+     "| A | B |\n|---|---|\n| ~~strike~~ | plain |\n| plain | plain |\n")
+    (pi-coding-agent--render-complete-message)
+    (let ((widths (pi-coding-agent-test--table-row-visible-widths (buffer-string))))
+      (should (= (length widths) 3))
+      (should (apply #'= widths)))))
+
 (ert-deftest pi-coding-agent-test-table-alignment-with-italic ()
   "Column sized for visible italic text, not raw *text* syntax."
   (with-temp-buffer
@@ -5411,3 +5444,113 @@ The advice limits this scan to `pi-coding-agent-markdown-search-limit' bytes."
     (let ((col-width (pi-coding-agent-test--table-col-width (buffer-string))))
       (should col-width)
       (should (<= col-width 17)))))
+
+(ert-deftest pi-coding-agent-test-table-rows-have-equal-visible-width ()
+  "All table rows should have equal visible width after alignment.
+When markdown-hide-markup is enabled, rows with inline code like `code`
+should be padded extra to compensate for hidden backticks, ensuring
+visual alignment."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    ;; Table with one plain row and one row with inline code
+    (pi-coding-agent--display-message-delta
+     "| Col |\n|---|\n| `code` |\n| normal |\n")
+    (pi-coding-agent--render-complete-message)
+    (let ((widths (pi-coding-agent-test--table-row-visible-widths (buffer-string))))
+      ;; Should have 3 rows: header, code row, normal row
+      (should (= (length widths) 3))
+      ;; All rows should have the same visible width
+      (should (= (nth 0 widths) (nth 1 widths)))
+      (should (= (nth 1 widths) (nth 2 widths))))))
+
+(ert-deftest pi-coding-agent-test-table-rows-mixed-markup-alignment ()
+  "Table with various markup types should align visually.
+Tests real-world scenario with links, code, bold in same table."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-message-delta
+     "| Feature | Example |\n|---|---|\n| Link | [click](http://x.com) |\n| Code | `example` |\n| Bold | **strong** |\n| Plain | normal text |\n")
+    (pi-coding-agent--render-complete-message)
+    (let ((widths (pi-coding-agent-test--table-row-visible-widths (buffer-string))))
+      ;; Should have 5 rows: header + 4 content rows
+      (should (= (length widths) 5))
+      ;; All rows should have equal visible width
+      (should (apply #'= widths)))))
+
+(ert-deftest pi-coding-agent-test-phscroll-available-p-requires-both ()
+  "Phscroll requires both the feature and customization enabled."
+  ;; When phscroll is not loaded, should return nil
+  (let ((pi-coding-agent-table-horizontal-scroll t))
+    (unless (featurep 'phscroll)
+      (should-not (pi-coding-agent--phscroll-available-p))))
+  ;; When disabled via customization, should return nil
+  (let ((pi-coding-agent-table-horizontal-scroll nil))
+    (should-not (pi-coding-agent--phscroll-available-p))))
+
+(ert-deftest pi-coding-agent-test-apply-phscroll-graceful-fallback ()
+  "Applying phscroll to tables does nothing when phscroll unavailable."
+  ;; Should not error when phscroll is not available
+  (let ((pi-coding-agent-table-horizontal-scroll nil))
+    (with-temp-buffer
+      (insert "| A | B |\n|---|---|\n| 1 | 2 |\n")
+      ;; Should complete without error
+      (pi-coding-agent--apply-phscroll-to-tables (point-min) (point-max))
+      ;; Buffer content should be unchanged
+      (should (string-match-p "| A | B |" (buffer-string))))))
+
+(ert-deftest pi-coding-agent-test-phscroll-called-after-fontlock-streaming ()
+  "When rendering streamed messages, phscroll must be called after font-lock.
+Otherwise invisible properties for hidden markup aren't set yet,
+causing column misalignment when horizontally scrolling."
+  (let ((phscroll-call-invisible-state nil))
+    ;; Mock phscroll to capture state when called
+    (cl-letf (((symbol-function 'pi-coding-agent--phscroll-available-p)
+               (lambda () t))
+              ((symbol-function 'phscroll-mode)
+               (lambda (&optional _arg) nil))
+              ((symbol-function 'phscroll-region)
+               (lambda (beg end)
+                 ;; Record whether invisible props are set on backticks
+                 (save-excursion
+                   (goto-char beg)
+                   (when (search-forward "`" end t)
+                     (setq phscroll-call-invisible-state
+                           (get-text-property (1- (point)) 'invisible)))))))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (pi-coding-agent--display-agent-start)
+        ;; Table with inline code - backticks should be invisible
+        (pi-coding-agent--display-message-delta
+         "| Col |\n|---|\n| `code` |\n")
+        (pi-coding-agent--render-complete-message)
+        ;; At the time phscroll-region was called, invisible should be set
+        (should (eq phscroll-call-invisible-state 'markdown-markup))))))
+
+(ert-deftest pi-coding-agent-test-phscroll-called-after-fontlock-history ()
+  "When rendering history, phscroll must be called after font-lock.
+Otherwise invisible properties for hidden markup aren't set yet,
+causing column misalignment when horizontally scrolling."
+  (let ((phscroll-call-invisible-state nil))
+    ;; Mock phscroll to capture state when called
+    (cl-letf (((symbol-function 'pi-coding-agent--phscroll-available-p)
+               (lambda () t))
+              ((symbol-function 'phscroll-mode)
+               (lambda (&optional _arg) nil))
+              ((symbol-function 'phscroll-region)
+               (lambda (beg end)
+                 ;; Record whether invisible props are set on backticks
+                 (save-excursion
+                   (goto-char beg)
+                   (when (search-forward "`" end t)
+                     (setq phscroll-call-invisible-state
+                           (get-text-property (1- (point)) 'invisible)))))))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (setq pi-coding-agent--chat-buffer (current-buffer))
+        ;; Render history text with a table containing inline code
+        (pi-coding-agent--render-history-text
+         "| Col |\n|---|\n| `code` |\n")
+        ;; At the time phscroll-region was called, invisible should be set
+        (should (eq phscroll-call-invisible-state 'markdown-markup))))))

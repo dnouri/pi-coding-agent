@@ -37,6 +37,15 @@ npm install -g @mariozechner/pi-coding-agent
 mise use -g npm:@mariozechner/pi-coding-agent
 #+end_src
 
+** Optional: phscroll for wide tables
+
+Markdown tables in the chat buffer that exceed the window width normally wrap awkwardly.
+[[https://github.com/misohena/phscroll][phscroll]] enables horizontal scrolling so tables stay readable.
+
+#+begin_src
+M-x package-vc-install RET https://github.com/misohena/phscroll RET
+#+end_src
+
 * Installation
 
 ** MELPA
