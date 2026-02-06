@@ -86,6 +86,13 @@
 (declare-function phscroll-mode "phscroll" (&optional arg))
 (declare-function phscroll-region "phscroll" (beg end))
 
+(defcustom pi-coding-agent-phscroll-offer-install t
+  "Whether to offer installing `phscroll' for horizontal table scrolling.
+When non-nil and phscroll is not installed, pi-coding-agent will
+prompt once on first session start.  Set to nil to suppress."
+  :type 'boolean
+  :group 'pi-coding-agent)
+
 ;;;; Customization Group
 
 (defgroup pi-coding-agent nil
@@ -371,7 +378,8 @@ This is a read-only buffer showing the conversation history."
   ;; Add wrap-prefix to blockquotes so wrapped lines show the indicator
   (font-lock-add-keywords nil '((pi-coding-agent--fontify-blockquote-wrap-prefix)) 'append)
 
-  ;; Enable phscroll for horizontal table scrolling if available
+  ;; Enable phscroll for horizontal table scrolling, offer install if missing
+  (pi-coding-agent--maybe-install-phscroll)
   (when (pi-coding-agent--phscroll-available-p)
     (phscroll-mode 1))
 
@@ -1637,6 +1645,25 @@ Uses visible text width for column sizing, accounting for hidden markup."
   "Return non-nil if phscroll is available and enabled."
   (and pi-coding-agent-table-horizontal-scroll
        (featurep 'phscroll)))
+
+(defun pi-coding-agent--maybe-install-phscroll ()
+  "Offer to install phscroll when horizontal scroll is wanted but missing.
+On Emacs 29+, offer to install via `package-vc-install'.
+On Emacs 28, show the URL.  If declined, suppress future prompts
+by saving `pi-coding-agent-phscroll-offer-install' to nil."
+  (when (and pi-coding-agent-table-horizontal-scroll
+             pi-coding-agent-phscroll-offer-install
+             (not (featurep 'phscroll))
+             (not noninteractive))
+    (if (fboundp 'package-vc-install)
+        (if (y-or-n-p "Install `phscroll' for horizontal table scrolling? ")
+            (progn
+              (package-vc-install "https://github.com/misohena/phscroll")
+              (require 'phscroll))
+          (customize-save-variable 'pi-coding-agent-phscroll-offer-install nil))
+      (message "pi-coding-agent: horizontal table scrolling requires `phscroll': \
+https://github.com/misohena/phscroll")
+      (customize-save-variable 'pi-coding-agent-phscroll-offer-install nil))))
 
 (defun pi-coding-agent--apply-phscroll-to-tables (start end)
   "Apply horizontal scrolling to markdown tables between START and END.
