@@ -104,6 +104,13 @@ This ensures all files get code fences for consistent display."
     (should word-wrap)
     (should-not truncate-lines)))
 
+(ert-deftest pi-coding-agent-test-chat-mode-disables-hl-line ()
+  "pi-coding-agent-chat-mode disables hl-line to prevent scroll oscillation."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (should-not hl-line-mode)
+    (should-not (buffer-local-value 'global-hl-line-mode (current-buffer)))))
+
 (ert-deftest pi-coding-agent-test-input-mode-derives-from-text ()
   "pi-coding-agent-input-mode is derived from text-mode."
   (with-temp-buffer
