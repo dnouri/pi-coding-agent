@@ -33,7 +33,7 @@
 ;; with rendered markdown, and a separate prompt composition buffer.
 ;;
 ;; Requirements:
-;;   - pi coding agent installed and in PATH
+;;   - pi coding agent 0.51.3 or later, installed and in PATH
 ;;
 ;; Optional Dependencies:
 ;;   - phscroll: Markdown tables that exceed the window width wrap awkwardly.
@@ -2622,7 +2622,7 @@ Safely handles dead buffers by checking liveness first."
 (defvar-local pi-coding-agent--commands nil
   "List of available commands from pi.
 Each entry is a plist with :name, :description, :source.
-Source is \"template\", \"extension\", or \"skill\".")
+Source is \"prompt\", \"extension\", or \"skill\".")
 
 (defun pi-coding-agent--fetch-commands (proc callback)
   "Fetch available commands via RPC, call CALLBACK with result.
@@ -3794,14 +3794,14 @@ Press number to run, Shift+number to edit source file."
    (lambda (_)
      (transient-parse-suffixes
       'pi-coding-agent-templates-menu
-      (or (pi-coding-agent--make-submenu-children "template")
+      (or (pi-coding-agent--make-submenu-children "prompt")
           '(("" "No templates available" ignore)))))]
   [:class transient-columns
    :description "Edit"
    :setup-children
    (lambda (_)
      (pi-coding-agent--make-edit-columns
-      'pi-coding-agent-templates-menu "template"))])
+      'pi-coding-agent-templates-menu "prompt"))])
 
 (transient-define-prefix pi-coding-agent-extensions-menu ()
   "All extension commands.
@@ -3846,7 +3846,7 @@ quick-access commands per category and links to full submenus.
 Sections are displayed side-by-side to use horizontal space."
   (let* ((extensions (pi-coding-agent--commands-by-source "extension"))
          (skills (pi-coding-agent--commands-by-source "skill"))
-         (templates (pi-coding-agent--commands-by-source "template"))
+         (templates (pi-coding-agent--commands-by-source "prompt"))
          (columns '())
          (key 1))
     ;; Remove existing command group (index 4 if it exists)
