@@ -34,9 +34,8 @@ help:
 # ============================================================
 
 # Install package dependencies
-# Note: Emacs 28 has transient 0.3.6 built-in, but we need 0.3.7+ for
-# transient-parse-suffixes (added in Emacs 29). For Emacs 28, we pass
-# the pkg-desc to package-install (bypasses built-in check, handles deps).
+# Note: We need transient 0.7.0+ (built into Emacs 30). For Emacs 28/29,
+# install the latest transient from MELPA.
 deps:
 	@$(BATCH) \
 		--eval "(require 'package)" \
@@ -45,7 +44,7 @@ deps:
 		--eval "(package-refresh-contents)" \
 		--eval "(unless (package-installed-p 'markdown-mode) \
 		          (package-install 'markdown-mode))" \
-		--eval "(when (< emacs-major-version 29) \
+		--eval "(when (< emacs-major-version 30) \
 		          (package-install (cadr (assq 'transient package-archive-contents))))" \
 		--eval "(message \"Dependencies installed\")"
 

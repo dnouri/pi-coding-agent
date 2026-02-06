@@ -7,7 +7,7 @@
 ;; URL: https://github.com/dnouri/pi-coding-agent
 ;; Keywords: ai llm ai-pair-programming tools
 ;; Version: 1.2.4
-;; Package-Requires: ((emacs "28.1") (markdown-mode "2.6") (transient "0.3.7"))
+;; Package-Requires: ((emacs "28.1") (markdown-mode "2.6") (transient "0.7.0"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -2652,6 +2652,18 @@ COMMANDS is a list of plists with :name, :description, :source."
 
 (require 'transient)
 
+(when (and (not (bound-and-true-p byte-compile-current-file))
+           (or (not (boundp 'transient-version))
+               (version< transient-version "0.7.0")))
+  (display-warning 'pi-coding-agent
+                   (format "pi-coding-agent requires transient >= 0.7.0 \
+\(Emacs 30+), but %s is loaded.
+  Fix: M-x package-install RET transient RET, then restart Emacs."
+                           (if (boundp 'transient-version)
+                               transient-version
+                             "unknown"))
+                   :error))
+
 (defun pi-coding-agent--menu-model-description ()
   "Return model description for transient menu."
   (let ((model (plist-get (plist-get pi-coding-agent--state :model) :name)))
@@ -3773,14 +3785,11 @@ Returns children for `:setup-children' as column group vectors."
       (let* ((num-cols (min 3 len))
              (per-col (ceiling len (float num-cols)))
              (columns '()))
-        ;; Split items into columns, each as [level transient-column args (suffixes)]
         (dotimes (i num-cols)
           (let* ((start (* i per-col))
                  (col-items (seq-subseq items start (min (+ start per-col) len))))
             (when col-items
-              ;; Format: [level transient-column (:description ...) (suffixes)]
-              (push (vector 1
-                            'transient-column
+              (push (vector 'transient-column
                             nil
                             (transient-parse-suffixes prefix col-items))
                     columns))))
@@ -3792,10 +3801,8 @@ Press number to run, Shift+number to edit source file."
   [:class transient-column
    :setup-children
    (lambda (_)
-     (transient-parse-suffixes
-      'pi-coding-agent-templates-menu
-      (or (pi-coding-agent--make-submenu-children "prompt")
-          '(("" "No templates available" ignore)))))]
+     (when-let ((items (pi-coding-agent--make-submenu-children "prompt")))
+       (transient-parse-suffixes 'pi-coding-agent-templates-menu items)))]
   [:class transient-columns
    :description "Edit"
    :setup-children
@@ -3809,10 +3816,8 @@ Press number to run, Shift+number to edit source file."
   [:class transient-column
    :setup-children
    (lambda (_)
-     (transient-parse-suffixes
-      'pi-coding-agent-extensions-menu
-      (or (pi-coding-agent--make-submenu-children "extension")
-          '(("" "No extension commands available" ignore)))))]
+     (when-let ((items (pi-coding-agent--make-submenu-children "extension")))
+       (transient-parse-suffixes 'pi-coding-agent-extensions-menu items)))]
   [:class transient-columns
    :description "Edit"
    :setup-children
@@ -3826,10 +3831,8 @@ Press number to run, Shift+number to edit source file."
   [:class transient-column
    :setup-children
    (lambda (_)
-     (transient-parse-suffixes
-      'pi-coding-agent-skills-menu
-      (or (pi-coding-agent--make-submenu-children "skill")
-          '(("" "No skills available" ignore)))))]
+     (when-let ((items (pi-coding-agent--make-submenu-children "skill")))
+       (transient-parse-suffixes 'pi-coding-agent-skills-menu items)))]
   [:class transient-columns
    :description "Edit"
    :setup-children
