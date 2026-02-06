@@ -25,7 +25,7 @@ An Emacs frontend for the [[https://shittycodingagent.ai/][pi coding agent]].
 * Requirements
 
 - Emacs 28.1 or later
-- [[https://shittycodingagent.ai/][pi coding agent]] installed and in PATH
+- [[https://shittycodingagent.ai/][pi coding agent]] 0.51.3 or later, installed and in PATH
 
 ** Installing pi coding agent
 
