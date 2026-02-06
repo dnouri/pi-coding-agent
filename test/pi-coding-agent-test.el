@@ -5186,7 +5186,7 @@ The advice limits this scan to `pi-coding-agent-markdown-search-limit' bytes."
   (let* ((callback-result nil)
          (mock-response '(:success t
                           :data (:commands
-                                 [(:name "fix-tests" :description "Fix tests" :source "template")
+                                 [(:name "fix-tests" :description "Fix tests" :source "prompt")
                                   (:name "session-name" :description "Set name" :source "extension")])))
          (fake-proc (start-process "test" nil "cat")))
     (unwind-protect
@@ -5221,7 +5221,7 @@ The advice limits this scan to `pi-coding-agent-markdown-search-limit' bytes."
   (with-temp-buffer
     (let* ((input-buf (generate-new-buffer "*test-input*"))
            (pi-coding-agent--input-buffer input-buf)
-           (commands '((:name "test" :description "Test cmd" :source "template"))))
+           (commands '((:name "test" :description "Test cmd" :source "prompt"))))
       (unwind-protect
           (progn
             (pi-coding-agent--set-commands commands)
@@ -5236,8 +5236,8 @@ The advice limits this scan to `pi-coding-agent-markdown-search-limit' bytes."
   "command-capf completion uses pi-coding-agent--commands."
   (with-temp-buffer
     (let ((pi-coding-agent--commands
-           '((:name "fix-tests" :description "Fix" :source "template")
-             (:name "review" :description "Review" :source "template"))))
+           '((:name "fix-tests" :description "Fix" :source "prompt")
+             (:name "review" :description "Review" :source "prompt"))))
       (insert "/")
       (let ((completion (pi-coding-agent--command-capf)))
         (should completion)
@@ -5249,7 +5249,7 @@ The advice limits this scan to `pi-coding-agent-markdown-search-limit' bytes."
   "run-custom-command sends literal /command text, not expanded."
   (let* ((sent-message nil)
          (fake-proc (start-process "test" nil "cat"))
-         (cmd '(:name "greet" :description "Greet" :source "template")))
+         (cmd '(:name "greet" :description "Greet" :source "prompt")))
     (unwind-protect
         (with-temp-buffer
           (pi-coding-agent-chat-mode)
@@ -5262,7 +5262,7 @@ The advice limits this scan to `pi-coding-agent-markdown-search-limit' bytes."
                       ((symbol-function 'read-string)
                        (lambda (_prompt) "world")))
               (pi-coding-agent--run-custom-command cmd)
-              ;; Should send literal /greet world, NOT expanded template
+              ;; Should send literal /greet world, NOT expanded prompt
               (should (equal sent-message "/greet world")))))
       (delete-process fake-proc))))
 
@@ -5287,6 +5287,18 @@ The advice limits this scan to `pi-coding-agent-markdown-search-limit' bytes."
               ;; Should send just /mycommand without trailing space
               (should (equal sent-message "/mycommand")))))
       (delete-process fake-proc))))
+
+(ert-deftest pi-coding-agent-test-rebuild-menu-shows-prompt-source-as-templates ()
+  "rebuild-commands-menu creates Templates section for source \"prompt\".
+Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
+  (let ((pi-coding-agent--commands
+         '((:name "fix-tests" :description "Fix tests" :source "prompt" :location "user")
+           (:name "review" :description "Code review" :source "prompt" :location "project"))))
+    (unwind-protect
+        (progn
+          (pi-coding-agent--rebuild-commands-menu)
+          (should (transient-get-suffix 'pi-coding-agent-menu '(4))))
+      (ignore-errors (transient-remove-suffix 'pi-coding-agent-menu '(4))))))
 
 ;;; Table Alignment with Hidden Markup
 
