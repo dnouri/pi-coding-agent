@@ -960,6 +960,12 @@ on each delta - fontification happens at message end instead."
   (when (and delta pi-coding-agent--streaming-marker)
     (let* ((inhibit-read-only t)
            (inhibit-modification-hooks t)
+           ;; Strip leading newlines from first content after header
+           (delta (if (and pi-coding-agent--message-start-marker
+                          (= (marker-position pi-coding-agent--message-start-marker)
+                             (marker-position pi-coding-agent--streaming-marker)))
+                     (string-trim-left delta "\n+")
+                   delta))
            (transformed (pi-coding-agent--transform-delta delta)))
       (pi-coding-agent--with-scroll-preservation
         (save-excursion
@@ -1008,7 +1014,7 @@ CONTENT is ignored - we use what was already streamed."
           (set-marker pi-coding-agent--streaming-marker (point)))))))
 
 (defun pi-coding-agent--display-agent-end ()
-  "Display end of agent turn and process follow-up queue.
+  "Finalize agent turn: normalize whitespace, handle abort, process queue.
 Note: status is set to `idle' by the event handler."
   ;; Reset local message tracker.
   ;; Ensures clean state for next turn (e.g., if abort occurred before echo arrived).
@@ -1030,14 +1036,13 @@ Note: status is set to `idle' by the event handler."
             (insert "\n\n" (propertize "[Aborted]" 'face 'error) "\n")))
         (setq pi-coding-agent--aborted nil)
         (setq pi-coding-agent--followup-queue nil))
-      ;; Add spacing for next turn, avoiding excess blank lines
-      ;; Use scroll preservation so following windows stay at end
+      ;; Normalize trailing newlines - ensure content ends with single newline.
       (pi-coding-agent--with-scroll-preservation
         (save-excursion
           (goto-char (point-max))
           (skip-chars-backward "\n")
           (delete-region (point) (point-max))
-          (insert "\n\n"))))
+          (insert "\n"))))
     (pi-coding-agent--spinner-stop)
     (pi-coding-agent--fontify-timer-stop)
     (pi-coding-agent--refresh-header)
