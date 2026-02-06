@@ -7,7 +7,7 @@
 ;; URL: https://github.com/dnouri/pi-coding-agent
 ;; Keywords: ai llm ai-pair-programming tools
 ;; Version: 1.2.5
-;; Package-Requires: ((emacs "28.1") (markdown-mode "2.6") (transient "0.7.0"))
+;; Package-Requires: ((emacs "28.1") (markdown-mode "2.6") (transient "0.9.0"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -2653,10 +2653,10 @@ COMMANDS is a list of plists with :name, :description, :source."
 
 (when (and (not (bound-and-true-p byte-compile-current-file))
            (or (not (boundp 'transient-version))
-               (version< transient-version "0.7.0")))
+               (version< transient-version "0.9.0")))
   (display-warning 'pi-coding-agent
-                   (format "pi-coding-agent requires transient >= 0.7.0 \
-\(Emacs 30+), but %s is loaded.
+                   (format "pi-coding-agent requires transient >= 0.9.0, \
+but %s is loaded.
   Fix: M-x package-install RET transient RET, then restart Emacs."
                            (if (boundp 'transient-version)
                                transient-version
