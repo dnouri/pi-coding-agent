@@ -34,8 +34,8 @@ help:
 # ============================================================
 
 # Install package dependencies
-# Note: We need transient 0.7.0+ (built into Emacs 30). For Emacs 28/29,
-# install the latest transient from MELPA.
+# Note: We need transient 0.9.0+ (3-element group vector format).
+# Emacs 30 ships 0.7.2, so all Emacs versions need MELPA transient.
 deps:
 	@$(BATCH) \
 		--eval "(require 'package)" \
@@ -44,8 +44,7 @@ deps:
 		--eval "(package-refresh-contents)" \
 		--eval "(unless (package-installed-p 'markdown-mode) \
 		          (package-install 'markdown-mode))" \
-		--eval "(when (< emacs-major-version 30) \
-		          (package-install (cadr (assq 'transient package-archive-contents))))" \
+		--eval "(package-install (cadr (assq 'transient package-archive-contents)))" \
 		--eval "(message \"Dependencies installed\")"
 
 # ============================================================
