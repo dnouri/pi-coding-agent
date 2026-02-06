@@ -5300,6 +5300,37 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
           (should (transient-get-suffix 'pi-coding-agent-menu '(4))))
       (ignore-errors (transient-remove-suffix 'pi-coding-agent-menu '(4))))))
 
+(defun pi-coding-agent-test--suffix-key-bound-p (key)
+  "Return non-nil if KEY is bound in current transient suffixes."
+  (cl-find-if (lambda (obj) (equal (oref obj key) key))
+              transient--suffixes))
+
+(ert-deftest pi-coding-agent-test-submenus-open-with-no-commands ()
+  "All submenus open without error when no commands are loaded."
+  (let ((pi-coding-agent--commands nil))
+    (dolist (menu '(pi-coding-agent-templates-menu
+                    pi-coding-agent-extensions-menu
+                    pi-coding-agent-skills-menu))
+      (transient-setup menu))))
+
+(ert-deftest pi-coding-agent-test-templates-menu-shows-run-keys ()
+  "Templates submenu binds numbered keys to commands."
+  (let ((pi-coding-agent--commands
+         '((:name "test-tmpl" :description "A template" :source "prompt"))))
+    (transient-setup 'pi-coding-agent-templates-menu)
+    (should (pi-coding-agent-test--suffix-key-bound-p "1"))))
+
+(ert-deftest pi-coding-agent-test-templates-menu-shows-edit-keys ()
+  "Templates submenu binds shift-number keys to edit file paths."
+  (let ((pi-coding-agent--commands
+         '((:name "uncle-bob" :description "Uncle Bob review"
+            :source "prompt" :path "/tmp/uncle-bob.md" :location "user")
+           (:name "fix-tests" :description "Fix tests"
+            :source "prompt" :path "/tmp/fix-tests.md" :location "project"))))
+    (transient-setup 'pi-coding-agent-templates-menu)
+    (should (pi-coding-agent-test--suffix-key-bound-p "1"))
+    (should (pi-coding-agent-test--suffix-key-bound-p "!"))))
+
 ;;; Table Alignment with Hidden Markup
 
 (defun pi-coding-agent-test--table-col-width (buffer-content)
