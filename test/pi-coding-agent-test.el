@@ -773,13 +773,13 @@ as the top-level structure."
     (pi-coding-agent--display-thinking-delta " about this.")
     (should (string-match-p "Let me think... about this." (buffer-string)))))
 
-(ert-deftest pi-coding-agent-test-display-agent-end-adds-newlines ()
-  "agent_end event adds trailing newlines."
+(ert-deftest pi-coding-agent-test-display-agent-end-adds-newline ()
+  "agent_end normalizes trailing whitespace to single newline."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (pi-coding-agent--append-to-chat "Some response")
     (pi-coding-agent--display-agent-end)
-    (should (string-suffix-p "\n\n" (buffer-string)))))
+    (should (string-suffix-p "response\n" (buffer-string)))))
 
 (ert-deftest pi-coding-agent-test-spacing-no-blank-line-after-user-header ()
   "User header has no blank line after setext underline.
@@ -799,6 +799,26 @@ The hidden === provides visual spacing when `markdown-hide-markup' is t."
     (pi-coding-agent--display-message-delta "Hi")
     ;; Pattern: setext heading (Assistant + underline), NO blank line, content
     (should (string-match-p "Assistant\n=+\nHi" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-spacing-delta-leading-newlines-stripped ()
+  "Leading newlines from first text delta are stripped.
+Models often send \\n\\n before first content, which would create
+extra blank lines after the setext header."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-message-delta "\n\nHi")
+    (should (string-match-p "Assistant\n=+\nHi" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-spacing-thinking-leading-newlines-stripped ()
+  "Leading newlines before thinking block are stripped.
+Models may send \\n\\n before thinking content too."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-thinking-start)
+    ;; Thinking start should appear directly after header, no blank line
+    (should (string-match-p "Assistant\n=+\n>" (buffer-string)))))
 
 (ert-deftest pi-coding-agent-test-spacing-blank-line-before-tool ()
   "Tool block is preceded by blank line when after text."
@@ -822,6 +842,34 @@ The hidden === provides visual spacing when `markdown-hide-markup' is t."
                           nil nil)
     ;; Should end with closing fence and blank line
     (should (string-match-p "```\n\n" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-spacing-single-blank-line-between-turns ()
+  "Only one blank line between agent response and next section header.
+agent_end + next section's leading newline must not create triple newlines."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    ;; Turn 1: user + assistant
+    (pi-coding-agent--display-user-message "Hi")
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-message-delta "Hello!")
+    (pi-coding-agent--render-complete-message)
+    (pi-coding-agent--display-agent-end)
+    ;; Turn 2: user message
+    (setq pi-coding-agent--assistant-header-shown nil)
+    (pi-coding-agent--display-user-message "Bye")
+    ;; Should never have triple newlines (which would be two blank lines)
+    (should-not (string-match-p "\n\n\n" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-spacing-single-blank-line-before-compaction ()
+  "Only one blank line between agent response and compaction header."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-message-delta "Some response.")
+    (pi-coding-agent--render-complete-message)
+    (pi-coding-agent--display-agent-end)
+    (pi-coding-agent--display-compaction-result 50000 "Summary.")
+    (should-not (string-match-p "\n\n\n" (buffer-string)))))
 
 (ert-deftest pi-coding-agent-test-spacing-no-double-blank-between-tools ()
   "Consecutive tools have single blank line between them."
