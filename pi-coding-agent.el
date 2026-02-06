@@ -6,7 +6,7 @@
 ;; Maintainer: Daniel Nouri <daniel.nouri@gmail.com>
 ;; URL: https://github.com/dnouri/pi-coding-agent
 ;; Keywords: ai llm ai-pair-programming tools
-;; Version: 1.2.4
+;; Version: 1.2.5
 ;; Package-Requires: ((emacs "28.1") (markdown-mode "2.6") (transient "0.7.0"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -2320,7 +2320,7 @@ Displays warnings for missing dependencies."
 
 ;;;; Startup Header
 
-(defconst pi-coding-agent-version "1.2.4"
+(defconst pi-coding-agent-version "1.2.5"
   "Version of pi-coding-agent.")
 
 (defun pi-coding-agent--get-pi-coding-agent-version ()
