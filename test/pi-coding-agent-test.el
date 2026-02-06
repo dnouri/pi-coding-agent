@@ -5331,6 +5331,104 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
     (should (pi-coding-agent-test--suffix-key-bound-p "1"))
     (should (pi-coding-agent-test--suffix-key-bound-p "!"))))
 
+;;; Optional phscroll install
+
+(ert-deftest pi-coding-agent-test-phscroll-offer-install-when-missing ()
+  "Offer to install phscroll when wanted but not available (Emacs 29+)."
+  (let ((pi-coding-agent-table-horizontal-scroll t)
+        (pi-coding-agent-phscroll-offer-install t)
+        (noninteractive nil)
+        (installed-url nil))
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (_prompt) t))
+              ((symbol-function 'package-vc-install)
+               (lambda (url) (setq installed-url url)))
+              ((symbol-function 'require)
+               #'ignore))
+      (pi-coding-agent--maybe-install-phscroll)
+      (should (string-match-p "phscroll" installed-url)))))
+
+(ert-deftest pi-coding-agent-test-phscroll-decline-suppresses-permanently ()
+  "Declining phscroll install persists the suppression."
+  (let ((pi-coding-agent-table-horizontal-scroll t)
+        (pi-coding-agent-phscroll-offer-install t)
+        (noninteractive nil)
+        (saved-var nil))
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (_prompt) nil))
+              ((symbol-function 'customize-save-variable)
+               (lambda (var val) (setq saved-var var)
+                       (set var val))))
+      (pi-coding-agent--maybe-install-phscroll)
+      (should (eq saved-var 'pi-coding-agent-phscroll-offer-install))
+      (should-not pi-coding-agent-phscroll-offer-install))))
+
+(ert-deftest pi-coding-agent-test-phscroll-no-prompt-when-already-loaded ()
+  "No prompt when phscroll is already available."
+  (let ((pi-coding-agent-table-horizontal-scroll t)
+        (pi-coding-agent-phscroll-offer-install t)
+        (noninteractive nil)
+        (prompted nil))
+    (unwind-protect
+        (progn
+          (provide 'phscroll)
+          (cl-letf (((symbol-function 'y-or-n-p)
+                     (lambda (_prompt) (setq prompted t))))
+            (pi-coding-agent--maybe-install-phscroll)
+            (should-not prompted)))
+      (setq features (delq 'phscroll features)))))
+
+(ert-deftest pi-coding-agent-test-phscroll-no-prompt-when-scroll-disabled ()
+  "No prompt when horizontal scroll is disabled."
+  (let ((pi-coding-agent-table-horizontal-scroll nil)
+        (pi-coding-agent-phscroll-offer-install t)
+        (noninteractive nil)
+        (prompted nil))
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (_prompt) (setq prompted t))))
+      (pi-coding-agent--maybe-install-phscroll)
+      (should-not prompted))))
+
+(ert-deftest pi-coding-agent-test-phscroll-no-prompt-when-suppressed ()
+  "No prompt when user previously declined."
+  (let ((pi-coding-agent-table-horizontal-scroll t)
+        (pi-coding-agent-phscroll-offer-install nil)
+        (noninteractive nil)
+        (prompted nil))
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (_prompt) (setq prompted t))))
+      (pi-coding-agent--maybe-install-phscroll)
+      (should-not prompted))))
+
+(ert-deftest pi-coding-agent-test-phscroll-no-prompt-in-batch-mode ()
+  "Never prompt in batch mode (noninteractive)."
+  (let ((pi-coding-agent-table-horizontal-scroll t)
+        (pi-coding-agent-phscroll-offer-install t)
+        (prompted nil))
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (_prompt) (setq prompted t))))
+      (pi-coding-agent--maybe-install-phscroll)
+      (should-not prompted))))
+
+(ert-deftest pi-coding-agent-test-phscroll-emacs28-shows-url ()
+  "On Emacs 28 (no package-vc-install), show URL and suppress."
+  (let ((pi-coding-agent-table-horizontal-scroll t)
+        (pi-coding-agent-phscroll-offer-install t)
+        (noninteractive nil)
+        (shown-message nil)
+        (saved-var nil))
+    (cl-letf (((symbol-function 'package-vc-install)
+               nil)
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (setq shown-message (apply #'format fmt args))))
+              ((symbol-function 'customize-save-variable)
+               (lambda (var val) (setq saved-var var)
+                       (set var val))))
+      (pi-coding-agent--maybe-install-phscroll)
+      (should (string-match-p "phscroll" shown-message))
+      (should (eq saved-var 'pi-coding-agent-phscroll-offer-install)))))
+
 ;;; Table Alignment with Hidden Markup
 
 (defun pi-coding-agent-test--table-col-width (buffer-content)

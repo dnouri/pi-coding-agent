@@ -24,6 +24,9 @@
 ;; Disable "Buffer has running process" prompts in tests
 (remove-hook 'kill-buffer-query-functions #'process-kill-buffer-query-function)
 
+;; Disable interactive phscroll install prompt (would hang GUI tests)
+(setq pi-coding-agent-phscroll-offer-install nil)
+
 ;;;; Configuration
 
 (defvar pi-coding-agent-gui-test-model '(:provider "ollama" :modelId "qwen3:1.7b")
