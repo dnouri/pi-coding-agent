@@ -3653,7 +3653,7 @@ automatically queues as follow-up when the agent is busy."
     ("R" "reload" pi-coding-agent-reload)
     ("N" "name" pi-coding-agent-set-session-name)
     ("e" "export" pi-coding-agent-export-html)
-    ("q" "quit" pi-coding-agent-quit)]
+    ("Q" "quit" pi-coding-agent-quit)]
    ["Context"
     ("c" "compact" pi-coding-agent-compact)
     ("f" "fork" pi-coding-agent-fork)]]
