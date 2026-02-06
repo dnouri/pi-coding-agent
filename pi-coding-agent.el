@@ -339,6 +339,10 @@ This is a read-only buffer showing the conversation history."
   (setq-local markdown-hide-markup t)
   (add-to-invisibility-spec 'markdown-markup)
   (setq-local pi-coding-agent--tool-args-cache (make-hash-table :test 'equal))
+  ;; Disable hl-line-mode: its post-command-hook overlay update causes
+  ;; scroll oscillation in buffers with invisible text + variable heights.
+  (setq-local global-hl-line-mode nil)
+  (hl-line-mode -1)
   ;; Make window-point follow inserted text (like comint does).
   ;; This is key for natural scroll behavior during streaming.
   (setq-local window-point-insertion-type t)
