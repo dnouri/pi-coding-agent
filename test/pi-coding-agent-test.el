@@ -1270,19 +1270,19 @@ since we don't display them locally. Let pi's message_start handle it."
 
 (ert-deftest pi-coding-agent-test-separator-without-timestamp ()
   "Separator without timestamp is setext H1 heading."
-  (let ((sep (pi-coding-agent--make-separator "You" 'pi-coding-agent-user-label)))
+  (let ((sep (pi-coding-agent--make-separator "You")))
     ;; Setext format: label on one line, === underline on next
     (should (string-match-p "^You\n=+$" sep))))
 
 (ert-deftest pi-coding-agent-test-separator-with-timestamp ()
   "Separator with timestamp shows label · time as setext H1."
-  (let ((sep (pi-coding-agent--make-separator "You" 'pi-coding-agent-user-label (current-time))))
+  (let ((sep (pi-coding-agent--make-separator "You" (current-time))))
     ;; Format: "You · HH:MM" followed by newline and ===
     (should (string-match-p "^You · [0-2][0-9]:[0-5][0-9]\n=+$" sep))))
 
 (ert-deftest pi-coding-agent-test-separator-is-valid-setext-heading ()
   "Separator produces valid markdown setext H1 syntax."
-  (let ((sep (pi-coding-agent--make-separator "Assistant" 'pi-coding-agent-assistant-label)))
+  (let ((sep (pi-coding-agent--make-separator "Assistant")))
     ;; Must have at least 3 = characters for valid setext
     (should (string-match-p "\n===+" sep))
     ;; Underline should match or exceed label length

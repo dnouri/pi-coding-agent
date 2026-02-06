@@ -167,29 +167,9 @@ When phscroll is not available, tables wrap like other content."
 
 ;;;; Faces
 
-(defface pi-coding-agent-separator
-  '((t :inherit font-lock-comment-face))
-  "Face for section separators in pi chat."
-  :group 'pi-coding-agent)
-
-(defface pi-coding-agent-user-label
-  '((t :inherit bold :foreground "dodger blue"))
-  "Face for the You label in pi chat."
-  :group 'pi-coding-agent)
-
 (defface pi-coding-agent-timestamp
   '((t :inherit shadow))
   "Face for timestamps in message headers."
-  :group 'pi-coding-agent)
-
-(defface pi-coding-agent-assistant-label
-  '((t :inherit bold :foreground "sea green"))
-  "Face for the Assistant label in pi chat."
-  :group 'pi-coding-agent)
-
-(defface pi-coding-agent-compaction-label
-  '((t :inherit bold :foreground "medium purple"))
-  "Face for the Compaction label in pi chat."
   :group 'pi-coding-agent)
 
 (defface pi-coding-agent-tool-name
@@ -213,29 +193,17 @@ When phscroll is not available, tables wrap like other content."
   :group 'pi-coding-agent)
 
 (defface pi-coding-agent-tool-block-pending
-  '((((class color) (min-colors 88) (background dark))
-     :background "#2a2a35" :extend t)
-    (((class color) (min-colors 88) (background light))
-     :background "#f0f0f5" :extend t)
-    (t :inherit secondary-selection :extend t))
+  '((t :inherit secondary-selection :extend t))
   "Face for tool blocks during execution."
   :group 'pi-coding-agent)
 
 (defface pi-coding-agent-tool-block-success
-  '((((class color) (min-colors 88) (background dark))
-     :background "#2a352a" :extend t)
-    (((class color) (min-colors 88) (background light))
-     :background "#f0f5f0" :extend t)
-    (t :inherit secondary-selection :extend t))
+  '((t :inherit diff-added :extend t))
   "Face for tool blocks after successful completion."
   :group 'pi-coding-agent)
 
 (defface pi-coding-agent-tool-block-error
-  '((((class color) (min-colors 88) (background dark))
-     :background "#352a2a" :extend t)
-    (((class color) (min-colors 88) (background light))
-     :background "#f5f0f0" :extend t)
-    (t :inherit secondary-selection :extend t))
+  '((t :inherit diff-removed :extend t))
   "Face for tool blocks after failed completion."
   :group 'pi-coding-agent)
 
@@ -854,10 +822,11 @@ Windows where user scrolled up (point earlier) stay in place."
         (goto-char (point-max))
         (insert text)))))
 
-(defun pi-coding-agent--make-separator (label face &optional timestamp)
-  "Create a setext-style H1 heading separator with LABEL styled with FACE.
+(defun pi-coding-agent--make-separator (label &optional timestamp)
+  "Create a setext-style H1 heading separator with LABEL.
 If TIMESTAMP (Emacs time value) is provided, append it after \" · \".
 Returns a markdown setext heading: label line followed by === underline.
+Fontification is handled by `gfm-mode' (inherits `markdown-header-face-1').
 
 Using setext headings enables outline/imenu navigation and keeps our
 turn markers as H1 while LLM ATX headings are leveled down to H2+."
@@ -869,8 +838,7 @@ turn markers as H1 while LLM ATX headings are leveled down to H2+."
          ;; Underline must be at least 3 chars, and at least as long as header
          (underline-len (max 3 (length header-line)))
          (underline (make-string underline-len ?=)))
-    (concat (propertize header-line 'face face) "\n"
-            (propertize underline 'face 'pi-coding-agent-separator))))
+    (concat header-line "\n" underline)))
 
 (defun pi-coding-agent--display-user-message (text &optional timestamp)
   "Display user message TEXT in the chat buffer.
@@ -878,7 +846,7 @@ If TIMESTAMP (Emacs time value) is provided, display it in the header.
 Note: No blank line after setext underline - the hidden === provides
 visual spacing when `markdown-hide-markup' is enabled."
   (pi-coding-agent--append-to-chat
-   (concat "\n" (pi-coding-agent--make-separator "You" 'pi-coding-agent-user-label timestamp) "\n"
+   (concat "\n" (pi-coding-agent--make-separator "You" timestamp) "\n"
            text "\n")))
 
 (defun pi-coding-agent--display-agent-start ()
@@ -891,7 +859,7 @@ visual spacing when `markdown-hide-markup' is enabled."
   ;; Only show header if not already shown for this prompt
   (unless pi-coding-agent--assistant-header-shown
     (pi-coding-agent--append-to-chat
-     (concat "\n" (pi-coding-agent--make-separator "Assistant" 'pi-coding-agent-assistant-label) "\n"))
+     (concat "\n" (pi-coding-agent--make-separator "Assistant") "\n"))
     (setq pi-coding-agent--assistant-header-shown t))
   ;; Create markers at current end position
   ;; message-start-marker: where content begins (for later replacement)
@@ -1381,7 +1349,7 @@ Updates buffer-local state and renders display updates."
           ;; Assistant message - show header if needed, reset markers
           (unless pi-coding-agent--assistant-header-shown
             (pi-coding-agent--append-to-chat
-             (concat "\n" (pi-coding-agent--make-separator "Assistant" 'pi-coding-agent-assistant-label) "\n"))
+             (concat "\n" (pi-coding-agent--make-separator "Assistant") "\n"))
             (setq pi-coding-agent--assistant-header-shown t))
           (setq pi-coding-agent--message-start-marker (copy-marker (point-max) nil))
           (setq pi-coding-agent--streaming-marker (copy-marker (point-max) t))))))
@@ -2288,7 +2256,7 @@ TOKENS-BEFORE is the token count before compaction.
 SUMMARY is the compaction summary text (markdown).
 TIMESTAMP is optional time when compaction occurred."
   (pi-coding-agent--append-to-chat
-   (concat "\n" (pi-coding-agent--make-separator "Compaction" 'pi-coding-agent-compaction-label timestamp) "\n"
+   (concat "\n" (pi-coding-agent--make-separator "Compaction" timestamp) "\n"
            (propertize (format "Compacted from %s tokens\n\n"
                                (pi-coding-agent--format-number (or tokens-before 0)))
                        'face 'pi-coding-agent-tool-name)
@@ -2332,8 +2300,7 @@ Displays warnings for missing dependencies."
 (defun pi-coding-agent--format-startup-header ()
   "Format the startup header string with styled separator."
   (let* ((pi-coding-agent-cli-version (pi-coding-agent--get-pi-coding-agent-version))
-         (separator (pi-coding-agent--make-separator (format "Pi %s" pi-coding-agent-cli-version)
-                                        'pi-coding-agent-assistant-label)))
+         (separator (pi-coding-agent--make-separator (format "Pi %s" pi-coding-agent-cli-version))))
     (concat
      separator "\n"
      "C-c C-c   send prompt\n"
@@ -2932,7 +2899,7 @@ Each text block is rendered independently for proper formatting."
                     (timestamp (pi-coding-agent--ms-to-time (plist-get message :timestamp))))
                (when (and text (not (string-empty-p text)))
                  (pi-coding-agent--append-to-chat
-                  (concat "\n" (pi-coding-agent--make-separator "You" 'pi-coding-agent-user-label timestamp) "\n"
+                  (concat "\n" (pi-coding-agent--make-separator "You" timestamp) "\n"
                           text "\n"))))
              (setq prev-role "user"))
             ("assistant"
@@ -2940,7 +2907,7 @@ Each text block is rendered independently for proper formatting."
              (when (not (equal prev-role "assistant"))
                (flush-tools)
                (pi-coding-agent--append-to-chat
-                (concat "\n" (pi-coding-agent--make-separator "Assistant" 'pi-coding-agent-assistant-label) "\n")))
+                (concat "\n" (pi-coding-agent--make-separator "Assistant") "\n")))
              ;; Render text immediately (isolated)
              (let ((text (pi-coding-agent--extract-message-text message))
                    (tool-count (pi-coding-agent--count-tool-calls message)))
