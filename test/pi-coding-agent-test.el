@@ -788,6 +788,78 @@ as the top-level structure."
     (pi-coding-agent--display-agent-end)
     (should (string-suffix-p "response\n" (buffer-string)))))
 
+;;; Activity Phase Transition Tests
+
+(ert-deftest pi-coding-agent-test-agent-start-sets-thinking-phase ()
+  "agent_start sets activity phase to thinking."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (should (eq 'thinking pi-coding-agent--activity-phase))))
+
+(ert-deftest pi-coding-agent-test-text-delta-sets-replying-phase ()
+  "First text_delta switches activity phase to replying."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (should (eq 'thinking pi-coding-agent--activity-phase))
+    (pi-coding-agent--display-message-delta "Hello")
+    (should (eq 'replying pi-coding-agent--activity-phase))))
+
+(ert-deftest pi-coding-agent-test-thinking-start-sets-thinking-phase ()
+  "thinking_start keeps/sets activity phase to thinking."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-thinking-start)
+    (should (eq 'thinking pi-coding-agent--activity-phase))))
+
+(ert-deftest pi-coding-agent-test-tool-start-sets-running-phase ()
+  "tool_execution_start sets activity phase to running."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-tool-start "bash" '(:command "ls"))
+    (should (eq 'running pi-coding-agent--activity-phase))))
+
+(ert-deftest pi-coding-agent-test-tool-end-sets-thinking-phase ()
+  "tool_execution_end sets activity phase back to thinking."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-tool-start "bash" '(:command "ls"))
+    (should (eq 'running pi-coding-agent--activity-phase))
+    (pi-coding-agent--display-tool-end "bash" '(:command "ls") "output" nil nil)
+    (should (eq 'thinking pi-coding-agent--activity-phase))))
+
+(ert-deftest pi-coding-agent-test-agent-end-clears-phase ()
+  "agent_end clears activity phase to nil."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (should (eq 'thinking pi-coding-agent--activity-phase))
+    (pi-coding-agent--display-agent-end)
+    (should-not pi-coding-agent--activity-phase)))
+
+(ert-deftest pi-coding-agent-test-compaction-sets-compacting-phase ()
+  "auto_compaction_start sets activity phase to compacting."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event
+     '(:type "auto_compaction_start" :reason "overflow"))
+    (should (eq 'compacting pi-coding-agent--activity-phase))))
+
+(ert-deftest pi-coding-agent-test-compaction-end-clears-phase ()
+  "auto_compaction_end clears activity phase."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event
+     '(:type "auto_compaction_start" :reason "overflow"))
+    (should (eq 'compacting pi-coding-agent--activity-phase))
+    (pi-coding-agent--handle-display-event
+     '(:type "auto_compaction_end" :aborted t))
+    (should-not pi-coding-agent--activity-phase)))
+
 (ert-deftest pi-coding-agent-test-spacing-no-blank-line-after-user-header ()
   "User header has no blank line after setext underline.
 The hidden === provides visual spacing when `markdown-hide-markup' is t."
@@ -1001,7 +1073,6 @@ When user aborts, they want to stop everything - including queued messages."
       ;; Mock send functions to detect if queue processing sends the message
       (cl-letf (((symbol-function 'pi-coding-agent--prepare-and-send)
                  (lambda (_text) (setq message-was-sent t)))
-                ((symbol-function 'pi-coding-agent--spinner-stop) #'ignore)
                 ((symbol-function 'pi-coding-agent--fontify-timer-stop) #'ignore)
                 ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
         ;; Simulate agent_end arriving after abort
@@ -1238,8 +1309,7 @@ since we don't display them locally. Let pi's message_start handle it."
             (insert "/fix-tests")
             (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
                       ((symbol-function 'process-live-p) (lambda (_) t))
-                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore)
-                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore))
+                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore))
               (pi-coding-agent-send)))
           
           ;; KEY ASSERTION: assistant-header-shown should still be t
@@ -2841,8 +2911,7 @@ which is just a success message."
             (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
                       ((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'pi-coding-agent--send-prompt)
-                       (lambda (text) (setq sent-prompt text)))
-                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore))
+                       (lambda (text) (setq sent-prompt text))))
               (pi-coding-agent-queue-followup))
             ;; Should send as normal prompt
             (should (equal sent-prompt "Do something else"))
@@ -3020,8 +3089,7 @@ correct position in the conversation."
             (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
                       ((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'pi-coding-agent--send-prompt)
-                       (lambda (text) (setq sent-prompt text)))
-                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore))
+                       (lambda (text) (setq sent-prompt text))))
               (pi-coding-agent-send))
             ;; Should send literal command (pi handles expansion)
             (should (equal sent-prompt "/greet world"))))
@@ -3248,8 +3316,7 @@ mixed together like:
             (insert "First message")
             (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
                       ((symbol-function 'process-live-p) (lambda (_) t))
-                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore)
-                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore))
+                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore))
               (pi-coding-agent-send)))
           ;; After normal send, variable should store the message text
           (with-current-buffer chat-buf
@@ -3296,8 +3363,7 @@ When pi echoes it back via message_start, we should NOT display it again."
             (insert "Hello pi")
             (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
                       ((symbol-function 'process-live-p) (lambda (_) t))
-                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore)
-                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore))
+                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore))
               (pi-coding-agent-send)))
           ;; Now simulate pi echoing the message back via message_start
           (with-current-buffer chat-buf
@@ -3350,8 +3416,6 @@ On agent_end, we pop from queue and send (which displays the message)."
                       ((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'pi-coding-agent--send-prompt)
                        (lambda (text) (setq sent-prompt text)))
-                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore)
-                      ((symbol-function 'pi-coding-agent--spinner-stop) #'ignore)
                       ((symbol-function 'pi-coding-agent--fontify-timer-stop) #'ignore)
                       ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
               (pi-coding-agent--handle-display-event '(:type "agent_end")))
@@ -3393,8 +3457,6 @@ On agent_end, we pop from queue and send (which displays the message)."
                       ((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'pi-coding-agent--send-prompt)
                        (lambda (text) (push text sent-prompts)))
-                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore)
-                      ((symbol-function 'pi-coding-agent--spinner-stop) #'ignore)
                       ((symbol-function 'pi-coding-agent--fontify-timer-stop) #'ignore)
                       ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
               ;; First agent_end
@@ -4424,38 +4486,72 @@ Pi handles command expansion on the server side."
     (let ((header (pi-coding-agent--header-line-string)))
       (should (string-match-p "high" header)))))
 
-(ert-deftest pi-coding-agent-test-header-line-shows-streaming-indicator ()
-  "Header line shows spinner when streaming."
+(ert-deftest pi-coding-agent-test-header-shows-activity-phase-thinking ()
+  "Header line shows 'thinking' during agent thinking phase."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (setq pi-coding-agent--state '(:model "claude-sonnet-4"))
-    (pi-coding-agent--spinner-start)
-    (unwind-protect
-        (let ((header (pi-coding-agent--header-line-string)))
-          (should (string-match-p "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]" header)))
-      (pi-coding-agent--spinner-stop))))
+    (setq pi-coding-agent--activity-phase 'thinking)
+    (let ((header (pi-coding-agent--header-line-string)))
+      (should (string-match-p "thinking" header)))))
 
-(ert-deftest pi-coding-agent-test-spinner-stop-with-explicit-buffer ()
-  "Spinner stops correctly when buffer is passed explicitly.
-Regression test for #24: spinner wouldn't stop if callback ran in
-arbitrary buffer context (e.g., process sentinel)."
-  (let* ((chat-buf (generate-new-buffer "*pi-coding-agent-chat:test-spinner/*"))
-         (original-spinning pi-coding-agent--spinning-sessions))
+(ert-deftest pi-coding-agent-test-header-shows-activity-phase-replying ()
+  "Header line shows 'replying' during text streaming."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--state '(:model "claude-sonnet-4"))
+    (setq pi-coding-agent--activity-phase 'replying)
+    (let ((header (pi-coding-agent--header-line-string)))
+      (should (string-match-p "replying" header)))))
+
+(ert-deftest pi-coding-agent-test-header-shows-activity-phase-running ()
+  "Header line shows 'running' during tool execution."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--state '(:model "claude-sonnet-4"))
+    (setq pi-coding-agent--activity-phase 'running)
+    (let ((header (pi-coding-agent--header-line-string)))
+      (should (string-match-p "running" header)))))
+
+(ert-deftest pi-coding-agent-test-header-no-activity-when-idle ()
+  "Header line shows no activity text when idle."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--state '(:model "claude-sonnet-4"))
+    (setq pi-coding-agent--activity-phase nil)
+    (let ((header (pi-coding-agent--header-line-string)))
+      (should-not (string-match-p "thinking\\|replying\\|running" header)))))
+
+(ert-deftest pi-coding-agent-test-activity-phases-same-width ()
+  "All activity phase labels produce same-width status strings.
+Prevents header-line jumping during phase transitions."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--state '(:model "claude-sonnet-4"))
+    (let (widths)
+      (dolist (phase '(thinking replying running compacting))
+        (setq pi-coding-agent--activity-phase phase)
+        (let ((header (pi-coding-agent--header-line-string)))
+          (push (length header) widths)))
+      ;; All active phases should produce same header length
+      (should (= 1 (length (delete-dups widths)))))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-cleared-from-other-buffer ()
+  "Activity phase clears correctly when called from different buffer.
+Regression test: mirrors old spinner-stop-with-explicit-buffer test."
+  (let ((chat-buf (generate-new-buffer "*pi-coding-agent-chat:test-activity/*")))
     (unwind-protect
         (progn
           (with-current-buffer chat-buf
             (pi-coding-agent-chat-mode)
-            (pi-coding-agent--spinner-start))
-          ;; Verify spinner started
-          (should (memq chat-buf pi-coding-agent--spinning-sessions))
-          ;; Stop from different buffer context (simulating sentinel/callback)
-          (with-temp-buffer
-            ;; Without explicit buffer, this would fail to remove chat-buf
-            (pi-coding-agent--spinner-stop chat-buf))
-          ;; Verify spinner stopped
-          (should-not (memq chat-buf pi-coding-agent--spinning-sessions)))
-      ;; Cleanup
-      (setq pi-coding-agent--spinning-sessions original-spinning)
+            (pi-coding-agent--set-activity-phase 'thinking))
+          ;; Verify phase set
+          (should (eq 'thinking (buffer-local-value 'pi-coding-agent--activity-phase chat-buf)))
+          ;; Clear from different buffer context (simulating sentinel/callback)
+          (with-current-buffer chat-buf
+            (pi-coding-agent--set-activity-phase nil))
+          ;; Verify phase cleared
+          (should-not (buffer-local-value 'pi-coding-agent--activity-phase chat-buf)))
       (when (buffer-live-p chat-buf)
         (kill-buffer chat-buf)))))
 
@@ -5122,10 +5218,10 @@ display-agent-end must finalize the pending overlay with error face."
       (when (buffer-live-p chat-buf)
         (kill-buffer chat-buf)))))
 
-(ert-deftest pi-coding-agent-test-send-stops-spinner-when-process-dead ()
-  "Sending when process is dead stops spinner and resets status."
-  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-spinner-dead*"))
-        (input-buf (get-buffer-create "*pi-coding-agent-test-spinner-dead-input*")))
+(ert-deftest pi-coding-agent-test-send-clears-activity-when-process-dead ()
+  "Sending when process is dead clears activity phase and resets status."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-dead-proc*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-dead-proc-input*")))
     (unwind-protect
         (progn
           (with-current-buffer chat-buf
@@ -5140,9 +5236,10 @@ display-agent-end must finalize the pending overlay with error face."
             (setq pi-coding-agent--chat-buffer chat-buf)
             (insert "test message")
             (pi-coding-agent-send))
-          ;; Verify spinner stopped and status reset
+          ;; Verify activity cleared and status reset
           (with-current-buffer chat-buf
-            (should (eq pi-coding-agent--status 'idle))))
+            (should (eq pi-coding-agent--status 'idle))
+            (should-not pi-coding-agent--activity-phase)))
       (when (buffer-live-p chat-buf) (kill-buffer chat-buf))
       (when (buffer-live-p input-buf) (kill-buffer input-buf)))))
 

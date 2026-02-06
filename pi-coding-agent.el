@@ -227,6 +227,11 @@ When phscroll is not available, tables wrap like other content."
   "Face for error notifications from the server."
   :group 'pi-coding-agent)
 
+(defface pi-coding-agent-activity-status
+  '((t :inherit shadow))
+  "Face for activity status text in header line."
+  :group 'pi-coding-agent)
+
 ;;;; Language Detection
 
 (defconst pi-coding-agent--extension-language-alist
@@ -668,6 +673,11 @@ Starts as `line-start' because content begins after separator newline.")
 ;; pi-coding-agent--status is defined in pi-coding-agent-core.el as the single source of truth
 ;; for session activity state (idle, sending, streaming, compacting)
 
+(defvar-local pi-coding-agent--activity-phase nil
+  "Current activity phase for header-line display.
+One of: nil (idle), `thinking', `replying', `running', `compacting'.
+Set by event handlers, displayed in header-line as semantic status text.")
+
 (defvar-local pi-coding-agent--cached-stats nil
   "Cached session statistics for header-line display.
 Updated after each agent turn completes.")
@@ -874,7 +884,7 @@ visual spacing when `markdown-hide-markup' is enabled."
   (setq pi-coding-agent--line-parse-state 'line-start)
   (setq pi-coding-agent--in-code-block nil)
   (setq pi-coding-agent--in-thinking-block nil)
-  (pi-coding-agent--spinner-start)
+  (pi-coding-agent--set-activity-phase 'thinking)
   (pi-coding-agent--fontify-timer-start)
   (force-mode-line-update))
 
@@ -962,6 +972,7 @@ to keep our setext H1 separators as the top-level document structure.
 Inhibits modification hooks to prevent expensive jit-lock fontification
 on each delta - fontification happens at message end instead."
   (when (and delta pi-coding-agent--streaming-marker)
+    (pi-coding-agent--set-activity-phase 'replying)
     (let* ((inhibit-read-only t)
            (inhibit-modification-hooks t)
            ;; Strip leading newlines from first content after header
@@ -981,6 +992,7 @@ on each delta - fontification happens at message end instead."
   "Insert opening marker for thinking block (blockquote)."
   (when pi-coding-agent--streaming-marker
     (setq pi-coding-agent--in-thinking-block t)
+    (pi-coding-agent--set-activity-phase 'thinking)
     (let ((inhibit-read-only t))
       (pi-coding-agent--with-scroll-preservation
         (save-excursion
@@ -1047,7 +1059,7 @@ Note: status is set to `idle' by the event handler."
           (skip-chars-backward "\n")
           (delete-region (point) (point-max))
           (insert "\n"))))
-    (pi-coding-agent--spinner-stop)
+    (pi-coding-agent--set-activity-phase nil)
     (pi-coding-agent--fontify-timer-stop)
     (pi-coding-agent--refresh-header)
     ;; Check follow-up queue and send next message if any (unless aborted)
@@ -1414,12 +1426,12 @@ Updates buffer-local state and renders display updates."
      (pi-coding-agent--display-tool-update (plist-get event :partialResult)))
     ("auto_compaction_start"
      (setq pi-coding-agent--status 'compacting)
-     (pi-coding-agent--spinner-start)
+     (pi-coding-agent--set-activity-phase 'compacting)
      (let ((reason (plist-get event :reason)))
        (message "Pi: %sAuto-compacting... (C-c C-k to cancel)"
                 (if (equal reason "overflow") "Context overflow, " ""))))
     ("auto_compaction_end"
-     (pi-coding-agent--spinner-stop)
+     (pi-coding-agent--set-activity-phase nil)
      (setq pi-coding-agent--status 'idle)
      (if (pi-coding-agent--normalize-boolean (plist-get event :aborted))
          (progn
@@ -1498,10 +1510,10 @@ Shows an error message if process is unavailable."
 
 (defun pi-coding-agent--abort-send (chat-buf)
   "Clean up after a failed send attempt in CHAT-BUF.
-Stops spinner and resets status to idle."
+Clears activity phase and resets status to idle."
   (when (buffer-live-p chat-buf)
     (with-current-buffer chat-buf
-      (pi-coding-agent--spinner-stop)
+      (pi-coding-agent--set-activity-phase nil)
       (setq pi-coding-agent--status 'idle)
       (force-mode-line-update))))
 
@@ -1810,6 +1822,7 @@ it from extending to subsequent content.  Sets pending overlay to nil."
 
 (defun pi-coding-agent--display-tool-start (tool-name args)
   "Display header for tool TOOL-NAME with ARGS and create overlay."
+  (pi-coding-agent--set-activity-phase 'running)
   (let* ((path (pi-coding-agent--tool-path args))
          (header (pcase tool-name
                    ("bash" (format "$ %s" (or (plist-get args :command) "...")))
@@ -1949,7 +1962,9 @@ Returns the rendered string."
 ARGS contains tool arguments, CONTENT is a list of content blocks.
 DETAILS contains tool-specific data (e.g., diff for edit tool).
 IS-ERROR indicates failure.
+Sets activity phase back to `thinking' (agent deciding next action).
 Shows preview lines with expandable toggle for long output."
+  (pi-coding-agent--set-activity-phase 'thinking)
   (let* ((is-error (eq t is-error))
          (text-blocks (seq-filter (lambda (c) (equal (plist-get c :type) "text"))
                                   content))
@@ -2338,62 +2353,36 @@ Removes common prefixes like \"Claude \" and suffixes like \" (latest)\"."
     (replace-regexp-in-string " (latest)$" "")
     (replace-regexp-in-string "^claude-" "")))
 
-(defvar pi-coding-agent--spinner-frames ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
-  "Frames for the busy spinner animation.")
+;;;; Activity Phase (semantic status in header-line)
 
-(defvar pi-coding-agent--spinner-index 0
-  "Current frame index in the spinner animation (shared for sync).")
+(defun pi-coding-agent--activity-phase-label (phase)
+  "Return display label for activity PHASE.
+All labels are padded to 8 characters to prevent header-line jumping."
+  (format "%-8s" (pcase phase
+                   ('thinking  "thinking")
+                   ('replying  "replying")
+                   ('running   "running")
+                   ('compacting "compact.")
+                   (_          ""))))
 
-(defvar pi-coding-agent--spinner-timer nil
-  "Timer for animating spinners (shared across sessions).")
-
-(defvar pi-coding-agent--spinning-sessions nil
-  "List of chat buffers currently spinning.")
-
-(defun pi-coding-agent--spinner-start ()
-  "Start the spinner for current session."
-  (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
-    (when (and chat-buf (not (memq chat-buf pi-coding-agent--spinning-sessions)))
-      (push chat-buf pi-coding-agent--spinning-sessions)
-      ;; Start global timer if not running
-      (unless pi-coding-agent--spinner-timer
-        (setq pi-coding-agent--spinner-index 0)
-        (setq pi-coding-agent--spinner-timer
-              (run-with-timer 0 0.1 #'pi-coding-agent--spinner-tick))))))
-
-(defun pi-coding-agent--spinner-stop (&optional chat-buf)
-  "Stop the spinner for current session.
-CHAT-BUF is the buffer to stop spinning; if nil, uses current context.
-Note: When called from async callbacks, pass CHAT-BUF explicitly."
-  (let ((chat-buf (or chat-buf (pi-coding-agent--get-chat-buffer))))
-    (setq pi-coding-agent--spinning-sessions (delq chat-buf pi-coding-agent--spinning-sessions))
-    ;; Stop global timer if no sessions spinning
-    (when (and pi-coding-agent--spinner-timer (null pi-coding-agent--spinning-sessions))
-      (cancel-timer pi-coding-agent--spinner-timer)
-      (setq pi-coding-agent--spinner-timer nil))))
-
-(defun pi-coding-agent--spinner-tick ()
-  "Advance spinner to next frame and update spinning sessions."
-  (setq pi-coding-agent--spinner-index
-        (mod (1+ pi-coding-agent--spinner-index) (length pi-coding-agent--spinner-frames)))
-  ;; Only update windows showing spinning sessions
-  (dolist (buf pi-coding-agent--spinning-sessions)
-    (when (buffer-live-p buf)
-      (let ((input-buf (buffer-local-value 'pi-coding-agent--input-buffer buf)))
-        ;; Update input buffer's header line (where spinner shows)
+(defun pi-coding-agent--set-activity-phase (phase &optional chat-buf)
+  "Set the activity PHASE and update the header-line.
+PHASE is one of `thinking', `replying', `running', `compacting', or nil.
+CHAT-BUF is the chat buffer; if nil, uses current context."
+  (let ((chat-buf (or chat-buf
+                      (cond
+                       ((derived-mode-p 'pi-coding-agent-chat-mode) (current-buffer))
+                       ((derived-mode-p 'pi-coding-agent-input-mode) pi-coding-agent--chat-buffer)
+                       (t (pi-coding-agent--get-chat-buffer))))))
+    (when (and chat-buf (buffer-live-p chat-buf))
+      (with-current-buffer chat-buf
+        (setq pi-coding-agent--activity-phase phase))
+      ;; Update input buffer's header line
+      (let ((input-buf (buffer-local-value 'pi-coding-agent--input-buffer chat-buf)))
         (when (and input-buf (buffer-live-p input-buf))
           (dolist (win (get-buffer-window-list input-buf nil t))
             (with-selected-window win
               (force-mode-line-update))))))))
-
-(defun pi-coding-agent--spinner-current ()
-  "Return current spinner frame if this session is spinning."
-  (let ((chat-buf (cond
-                   ((derived-mode-p 'pi-coding-agent-chat-mode) (current-buffer))
-                   ((derived-mode-p 'pi-coding-agent-input-mode) pi-coding-agent--chat-buffer)
-                   (t nil))))
-    (when (and chat-buf (memq chat-buf pi-coding-agent--spinning-sessions))
-      (aref pi-coding-agent--spinner-frames pi-coding-agent--spinner-index))))
 
 ;;;; Streaming Fontification
 
@@ -2564,9 +2553,11 @@ Accesses state from the linked chat buffer."
          (model-short (if (string-empty-p model-name) "..."
                         (pi-coding-agent--shorten-model-name model-name)))
          (thinking (or (plist-get state :thinking-level) ""))
-         (status-str (if-let ((spinner (pi-coding-agent--spinner-current)))
-                         (concat " " spinner)
-                       "  ")))  ; Same width as " ⠋" to prevent jumping
+         (phase (and chat-buf (buffer-local-value 'pi-coding-agent--activity-phase chat-buf)))
+         (status-str (if phase
+                         (concat " " (propertize (pi-coding-agent--activity-phase-label phase)
+                                                 'face 'pi-coding-agent-activity-status))
+                       (make-string 9 ?\s))))  ; 1 space + 8 padding = same width
     (concat
      ;; Model (clickable)
      (propertize model-short
@@ -2581,7 +2572,7 @@ Accesses state from the linked chat buffer."
                            'mouse-face 'highlight
                            'help-echo "mouse-1: Cycle thinking level"
                            'local-map pi-coding-agent--header-thinking-map)))
-     ;; Spinner/status (right after model/thinking)
+     ;; Activity status (right after model/thinking)
      status-str
      ;; Stats (if available)
      (pi-coding-agent--header-format-stats stats last-usage model-obj)
@@ -3274,14 +3265,14 @@ Optional CUSTOM-INSTRUCTIONS provide guidance for the compaction summary."
   (when-let ((proc (pi-coding-agent--get-process))
              (chat-buf (pi-coding-agent--get-chat-buffer)))
     (message "Pi: Compacting...")
-    (pi-coding-agent--spinner-start)
+    (pi-coding-agent--set-activity-phase 'compacting)
     (pi-coding-agent--rpc-async proc
                    (if custom-instructions
                        (list :type "compact" :customInstructions custom-instructions)
                      '(:type "compact"))
                    (lambda (response)
                      ;; Pass chat-buf explicitly (callback may run in arbitrary context)
-                     (pi-coding-agent--spinner-stop chat-buf)
+                     (pi-coding-agent--set-activity-phase nil chat-buf)
                      (if (plist-get response :success)
                          (when (buffer-live-p chat-buf)
                            (with-current-buffer chat-buf
