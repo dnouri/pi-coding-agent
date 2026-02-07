@@ -19,3 +19,4 @@ tmp/
 
 # Local pi prompts and config
 .pi/
+.deps-stamp

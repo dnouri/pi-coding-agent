@@ -8,13 +8,17 @@ PI_VERSION ?= 0.51.3
 PI_BIN ?= .cache/pi/node_modules/.bin/pi
 PI_BIN_DIR = $(abspath $(dir $(PI_BIN)))
 
+# Test selector: run a subset of tests by ERT pattern
+# Example: make test SELECTOR=fontify-buffer-tail
+SELECTOR ?=
+
 .PHONY: test test-unit test-integration test-integration-ci test-gui test-gui-ci test-all
 .PHONY: check compile lint lint-checkdoc lint-package clean clean-cache help
-.PHONY: ollama-start ollama-stop ollama-status setup-pi setup-models deps install-hooks
+.PHONY: ollama-start ollama-stop ollama-status setup-pi setup-models install-hooks
 
 help:
 	@echo "Targets:"
-	@echo "  make test             Unit tests only (fast)"
+	@echo "  make test             Unit tests (use SELECTOR=pattern to filter)"
 	@echo "  make test-unit        Compile + unit tests"
 	@echo "  make test-integration Integration tests (local, starts Ollama)"
 	@echo "  make test-gui         GUI tests (local, starts Ollama)"
@@ -33,10 +37,10 @@ help:
 # Dependencies
 # ============================================================
 
-# Install package dependencies
+# Install package dependencies (sentinel file avoids re-running every time).
 # Note: We need transient 0.9.0+ (3-element group vector format).
 # Emacs 30 ships 0.7.2, so all Emacs versions need MELPA transient.
-deps:
+.deps-stamp: Makefile
 	@$(BATCH) \
 		--eval "(require 'package)" \
 		--eval "(push '(\"melpa\" . \"https://melpa.org/packages/\") package-archives)" \
@@ -46,17 +50,21 @@ deps:
 		          (package-install 'markdown-mode))" \
 		--eval "(package-install (cadr (assq 'transient package-archive-contents)))" \
 		--eval "(message \"Dependencies installed\")"
+	@touch $@
+
+deps: .deps-stamp
 
 # ============================================================
 # Unit tests
 # ============================================================
 
-test: clean deps
+test: .deps-stamp
 	@echo "=== Unit Tests ==="
 	$(BATCH) -L test \
 		--eval "(require 'package)" \
 		--eval "(package-initialize)" \
-		-l pi-coding-agent -l pi-coding-agent-core-test -l pi-coding-agent-test -f ert-run-tests-batch-and-exit
+		-l pi-coding-agent -l pi-coding-agent-core-test -l pi-coding-agent-test \
+		$(if $(SELECTOR),--eval '(ert-run-tests-batch-and-exit "$(SELECTOR)")',-f ert-run-tests-batch-and-exit)
 
 test-unit: compile test
 
@@ -98,7 +106,7 @@ setup-models:
 # ============================================================
 
 # Local: starts Ollama via Docker
-test-integration: clean deps setup-pi
+test-integration: clean .deps-stamp setup-pi
 	@echo "=== Integration Tests (pi@$(PI_VERSION)) ==="
 	@./scripts/ollama.sh start
 	@PI_CODING_AGENT_DIR=$$(mktemp -d) && \
@@ -111,7 +119,7 @@ test-integration: clean deps setup-pi
 		status=$$?; rm -rf "$$PI_CODING_AGENT_DIR"; exit $$status
 
 # CI: Ollama already running via services block
-test-integration-ci: clean deps setup-pi
+test-integration-ci: clean .deps-stamp setup-pi
 	@echo "=== Integration Tests CI (pi@$(PI_VERSION)) ==="
 	@mkdir -p "$$PI_CODING_AGENT_DIR"
 	@cp test/fixtures/ollama-models.json "$$PI_CODING_AGENT_DIR/models.json"
@@ -126,7 +134,7 @@ test-integration-ci: clean deps setup-pi
 # ============================================================
 
 # Local: starts Ollama via Docker
-test-gui: clean deps setup-pi
+test-gui: clean .deps-stamp setup-pi
 	@echo "=== GUI Tests (pi@$(PI_VERSION)) ==="
 	@./scripts/ollama.sh start
 	@PI_CODING_AGENT_DIR=$$(mktemp -d) && \
@@ -136,7 +144,7 @@ test-gui: clean deps setup-pi
 		status=$$?; rm -rf "$$PI_CODING_AGENT_DIR"; exit $$status
 
 # CI: Ollama already running via services block
-test-gui-ci: clean deps setup-pi
+test-gui-ci: clean .deps-stamp setup-pi
 	@echo "=== GUI Tests CI (pi@$(PI_VERSION)) ==="
 	@mkdir -p "$$PI_CODING_AGENT_DIR"
 	@cp test/fixtures/ollama-models.json "$$PI_CODING_AGENT_DIR/models.json"
@@ -165,7 +173,7 @@ ollama-status:
 # Code quality
 # ============================================================
 
-compile: clean deps
+compile: clean .deps-stamp
 	@echo "=== Byte-compile ==="
 	$(BATCH) \
 		--eval "(require 'package)" \
@@ -177,12 +185,13 @@ lint: lint-checkdoc lint-package
 
 lint-checkdoc:
 	@echo "=== Checkdoc ==="
-	@$(BATCH) \
+	@OUTPUT=$$($(BATCH) \
 		--eval "(require 'checkdoc)" \
 		--eval "(setq sentence-end-double-space nil)" \
 		--eval "(checkdoc-file \"pi-coding-agent-core.el\")" \
-		--eval "(checkdoc-file \"pi-coding-agent.el\")" 2>&1 | \
-		{ grep -q "^Warning" && { grep "^Warning"; exit 1; } || echo "OK"; }
+		--eval "(checkdoc-file \"pi-coding-agent.el\")" 2>&1); \
+	WARNINGS=$$(echo "$$OUTPUT" | grep -A1 "^Warning" | grep -v "^Warning\|^--$$"); \
+	if [ -n "$$WARNINGS" ]; then echo "$$WARNINGS"; exit 1; else echo "OK"; fi
 
 lint-package:
 	@echo "=== Package-lint ==="
@@ -204,7 +213,7 @@ check: compile lint test
 # ============================================================
 
 clean:
-	@rm -f *.elc test/*.elc
+	@rm -f *.elc test/*.elc .deps-stamp
 
 clean-cache:
 	@./scripts/ollama.sh stop 2>/dev/null || true
