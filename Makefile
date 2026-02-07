@@ -1,7 +1,7 @@
 # pi-coding-agent Makefile
 
 EMACS ?= emacs
-BATCH = $(EMACS) --batch -L .
+BATCH = $(EMACS) --batch -Q -L .
 
 # Pi CLI version - update in workflows too when changing
 PI_VERSION ?= 0.51.3
@@ -49,7 +49,8 @@ help:
 		--eval "(unless (package-installed-p 'markdown-mode) \
 		          (package-install 'markdown-mode))" \
 		--eval "(package-install (cadr (assq 'transient package-archive-contents)))" \
-		--eval "(message \"Dependencies installed\")"
+		--eval "(message \"Dependencies installed\")" 2>&1 \
+		| grep -E "^Dependencies installed$$|^Error:" || true
 	@touch $@
 
 deps: .deps-stamp
@@ -58,13 +59,16 @@ deps: .deps-stamp
 # Unit tests
 # ============================================================
 
+SHELL = /bin/bash
+
 test: .deps-stamp
 	@echo "=== Unit Tests ==="
-	$(BATCH) -L test \
+	@set -o pipefail; $(BATCH) -L test \
 		--eval "(require 'package)" \
 		--eval "(package-initialize)" \
 		-l pi-coding-agent -l pi-coding-agent-core-test -l pi-coding-agent-test \
-		$(if $(SELECTOR),--eval '(ert-run-tests-batch-and-exit "$(SELECTOR)")',-f ert-run-tests-batch-and-exit)
+		$(if $(SELECTOR),--eval '(ert-run-tests-batch-and-exit "$(SELECTOR)")',-f ert-run-tests-batch-and-exit) 2>&1 \
+		| grep -v "^   passed\|^Pi: \|^Running [0-9]\|^$$"
 
 test-unit: compile test
 
@@ -181,7 +185,7 @@ check-parens:
 
 compile: clean .deps-stamp
 	@echo "=== Byte-compile ==="
-	$(BATCH) \
+	@$(BATCH) \
 		--eval "(require 'package)" \
 		--eval "(package-initialize)" \
 		--eval "(setq byte-compile-error-on-warn t)" \
