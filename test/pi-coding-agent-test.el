@@ -2006,6 +2006,70 @@ since we don't display them locally. Let pi's message_start handle it."
       (should ov)
       (should-not (overlay-get ov 'pi-coding-agent-tool-offset)))))
 
+(ert-deftest pi-coding-agent-test-streaming-tool-overlay-has-path-after-finalize ()
+  "Streaming write with nil args at start should have path after finalize.
+When toolcall_start has nil args and the path arrives via toolcall_delta,
+the finalized overlay must still have the path for visit-file navigation."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event '(:type "agent_start"))
+    (pi-coding-agent--handle-display-event '(:type "message_start"))
+    ;; toolcall_start with nil args (LLM just started generating JSON)
+    (pi-coding-agent--handle-display-event
+     `(:type "message_update"
+       :assistantMessageEvent (:type "toolcall_start" :contentIndex 0)
+       :message (:role "assistant"
+                 :content [(:type "toolCall" :id "call_1"
+                            :name "write" :arguments nil)])))
+    ;; Delta with path now populated
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "hello\n"))
+    (pi-coding-agent--handle-display-event
+     '(:type "message_end" :message (:role "assistant")))
+    ;; Execution phase
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start" :toolCallId "call_1"
+       :toolName "write" :args (:path "/tmp/foo.py" :content "hello\n")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_end" :toolCallId "call_1"
+       :toolName "write"
+       :result (:content [(:type "text" :text "wrote file")])
+       :isError nil))
+    ;; Finalized overlay must have the path
+    (let ((ov (seq-find (lambda (o) (overlay-get o 'pi-coding-agent-tool-block))
+                        (overlays-in (point-min) (point-max)))))
+      (should ov)
+      (should (equal "/tmp/foo.py"
+                     (overlay-get ov 'pi-coding-agent-tool-path))))))
+
+(ert-deftest pi-coding-agent-test-streaming-tool-path-from-execution-start ()
+  "Overlay path set from tool_execution_start when delta never provided it.
+Safety net: even if toolcall_delta doesn't include the path, the
+authoritative args from tool_execution_start should populate it."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event '(:type "agent_start"))
+    (pi-coding-agent--handle-display-event '(:type "message_start"))
+    ;; toolcall_start with nil args
+    (pi-coding-agent--handle-display-event
+     `(:type "message_update"
+       :assistantMessageEvent (:type "toolcall_start" :contentIndex 0)
+       :message (:role "assistant"
+                 :content [(:type "toolCall" :id "call_1"
+                            :name "edit" :arguments nil)])))
+    ;; No toolcall_delta with path — skip straight to execution
+    (pi-coding-agent--handle-display-event
+     '(:type "message_end" :message (:role "assistant")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start" :toolCallId "call_1"
+       :toolName "edit"
+       :args (:path "/tmp/bar.el" :oldText "old" :newText "new")))
+    ;; Pending overlay should now have path from execution start
+    (should pi-coding-agent--pending-tool-overlay)
+    (should (equal "/tmp/bar.el"
+                   (overlay-get pi-coding-agent--pending-tool-overlay
+                                'pi-coding-agent-tool-path)))))
+
 (ert-deftest pi-coding-agent-test-visit-file-from-edit-diff ()
   "visit-file should navigate to correct line from edit diff."
   (with-temp-buffer
@@ -2369,8 +2433,10 @@ Regression test: streaming output with no newlines should still be capped."
     ;; Must have blank line between text and tool header
     (should (string-match-p "check\\.\n\n\\$ ls" (buffer-string)))))
 
-(ert-deftest pi-coding-agent-test-toolcall-delta-updates-header ()
-  "toolcall_delta updates header when path/command becomes available."
+(ert-deftest pi-coding-agent-test-toolcall-delta-updates-header-not-path ()
+  "toolcall_delta updates header text for responsiveness but not overlay path.
+Header shows path as soon as it appears in streaming args (visual feedback).
+Overlay path is only set at tool_execution_start (authoritative for navigation)."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (pi-coding-agent--handle-display-event '(:type "agent_start"))
@@ -2382,7 +2448,7 @@ Regression test: streaming output with no newlines should still be capped."
        :message (:role "assistant"
                  :content [(:type "toolCall" :id "call_1"
                             :name "read" :arguments nil)])))
-    ;; Delta with path now populated
+    ;; Delta with path — header SHOULD update (visual feedback)
     (pi-coding-agent--handle-display-event
      `(:type "message_update"
        :assistantMessageEvent (:type "toolcall_delta" :contentIndex 0 :delta "x")
@@ -2390,9 +2456,41 @@ Regression test: streaming output with no newlines should still be capped."
                  :content [(:type "toolCall" :id "call_1"
                             :name "read"
                             :arguments (:path "/tmp/foo.py"))])))
-    ;; Header should show the real path, not "..."
+    ;; Header should show the real path
     (should (string-match-p "read /tmp/foo\\.py" (buffer-string)))
-    (should-not (string-match-p "read \\.\\.\\." (buffer-string)))))
+    ;; But overlay should NOT have path yet (deferred to tool_execution_start)
+    (should-not (overlay-get pi-coding-agent--pending-tool-overlay
+                             'pi-coding-agent-tool-path))))
+
+(ert-deftest pi-coding-agent-test-toolcall-header-updated-at-execution-start ()
+  "Header updates from placeholder to real args at tool_execution_start.
+During streaming, header shows placeholder.  When execution starts with
+authoritative args, header and overlay path are updated."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event '(:type "agent_start"))
+    (pi-coding-agent--handle-display-event '(:type "message_start"))
+    ;; toolcall_start with nil args
+    (pi-coding-agent--handle-display-event
+     `(:type "message_update"
+       :assistantMessageEvent (:type "toolcall_start" :contentIndex 0)
+       :message (:role "assistant"
+                 :content [(:type "toolCall" :id "call_1"
+                            :name "read" :arguments nil)])))
+    (should (string-match-p "read \\.\\.\\." (buffer-string)))
+    ;; tool_execution_start with authoritative args
+    (pi-coding-agent--handle-display-event
+     '(:type "message_end" :message (:role "assistant")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start" :toolCallId "call_1"
+       :toolName "read" :args (:path "/tmp/foo.py")))
+    ;; Now header should show the real path
+    (should (string-match-p "read /tmp/foo\\.py" (buffer-string)))
+    (should-not (string-match-p "read \\.\\.\\." (buffer-string)))
+    ;; And overlay should have the path
+    (should (equal "/tmp/foo.py"
+                   (overlay-get pi-coding-agent--pending-tool-overlay
+                                'pi-coding-agent-tool-path)))))
 
 (ert-deftest pi-coding-agent-test-toolcall-start-creates-overlay ()
   "toolcall_start in message_update creates tool overlay with header."
