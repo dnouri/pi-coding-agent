@@ -1440,6 +1440,9 @@ Updates buffer-local state and renders display updates."
                     (plist-get tool-call :id)))))
          ("toolcall_delta"
           ;; LLM streaming tool call args — update header and stream content.
+          ;; Header updates here for responsiveness (path appears as soon as
+          ;; the LLM generates it).  Overlay path for navigation is only set
+          ;; at tool_execution_start with authoritative args.
           (when pi-coding-agent--streaming-tool-id
             (when-let* ((tool-call (pi-coding-agent--extract-tool-call
                                     event msg-event)))
@@ -1482,7 +1485,16 @@ Updates buffer-local state and renders display updates."
        ;; Skip overlay creation if toolcall_start already created it
        (if (and pi-coding-agent--streaming-tool-id
                 (equal tool-call-id pi-coding-agent--streaming-tool-id))
-           (setq pi-coding-agent--streaming-tool-id nil)
+           (progn
+             (setq pi-coding-agent--streaming-tool-id nil)
+             ;; Update header and path from authoritative args.
+             ;; During streaming, header shows placeholder ("...") since
+             ;; delta args may be partial.  Now we have the real args.
+             (let ((tool-name (plist-get event :toolName)))
+               (pi-coding-agent--display-tool-update-header tool-name args))
+             (when-let* ((path (pi-coding-agent--tool-path args))
+                         (ov pi-coding-agent--pending-tool-overlay))
+               (overlay-put ov 'pi-coding-agent-tool-path path)))
          (pi-coding-agent--display-tool-start (plist-get event :toolName) args))))
     ("tool_execution_end"
      (let* ((tool-call-id (plist-get event :toolCallId))
@@ -1932,8 +1944,8 @@ Uses `font-lock-face' to survive gfm-mode refontification."
 
 (defun pi-coding-agent--display-tool-update-header (tool-name args)
   "Update the header of the pending tool overlay for TOOL-NAME with ARGS.
-Replaces the header text when it has changed (e.g., path becomes
-available during toolcall_delta streaming)."
+Replaces the header text when it has changed (e.g., when authoritative
+args arrive at tool_execution_start after streaming placeholder)."
   (when pi-coding-agent--pending-tool-overlay
     (let* ((new-header (pi-coding-agent--tool-header tool-name args))
            (ov pi-coding-agent--pending-tool-overlay)
