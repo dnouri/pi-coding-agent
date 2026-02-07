@@ -192,15 +192,11 @@ When phscroll is not available, tables wrap like other content."
   "Face for tool error indicators."
   :group 'pi-coding-agent)
 
-(defface pi-coding-agent-tool-block-pending
+(defface pi-coding-agent-tool-block
   '((t :extend t))
-  "Face for tool blocks during execution.
-Subtle blue-tinted background derived from the current theme."
-  :group 'pi-coding-agent)
-
-(defface pi-coding-agent-tool-block-success
-  '((t :inherit diff-added :extend t))
-  "Face for tool blocks after successful completion."
+  "Base face for tool blocks.
+Subtle blue-tinted background derived from the current theme.
+Used during execution and after successful completion."
   :group 'pi-coding-agent)
 
 (defface pi-coding-agent-tool-block-error
@@ -242,8 +238,8 @@ Returns a hex color string.  AMOUNT of 0.0 returns BASE unchanged;
                     (color-name-to-rgb base)
                     (color-name-to-rgb target))))
 
-(defun pi-coding-agent--update-tool-pending-face (&rest _)
-  "Set `pi-coding-agent-tool-block-pending' background from theme.
+(defun pi-coding-agent--update-tool-block-face (&rest _)
+  "Set `pi-coding-agent-tool-block' background from theme.
 Blends the default background slightly toward blue, producing a
 subtle tint that works with any theme.  Called from mode setup and
 on theme changes."
@@ -256,7 +252,7 @@ on theme changes."
                  (tint (if dark-p "#5555cc" "#3333aa"))
                  (amount (if dark-p 0.12 0.08)))
             (set-face-attribute
-             'pi-coding-agent-tool-block-pending nil
+             'pi-coding-agent-tool-block nil
              :background
              (pi-coding-agent--blend-color bg tint amount)))))
     (error nil)))
@@ -264,7 +260,7 @@ on theme changes."
 ;; Recompute when theme changes (Emacs 29+)
 (when (boundp 'enable-theme-functions)
   (add-hook 'enable-theme-functions
-            #'pi-coding-agent--update-tool-pending-face))
+            #'pi-coding-agent--update-tool-block-face))
 
 ;;;; Language Detection
 
@@ -401,7 +397,7 @@ This is a read-only buffer showing the conversation history."
     (phscroll-mode 1))
 
   ;; Compute pending-tool-block face from current theme
-  (pi-coding-agent--update-tool-pending-face)
+  (pi-coding-agent--update-tool-block-face)
 
   (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-on-kill nil t))
 
@@ -1857,7 +1853,7 @@ automatically extends when content is inserted at its end."
   (let ((ov (make-overlay (point) (point) nil nil t)))
     (overlay-put ov 'pi-coding-agent-tool-block t)
     (overlay-put ov 'pi-coding-agent-tool-name tool-name)
-    (overlay-put ov 'face 'pi-coding-agent-tool-block-pending)
+    (overlay-put ov 'face 'pi-coding-agent-tool-block)
     (when path
       (overlay-put ov 'pi-coding-agent-tool-path path))
     ov))
@@ -2294,7 +2290,7 @@ Shows preview lines with expandable toggle for long output."
                        'pi-coding-agent-line-map line-map)))
       ;; Finalize overlay - replace with non-rear-advance version
       (pi-coding-agent--tool-overlay-finalize
-       (if is-error 'pi-coding-agent-tool-block-error 'pi-coding-agent-tool-block-success))
+       (if is-error 'pi-coding-agent-tool-block-error 'pi-coding-agent-tool-block))
       ;; Add trailing newline for spacing after tool block
       (insert "\n"))))
 
