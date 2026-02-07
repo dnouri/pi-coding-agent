@@ -58,5 +58,43 @@ Returns non-nil if the process exits before the timeout."
    pi-coding-agent-test-poll-interval
    process))
 
+;;;; Toolcall Streaming Helpers
+
+(defun pi-coding-agent-test--count-matches (regexp string)
+  "Count non-overlapping occurrences of REGEXP in STRING."
+  (let ((count 0) (start 0))
+    (while (string-match regexp string start)
+      (setq count (1+ count)
+            start (match-end 0)))
+    count))
+
+(defmacro pi-coding-agent-test--with-toolcall (tool-name args &rest body)
+  "Set up a chat buffer with a streaming tool call, then run BODY.
+Creates a temp buffer in chat mode, fires agent_start, message_start,
+and toolcall_start for TOOL-NAME with ARGS (a plist).  The tool call
+ID is \"call_1\" and contentIndex is 0."
+  (declare (indent 2) (debug (sexp sexp body)))
+  `(with-temp-buffer
+     (pi-coding-agent-chat-mode)
+     (pi-coding-agent--handle-display-event '(:type "agent_start"))
+     (pi-coding-agent--handle-display-event '(:type "message_start"))
+     (pi-coding-agent--handle-display-event
+      `(:type "message_update"
+        :assistantMessageEvent (:type "toolcall_start" :contentIndex 0)
+        :message (:role "assistant"
+                  :content [(:type "toolCall" :id "call_1"
+                             :name ,,tool-name :arguments ,,args)])))
+     ,@body))
+
+(defun pi-coding-agent-test--send-delta (tool-name args)
+  "Send a toolcall_delta event for TOOL-NAME with ARGS.
+Uses tool call ID \"call_1\" and contentIndex 0."
+  (pi-coding-agent--handle-display-event
+   `(:type "message_update"
+     :assistantMessageEvent (:type "toolcall_delta" :contentIndex 0 :delta "x")
+     :message (:role "assistant"
+               :content [(:type "toolCall" :id "call_1"
+                          :name ,tool-name :arguments ,args)]))))
+
 (provide 'pi-coding-agent-test-common)
 ;;; pi-coding-agent-test-common.el ends here
