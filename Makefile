@@ -13,7 +13,7 @@ PI_BIN_DIR = $(abspath $(dir $(PI_BIN)))
 SELECTOR ?=
 
 .PHONY: test test-unit test-integration test-integration-ci test-gui test-gui-ci test-all
-.PHONY: check compile lint lint-checkdoc lint-package clean clean-cache help
+.PHONY: check check-parens compile lint lint-checkdoc lint-package clean clean-cache help
 .PHONY: ollama-start ollama-stop ollama-status setup-pi setup-models install-hooks
 
 help:
@@ -172,6 +172,12 @@ ollama-status:
 # ============================================================
 # Code quality
 # ============================================================
+
+check-parens:
+	@echo "=== Check Parens ==="
+	@OUTPUT=$$($(BATCH) --eval '(condition-case err (dolist (f (list "pi-coding-agent-core.el" "pi-coding-agent.el")) (with-current-buffer (find-file-noselect f) (check-parens) (message "%s OK" f))) (user-error (message "FAIL: %s" (error-message-string err)) (kill-emacs 1)))' 2>&1); \
+	echo "$$OUTPUT" | grep -E "OK$$|FAIL:"; \
+	echo "$$OUTPUT" | grep -q "FAIL:" && exit 1 || true
 
 compile: clean .deps-stamp
 	@echo "=== Byte-compile ==="
