@@ -2224,7 +2224,7 @@ Regression test: single lines should respect byte limit even with no newlines."
     ;; Should have output, success face, no [error]
     (should (string-match-p "success output" (buffer-string)))
     (let ((ov (car (overlays-at (point-min)))))
-      (should (eq (overlay-get ov 'face) 'pi-coding-agent-tool-block-success)))
+      (should (eq (overlay-get ov 'face) 'pi-coding-agent-tool-block)))
     (should-not (string-match-p "\\[error\\]" (buffer-string)))))
 
 (ert-deftest pi-coding-agent-test-tool-output-survives-message-render ()
@@ -5264,7 +5264,7 @@ Errors still consume context, so their usage data is valid for display."
     (let* ((overlays (overlays-at (point)))
            (tool-ov (seq-find (lambda (o) (overlay-get o 'pi-coding-agent-tool-block)) overlays)))
       (should tool-ov)
-      (should (eq (overlay-get tool-ov 'face) 'pi-coding-agent-tool-block-pending))
+      (should (eq (overlay-get tool-ov 'face) 'pi-coding-agent-tool-block))
       (should (equal (overlay-get tool-ov 'pi-coding-agent-tool-name) "bash")))))
 
 (ert-deftest pi-coding-agent-test-tool-start-header-format ()
@@ -5277,20 +5277,54 @@ Errors still consume context, so their usage data is valid for display."
     ;; Should NOT have drawer syntax
     (should-not (string-match-p ":BASH:" (buffer-string)))))
 
-(ert-deftest pi-coding-agent-test-tool-end-changes-overlay-face ()
-  "tool_execution_end changes overlay face from pending to success/error."
+(ert-deftest pi-coding-agent-test-tool-header-faces ()
+  "Tool header applies tool-name face on prefix and tool-command on args."
+  ;; bash: "$" is tool-name, command is tool-command
+  (let ((header (pi-coding-agent--tool-header "bash" '(:command "ls -la"))))
+    (should (eq (get-text-property 0 'font-lock-face header)
+                'pi-coding-agent-tool-name))
+    (should (eq (get-text-property 2 'font-lock-face header)
+                'pi-coding-agent-tool-command)))
+  ;; read/write/edit: tool name is tool-name, path is tool-command
+  (dolist (tool '("read" "write" "edit"))
+    (let ((header (pi-coding-agent--tool-header tool '(:path "foo.txt"))))
+      (should (eq (get-text-property 0 'font-lock-face header)
+                  'pi-coding-agent-tool-name))
+      (should (eq (get-text-property (1+ (length tool)) 'font-lock-face header)
+                  'pi-coding-agent-tool-command))))
+  ;; Unknown tool: entire string is tool-name
+  (let ((header (pi-coding-agent--tool-header "custom_tool" nil)))
+    (should (eq (get-text-property 0 'font-lock-face header)
+                'pi-coding-agent-tool-name))
+    (should (equal (substring-no-properties header) "custom_tool"))))
+
+(ert-deftest pi-coding-agent-test-tool-header-survives-font-lock ()
+  "Tool header font-lock-face properties survive gfm-mode refontification."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "edit" '(:path "foo.txt"))
+    (font-lock-ensure)
+    (goto-char (point-min))
+    (should (eq (get-text-property (point) 'font-lock-face)
+                'pi-coding-agent-tool-name))
+    (search-forward "foo.txt")
+    (should (eq (get-text-property (match-beginning 0) 'font-lock-face)
+                'pi-coding-agent-tool-command))))
+
+(ert-deftest pi-coding-agent-test-tool-end-keeps-overlay-face ()
+  "tool_execution_end keeps base face on success."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (pi-coding-agent--display-tool-start "bash" '(:command "ls"))
-    ;; Initially pending
+    ;; Initially base face
     (let ((ov (car (overlays-at (point-min)))))
-      (should (eq (overlay-get ov 'face) 'pi-coding-agent-tool-block-pending)))
-    ;; After success
+      (should (eq (overlay-get ov 'face) 'pi-coding-agent-tool-block)))
+    ;; After success — face stays the same
     (pi-coding-agent--display-tool-end "bash" '(:command "ls")
                           '((:type "text" :text "file.txt"))
                           nil nil)
     (let ((ov (car (overlays-at (point-min)))))
-      (should (eq (overlay-get ov 'face) 'pi-coding-agent-tool-block-success)))))
+      (should (eq (overlay-get ov 'face) 'pi-coding-agent-tool-block)))))
 
 (ert-deftest pi-coding-agent-test-tool-end-error-face ()
   "tool_execution_end sets error face on failure."
@@ -5346,7 +5380,7 @@ display-agent-end must finalize the pending overlay with error face."
     ;; Verify overlay is pending
     (should pi-coding-agent--pending-tool-overlay)
     (should (eq (overlay-get pi-coding-agent--pending-tool-overlay 'face)
-                'pi-coding-agent-tool-block-pending))
+                'pi-coding-agent-tool-block))
     ;; Simulate abort - display-agent-end is called WITHOUT tool-end
     (setq pi-coding-agent--aborted t)
     (pi-coding-agent--display-agent-end)

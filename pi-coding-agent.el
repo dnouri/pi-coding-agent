@@ -173,12 +173,12 @@ When phscroll is not available, tables wrap like other content."
   :group 'pi-coding-agent)
 
 (defface pi-coding-agent-tool-name
-  '((t :inherit font-lock-function-name-face :weight bold))
+  '((t :inherit font-lock-function-name-face :weight bold :slant italic))
   "Face for tool names (BASH, READ, etc.) in pi chat."
   :group 'pi-coding-agent)
 
 (defface pi-coding-agent-tool-command
-  '((t :inherit font-lock-function-name-face))
+  '((t :inherit font-lock-function-name-face :slant italic))
   "Face for tool commands and arguments."
   :group 'pi-coding-agent)
 
@@ -192,15 +192,10 @@ When phscroll is not available, tables wrap like other content."
   "Face for tool error indicators."
   :group 'pi-coding-agent)
 
-(defface pi-coding-agent-tool-block-pending
+(defface pi-coding-agent-tool-block
   '((t :extend t))
-  "Face for tool blocks during execution.
+  "Face for tool blocks.
 Subtle blue-tinted background derived from the current theme."
-  :group 'pi-coding-agent)
-
-(defface pi-coding-agent-tool-block-success
-  '((t :inherit diff-added :extend t))
-  "Face for tool blocks after successful completion."
   :group 'pi-coding-agent)
 
 (defface pi-coding-agent-tool-block-error
@@ -242,8 +237,8 @@ Returns a hex color string.  AMOUNT of 0.0 returns BASE unchanged;
                     (color-name-to-rgb base)
                     (color-name-to-rgb target))))
 
-(defun pi-coding-agent--update-tool-pending-face (&rest _)
-  "Set `pi-coding-agent-tool-block-pending' background from theme.
+(defun pi-coding-agent--update-tool-block-face (&rest _)
+  "Set `pi-coding-agent-tool-block' background from theme.
 Blends the default background slightly toward blue, producing a
 subtle tint that works with any theme.  Called from mode setup and
 on theme changes."
@@ -256,7 +251,7 @@ on theme changes."
                  (tint (if dark-p "#5555cc" "#3333aa"))
                  (amount (if dark-p 0.12 0.08)))
             (set-face-attribute
-             'pi-coding-agent-tool-block-pending nil
+             'pi-coding-agent-tool-block nil
              :background
              (pi-coding-agent--blend-color bg tint amount)))))
     (error nil)))
@@ -264,7 +259,7 @@ on theme changes."
 ;; Recompute when theme changes (Emacs 29+)
 (when (boundp 'enable-theme-functions)
   (add-hook 'enable-theme-functions
-            #'pi-coding-agent--update-tool-pending-face))
+            #'pi-coding-agent--update-tool-block-face))
 
 ;;;; Language Detection
 
@@ -400,8 +395,8 @@ This is a read-only buffer showing the conversation history."
   (when (pi-coding-agent--phscroll-available-p)
     (phscroll-mode 1))
 
-  ;; Compute pending-tool-block face from current theme
-  (pi-coding-agent--update-tool-pending-face)
+  ;; Compute tool-block face from current theme
+  (pi-coding-agent--update-tool-block-face)
 
   (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-on-kill nil t))
 
@@ -1857,7 +1852,7 @@ automatically extends when content is inserted at its end."
   (let ((ov (make-overlay (point) (point) nil nil t)))
     (overlay-put ov 'pi-coding-agent-tool-block t)
     (overlay-put ov 'pi-coding-agent-tool-name tool-name)
-    (overlay-put ov 'face 'pi-coding-agent-tool-block-pending)
+    (overlay-put ov 'face 'pi-coding-agent-tool-block)
     (when path
       (overlay-put ov 'pi-coding-agent-tool-path path))
     ov))
@@ -1893,20 +1888,25 @@ it from extending to subsequent content.  Sets pending overlay to nil."
         (overlay-put ov 'face face)))
     (setq pi-coding-agent--pending-tool-overlay nil)))
 
-(defun pi-coding-agent--tool-header-text (tool-name args)
-  "Compute header text for tool TOOL-NAME with ARGS."
+(defun pi-coding-agent--tool-header (tool-name args)
+  "Return propertized header for tool TOOL-NAME with ARGS.
+The tool name prefix uses `pi-coding-agent-tool-name' face and
+the arguments use `pi-coding-agent-tool-command' face.
+Uses `font-lock-face' to survive gfm-mode refontification."
   (let ((path (pi-coding-agent--tool-path args)))
     (pcase tool-name
-      ("bash" (format "$ %s" (or (plist-get args :command) "...")))
-      ("read" (format "read %s" (or path "...")))
-      ("write" (format "write %s" (or path "...")))
-      ("edit" (format "edit %s" (or path "...")))
-      (_ tool-name))))
+      ("bash"
+       (let ((cmd (or (plist-get args :command) "...")))
+         (concat (propertize "$" 'font-lock-face 'pi-coding-agent-tool-name)
+                 (propertize (concat " " cmd) 'font-lock-face 'pi-coding-agent-tool-command))))
+      ((or "read" "write" "edit")
+       (concat (propertize tool-name 'font-lock-face 'pi-coding-agent-tool-name)
+               (propertize (concat " " (or path "...")) 'font-lock-face 'pi-coding-agent-tool-command)))
+      (_ (propertize tool-name 'font-lock-face 'pi-coding-agent-tool-name)))))
 
 (defun pi-coding-agent--display-tool-start (tool-name args)
   "Display header for tool TOOL-NAME with ARGS and create overlay."
-  (let* ((header (pi-coding-agent--tool-header-text tool-name args))
-         (header-display (propertize header 'face 'pi-coding-agent-tool-command))
+  (let* ((header-display (pi-coding-agent--tool-header tool-name args))
          (path (pi-coding-agent--tool-path args))
          (inhibit-read-only t))
     (pi-coding-agent--with-scroll-preservation
@@ -1935,22 +1935,21 @@ it from extending to subsequent content.  Sets pending overlay to nil."
 Replaces the header text when it has changed (e.g., path becomes
 available during toolcall_delta streaming)."
   (when pi-coding-agent--pending-tool-overlay
-    (let* ((new-header (pi-coding-agent--tool-header-text tool-name args))
+    (let* ((new-header (pi-coding-agent--tool-header tool-name args))
            (ov pi-coding-agent--pending-tool-overlay)
            (ov-start (overlay-start ov))
            (header-end (overlay-get ov 'pi-coding-agent-header-end)))
       (when (and ov-start header-end)
         (let ((old-header (buffer-substring-no-properties
                            ov-start (1- (marker-position header-end)))))
-          (unless (string= old-header new-header)
+          (unless (string= old-header (substring-no-properties new-header))
             (let ((inhibit-read-only t)
                   (inhibit-modification-hooks t))
               (pi-coding-agent--with-scroll-preservation
                 (save-excursion
                   (goto-char ov-start)
                   (delete-region ov-start (1- (marker-position header-end)))
-                  (insert (propertize new-header 'face
-                                      'pi-coding-agent-tool-command)))))))))))
+                  (insert new-header))))))))))
 
 (defun pi-coding-agent--extract-tool-call (event msg-event)
   "Extract toolCall from EVENT using contentIndex in MSG-EVENT.
@@ -2294,7 +2293,7 @@ Shows preview lines with expandable toggle for long output."
                        'pi-coding-agent-line-map line-map)))
       ;; Finalize overlay - replace with non-rear-advance version
       (pi-coding-agent--tool-overlay-finalize
-       (if is-error 'pi-coding-agent-tool-block-error 'pi-coding-agent-tool-block-success))
+       (if is-error 'pi-coding-agent-tool-block-error 'pi-coding-agent-tool-block))
       ;; Add trailing newline for spacing after tool block
       (insert "\n"))))
 
