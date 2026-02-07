@@ -16,6 +16,7 @@
 
 (require 'ert)
 (require 'pi-coding-agent-gui-test-utils)
+(require 'pi-coding-agent-test-common)
 
 ;;;; Session Tests
 
@@ -195,6 +196,42 @@ is properly displayed in the chat buffer."
         (sleep-for 2)
         ;; The follow-up message should be in the chat buffer
         (should (pi-coding-agent-gui-test-chat-contains "CONFIRMED"))))))
+
+;;;; Streaming Fontification Tests
+
+(ert-deftest pi-coding-agent-gui-test-streaming-no-fences ()
+  "Streaming write content has no fence markers in a GUI buffer.
+Pre-fontification in a temp buffer means no ``` markers to hide.
+Uses a displayed buffer (jit-lock active) to verify the approach
+works in real GUI conditions."
+  (let ((buf (get-buffer-create "*pi-gui-fontify-test*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buf)
+          (pi-coding-agent-chat-mode)
+          (pi-coding-agent--handle-display-event '(:type "agent_start"))
+          (pi-coding-agent--handle-display-event '(:type "message_start"))
+          (pi-coding-agent--handle-display-event
+           `(:type "message_update"
+             :assistantMessageEvent (:type "toolcall_start" :contentIndex 0)
+             :message (:role "assistant"
+                       :content [(:type "toolCall" :id "call_1"
+                                  :name "write"
+                                  :arguments (:path "/tmp/test.py"))])))
+          (redisplay)
+          (pi-coding-agent-test--send-delta
+           "write" '(:path "/tmp/test.py"
+                     :content "def hello():\n    return 42\n"))
+          ;; No fence markers in buffer
+          (should-not (string-match-p "```" (buffer-string)))
+          ;; Content is present with syntax faces
+          (goto-char (point-min))
+          (should (search-forward "def" nil t))
+          (let ((face (get-text-property (match-beginning 0) 'face)))
+            (should (or (eq face 'font-lock-keyword-face)
+                        (and (listp face)
+                             (memq 'font-lock-keyword-face face))))))
+      (kill-buffer buf))))
 
 (provide 'pi-coding-agent-gui-tests)
 ;;; pi-coding-agent-gui-tests.el ends here

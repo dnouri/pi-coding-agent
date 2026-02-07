@@ -2347,6 +2347,283 @@ Regression test: streaming output with no newlines should still be capped."
       ;; Should contain truncation indicator
       (should (string-match-p "earlier output\\|truncated" buffer-content)))))
 
+;; ── Toolcall streaming (during LLM generation) ─────────────────────
+
+(ert-deftest pi-coding-agent-test-toolcall-start-after-text-has-blank-line ()
+  "toolcall_start after text delta without trailing newline has proper spacing."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event '(:type "agent_start"))
+    (pi-coding-agent--handle-display-event '(:type "message_start"))
+    ;; Text delta without trailing newline (common: LLM streams partial line)
+    (pi-coding-agent--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "text_delta" :delta "Let me check.")))
+    ;; toolcall_start fires immediately after
+    (pi-coding-agent--handle-display-event
+     `(:type "message_update"
+       :assistantMessageEvent (:type "toolcall_start" :contentIndex 0)
+       :message (:role "assistant"
+                 :content [(:type "toolCall" :id "call_1"
+                            :name "bash" :arguments (:command "ls"))])))
+    ;; Must have blank line between text and tool header
+    (should (string-match-p "check\\.\n\n\\$ ls" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-updates-header ()
+  "toolcall_delta updates header when path/command becomes available."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event '(:type "agent_start"))
+    (pi-coding-agent--handle-display-event '(:type "message_start"))
+    ;; toolcall_start with empty args (LLM just started generating JSON)
+    (pi-coding-agent--handle-display-event
+     `(:type "message_update"
+       :assistantMessageEvent (:type "toolcall_start" :contentIndex 0)
+       :message (:role "assistant"
+                 :content [(:type "toolCall" :id "call_1"
+                            :name "read" :arguments nil)])))
+    ;; Delta with path now populated
+    (pi-coding-agent--handle-display-event
+     `(:type "message_update"
+       :assistantMessageEvent (:type "toolcall_delta" :contentIndex 0 :delta "x")
+       :message (:role "assistant"
+                 :content [(:type "toolCall" :id "call_1"
+                            :name "read"
+                            :arguments (:path "/tmp/foo.py"))])))
+    ;; Header should show the real path, not "..."
+    (should (string-match-p "read /tmp/foo\\.py" (buffer-string)))
+    (should-not (string-match-p "read \\.\\.\\." (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-toolcall-start-creates-overlay ()
+  "toolcall_start in message_update creates tool overlay with header."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (should (string-match-p "write /tmp/foo\\.py" (buffer-string)))
+    (should pi-coding-agent--pending-tool-overlay)
+    (should (equal pi-coding-agent--streaming-tool-id "call_1"))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-streams-write-content ()
+  "toolcall_delta streams args.content for write tools."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "line1\nline2\n"))
+    (should (string-match-p "line1" (buffer-string)))
+    (should (string-match-p "line2" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-no-fence-markers-in-buffer ()
+  "Streaming write content has no visible fence markers.
+Content is pre-fontified in a temp buffer and inserted without fences."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "def hello():\n    print('hi')\n"))
+    (should (string-match-p "def hello" (buffer-string)))
+    (should-not (string-match-p "```" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-streaming-has-keyword-face ()
+  "Streaming write content gets syntax highlighting via pre-fontification."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "def hello():\n    pass\n"))
+    (goto-char (point-min))
+    (search-forward "def")
+    (let ((face (get-text-property (match-beginning 0) 'face)))
+      (should (or (eq face 'font-lock-keyword-face)
+                  (and (listp face) (memq 'font-lock-keyword-face face)))))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-fontified-prevents-gfm ()
+  "Pre-fontified tool content is marked fontified to block gfm-mode.
+Without this, jit-lock would turn __init__ into markdown bold."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "def __init__(self):\n    pass\n"))
+    (goto-char (point-min))
+    (search-forward "def")
+    (should (get-text-property (match-beginning 0) 'fontified))
+    (search-forward "__init__")
+    (let ((face (get-text-property (match-beginning 0) 'face)))
+      (should-not (memq 'markdown-bold-face
+                        (if (listp face) face (list face)))))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-incremental-fontify-context ()
+  "Incremental fontification preserves syntax context across deltas.
+Docstring opener scrolls past the 10-line preview window; text added
+later inside the open docstring should still get string/doc face."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (let* ((opener "class Foo:\n    \"\"\"\n")
+           (doc-lines (mapconcat (lambda (i) (format "    docstring line %d" i))
+                                 (number-sequence 1 15) "\n"))
+           (content1 (concat opener doc-lines "\n")))
+      (pi-coding-agent-test--send-delta
+       "write" `(:path "/tmp/foo.py" :content ,content1))
+      (pi-coding-agent-test--send-delta
+       "write" `(:path "/tmp/foo.py"
+                 :content ,(concat content1
+                                   "    def inside_string():\n"
+                                   "    still docs\n"))))
+    (goto-char (point-min))
+    (search-forward "def inside_string")
+    (let ((face (get-text-property (match-beginning 0) 'face)))
+      (should (memq (if (listp face) (car face) face)
+                    '(font-lock-string-face font-lock-doc-face))))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-streams-without-mode ()
+  "Streaming works even when the language mode is not installed.
+Writing a .rs file without rust-mode should still show content,
+falling back to unfontified text."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.rs")
+    (cl-letf (((symbol-function 'rust-mode) nil))
+      (pi-coding-agent-test--send-delta
+       "write" '(:path "/tmp/foo.rs" :content "fn main() {\n    println!(\"hi\");\n}\n")))
+    (should (string-match-p "fn main" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-stable-line-count ()
+  "Streaming preview line count is stable across partial-line deltas.
+A delta that ends mid-line should show the same number of lines
+as the previous delta that ended at a newline boundary."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    ;; Delta 1: two complete lines
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "line1\nline2\n"))
+    (let ((lines-after-complete
+           (length (split-string (string-trim (buffer-string)) "\n"))))
+      ;; Delta 2: adds a partial third line
+      (pi-coding-agent-test--send-delta
+       "write" '(:path "/tmp/foo.py" :content "line1\nline2\npar"))
+      (let ((lines-after-partial
+             (length (split-string (string-trim (buffer-string)) "\n"))))
+        ;; Line count should NOT increase from the partial line
+        (should (= lines-after-complete lines-after-partial))))))
+
+(ert-deftest pi-coding-agent-test-fontify-sync-complete-lines-only ()
+  "Fontification runs only on complete lines, not partial lines.
+A delta ending mid-line should not fontify the partial part, avoiding
+incorrect keyword matching on incomplete tokens."
+  (let* ((lang "python")
+         (buf-name (pi-coding-agent--fontify-buffer-name lang)))
+    (ignore-errors (kill-buffer buf-name))
+    ;; Sync partial line: `def` is incomplete
+    (pi-coding-agent--fontify-sync "def hel" lang)
+    (let ((buf (get-buffer buf-name)))
+      (should buf)
+      ;; Content should be in the buffer
+      (should (= (buffer-size buf) 7))
+      ;; But `def` should NOT be fontified since the line isn't complete
+      (with-current-buffer buf
+        (goto-char (point-min))
+        (should-not (get-text-property (point) 'face))))
+    ;; Now complete the line
+    (pi-coding-agent--fontify-sync "def hello():\n" lang)
+    (with-current-buffer buf-name
+      (goto-char (point-min))
+      ;; Now `def` SHOULD be fontified
+      (let ((face (get-text-property (point) 'face)))
+        (should (or (eq face 'font-lock-keyword-face)
+                    (and (listp face) (memq 'font-lock-keyword-face face))))))
+    (ignore-errors (kill-buffer buf-name))))
+
+(ert-deftest pi-coding-agent-test-toolcall-dedup-on-tool-execution-start ()
+  "tool_execution_start skips overlay creation when toolcall_start already created it."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (pi-coding-agent--handle-display-event
+     '(:type "message_end" :message (:role "assistant")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start" :toolCallId "call_1"
+       :toolName "write" :args (:path "/tmp/foo.py" :content "final")))
+    (should (= 1 (pi-coding-agent-test--count-matches
+                   "write /tmp/foo\\.py" (buffer-string))))
+    (should-not pi-coding-agent--streaming-tool-id)))
+
+(ert-deftest pi-coding-agent-test-toolcall-full-event-flow ()
+  "Full toolcall streaming flow produces correct final output."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "streaming content\n"))
+    (pi-coding-agent--handle-display-event
+     `(:type "message_update"
+       :assistantMessageEvent (:type "toolcall_end" :contentIndex 0)
+       :message (:role "assistant"
+                 :content [(:type "toolCall" :id "call_1"
+                            :name "write"
+                            :arguments (:path "/tmp/foo.py"
+                                        :content "streaming content\n"))])))
+    (pi-coding-agent--handle-display-event
+     '(:type "message_end" :message (:role "assistant")))
+    ;; Execution phase (dedup guard skips overlay creation)
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start" :toolCallId "call_1"
+       :toolName "write" :args (:path "/tmp/foo.py" :content "final content")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_end" :toolCallId "call_1"
+       :toolName "write"
+       :result (:content [(:type "text" :text "wrote 42 lines")])))
+    (let ((content (buffer-string)))
+      (should (= 1 (pi-coding-agent-test--count-matches
+                      "write /tmp/foo\\.py" content)))
+      (should (string-match-p "final content" content)))))
+
+(ert-deftest pi-coding-agent-test-toolcall-non-write-shows-header-only ()
+  "Non-write tools show header from toolcall_start but no streaming content."
+  (pi-coding-agent-test--with-toolcall "read" '(:path "/tmp/test.txt")
+    (pi-coding-agent-test--send-delta
+     "read" '(:path "/tmp/test.txt" :offset 1))
+    (should (string-match-p "read /tmp/test\\.txt" (buffer-string)))
+    (should-not (string-match-p "offset" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-toolcall-abort-cleans-up ()
+  "Abort during toolcall streaming cleans up properly."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (let ((pi-coding-agent--aborted t))
+      (pi-coding-agent--handle-display-event '(:type "agent_end")))
+    (should-not pi-coding-agent--pending-tool-overlay)
+    (should-not pi-coding-agent--streaming-tool-id)))
+
+(ert-deftest pi-coding-agent-test-toolcall-second-ignored-during-streaming ()
+  "Second toolcall_start is ignored while first is still streaming."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event '(:type "agent_start"))
+    (pi-coding-agent--handle-display-event '(:type "message_start"))
+    ;; First tool call starts streaming
+    (pi-coding-agent--handle-display-event
+     `(:type "message_update"
+       :assistantMessageEvent (:type "toolcall_start" :contentIndex 0)
+       :message (:role "assistant"
+                 :content [(:type "toolCall" :id "call_1"
+                            :name "write" :arguments (:path "/tmp/a.py"))
+                           (:type "toolCall" :id "call_2"
+                            :name "write" :arguments (:path "/tmp/b.py"))])))
+    ;; Second tool call start — should be ignored (streaming-tool-id already set)
+    (pi-coding-agent--handle-display-event
+     `(:type "message_update"
+       :assistantMessageEvent (:type "toolcall_start" :contentIndex 1)
+       :message (:role "assistant"
+                 :content [(:type "toolCall" :id "call_1"
+                            :name "write" :arguments (:path "/tmp/a.py"))
+                           (:type "toolCall" :id "call_2"
+                            :name "write" :arguments (:path "/tmp/b.py"))])))
+    ;; Only first tool's header appears
+    (let ((content (buffer-string)))
+      (should (string-match-p "write /tmp/a\\.py" content))
+      (should-not (string-match-p "write /tmp/b\\.py" content)))
+    ;; streaming-tool-id still tracks first tool
+    (should (equal pi-coding-agent--streaming-tool-id "call_1"))
+    ;; After tool_execution_start for first (dedup), second gets normal path
+    (pi-coding-agent--handle-display-event '(:type "message_end" :message (:role "assistant")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start" :toolCallId "call_1"
+       :toolName "write" :args (:path "/tmp/a.py" :content "content a")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_end" :toolCallId "call_1"
+       :toolName "write" :result (:content [(:type "text" :text "wrote a")])))
+    ;; Now second tool gets created by tool_execution_start normally
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start" :toolCallId "call_2"
+       :toolName "write" :args (:path "/tmp/b.py" :content "content b")))
+    (let ((content (buffer-string)))
+      (should (string-match-p "write /tmp/b\\.py" content))
+      ;; Both headers present, no duplicates
+      (should (= 1 (pi-coding-agent-test--count-matches "write /tmp/a\\.py" content)))
+      (should (= 1 (pi-coding-agent-test--count-matches "write /tmp/b\\.py" content))))))
+
 (ert-deftest pi-coding-agent-test-get-tail-lines-basic ()
   "Get-tail-lines returns last N lines correctly."
   (let ((content "line1\nline2\nline3\nline4\nline5"))
@@ -2372,6 +2649,28 @@ Regression test: streaming output with no newlines should still be capped."
       (should (equal (car result) "line2\nline3\n\n"))
       (should (eq (cdr result) t)))))
 
+(ert-deftest pi-coding-agent-test-get-tail-lines-skips-blank-lines ()
+  "Get-tail-lines does not count blank lines toward N.
+Blank lines are included in the returned content but don't consume
+a slot, so downstream consumers that skip blanks still get N content lines."
+  ;; With blank line in the tail region, should return 3 content lines
+  (let* ((content "line1\nline2\nline3\n\nline4\nline5")
+         (result (pi-coding-agent--get-tail-lines content 3)))
+    ;; Should include line3, blank, line4, line5 — 3 non-blank lines
+    (should (equal (car result) "line3\n\nline4\nline5"))
+    (should (eq (cdr result) t)))
+  ;; Multiple blank lines should all be skipped
+  (let* ((content "a\nb\n\n\nc\nd")
+         (result (pi-coding-agent--get-tail-lines content 3)))
+    ;; Should return b, blank, blank, c, d — 3 non-blank lines
+    (should (equal (car result) "b\n\n\nc\nd"))
+    (should (eq (cdr result) t)))
+  ;; Blank line at very end (before trailing newline)
+  (let* ((content "line1\nline2\n\n")
+         (result (pi-coding-agent--get-tail-lines content 2)))
+    (should (equal (car result) "line1\nline2\n\n"))
+    (should (eq (cdr result) nil))))
+
 (ert-deftest pi-coding-agent-test-get-tail-lines-empty ()
   "Get-tail-lines handles empty content."
   (let ((result (pi-coding-agent--get-tail-lines "" 5)))
@@ -2383,6 +2682,89 @@ Regression test: streaming output with no newlines should still be capped."
   (let ((result (pi-coding-agent--get-tail-lines "just one line" 5)))
     (should (equal (car result) "just one line"))
     (should (eq (cdr result) nil))))
+
+(ert-deftest pi-coding-agent-test-fontify-buffer-tail-single-line ()
+  "fontify-buffer-tail returns content for a single complete line.
+Only complete lines (terminated by newline) are extracted."
+  (let ((buf (get-buffer-create " *pi-fontify:python*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (erase-buffer)
+          (insert "x = 1\n")
+          (let ((result (pi-coding-agent--fontify-buffer-tail "python" 5)))
+            (should result)
+            (should (equal (substring-no-properties (car result)) "x = 1"))
+            (should-not (cdr result))))
+      (kill-buffer buf))))
+
+(ert-deftest pi-coding-agent-test-fontify-buffer-tail-respects-n ()
+  "fontify-buffer-tail returns exactly N non-blank lines, not N+1.
+Regression: forward-line -1 from the last newline skipped the last
+complete line, making the extracted content one line too many."
+  (let ((buf (get-buffer-create " *pi-fontify:test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (erase-buffer)
+          (dotimes (i 15) (insert (format "line%d\n" (1+ i))))
+          (let* ((result (pi-coding-agent--fontify-buffer-tail "test" 10))
+                 (tail (car result))
+                 (line-count (length (split-string
+                                      (substring-no-properties tail) "\n" t))))
+            (should result)
+            (should (= line-count 10))
+            (should (cdr result))))  ; has-hidden = t
+      (kill-buffer buf))))
+
+(ert-deftest pi-coding-agent-test-fontify-buffer-tail-empty-buffer ()
+  "fontify-buffer-tail returns nil for empty or nonexistent buffer."
+  ;; Nonexistent buffer
+  (should-not (pi-coding-agent--fontify-buffer-tail "nosuchlang" 5))
+  ;; Empty buffer
+  (let ((buf (get-buffer-create " *pi-fontify:python*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf (erase-buffer))
+          (should-not (pi-coding-agent--fontify-buffer-tail "python" 5)))
+      (kill-buffer buf))))
+
+(ert-deftest pi-coding-agent-test-fontify-buffer-tail-preserves-properties ()
+  "fontify-buffer-tail preserves text properties from fontification."
+  (let ((buf (get-buffer-create " *pi-fontify:python*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (erase-buffer)
+          (insert (propertize "def" 'face 'font-lock-keyword-face))
+          (insert " foo():\n    pass\n")
+          (let* ((result (pi-coding-agent--fontify-buffer-tail "python" 5))
+                 (tail (car result)))
+            (should tail)
+            (should (eq (get-text-property 0 'face tail)
+                        'font-lock-keyword-face))))
+      (kill-buffer buf))))
+
+(ert-deftest pi-coding-agent-test-fontify-buffer-tail-strips-blank-lines ()
+  "fontify-buffer-tail excludes blank lines from returned content.
+Blank lines between non-blank lines must not appear in the result,
+otherwise the displayed line count fluctuates as the tail window
+moves over regions with varying numbers of blank lines."
+  (let ((buf (get-buffer-create " *pi-fontify:test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (erase-buffer)
+          ;; Content with blank lines between code blocks
+          (insert "line1\nline2\n\nline3\n\nline4\nline5\n")
+          (let* ((result (pi-coding-agent--fontify-buffer-tail "test" 3))
+                 (tail (substring-no-properties (car result)))
+                 (lines (split-string tail "\n" t)))
+            (should result)
+            ;; Should return exactly 3 non-blank lines with no blanks
+            (should (= (length lines) 3))
+            (should (equal lines '("line3" "line4" "line5")))
+            ;; Total line count in string should equal non-blank count
+            ;; (no blank lines padding the result)
+            (should (= (length (split-string tail "\n"))
+                        3))))
+      (kill-buffer buf))))
 
 (ert-deftest pi-coding-agent-test-extract-text-from-content-single-block ()
   "Extract-text-from-content handles single text block efficiently."
