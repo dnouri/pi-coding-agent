@@ -5277,6 +5277,40 @@ Errors still consume context, so their usage data is valid for display."
     ;; Should NOT have drawer syntax
     (should-not (string-match-p ":BASH:" (buffer-string)))))
 
+(ert-deftest pi-coding-agent-test-tool-header-has-split-faces ()
+  "Tool header has tool-name face on name part and tool-command on args.
+Uses font-lock-face so faces survive font-lock refontification."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "bash" '(:command "ls -la"))
+    ;; Force font-lock to run (as it would on display)
+    (font-lock-ensure)
+    (goto-char (point-min))
+    ;; The "$" prefix should have tool-name face (bold italic)
+    (let ((face-at-dollar (get-text-property (point) 'font-lock-face)))
+      (should (eq face-at-dollar 'pi-coding-agent-tool-name)))
+    ;; The command part "ls -la" should have tool-command face (italic)
+    (search-forward "ls")
+    (let ((face-at-cmd (get-text-property (match-beginning 0) 'font-lock-face)))
+      (should (eq face-at-cmd 'pi-coding-agent-tool-command)))))
+
+(ert-deftest pi-coding-agent-test-tool-header-read-has-split-faces ()
+  "Read tool header has tool-name face on 'read' and tool-command on path.
+Uses font-lock-face so faces survive font-lock refontification."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "read" '(:path "foo.txt"))
+    ;; Force font-lock to run (as it would on display)
+    (font-lock-ensure)
+    (goto-char (point-min))
+    ;; "read" should have tool-name face
+    (let ((face-at-start (get-text-property (point) 'font-lock-face)))
+      (should (eq face-at-start 'pi-coding-agent-tool-name)))
+    ;; "foo.txt" should have tool-command face
+    (search-forward "foo.txt")
+    (let ((face-at-path (get-text-property (match-beginning 0) 'font-lock-face)))
+      (should (eq face-at-path 'pi-coding-agent-tool-command)))))
+
 (ert-deftest pi-coding-agent-test-tool-end-keeps-overlay-face ()
   "tool_execution_end keeps base face on success."
   (with-temp-buffer

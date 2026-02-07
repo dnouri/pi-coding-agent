@@ -173,12 +173,12 @@ When phscroll is not available, tables wrap like other content."
   :group 'pi-coding-agent)
 
 (defface pi-coding-agent-tool-name
-  '((t :inherit font-lock-function-name-face :weight bold))
+  '((t :inherit font-lock-function-name-face :weight bold :slant italic))
   "Face for tool names (BASH, READ, etc.) in pi chat."
   :group 'pi-coding-agent)
 
 (defface pi-coding-agent-tool-command
-  '((t :inherit font-lock-function-name-face))
+  '((t :inherit font-lock-function-name-face :slant italic))
   "Face for tool commands and arguments."
   :group 'pi-coding-agent)
 
@@ -1890,19 +1890,24 @@ it from extending to subsequent content.  Sets pending overlay to nil."
     (setq pi-coding-agent--pending-tool-overlay nil)))
 
 (defun pi-coding-agent--tool-header-text (tool-name args)
-  "Compute header text for tool TOOL-NAME with ARGS."
+  "Compute header text for tool TOOL-NAME with ARGS.
+Returns a propertized string with `pi-coding-agent-tool-name' face
+on the tool name prefix and `pi-coding-agent-tool-command' face on
+the arguments."
   (let ((path (pi-coding-agent--tool-path args)))
     (pcase tool-name
-      ("bash" (format "$ %s" (or (plist-get args :command) "...")))
-      ("read" (format "read %s" (or path "...")))
-      ("write" (format "write %s" (or path "...")))
-      ("edit" (format "edit %s" (or path "...")))
-      (_ tool-name))))
+      ("bash"
+       (let ((cmd (or (plist-get args :command) "...")))
+         (concat (propertize "$" 'font-lock-face 'pi-coding-agent-tool-name)
+                 (propertize (concat " " cmd) 'font-lock-face 'pi-coding-agent-tool-command))))
+      ((or "read" "write" "edit")
+       (concat (propertize tool-name 'font-lock-face 'pi-coding-agent-tool-name)
+               (propertize (concat " " (or path "...")) 'font-lock-face 'pi-coding-agent-tool-command)))
+      (_ (propertize tool-name 'font-lock-face 'pi-coding-agent-tool-name)))))
 
 (defun pi-coding-agent--display-tool-start (tool-name args)
   "Display header for tool TOOL-NAME with ARGS and create overlay."
-  (let* ((header (pi-coding-agent--tool-header-text tool-name args))
-         (header-display (propertize header 'face 'pi-coding-agent-tool-command))
+  (let* ((header-display (pi-coding-agent--tool-header-text tool-name args))
          (path (pi-coding-agent--tool-path args))
          (inhibit-read-only t))
     (pi-coding-agent--with-scroll-preservation
@@ -1938,15 +1943,14 @@ available during toolcall_delta streaming)."
       (when (and ov-start header-end)
         (let ((old-header (buffer-substring-no-properties
                            ov-start (1- (marker-position header-end)))))
-          (unless (string= old-header new-header)
+          (unless (string= old-header (substring-no-properties new-header))
             (let ((inhibit-read-only t)
                   (inhibit-modification-hooks t))
               (pi-coding-agent--with-scroll-preservation
                 (save-excursion
                   (goto-char ov-start)
                   (delete-region ov-start (1- (marker-position header-end)))
-                  (insert (propertize new-header 'face
-                                      'pi-coding-agent-tool-command)))))))))))
+                  (insert new-header))))))))))
 
 (defun pi-coding-agent--extract-tool-call (event msg-event)
   "Extract toolCall from EVENT using contentIndex in MSG-EVENT.
