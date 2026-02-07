@@ -194,9 +194,8 @@ When phscroll is not available, tables wrap like other content."
 
 (defface pi-coding-agent-tool-block
   '((t :extend t))
-  "Base face for tool blocks.
-Subtle blue-tinted background derived from the current theme.
-Used during execution and after successful completion."
+  "Face for tool blocks.
+Subtle blue-tinted background derived from the current theme."
   :group 'pi-coding-agent)
 
 (defface pi-coding-agent-tool-block-error
@@ -396,7 +395,7 @@ This is a read-only buffer showing the conversation history."
   (when (pi-coding-agent--phscroll-available-p)
     (phscroll-mode 1))
 
-  ;; Compute pending-tool-block face from current theme
+  ;; Compute tool-block face from current theme
   (pi-coding-agent--update-tool-block-face)
 
   (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-on-kill nil t))
@@ -1889,11 +1888,11 @@ it from extending to subsequent content.  Sets pending overlay to nil."
         (overlay-put ov 'face face)))
     (setq pi-coding-agent--pending-tool-overlay nil)))
 
-(defun pi-coding-agent--tool-header-text (tool-name args)
-  "Compute header text for tool TOOL-NAME with ARGS.
-Returns a propertized string with `pi-coding-agent-tool-name' face
-on the tool name prefix and `pi-coding-agent-tool-command' face on
-the arguments."
+(defun pi-coding-agent--tool-header (tool-name args)
+  "Return propertized header for tool TOOL-NAME with ARGS.
+The tool name prefix uses `pi-coding-agent-tool-name' face and
+the arguments use `pi-coding-agent-tool-command' face.
+Uses `font-lock-face' to survive gfm-mode refontification."
   (let ((path (pi-coding-agent--tool-path args)))
     (pcase tool-name
       ("bash"
@@ -1907,7 +1906,7 @@ the arguments."
 
 (defun pi-coding-agent--display-tool-start (tool-name args)
   "Display header for tool TOOL-NAME with ARGS and create overlay."
-  (let* ((header-display (pi-coding-agent--tool-header-text tool-name args))
+  (let* ((header-display (pi-coding-agent--tool-header tool-name args))
          (path (pi-coding-agent--tool-path args))
          (inhibit-read-only t))
     (pi-coding-agent--with-scroll-preservation
@@ -1936,7 +1935,7 @@ the arguments."
 Replaces the header text when it has changed (e.g., path becomes
 available during toolcall_delta streaming)."
   (when pi-coding-agent--pending-tool-overlay
-    (let* ((new-header (pi-coding-agent--tool-header-text tool-name args))
+    (let* ((new-header (pi-coding-agent--tool-header tool-name args))
            (ov pi-coding-agent--pending-tool-overlay)
            (ov-start (overlay-start ov))
            (header-end (overlay-get ov 'pi-coding-agent-header-end)))
