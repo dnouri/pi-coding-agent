@@ -5,22 +5,10 @@
 #   ./scripts/check.sh              # Unit tests only (fast)
 #   ./scripts/check.sh --integration # Include integration tests (slow, needs pi)
 #   ./scripts/check.sh -i            # Short form
-#
-# Output is quiet on success (noise-filtered), verbose on failure.
 
-set -euo pipefail
+set -e
 
 cd "$(dirname "$0")/.."
-
-# Filter Emacs noise: Loading..., site-init errors, blank lines
-filter_noise() {
-    grep -v "^Loading\|^Error while loading\|^$" || true
-}
-
-# Same as filter_noise but also strips per-test "passed" lines and test side-effects
-filter_test_noise() {
-    grep -v "^Loading\|^Error while loading\|^$\|^   passed\|^Pi: \|^Running [0-9]" || true
-}
 
 # Parse arguments
 RUN_INTEGRATION=false
@@ -49,9 +37,11 @@ emacs --batch \
     --eval "(package-initialize)" \
     --eval "(setq byte-compile-error-on-warn t)" \
     -f batch-byte-compile \
-    pi-coding-agent-core.el pi-coding-agent.el 2>&1 | filter_noise
+    pi-coding-agent-core.el pi-coding-agent.el
 
+echo ""
 echo "=== Checking docstrings ==="
+# Capture warnings from checkdoc and fail if any are found
 CHECKDOC_OUTPUT=$(emacs --batch \
     -L . \
     --eval "(require 'checkdoc)" \
@@ -64,8 +54,9 @@ if echo "$CHECKDOC_OUTPUT" | grep -q "^Warning"; then
     echo "Checkdoc failed!"
     exit 1
 fi
-echo "Checkdoc: OK"
+echo "Checkdoc: Done."
 
+echo ""
 echo "=== Package-lint ==="
 emacs --batch \
     -L . \
@@ -77,9 +68,10 @@ emacs --batch \
               (package-install 'package-lint))" \
     --eval "(require 'package-lint)" \
     --eval "(setq package-lint-main-file \"pi-coding-agent.el\")" \
-    -f package-lint-batch-and-exit pi-coding-agent.el pi-coding-agent-core.el 2>&1 | filter_noise
-echo "Package-lint: OK"
+    -f package-lint-batch-and-exit pi-coding-agent.el pi-coding-agent-core.el
+echo "Package-lint: Done."
 
+echo ""
 echo "=== Running unit tests ==="
 emacs --batch \
     -L . \
@@ -90,17 +82,18 @@ emacs --batch \
     -l pi-coding-agent \
     -l pi-coding-agent-core-test \
     -l pi-coding-agent-test \
-    -f ert-run-tests-batch-and-exit 2>&1 | filter_test_noise
+    -f ert-run-tests-batch-and-exit
 
 if [ "$RUN_INTEGRATION" = true ]; then
+    echo ""
     echo "=== Running integration tests ==="
-
+    
     # Check if pi is available
     if ! command -v pi &> /dev/null; then
         echo "Error: pi executable not found in PATH"
         exit 1
     fi
-
+    
     PI_RUN_INTEGRATION=1 emacs --batch \
         -L . \
         -L test \
@@ -109,9 +102,10 @@ if [ "$RUN_INTEGRATION" = true ]; then
         --eval "(package-initialize)" \
         -l pi-coding-agent \
         -l pi-coding-agent-integration-test \
-        -f ert-run-tests-batch-and-exit 2>&1 | filter_test_noise
+        -f ert-run-tests-batch-and-exit
 fi
 
+echo ""
 echo "=== All checks passed ==="
 
 # Clean up .elc files (we don't commit them)
