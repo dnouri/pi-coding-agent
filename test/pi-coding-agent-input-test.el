@@ -2452,40 +2452,6 @@ Errors still consume context, so their usage data is valid for display."
     ;; Should NOT have drawer syntax
     (should-not (string-match-p ":BASH:" (buffer-string)))))
 
-(ert-deftest pi-coding-agent-test-tool-header-faces ()
-  "Tool header applies tool-name face on prefix and tool-command on args."
-  ;; bash: "$" is tool-name, command is tool-command
-  (let ((header (pi-coding-agent--tool-header "bash" '(:command "ls -la"))))
-    (should (eq (get-text-property 0 'font-lock-face header)
-                'pi-coding-agent-tool-name))
-    (should (eq (get-text-property 2 'font-lock-face header)
-                'pi-coding-agent-tool-command)))
-  ;; read/write/edit: tool name is tool-name, path is tool-command
-  (dolist (tool '("read" "write" "edit"))
-    (let ((header (pi-coding-agent--tool-header tool '(:path "foo.txt"))))
-      (should (eq (get-text-property 0 'font-lock-face header)
-                  'pi-coding-agent-tool-name))
-      (should (eq (get-text-property (1+ (length tool)) 'font-lock-face header)
-                  'pi-coding-agent-tool-command))))
-  ;; Unknown tool: entire string is tool-name
-  (let ((header (pi-coding-agent--tool-header "custom_tool" nil)))
-    (should (eq (get-text-property 0 'font-lock-face header)
-                'pi-coding-agent-tool-name))
-    (should (equal (substring-no-properties header) "custom_tool"))))
-
-(ert-deftest pi-coding-agent-test-tool-header-survives-font-lock ()
-  "Tool header font-lock-face properties survive gfm-mode refontification."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    (pi-coding-agent--display-tool-start "edit" '(:path "foo.txt"))
-    (font-lock-ensure)
-    (goto-char (point-min))
-    (should (eq (get-text-property (point) 'font-lock-face)
-                'pi-coding-agent-tool-name))
-    (search-forward "foo.txt")
-    (should (eq (get-text-property (match-beginning 0) 'font-lock-face)
-                'pi-coding-agent-tool-command))))
-
 (ert-deftest pi-coding-agent-test-tool-end-keeps-overlay-face ()
   "tool_execution_end keeps base face on success."
   (with-temp-buffer
