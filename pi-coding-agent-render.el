@@ -802,10 +802,27 @@ it from extending to subsequent content.  Sets pending overlay to nil."
         (overlay-put ov 'face face)))
     (setq pi-coding-agent--pending-tool-overlay nil)))
 
+(defun pi-coding-agent--pretty-print-json (plist-data)
+  "Return PLIST-DATA as a 2-space indented JSON string, or nil.
+Handles the plist/vector representation from `json-parse-string'
+with `:object-type \\='plist'.  Returns nil when PLIST-DATA is nil."
+  (when plist-data
+    (require 'json)
+    ;; json-serialize is fast (C) but has no pretty-print option;
+    ;; json-encode supports it, but needs alists — so we round-trip.
+    (let* ((compact (json-serialize plist-data))
+           (parsed (json-parse-string compact :object-type 'alist))
+           (json-encoding-pretty-print t)
+           (json-encoding-default-indentation "  "))
+      (json-encode parsed))))
+
 (defun pi-coding-agent--tool-header (tool-name args)
   "Return propertized header for tool TOOL-NAME with ARGS.
 The tool name prefix uses `pi-coding-agent-tool-name' face and
 the arguments use `pi-coding-agent-tool-command' face.
+Built-in tools show specialized formats (e.g., \"$ cmd\" for bash).
+Generic tools show JSON args: compact when the full header fits
+within `fill-column', pretty-printed otherwise.
 Uses `font-lock-face' to survive gfm-mode refontification."
   (let ((path (pi-coding-agent--tool-path args)))
     (pcase tool-name
@@ -816,7 +833,21 @@ Uses `font-lock-face' to survive gfm-mode refontification."
       ((or "read" "write" "edit")
        (concat (propertize tool-name 'font-lock-face 'pi-coding-agent-tool-name)
                (propertize (concat " " (or path "...")) 'font-lock-face 'pi-coding-agent-tool-command)))
-      (_ (propertize tool-name 'font-lock-face 'pi-coding-agent-tool-name)))))
+      (_
+       (let* ((name (propertize tool-name 'font-lock-face 'pi-coding-agent-tool-name))
+              (json-pretty (pi-coding-agent--pretty-print-json args))
+              (json-compact (when json-pretty
+                              (mapconcat #'string-trim
+                                         (split-string json-pretty "\n") " ")))
+              (json (cond
+                     ((null json-pretty) nil)
+                     ((<= (+ (length tool-name) 1 (length json-compact))
+                          fill-column)
+                      json-compact)
+                     (t json-pretty))))
+         (if json
+             (concat name (propertize (concat " " json) 'font-lock-face 'pi-coding-agent-tool-command))
+           name))))))
 
 (defun pi-coding-agent--display-tool-start (tool-name args)
   "Display header for tool TOOL-NAME with ARGS and create overlay."
@@ -1134,7 +1165,8 @@ Returns nil if the buffer doesn't exist or has no complete lines."
 (defun pi-coding-agent--display-tool-end (tool-name args content details is-error)
   "Display result for TOOL-NAME and update overlay face.
 ARGS contains tool arguments, CONTENT is a list of content blocks.
-DETAILS contains tool-specific data (e.g., diff for edit tool).
+DETAILS contains tool-specific data (e.g., diff for edit tool);
+for generic tools, non-nil DETAILS are rendered below the content.
 IS-ERROR indicates failure.
 Shows preview lines with expandable toggle for long output."
   (let* ((is-error (eq t is-error))
@@ -1152,14 +1184,19 @@ Shows preview lines with expandable toggle for long output."
          (is-edit-diff (and (equal tool-name "edit")
                             (not is-error)
                             (plist-get details :diff)))
-         ;; For edit with diff, use diff from details
-         ;; For write, use content from args (result is just success message)
-         ;; Strip ANSI escape codes - CLI tools often output colors
-         (display-content (ansi-color-filter-apply
-                           (pcase tool-name
-                             ("edit" (or (plist-get details :diff) raw-output))
-                             ("write" (or (plist-get args :content) raw-output))
-                             (_ raw-output))))
+         (display-content
+          (ansi-color-filter-apply
+           (pcase tool-name
+             ("edit" (or (plist-get details :diff) raw-output))
+             ("write" (or (plist-get args :content) raw-output))
+             ((or "bash" "read") raw-output)
+             (_ (if-let ((details-json
+                          (pi-coding-agent--pretty-print-json details)))
+                    (concat raw-output "\n\n"
+                            (propertize (concat "**Details**\n" details-json)
+                                        'font-lock-face
+                                        'pi-coding-agent-tool-output))
+                  raw-output)))))
          (preview-limit (pcase tool-name
                           ("bash" pi-coding-agent-bash-preview-lines)
                           (_ pi-coding-agent-tool-preview-lines)))

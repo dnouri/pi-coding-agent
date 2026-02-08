@@ -939,6 +939,142 @@ since we don't display them locally. Let pi's message_start handle it."
         (should response-sent)
         (should (eq (plist-get response-sent :cancelled) t))))))
 
+;;; Pretty-Print JSON Helper
+
+(ert-deftest pi-coding-agent-test-pretty-print-json-simple-plist ()
+  "Pretty-print helper produces 2-space indented JSON from plist."
+  (let ((result (pi-coding-agent--pretty-print-json
+                 '(:agent "worker" :task "Search for foo"))))
+    (should (stringp result))
+    (should (string-match-p "\"agent\": \"worker\"" result))
+    (should (string-match-p "\"task\": \"Search for foo\"" result))
+    ;; Should be multi-line (pretty-printed)
+    (should (> (length (split-string result "\n")) 1))))
+
+(ert-deftest pi-coding-agent-test-pretty-print-json-nested ()
+  "Pretty-print helper handles nested objects and arrays."
+  (let ((result (pi-coding-agent--pretty-print-json
+                 '(:tasks [(:agent "worker" :task "foo")
+                           (:agent "scout" :task "bar")]))))
+    (should (string-match-p "\"tasks\"" result))
+    (should (string-match-p "\"worker\"" result))
+    (should (string-match-p "\"scout\"" result))))
+
+(ert-deftest pi-coding-agent-test-pretty-print-json-unicode ()
+  "Pretty-print helper preserves non-ASCII characters."
+  (let ((result (pi-coding-agent--pretty-print-json
+                 '(:city "Malmö" :note "väder"))))
+    (should (string-match-p "Malmö" result))
+    (should (string-match-p "väder" result))
+    ;; Should NOT have octal escapes
+    (should-not (string-match-p "\\\\303" result))))
+
+(ert-deftest pi-coding-agent-test-pretty-print-json-nil ()
+  "Pretty-print helper returns nil for nil input."
+  (should-not (pi-coding-agent--pretty-print-json nil)))
+
+;;; Tool Header
+
+(ert-deftest pi-coding-agent-test-tool-header-faces ()
+  "Tool header applies tool-name face on prefix and tool-command on args."
+  ;; bash: "$" is tool-name, command is tool-command
+  (let ((header (pi-coding-agent--tool-header "bash" '(:command "ls -la"))))
+    (should (eq (get-text-property 0 'font-lock-face header)
+                'pi-coding-agent-tool-name))
+    (should (eq (get-text-property 2 'font-lock-face header)
+                'pi-coding-agent-tool-command)))
+  ;; read/write/edit: tool name is tool-name, path is tool-command
+  (dolist (tool '("read" "write" "edit"))
+    (let ((header (pi-coding-agent--tool-header tool '(:path "foo.txt"))))
+      (should (eq (get-text-property 0 'font-lock-face header)
+                  'pi-coding-agent-tool-name))
+      (should (eq (get-text-property (1+ (length tool)) 'font-lock-face header)
+                  'pi-coding-agent-tool-command))))
+  ;; Unknown tool with nil args: entire string is tool-name
+  (let ((header (pi-coding-agent--tool-header "custom_tool" nil)))
+    (should (eq (get-text-property 0 'font-lock-face header)
+                'pi-coding-agent-tool-name))
+    (should (equal (substring-no-properties header) "custom_tool"))))
+
+(ert-deftest pi-coding-agent-test-tool-header-survives-font-lock ()
+  "Tool header font-lock-face properties survive gfm-mode refontification."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "edit" '(:path "foo.txt"))
+    (font-lock-ensure)
+    (goto-char (point-min))
+    (should (eq (get-text-property (point) 'font-lock-face)
+                'pi-coding-agent-tool-name))
+    (search-forward "foo.txt")
+    (should (eq (get-text-property (match-beginning 0) 'font-lock-face)
+                'pi-coding-agent-tool-command))))
+
+(ert-deftest pi-coding-agent-test-generic-tool-header-with-args ()
+  "Generic tool header shows tool name and JSON args."
+  (let ((header (pi-coding-agent--tool-header
+                 "subagent" '(:agent "worker" :task "Search"))))
+    ;; Should start with "subagent "
+    (should (string-prefix-p "subagent " (substring-no-properties header)))
+    ;; Should contain JSON keys
+    (should (string-match-p "\"agent\"" (substring-no-properties header)))
+    (should (string-match-p "\"worker\"" (substring-no-properties header)))))
+
+(ert-deftest pi-coding-agent-test-generic-tool-header-compact-when-short ()
+  "Short args produce a single-line compact header."
+  (let* ((fill-column 70)
+         (header (pi-coding-agent--tool-header "subagent" '(:agent "worker")))
+         (text (substring-no-properties header)))
+    ;; Single line
+    (should (= 1 (length (split-string text "\n"))))
+    ;; Contains key and value with proper JSON spacing
+    (should (string-match-p "\"agent\": \"worker\"" text))))
+
+(ert-deftest pi-coding-agent-test-generic-tool-header-pretty-when-long ()
+  "Long args that exceed fill-column produce a multi-line pretty header."
+  (let* ((fill-column 40)
+         (header (pi-coding-agent--tool-header
+                  "subagent" '(:agent "worker" :task "Search for weather")))
+         (text (substring-no-properties header)))
+    ;; Multi-line (pretty-printed)
+    (should (> (length (split-string text "\n")) 1))))
+
+(ert-deftest pi-coding-agent-test-generic-tool-header-respects-fill-column ()
+  "Compact-vs-pretty threshold follows fill-column."
+  (let ((args '(:agent "worker" :task "Search")))
+    ;; Wide fill-column → compact
+    (let* ((fill-column 200)
+           (text (substring-no-properties
+                  (pi-coding-agent--tool-header "subagent" args))))
+      (should (= 1 (length (split-string text "\n")))))
+    ;; Narrow fill-column → pretty
+    (let* ((fill-column 20)
+           (text (substring-no-properties
+                  (pi-coding-agent--tool-header "subagent" args))))
+      (should (> (length (split-string text "\n")) 1)))))
+
+(ert-deftest pi-coding-agent-test-generic-tool-header-faces ()
+  "Generic tool header applies tool-name face on name, tool-command on args."
+  (let ((header (pi-coding-agent--tool-header
+                 "subagent" '(:agent "worker" :task "Search"))))
+    ;; Tool name portion gets tool-name face
+    (should (eq (get-text-property 0 'font-lock-face header)
+                'pi-coding-agent-tool-name))
+    ;; JSON body (after "subagent ") gets tool-command face
+    (let ((json-start (length "subagent ")))
+      (should (eq (get-text-property json-start 'font-lock-face header)
+                  'pi-coding-agent-tool-command)))))
+
+(ert-deftest pi-coding-agent-test-builtin-tools-unaffected-by-generic-header ()
+  "Built-in tools still use their specialized header formats."
+  ;; bash: still "$ command"
+  (let ((header (pi-coding-agent--tool-header "bash" '(:command "ls -la"))))
+    (should (string-prefix-p "$ " (substring-no-properties header))))
+  ;; read/write/edit: still "tool path"
+  (dolist (tool '("read" "write" "edit"))
+    (let ((header (pi-coding-agent--tool-header tool '(:path "foo.txt"))))
+      (should (string-prefix-p (concat tool " foo.txt")
+                               (substring-no-properties header))))))
+
 ;;; Tool Output
 
 (ert-deftest pi-coding-agent-test-tool-start-inserts-header ()
@@ -1038,6 +1174,123 @@ since we don't display them locally. Let pi's message_start handle it."
       (should (string-match-p "line3" (buffer-string)))
       ;; Should NOT have more-lines indicator
       (should-not (string-match-p "more lines" (buffer-string))))))
+
+;;; Generic Tool Details in Output
+
+(defun pi-coding-agent-test--insert-generic-tool (content-text &optional details)
+  "Insert a subagent tool start+end in current buffer.
+CONTENT-TEXT is the text block string.  DETAILS is an optional plist.
+Call inside `with-temp-buffer' after `pi-coding-agent-chat-mode'."
+  (pi-coding-agent--display-tool-start "subagent" '(:agent "worker"))
+  (pi-coding-agent--display-tool-end "subagent" '(:agent "worker")
+                        (list (list :type "text" :text content-text))
+                        details nil))
+
+(ert-deftest pi-coding-agent-test-generic-tool-content-follows-header ()
+  "Generic tool content starts directly after the header line."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent-test--insert-generic-tool "Task completed")
+    (should (string-match-p "}\nTask completed" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-bash-no-blank-line-after-header ()
+  "Bash tool does NOT get an extra blank line after header."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "bash" '(:command "ls"))
+    (pi-coding-agent--display-tool-end "bash" '(:command "ls")
+                          '((:type "text" :text "file.txt"))
+                          nil nil)
+    (let ((text (buffer-string)))
+      ;; Bash header is "$ ls", followed by fenced code block — no extra blank line
+      (should-not (string-match-p "ls\n\n```" text)))))
+
+(ert-deftest pi-coding-agent-test-generic-tool-details-appended ()
+  "Generic tool with non-nil details shows details JSON after content."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent-test--insert-generic-tool
+     "Task completed" '(:mode "single" :exitCode 0))
+    (let ((text (buffer-string)))
+      (should (string-match-p "Task completed" text))
+      (should (string-match-p "\\*\\*Details\\*\\*" text))
+      (should (string-match-p "\"mode\": \"single\"" text))
+      (should (string-match-p "\"exitCode\": 0" text)))))
+
+(ert-deftest pi-coding-agent-test-generic-tool-details-face ()
+  "Details label and JSON both use pi-coding-agent-tool-output face."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent-test--insert-generic-tool
+     "Done" '(:mode "single" :exitCode 0))
+    ;; Label gets the face
+    (goto-char (point-min))
+    (should (search-forward "**Details**" nil t))
+    (should (eq (get-text-property (match-beginning 0) 'font-lock-face)
+                'pi-coding-agent-tool-output))
+    ;; JSON body gets the face
+    (should (search-forward "\"mode\"" nil t))
+    (should (eq (get-text-property (match-beginning 0) 'font-lock-face)
+                'pi-coding-agent-tool-output))))
+
+(ert-deftest pi-coding-agent-test-generic-tool-nil-details-unchanged ()
+  "Generic tool with nil details shows only content text."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent-test--insert-generic-tool "Task completed")
+    (let ((text (buffer-string)))
+      (should (string-match-p "Task completed" text))
+      (should-not (string-match-p "\\*\\*Details\\*\\*" text)))))
+
+(ert-deftest pi-coding-agent-test-generic-tool-details-nested ()
+  "Details with nested structure render as indented JSON."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent-test--insert-generic-tool
+     "Done" '(:items [(:name "a") (:name "b")]))
+    ;; Output may be collapsed if long; check via button's full content
+    ;; or directly in buffer for short output
+    (let* ((text (buffer-string))
+           (button (progn (goto-char (point-min)) (next-button (point))))
+           (full (if button
+                     (button-get button 'pi-coding-agent-full-content)
+                   text)))
+      (should (string-match-p "\"items\"" full))
+      (should (string-match-p "\"name\": \"a\"" full))
+      (should (string-match-p "\"name\": \"b\"" full)))))
+
+(ert-deftest pi-coding-agent-test-bash-details-not-appended ()
+  "Built-in tool (bash) does NOT append details to output."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "bash" '(:command "ls"))
+    (pi-coding-agent--display-tool-end "bash" '(:command "ls")
+                          '((:type "text" :text "file.txt"))
+                          '(:truncation t :fullOutputPath "/tmp/out")
+                          nil)
+    (let ((text (buffer-string)))
+      (should (string-match-p "file.txt" text))
+      (should-not (string-match-p "\\*\\*Details\\*\\*" text)))))
+
+(ert-deftest pi-coding-agent-test-generic-tool-details-in-expanded-view ()
+  "Details are included in collapsed output and survive TAB expand."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((long-output (mapconcat (lambda (n) (format "line%d" n))
+                                   (number-sequence 1 20)
+                                   "\n"))
+           (details '(:errors [(:task "foo" :error "timeout")])))
+      (pi-coding-agent-test--insert-generic-tool long-output details)
+      ;; Should have a "more lines" toggle (output is long enough)
+      (should (string-match-p "more lines" (buffer-string)))
+      ;; Details should be in the full content accessible via TAB
+      ;; Find the toggle button and check its full-content property
+      (goto-char (point-min))
+      (let ((button (next-button (point))))
+        (should button)
+        (let ((full (button-get button 'pi-coding-agent-full-content)))
+          (should (string-match-p "\\*\\*Details\\*\\*" full))
+          (should (string-match-p "\"error\": \"timeout\"" full)))))))
 
 ;;; Diff Overlay Highlighting
 
