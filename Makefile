@@ -64,6 +64,7 @@ SHELL = /bin/bash
 test: .deps-stamp
 	@echo "=== Unit Tests ==="
 	@set -o pipefail; $(BATCH) -L test \
+		--eval "(setq load-prefer-newer t)" \
 		--eval "(require 'package)" \
 		--eval "(package-initialize)" \
 		-l pi-coding-agent -l pi-coding-agent-core-test -l pi-coding-agent-test \

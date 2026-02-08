@@ -88,17 +88,11 @@ Sets up event dispatching through pi-coding-agent--event-handlers list."
            (data (plist-get response :data)))
       (should (plist-get data :thinkingLevel)))))
 
-;; NOTE: get_commands RPC requires pi > 0.50.1
-;; These tests skip gracefully if the RPC is not available.
-
 (ert-deftest pi-coding-agent-integration-get-commands-succeeds ()
   "get_commands returns successful response."
   (pi-coding-agent-integration-with-process
     (sleep-for 1)
     (let ((response (pi-coding-agent--rpc-sync proc '(:type "get_commands"))))
-      ;; Skip if RPC not available (pi <= 0.50.1)
-      (unless response
-        (ert-skip "get_commands RPC not available (requires pi > 0.50.1)"))
       (should response)
       (should (eq (plist-get response :success) t))
       (should (plist-get response :data)))))
@@ -108,9 +102,7 @@ Sets up event dispatching through pi-coding-agent--event-handlers list."
   (pi-coding-agent-integration-with-process
     (sleep-for 1)
     (let ((response (pi-coding-agent--rpc-sync proc '(:type "get_commands"))))
-      ;; Skip if RPC not available (pi <= 0.50.1)
-      (unless response
-        (ert-skip "get_commands RPC not available (requires pi > 0.50.1)"))
+      (should response)
       (let* ((data (plist-get response :data))
              (commands (plist-get data :commands)))
         ;; Commands should be a vector (JSON array)
