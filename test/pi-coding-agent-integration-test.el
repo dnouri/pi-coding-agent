@@ -384,10 +384,18 @@ Verifies the full flow:
                 (pi-coding-agent-chat-mode)
                 (setq pi-coding-agent--state (list :session-file session-file))
                 (setq pi-coding-agent--process proc)  ; Associate process with buffer
-                ;; Set the session name via RPC
-                (pi-coding-agent-set-session-name "Integration Test Session")
-                ;; Wait for async RPC to complete
-                (accept-process-output proc 1.0))
+                ;; Set the session name via RPC and wait for completion
+                (let ((name-set nil))
+                  (pi-coding-agent--rpc-async proc
+                      (list :type "set_session_name" :name "Integration Test Session")
+                      (lambda (response)
+                        (when (plist-get response :success)
+                          (setq pi-coding-agent--session-name "Integration Test Session")
+                          (setq name-set t))))
+                  (with-timeout (pi-coding-agent-test-rpc-timeout
+                                 (ert-fail "Timeout waiting for set_session_name"))
+                    (while (not name-set)
+                      (accept-process-output proc 0.1)))))
               ;; Verify file contains session_info with our name
               (with-temp-buffer
                 (insert-file-contents session-file)
