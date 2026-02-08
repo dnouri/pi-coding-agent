@@ -1,46 +1,86 @@
 # pi-coding-agent — Development Guide
 
-Emacs frontend for the [pi coding agent](https://picodingagent.ai/).
+Emacs frontend for the [pi coding agent](https://pi.dev).
 Two-window UI: markdown chat buffer + prompt composition buffer.
 Communicates with the pi CLI via JSON-over-stdio (RPC).
+
+## Module Architecture
+
+Six source modules with a strict dependency chain (no cycles):
+
+```
+pi-coding-agent.el              ← entry point, autoloads
+  ├── pi-coding-agent-menu.el   ← transient menu, session management
+  ├── pi-coding-agent-input.el  ← input buffer, history, completion
+  └── pi-coding-agent-render.el ← chat rendering, tool output
+        └── pi-coding-agent-ui.el ← shared state, faces, modes
+              └── pi-coding-agent-core.el ← JSON/RPC protocol
+```
+
+`menu.el` and `input.el` are siblings — neither requires the other.
+They communicate through shared variables in `ui.el` (e.g., `--commands`).
+
+Cross-module state mutations use accessor functions defined in `ui.el`
+(e.g., `--set-process`, `--set-aborted`, `--push-followup`).  Within a
+module, direct `setq` is fine.
 
 ## Source Files
 
 | File | Purpose |
 |------|---------|
-| `pi-coding-agent.el` | Main UI: chat rendering, tool display, event dispatch, transient menus (~4300 lines) |
-| `pi-coding-agent-core.el` | Low-level: JSON parsing, line buffering, RPC protocol (~375 lines) |
-| `test/pi-coding-agent-test.el` | Unit tests for the UI layer (~390 tests) |
-| `test/pi-coding-agent-core-test.el` | Unit tests for core (~57 tests) |
-| `test/pi-coding-agent-test-common.el` | Shared test utilities and fixtures |
+| `pi-coding-agent.el` | Entry point, autoloads, `--setup-session`, performance advice |
+| `pi-coding-agent-core.el` | JSON parsing, line buffering, RPC protocol |
+| `pi-coding-agent-ui.el` | Shared state, faces, customization, modes, display primitives, header-line |
+| `pi-coding-agent-render.el` | Streaming chat rendering, tool output, fontification, diffs, tables |
+| `pi-coding-agent-input.el` | Input history, isearch, send/abort, file/path/slash completion, queuing |
+| `pi-coding-agent-menu.el` | Transient menu, session management, model selection, commands |
+
+## Test Files
+
+| File | Covers |
+|------|--------|
+| `test/pi-coding-agent-core-test.el` | Core/RPC protocol |
+| `test/pi-coding-agent-ui-test.el` | Buffer naming, modes, session dir, startup header |
+| `test/pi-coding-agent-render-test.el` | Response display, tools, diffs, tables, phscroll |
+| `test/pi-coding-agent-input-test.el` | History, send/abort, queuing, completion |
+| `test/pi-coding-agent-menu-test.el` | Session management, transient menu, reconnect |
+| `test/pi-coding-agent-test.el` | Entry point / cross-module integration |
+| `test/pi-coding-agent-test-common.el` | Shared fixtures: mock-session macro, toolcall helpers |
 | `test/pi-coding-agent-integration-test.el` | Integration tests (require running pi + Ollama) |
 | `test/pi-coding-agent-gui-tests.el` | GUI tests (require display or xvfb) |
+
+## Other Files
+
+| File | Purpose |
+|------|---------|
 | `Makefile` | Build, test, lint targets |
 | `scripts/check.sh` | Pre-commit hook: byte-compile + lint + tests |
 
 ## Running Tests
 
-Run all unit tests (~446 tests, ~10s):
+Run all unit tests:
 ```bash
 make test
 ```
 
-Run a filtered subset by ERT pattern (~0.5s):
+Run tests for a single module:
+```bash
+make test-core
+make test-ui
+make test-render
+make test-input
+make test-menu
+```
+
+Run a filtered subset by ERT pattern:
 ```bash
 make test SELECTOR=fontify-buffer-tail
 make test SELECTOR=toolcall-delta
-make test SELECTOR=pi-coding-agent-test-abort-clears-followup-queue
+make test SELECTOR='abort\|followup'
 ```
 
-The `SELECTOR` value is an ERT selector string — a substring match against test names.
-Use `\|` for OR: `make test SELECTOR='abort\|followup'`
-
-## Paren Balance Check
-
-After editing `.el` files, verify parentheses are balanced:
-```bash
-make check-parens
-```
+The `SELECTOR` value is an ERT selector string — a substring match
+against test names.
 
 ## Linting
 
@@ -48,6 +88,7 @@ make check-parens
 make lint              # checkdoc + package-lint
 make lint-checkdoc     # docstring warnings only
 make lint-package      # MELPA package conventions only
+make check-parens      # verify balanced parentheses in all source files
 make check             # byte-compile + lint + all tests (= pre-commit hook)
 ```
 
