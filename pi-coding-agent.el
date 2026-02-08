@@ -3963,7 +3963,7 @@ automatically queues as follow-up when the agent is busy."
     ("m" "select" pi-coding-agent-select-model)
     ("t" "thinking" pi-coding-agent-cycle-thinking)]
    ["Info"
-    ("S" "stats" pi-coding-agent-session-stats)
+    ("i" "stats" pi-coding-agent-session-stats)
     ("y" "copy last" pi-coding-agent-copy-last-message)]]
   [["Actions"
     ("RET" "send" pi-coding-agent-send)
@@ -3999,6 +3999,20 @@ automatically queues as follow-up when the agent is busy."
         (lambda (a b)
           (string< (plist-get a :name) (plist-get b :name)))))
 
+(defun pi-coding-agent--submenu-commands-ordered (source)
+  "Return commands for SOURCE ordered by location then name.
+Location order: path, project, user, then commands without location.
+Within each location group, commands are sorted alphabetically by name.
+This ordering is shared by run keys (a-z) and edit keys (A-Z)."
+  (let ((path-cmds (pi-coding-agent--commands-by-source-and-location source "path"))
+        (project-cmds (pi-coding-agent--commands-by-source-and-location source "project"))
+        (user-cmds (pi-coding-agent--commands-by-source-and-location source "user"))
+        (no-location-cmds (seq-filter (lambda (c)
+                                        (and (equal (plist-get c :source) source)
+                                             (null (plist-get c :location))))
+                                      pi-coding-agent--commands)))
+    (append path-cmds project-cmds user-cmds no-location-cmds)))
+
 (defun pi-coding-agent--make-submenu-children (source)
   "Build transient children for commands with SOURCE.
 Returns a list suitable for `transient-parse-suffixes'.
@@ -4029,51 +4043,42 @@ Descriptions are truncated to fit the current frame width."
             (push label children))
           ;; Add commands
           (dolist (cmd cmds)
-            (let* ((name (plist-get cmd :name))
-                   (desc (or (plist-get cmd :description) "")))
-              ;; Run command with number key
-              (push (list (format "%d" (cl-incf key))
-                          (format "%-20s  %s"
-                                  (truncate-string-to-width name 20)
-                                  (truncate-string-to-width desc available-width))
-                          `(lambda ()
-                             (interactive)
-                             (pi-coding-agent--run-custom-command ',cmd)))
-                    children))))))
+            (when (< key 26)
+              (let* ((name (plist-get cmd :name))
+                     (desc (or (plist-get cmd :description) "")))
+                ;; Run command with letter key (a-z)
+                (push (list (format "%c" (+ ?a key))
+                            (format "%-20s  %s"
+                                    (truncate-string-to-width name 20)
+                                    (truncate-string-to-width desc available-width))
+                            `(lambda ()
+                               (interactive)
+                               (pi-coding-agent--run-custom-command ',cmd)))
+                      children)
+                (cl-incf key)))))))
     (nreverse children)))
 
 (defun pi-coding-agent--make-submenu-edit-children (source)
   "Build edit suffixes for commands with SOURCE.
 Returns a list suitable for `transient-parse-suffixes'.
-Edit keys use Shift+number (!@#$%^&*() for 1-9)."
-  (let* ((all-cmds (seq-filter (lambda (c)
-                                 (and (equal (plist-get c :source) source)
-                                      (plist-get c :path)))
-                               pi-coding-agent--commands))
-         ;; Sort by location: path, project, user
-         (sorted-cmds (seq-sort-by
-                       (lambda (c)
-                         (pcase (plist-get c :location)
-                           ("path" 0)
-                           ("project" 1)
-                           ("user" 2)
-                           (_ 3)))
-                       #'<
-                       all-cmds))
+Edit keys use uppercase letters (A-Z), matching the run keys (a-z).
+Keys are assigned from the full command list so that `a' and `A'
+always refer to the same command.  Commands without a :path are
+skipped but still consume a key position."
+  (let* ((all-cmds (pi-coding-agent--submenu-commands-ordered source))
          (key 0)
-         (children '())
-         ;; Shift+number symbols for edit bindings
-         (shift-keys ["!" "@" "#" "$" "%" "^" "&" "*" "("]))
-    (dolist (cmd sorted-cmds)
-      (when (< key 9)
-        (let ((name (plist-get cmd :name))
-              (path (plist-get cmd :path)))
-          (push (list (aref shift-keys key)
-                      (truncate-string-to-width name 12)
-                      `(lambda ()
-                         (interactive)
-                         (find-file-other-window ,path)))
-                children)
+         (children '()))
+    (dolist (cmd all-cmds)
+      (when (< key 26)
+        (let ((path (plist-get cmd :path)))
+          (when path
+            (let ((name (plist-get cmd :name)))
+              (push (list (format "%c" (+ ?A key))
+                          (truncate-string-to-width name 12)
+                          `(lambda ()
+                             (interactive)
+                             (find-file-other-window ,path)))
+                    children)))
           (cl-incf key))))
     (nreverse children)))
 
@@ -4099,7 +4104,7 @@ Returns children for `:setup-children' as column group vectors."
 
 (transient-define-prefix pi-coding-agent-templates-menu ()
   "All prompt templates.
-Press number to run, Shift+number to edit source file."
+Press letter to run, Shift+letter to edit source file."
   [:class transient-column
    :setup-children
    (lambda (_)
@@ -4114,7 +4119,7 @@ Press number to run, Shift+number to edit source file."
 
 (transient-define-prefix pi-coding-agent-extensions-menu ()
   "All extension commands.
-Press number to run, Shift+number to edit source file."
+Press letter to run, Shift+letter to edit source file."
   [:class transient-column
    :setup-children
    (lambda (_)
@@ -4129,7 +4134,7 @@ Press number to run, Shift+number to edit source file."
 
 (transient-define-prefix pi-coding-agent-skills-menu ()
   "All available skills.
-Press number to run, Shift+number to edit source file."
+Press letter to run, Shift+letter to edit source file."
   [:class transient-column
    :setup-children
    (lambda (_)

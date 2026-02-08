@@ -5883,22 +5883,56 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
       (transient-setup menu))))
 
 (ert-deftest pi-coding-agent-test-templates-menu-shows-run-keys ()
-  "Templates submenu binds numbered keys to commands."
+  "Templates submenu binds letter keys to commands."
   (let ((pi-coding-agent--commands
          '((:name "test-tmpl" :description "A template" :source "prompt"))))
     (transient-setup 'pi-coding-agent-templates-menu)
-    (should (pi-coding-agent-test--suffix-key-bound-p "1"))))
+    (should (pi-coding-agent-test--suffix-key-bound-p "a"))))
 
 (ert-deftest pi-coding-agent-test-templates-menu-shows-edit-keys ()
-  "Templates submenu binds shift-number keys to edit file paths."
+  "Templates submenu binds uppercase letter keys to edit file paths."
   (let ((pi-coding-agent--commands
          '((:name "uncle-bob" :description "Uncle Bob review"
             :source "prompt" :path "/tmp/uncle-bob.md" :location "user")
            (:name "fix-tests" :description "Fix tests"
             :source "prompt" :path "/tmp/fix-tests.md" :location "project"))))
     (transient-setup 'pi-coding-agent-templates-menu)
-    (should (pi-coding-agent-test--suffix-key-bound-p "1"))
-    (should (pi-coding-agent-test--suffix-key-bound-p "!"))))
+    (should (pi-coding-agent-test--suffix-key-bound-p "a"))
+    (should (pi-coding-agent-test--suffix-key-bound-p "A"))))
+
+(ert-deftest pi-coding-agent-test-stats-uses-i-key-not-S ()
+  "Stats is bound to `i' so it doesn't conflict with Skills `S' key."
+  (transient-setup 'pi-coding-agent-menu)
+  (should (pi-coding-agent-test--suffix-key-bound-p "i"))
+  (should-not (pi-coding-agent-test--suffix-key-bound-p "S")))
+
+(ert-deftest pi-coding-agent-test-submenu-handles-more-than-9-commands ()
+  "Submenu with 13 skills uses letter keys without crashing."
+  (let ((pi-coding-agent--commands
+         (cl-loop for i from 1 to 13
+                  collect (list :name (format "skill-%d" i)
+                                :description (format "Skill number %d" i)
+                                :source "skill"
+                                :location "user"))))
+    ;; Should not signal an error
+    (transient-setup 'pi-coding-agent-skills-menu)
+    ;; First and last should be bound
+    (should (pi-coding-agent-test--suffix-key-bound-p "a"))
+    (should (pi-coding-agent-test--suffix-key-bound-p "m"))))
+
+(ert-deftest pi-coding-agent-test-submenu-run-and-edit-keys-correspond ()
+  "Run key `a' and edit key `A' refer to the same command."
+  (let ((pi-coding-agent--commands
+         '((:name "alpha" :description "First" :source "skill"
+            :location "user" :path "/tmp/alpha.md")
+           (:name "beta" :description "Second" :source "skill"
+            :location "user" :path "/tmp/beta.md"))))
+    (transient-setup 'pi-coding-agent-skills-menu)
+    ;; Run keys a, b and edit keys A, B should all be bound
+    (should (pi-coding-agent-test--suffix-key-bound-p "a"))
+    (should (pi-coding-agent-test--suffix-key-bound-p "b"))
+    (should (pi-coding-agent-test--suffix-key-bound-p "A"))
+    (should (pi-coding-agent-test--suffix-key-bound-p "B"))))
 
 ;;; Optional phscroll install
 
