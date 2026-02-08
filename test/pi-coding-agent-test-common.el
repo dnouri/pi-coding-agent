@@ -3,9 +3,12 @@
 ;;; Commentary:
 
 ;; Common definitions shared across pi-coding-agent test files.
-;; Centralizes timeout values for easy adjustment (e.g., slow CI).
+;; Centralizes timeout values, the mock-session macro, and toolcall
+;; streaming helpers for easy adjustment (e.g., slow CI).
 
 ;;; Code:
+
+(require 'cl-lib) ; for cl-letf in mock-session macro
 
 ;;; Timeout Configuration
 
@@ -95,6 +98,24 @@ Uses tool call ID \"call_1\" and contentIndex 0."
      :message (:role "assistant"
                :content [(:type "toolCall" :id "call_1"
                           :name ,tool-name :arguments ,args)]))))
+
+;;;; Mock Session
+
+(defmacro pi-coding-agent-test-with-mock-session (dir &rest body)
+  "Execute BODY with a mocked pi session in DIR, cleaning up after.
+DIR should be a unique directory path like \"/tmp/pi-coding-agent-test-foo/\".
+Mocks `project-current', `pi-coding-agent--start-process', and
+`pi-coding-agent--display-buffers'.
+Automatically cleans up chat and input buffers."
+  (declare (indent 1) (debug t))
+  `(let ((default-directory ,dir))
+     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+               ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
+               ((symbol-function 'pi-coding-agent--display-buffers) #'ignore))
+       (unwind-protect
+           (progn (pi-coding-agent) ,@body)
+         (ignore-errors (kill-buffer (pi-coding-agent--chat-buffer-name ,dir nil)))
+         (ignore-errors (kill-buffer (pi-coding-agent--input-buffer-name ,dir nil)))))))
 
 (provide 'pi-coding-agent-test-common)
 ;;; pi-coding-agent-test-common.el ends here

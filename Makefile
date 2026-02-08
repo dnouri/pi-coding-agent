@@ -12,14 +12,20 @@ PI_BIN_DIR = $(abspath $(dir $(PI_BIN)))
 # Example: make test SELECTOR=fontify-buffer-tail
 SELECTOR ?=
 
-.PHONY: test test-unit test-integration test-integration-ci test-gui test-gui-ci test-all
+.PHONY: test test-unit test-core test-ui test-render test-input test-menu
+.PHONY: test-integration test-integration-ci test-gui test-gui-ci test-all
 .PHONY: check check-parens compile lint lint-checkdoc lint-package clean clean-cache help
 .PHONY: ollama-start ollama-stop ollama-status setup-pi setup-models install-hooks
 
 help:
 	@echo "Targets:"
-	@echo "  make test             Unit tests (use SELECTOR=pattern to filter)"
-	@echo "  make test-unit        Compile + unit tests"
+	@echo "  make test             All unit tests (use SELECTOR=pattern to filter)"
+	@echo "  make test-core        Core/RPC tests only"
+	@echo "  make test-ui          UI foundation tests only"
+	@echo "  make test-render      Render tests only"
+	@echo "  make test-input       Input buffer tests only"
+	@echo "  make test-menu        Menu/session tests only"
+	@echo "  make test-unit        Compile + all unit tests"
 	@echo "  make test-integration Integration tests (local, starts Ollama)"
 	@echo "  make test-gui         GUI tests (local, starts Ollama)"
 	@echo "  make lint             Checkdoc + package-lint"
@@ -67,9 +73,32 @@ test: .deps-stamp
 		--eval "(setq load-prefer-newer t)" \
 		--eval "(require 'package)" \
 		--eval "(package-initialize)" \
-		-l pi-coding-agent -l pi-coding-agent-core-test -l pi-coding-agent-test \
+		-l pi-coding-agent \
+		-l pi-coding-agent-core-test \
+		-l pi-coding-agent-ui-test \
+		-l pi-coding-agent-render-test \
+		-l pi-coding-agent-input-test \
+		-l pi-coding-agent-menu-test \
+		-l pi-coding-agent-test \
 		$(if $(SELECTOR),--eval '(ert-run-tests-batch-and-exit "$(SELECTOR)")',-f ert-run-tests-batch-and-exit) 2>&1 \
 		| grep -v "^   passed\|^Pi: \|^Running [0-9]\|^$$"
+
+# Per-module test targets: run tests for a single module in isolation.
+# Usage: make test-render (much faster than `make test` during development)
+BATCH_TEST = $(BATCH) -L test --eval "(setq load-prefer-newer t)" \
+	--eval "(require 'package)" --eval "(package-initialize)" \
+	-l pi-coding-agent
+
+test-core: .deps-stamp
+	@$(BATCH_TEST) -l pi-coding-agent-core-test -f ert-run-tests-batch-and-exit
+test-ui: .deps-stamp
+	@$(BATCH_TEST) -l pi-coding-agent-ui-test -f ert-run-tests-batch-and-exit
+test-render: .deps-stamp
+	@$(BATCH_TEST) -l pi-coding-agent-render-test -f ert-run-tests-batch-and-exit
+test-input: .deps-stamp
+	@$(BATCH_TEST) -l pi-coding-agent-input-test -f ert-run-tests-batch-and-exit
+test-menu: .deps-stamp
+	@$(BATCH_TEST) -l pi-coding-agent-menu-test -f ert-run-tests-batch-and-exit
 
 test-unit: compile test
 
@@ -180,17 +209,18 @@ ollama-status:
 
 check-parens:
 	@echo "=== Check Parens ==="
-	@OUTPUT=$$($(BATCH) --eval '(condition-case err (dolist (f (list "pi-coding-agent-core.el" "pi-coding-agent.el")) (with-current-buffer (find-file-noselect f) (check-parens) (message "%s OK" f))) (user-error (message "FAIL: %s" (error-message-string err)) (kill-emacs 1)))' 2>&1); \
+	@OUTPUT=$$($(BATCH) --eval '(condition-case err (dolist (f (list "pi-coding-agent-core.el" "pi-coding-agent-ui.el" "pi-coding-agent-render.el" "pi-coding-agent-input.el" "pi-coding-agent-menu.el" "pi-coding-agent.el")) (with-current-buffer (find-file-noselect f) (check-parens) (message "%s OK" f))) (user-error (message "FAIL: %s" (error-message-string err)) (kill-emacs 1)))' 2>&1); \
 	echo "$$OUTPUT" | grep -E "OK$$|FAIL:"; \
 	echo "$$OUTPUT" | grep -q "FAIL:" && exit 1 || true
 
-compile: clean .deps-stamp
+compile: .deps-stamp
+	@rm -f *.elc
 	@echo "=== Byte-compile ==="
 	@$(BATCH) \
 		--eval "(require 'package)" \
 		--eval "(package-initialize)" \
 		--eval "(setq byte-compile-error-on-warn t)" \
-		-f batch-byte-compile pi-coding-agent-core.el pi-coding-agent.el
+		-f batch-byte-compile pi-coding-agent-core.el pi-coding-agent-ui.el pi-coding-agent-render.el pi-coding-agent-input.el pi-coding-agent-menu.el pi-coding-agent.el
 
 lint: lint-checkdoc lint-package
 
@@ -200,6 +230,10 @@ lint-checkdoc:
 		--eval "(require 'checkdoc)" \
 		--eval "(setq sentence-end-double-space nil)" \
 		--eval "(checkdoc-file \"pi-coding-agent-core.el\")" \
+		--eval "(checkdoc-file \"pi-coding-agent-ui.el\")" \
+		--eval "(checkdoc-file \"pi-coding-agent-render.el\")" \
+		--eval "(checkdoc-file \"pi-coding-agent-input.el\")" \
+		--eval "(checkdoc-file \"pi-coding-agent-menu.el\")" \
 		--eval "(checkdoc-file \"pi-coding-agent.el\")" 2>&1); \
 	WARNINGS=$$(echo "$$OUTPUT" | grep -A1 "^Warning" | grep -v "^Warning\|^--$$"); \
 	if [ -n "$$WARNINGS" ]; then echo "$$WARNINGS"; exit 1; else echo "OK"; fi
@@ -215,7 +249,7 @@ lint-package:
 		          (package-install 'package-lint))" \
 		--eval "(require 'package-lint)" \
 		--eval "(setq package-lint-main-file \"pi-coding-agent.el\")" \
-		-f package-lint-batch-and-exit pi-coding-agent.el pi-coding-agent-core.el
+		-f package-lint-batch-and-exit pi-coding-agent.el pi-coding-agent-ui.el pi-coding-agent-render.el pi-coding-agent-input.el pi-coding-agent-menu.el pi-coding-agent-core.el
 
 check: compile lint test
 
