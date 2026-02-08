@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pi_version: ['0.50.1', 'latest', 'main']
+        pi_version: ['pinned', 'latest']
     services:
       ollama:
         image: ollama/ollama:latest
@@ -43,35 +43,29 @@ jobs:
         with:
           node-version: '20'
       
+      # Extract PI_VERSION from Makefile (single source of truth)
+      # For 'pinned' use Makefile default; for 'latest' override
+      - name: Get pi version
+        run: |
+          if [ "${{ matrix.pi_version }}" = "pinned" ]; then
+            echo "PI_VERSION=$(grep '^PI_VERSION' Makefile | head -1 | sed 's/.*?= *//')" >> $GITHUB_ENV
+          else
+            echo "PI_VERSION=${{ matrix.pi_version }}" >> $GITHUB_ENV
+          fi
+      
       - name: Cache npm dependencies
-        if: matrix.pi_version != 'main'
         uses: actions/cache@v4
         with:
           path: .cache
-          key: deps-${{ runner.os }}-pi-${{ matrix.pi_version }}
-      
-      - name: Setup pi-mono (main branch)
-        if: matrix.pi_version == 'main'
-        run: |
-          git clone --depth 1 https://github.com/badlogic/pi-mono.git pi-mono
-          cd pi-mono && npm install && npm run build
-          # Create 'pi' symlink like npm does
-          cd packages/coding-agent/dist && ln -s cli.js pi
+          key: deps-${{ runner.os }}-pi-${{ env.PI_VERSION }}
       
       - name: Setup Ollama model
         run: |
           for i in {1..30}; do curl -s http://localhost:11434/api/tags && break; sleep 1; done
           curl -s http://localhost:11434/api/pull -d '{"name":"qwen3:1.7b"}' | tail -1
       
-      - name: Run tests (npm version)
-        if: matrix.pi_version != 'main'
-        run: make test-integration-ci PI_VERSION=${{ matrix.pi_version }}
-        env:
-          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-test
-      
-      - name: Run tests (main branch)
-        if: matrix.pi_version == 'main'
-        run: make test-integration-ci PI_BIN=${{ github.workspace }}/pi-mono/packages/coding-agent/dist/cli.js
+      - name: Run tests
+        run: make test-integration-ci PI_VERSION=${{ env.PI_VERSION }}
         env:
           PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-test
 
@@ -82,7 +76,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pi_version: ['0.50.1', 'latest', 'main']
+        pi_version: ['pinned', 'latest']
     services:
       ollama:
         image: ollama/ollama:latest
@@ -98,36 +92,28 @@ jobs:
         with:
           node-version: '20'
       
+      # Extract PI_VERSION from Makefile (single source of truth)
+      - name: Get pi version
+        run: |
+          if [ "${{ matrix.pi_version }}" = "pinned" ]; then
+            echo "PI_VERSION=$(grep '^PI_VERSION' Makefile | head -1 | sed 's/.*?= *//')" >> $GITHUB_ENV
+          else
+            echo "PI_VERSION=${{ matrix.pi_version }}" >> $GITHUB_ENV
+          fi
+      
       - name: Cache npm dependencies
-        if: matrix.pi_version != 'main'
         uses: actions/cache@v4
         with:
           path: .cache
-          key: deps-${{ runner.os }}-pi-${{ matrix.pi_version }}
-      
-      - name: Setup pi-mono (main branch)
-        if: matrix.pi_version == 'main'
-        run: |
-          git clone --depth 1 https://github.com/badlogic/pi-mono.git pi-mono
-          cd pi-mono && npm install && npm run build
-          # Create 'pi' symlink like npm does
-          cd packages/coding-agent/dist && ln -s cli.js pi
+          key: deps-${{ runner.os }}-pi-${{ env.PI_VERSION }}
       
       - name: Setup Ollama model
         run: |
           for i in {1..30}; do curl -s http://localhost:11434/api/tags && break; sleep 1; done
           curl -s http://localhost:11434/api/pull -d '{"name":"qwen3:1.7b"}' | tail -1
       
-      - name: Run tests (npm version)
-        if: matrix.pi_version != 'main'
-        run: make test-gui-ci PI_VERSION=${{ matrix.pi_version }}
-        env:
-          PI_HEADLESS: 1
-          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-test
-      
-      - name: Run tests (main branch)
-        if: matrix.pi_version == 'main'
-        run: make test-gui-ci PI_BIN=${{ github.workspace }}/pi-mono/packages/coding-agent/dist/cli.js
+      - name: Run tests
+        run: make test-gui-ci PI_VERSION=${{ env.PI_VERSION }}
         env:
           PI_HEADLESS: 1
           PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-test

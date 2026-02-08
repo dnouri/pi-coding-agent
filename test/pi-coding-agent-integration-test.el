@@ -88,17 +88,11 @@ Sets up event dispatching through pi-coding-agent--event-handlers list."
            (data (plist-get response :data)))
       (should (plist-get data :thinkingLevel)))))
 
-;; NOTE: get_commands RPC requires pi > 0.50.1
-;; These tests skip gracefully if the RPC is not available.
-
 (ert-deftest pi-coding-agent-integration-get-commands-succeeds ()
   "get_commands returns successful response."
   (pi-coding-agent-integration-with-process
     (sleep-for 1)
     (let ((response (pi-coding-agent--rpc-sync proc '(:type "get_commands"))))
-      ;; Skip if RPC not available (pi <= 0.50.1)
-      (unless response
-        (ert-skip "get_commands RPC not available (requires pi > 0.50.1)"))
       (should response)
       (should (eq (plist-get response :success) t))
       (should (plist-get response :data)))))
@@ -108,9 +102,7 @@ Sets up event dispatching through pi-coding-agent--event-handlers list."
   (pi-coding-agent-integration-with-process
     (sleep-for 1)
     (let ((response (pi-coding-agent--rpc-sync proc '(:type "get_commands"))))
-      ;; Skip if RPC not available (pi <= 0.50.1)
-      (unless response
-        (ert-skip "get_commands RPC not available (requires pi > 0.50.1)"))
+      (should response)
       (let* ((data (plist-get response :data))
              (commands (plist-get data :commands)))
         ;; Commands should be a vector (JSON array)
@@ -392,10 +384,18 @@ Verifies the full flow:
                 (pi-coding-agent-chat-mode)
                 (setq pi-coding-agent--state (list :session-file session-file))
                 (setq pi-coding-agent--process proc)  ; Associate process with buffer
-                ;; Set the session name via RPC
-                (pi-coding-agent-set-session-name "Integration Test Session")
-                ;; Wait for async RPC to complete
-                (accept-process-output proc 1.0))
+                ;; Set the session name via RPC and wait for completion
+                (let ((name-set nil))
+                  (pi-coding-agent--rpc-async proc
+                      (list :type "set_session_name" :name "Integration Test Session")
+                      (lambda (response)
+                        (when (plist-get response :success)
+                          (setq pi-coding-agent--session-name "Integration Test Session")
+                          (setq name-set t))))
+                  (with-timeout (pi-coding-agent-test-rpc-timeout
+                                 (ert-fail "Timeout waiting for set_session_name"))
+                    (while (not name-set)
+                      (accept-process-output proc 0.1)))))
               ;; Verify file contains session_info with our name
               (with-temp-buffer
                 (insert-file-contents session-file)

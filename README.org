@@ -250,7 +250,7 @@ GitHub Actions runs on every push:
 - =test-integration.yml= - Integration tests with Docker Ollama
 - =test-gui.yml= - GUI tests with xvfb virtual framebuffer
 
-Nightly builds test against multiple pi versions (0.48.0, latest, and main branch).
+Nightly builds test against the pinned pi version (from Makefile) and latest.
 
 * Links
 
