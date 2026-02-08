@@ -5,9 +5,6 @@ on:
     branches: [master, main]
   pull_request:
 
-env:
-  PI_VERSION: '0.50.1'
-
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -27,6 +24,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      
+      # Extract PI_VERSION from Makefile (single source of truth)
+      - name: Get pi version
+        run: echo "PI_VERSION=$(grep '^PI_VERSION' Makefile | head -1 | sed 's/.*?= *//')" >> $GITHUB_ENV
       
       - name: Cache dependencies
         uses: actions/cache@v4
@@ -53,7 +54,7 @@ jobs:
           echo "Model qwen3:1.7b is ready"
       
       - name: Run tests
-        run: make test-gui-ci PI_VERSION=${{ env.PI_VERSION }}
+        run: make test-gui-ci
         env:
           PI_HEADLESS: 1
           PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-test
