@@ -263,8 +263,6 @@ Sets status to `streaming' on agent_start, `idle' on agent_end."
        (setq pi-coding-agent--state-timestamp (float-time)))
       ("message_start"
        (plist-put pi-coding-agent--state :current-message (plist-get event :message)))
-      ("message_update"
-       (pi-coding-agent--handle-message-update event))
       ("message_end"
        (plist-put pi-coding-agent--state :current-message nil))
       ("tool_execution_start"
@@ -283,17 +281,6 @@ Sets status to `streaming' on agent_start, `idle' on agent_end."
          (plist-put pi-coding-agent--state :last-error (plist-get event :finalError))))
       ("extension_error"
        (plist-put pi-coding-agent--state :last-error (plist-get event :error))))))
-
-(defun pi-coding-agent--handle-message-update (event)
-  "Handle a message_update EVENT by accumulating text deltas."
-  (let* ((msg-event (plist-get event :assistantMessageEvent))
-         (event-type (plist-get msg-event :type))
-         (current (plist-get pi-coding-agent--state :current-message)))
-    (when (and current (equal event-type "text_delta"))
-      (let* ((delta (plist-get msg-event :delta))
-             (content (or (plist-get current :content) ""))
-             (new-content (concat content delta)))
-        (plist-put current :content new-content)))))
 
 (defun pi-coding-agent--ensure-active-tools ()
   "Ensure :active-tools hash table exists in state."

@@ -462,7 +462,7 @@ Shown when the session starts without a configured model/API key."
 
 (defun pi-coding-agent--cleanup-on-kill ()
   "Clean up resources when chat buffer is killed.
-Also kills the linked input buffer.
+Also kills the linked input buffer and fontification cache buffers.
 
 Note: This runs from `kill-buffer-hook', which executes AFTER the kill
 decision is made.  For proper cancellation support, use `pi-coding-agent-quit'
@@ -472,6 +472,7 @@ which asks upfront before any buffers are touched."
       (pi-coding-agent--unregister-display-handler pi-coding-agent--process)
       (when (process-live-p pi-coding-agent--process)
         (delete-process pi-coding-agent--process)))
+    (pi-coding-agent--kill-fontify-buffers)
     (when (and pi-coding-agent--input-buffer (buffer-live-p pi-coding-agent--input-buffer))
       (let ((input-buf pi-coding-agent--input-buffer))
         (pi-coding-agent--set-input-buffer nil) ; break cycle before kill
@@ -975,10 +976,13 @@ when multi-line constructs (docstrings, block comments) start
 above the visible window.
 
 Inhibits modification hooks to prevent jit-lock from scanning the
-full buffer on each delta."
+full buffer on each delta.  Skips the delete+reinsert cycle when the
+visible tail content is unchanged from the previous delta."
   (when (and pi-coding-agent--pending-tool-overlay
              raw-text
              (not (string-empty-p raw-text)))
+    ;; Always sync fontify buffer (incremental, cheap) regardless of
+    ;; whether the display will update — the buffer must stay current.
     (when lang
       (pi-coding-agent--fontify-sync raw-text lang))
     (let* ((tail-result
@@ -1000,38 +1004,52 @@ full buffer on each delta."
             (or has-hidden
                 (and truncation
                      (> (plist-get truncation :hidden-lines) 0))))
-           (inhibit-read-only t)
-           (inhibit-modification-hooks t))
-      ;; Nothing to display yet (e.g., first delta before any newline)
-      (unless (string-empty-p display-content)
-        (pi-coding-agent--with-scroll-preservation
-          (save-excursion
-            (let* ((ov-end (overlay-end pi-coding-agent--pending-tool-overlay))
-                   (header-end (overlay-get pi-coding-agent--pending-tool-overlay
-                                            'pi-coding-agent-header-end)))
-              ;; Delete previous streaming content (everything after header)
-              (when (and header-end (< header-end ov-end))
-                (delete-region header-end ov-end))
-              ;; Insert new streaming content
-              (goto-char (overlay-end pi-coding-agent--pending-tool-overlay))
-              (when show-hidden-indicator
-                (insert (propertize "... (earlier output)\n"
-                                    'face 'pi-coding-agent-collapsed-indicator)))
-              (let ((content-start (point)))
-                (insert (if lang
-                            display-content
-                          (pi-coding-agent--render-tool-content
-                           display-content nil)))
-                (insert "\n")
-                ;; Mark pre-fontified content so jit-lock won't override
-                ;; our syntax faces with gfm-mode faces on redisplay.
-                ;; Also layer markdown-code-face underneath so the text
-                ;; uses fixed-pitch font, matching completed code blocks.
-                (when lang
-                  (put-text-property content-start (point)
-                                     'fontified t)
-                  (add-face-text-property content-start (point)
-                                          'markdown-code-face t))))))))))
+           ;; Compare plain text to cached value — skip if unchanged.
+           ;; Property-stripped comparison is correct: the text determines
+           ;; whether the preview changed.  Font-lock properties may shift
+           ;; cosmetically but that's not worth a full redraw.
+           (display-text (substring-no-properties display-content))
+           (cache-key (if show-hidden-indicator
+                         (concat "H:" display-text)
+                       display-text))
+           (last-tail (overlay-get pi-coding-agent--pending-tool-overlay
+                                   'pi-coding-agent-last-tail)))
+      ;; Skip display when the visible tail is unchanged
+      (unless (or (string-empty-p display-content)
+                  (equal cache-key last-tail))
+        (let ((inhibit-read-only t)
+              (inhibit-modification-hooks t))
+          (pi-coding-agent--with-scroll-preservation
+            (save-excursion
+              (let* ((ov-end (overlay-end pi-coding-agent--pending-tool-overlay))
+                     (header-end (overlay-get pi-coding-agent--pending-tool-overlay
+                                              'pi-coding-agent-header-end)))
+                ;; Delete previous streaming content (everything after header)
+                (when (and header-end (< header-end ov-end))
+                  (delete-region header-end ov-end))
+                ;; Insert new streaming content
+                (goto-char (overlay-end pi-coding-agent--pending-tool-overlay))
+                (when show-hidden-indicator
+                  (insert (propertize "... (earlier output)\n"
+                                      'face 'pi-coding-agent-collapsed-indicator)))
+                (let ((content-start (point)))
+                  (insert (if lang
+                              display-content
+                            (pi-coding-agent--render-tool-content
+                             display-content nil)))
+                  (insert "\n")
+                  ;; Mark pre-fontified content so jit-lock won't override
+                  ;; our syntax faces with gfm-mode faces on redisplay.
+                  ;; Also layer markdown-code-face underneath so the text
+                  ;; uses fixed-pitch font, matching completed code blocks.
+                  (when lang
+                    (put-text-property content-start (point)
+                                       'fontified t)
+                    (add-face-text-property content-start (point)
+                                            'markdown-code-face t))))))
+          ;; Cache the displayed content for next comparison
+          (overlay-put pi-coding-agent--pending-tool-overlay
+                       'pi-coding-agent-last-tail cache-key))))))
 
 (defun pi-coding-agent--display-tool-update (partial-result)
   "Display PARTIAL-RESULT as streaming output in pending tool overlay.
@@ -1057,9 +1075,28 @@ Returns the rendered string."
       (pi-coding-agent--wrap-in-src-block content lang)
     (propertize content 'face 'pi-coding-agent-tool-output)))
 
-(defsubst pi-coding-agent--fontify-buffer-name (lang)
-  "Return the name of the fontification cache buffer for LANG."
-  (format " *pi-fontify:%s*" lang))
+(defun pi-coding-agent--fontify-get-buffer (lang)
+  "Return the fontification cache buffer for LANG in the current session.
+Looks up the buffer-local `pi-coding-agent--fontify-buffers' hash table.
+Returns nil if no buffer exists for LANG.  Removes stale entries
+for buffers that have been killed externally."
+  (when pi-coding-agent--fontify-buffers
+    (let ((buf (gethash lang pi-coding-agent--fontify-buffers)))
+      (cond
+       ((null buf) nil)
+       ((buffer-live-p buf) buf)
+       (t (remhash lang pi-coding-agent--fontify-buffers) nil)))))
+
+(defun pi-coding-agent--fontify-get-or-create-buffer (lang)
+  "Return or create the fontification cache buffer for LANG.
+Uses the buffer-local hash table to track per-session buffers.
+Returns nil if called outside a chat buffer (no hash table)."
+  (when pi-coding-agent--fontify-buffers
+    (or (pi-coding-agent--fontify-get-buffer lang)
+        (let ((buf (generate-new-buffer
+                    (format " *pi-fontify:%s:%s*" lang (buffer-name)))))
+          (puthash lang buf pi-coding-agent--fontify-buffers)
+          buf))))
 
 (defun pi-coding-agent--fontify-reset (args)
   "Clear the fontification buffer for the language implied by ARGS.
@@ -1068,7 +1105,7 @@ buffer, preventing stale content from a previous call from being
 treated as a matching prefix during incremental sync."
   (when-let* ((lang (pi-coding-agent--path-to-language
                      (pi-coding-agent--tool-path args)))
-              (buf (get-buffer (pi-coding-agent--fontify-buffer-name lang))))
+              (buf (pi-coding-agent--fontify-get-buffer lang)))
     (with-current-buffer buf
       (erase-buffer))))
 
@@ -1081,9 +1118,8 @@ incorrect keyword matching on partial tokens.
 The buffer always accumulates content regardless of whether the
 language mode is available, so `pi-coding-agent--fontify-buffer-tail'
 can extract the tail even for languages without an installed mode."
-  (condition-case nil
-      (let ((buf (get-buffer-create
-                  (pi-coding-agent--fontify-buffer-name lang))))
+  (condition-case err
+      (when-let* ((buf (pi-coding-agent--fontify-get-or-create-buffer lang)))
         (with-current-buffer buf
           ;; Activate language mode once (best-effort for fontification).
           (let ((mode (and lang (markdown-get-lang-mode lang))))
@@ -1117,7 +1153,8 @@ can extract the tail even for languages without an installed mode."
               (ignore-errors
                 (font-lock-default-fontify-region
                  (point-min) (point-max) nil)))))))
-    (error nil)))
+    (error
+     (message "pi-coding-agent: fontify-sync error for %s: %S" lang err))))
 
 (defun pi-coding-agent--fontify-buffer-tail (lang n)
   "Extract last N non-blank complete lines from the LANG fontification buffer.
@@ -1135,7 +1172,7 @@ Returns (CONTENT . HAS-HIDDEN) where CONTENT is a string with text
 properties preserved.  HAS-HIDDEN is non-nil when earlier lines
 exist above the returned tail.
 Returns nil if the buffer doesn't exist or has no complete lines."
-  (let ((buf (get-buffer (pi-coding-agent--fontify-buffer-name lang))))
+  (let ((buf (pi-coding-agent--fontify-get-buffer lang)))
     (when (and buf (> (buffer-size buf) 0))
       (with-current-buffer buf
         ;; Find end of last complete line (just before the trailing
@@ -1161,6 +1198,17 @@ Returns nil if the buffer doesn't exist or has no complete lines."
             (when line-strings
               (cons (mapconcat #'identity line-strings "\n")
                     (> (point) (point-min))))))))))
+
+(defun pi-coding-agent--kill-fontify-buffers ()
+  "Kill all fontification cache buffers for the current session.
+Iterates the buffer-local `pi-coding-agent--fontify-buffers' hash table
+and kills each buffer, then clears the table."
+  (when pi-coding-agent--fontify-buffers
+    (maphash (lambda (_lang buf)
+               (when (buffer-live-p buf)
+                 (kill-buffer buf)))
+             pi-coding-agent--fontify-buffers)
+    (clrhash pi-coding-agent--fontify-buffers)))
 
 (defun pi-coding-agent--display-tool-end (tool-name args content details is-error)
   "Display result for TOOL-NAME and update overlay face.

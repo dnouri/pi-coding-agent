@@ -117,5 +117,21 @@ Automatically cleans up chat and input buffers."
          (ignore-errors (kill-buffer (pi-coding-agent--chat-buffer-name ,dir nil)))
          (ignore-errors (kill-buffer (pi-coding-agent--input-buffer-name ,dir nil)))))))
 
+;;;; Two-Session Fixture
+
+(defmacro pi-coding-agent-test--with-two-sessions (buf-a buf-b &rest body)
+  "Execute BODY with two independent chat-mode buffers BUF-A and BUF-B.
+Both buffers are created with `pi-coding-agent-chat-mode' activated.
+Buffers are killed after BODY completes, even on error."
+  (declare (indent 2) (debug (symbolp symbolp body)))
+  `(let ((,buf-a (generate-new-buffer "*test-chat-A*"))
+         (,buf-b (generate-new-buffer "*test-chat-B*")))
+     (with-current-buffer ,buf-a (pi-coding-agent-chat-mode))
+     (with-current-buffer ,buf-b (pi-coding-agent-chat-mode))
+     (unwind-protect
+         (progn ,@body)
+       (ignore-errors (kill-buffer ,buf-a))
+       (ignore-errors (kill-buffer ,buf-b)))))
+
 (provide 'pi-coding-agent-test-common)
 ;;; pi-coding-agent-test-common.el ends here
