@@ -2056,6 +2056,38 @@ falling back to unfontified text."
        "write" '(:path "/tmp/foo.rs" :content "fn main() {\n    println!(\"hi\");\n}\n")))
     (should (string-match-p "fn main" (buffer-string)))))
 
+(ert-deftest pi-coding-agent-test-toolcall-delta-skip-unchanged-display ()
+  "Partial-line delta produces no buffer modification when tail is unchanged.
+Most LLM tokens extend the current partial line, which the tail
+preview excludes.  The display should be a no-op for such deltas."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    ;; Delta 1: one complete line
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "line1\n"))
+    (let ((modtick-after-complete (buffer-modified-tick)))
+      ;; Delta 2: adds a partial second line (no newline)
+      (pi-coding-agent-test--send-delta
+       "write" '(:path "/tmp/foo.py" :content "line1\npartial"))
+      ;; Buffer should NOT have been modified — skip-when-unchanged
+      (should (= (buffer-modified-tick) modtick-after-complete)))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-updates-on-new-line ()
+  "Completing a new line triggers a display update.
+After a partial line, adding a newline changes the visible tail
+and should cause a redraw."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    ;; Delta 1: one complete line
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "line1\n"))
+    (let ((content-after-line1 (buffer-string)))
+      ;; Delta 2: complete second line
+      (pi-coding-agent-test--send-delta
+       "write" '(:path "/tmp/foo.py" :content "line1\nline2\n"))
+      ;; Buffer should have changed
+      (should-not (equal (buffer-string) content-after-line1))
+      ;; New line should appear
+      (should (string-match-p "line2" (buffer-string))))))
+
 (ert-deftest pi-coding-agent-test-toolcall-delta-stable-line-count ()
   "Streaming preview line count is stable across partial-line deltas.
 A delta that ends mid-line should show the same number of lines
@@ -2078,28 +2110,29 @@ as the previous delta that ended at a newline boundary."
   "Fontification runs only on complete lines, not partial lines.
 A delta ending mid-line should not fontify the partial part, avoiding
 incorrect keyword matching on incomplete tokens."
-  (let* ((lang "python")
-         (buf-name (pi-coding-agent--fontify-buffer-name lang)))
-    (ignore-errors (kill-buffer buf-name))
-    ;; Sync partial line: `def` is incomplete
-    (pi-coding-agent--fontify-sync "def hel" lang)
-    (let ((buf (get-buffer buf-name)))
-      (should buf)
-      ;; Content should be in the buffer
-      (should (= (buffer-size buf) 7))
-      ;; But `def` should NOT be fontified since the line isn't complete
-      (with-current-buffer buf
-        (goto-char (point-min))
-        (should-not (get-text-property (point) 'face))))
-    ;; Now complete the line
-    (pi-coding-agent--fontify-sync "def hello():\n" lang)
-    (with-current-buffer buf-name
-      (goto-char (point-min))
-      ;; Now `def` SHOULD be fontified
-      (let ((face (get-text-property (point) 'face)))
-        (should (or (eq face 'font-lock-keyword-face)
-                    (and (listp face) (memq 'font-lock-keyword-face face))))))
-    (ignore-errors (kill-buffer buf-name))))
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((lang "python"))
+      ;; Sync partial line: `def` is incomplete
+      (pi-coding-agent--fontify-sync "def hel" lang)
+      (let ((buf (pi-coding-agent--fontify-get-buffer lang)))
+        (should buf)
+        ;; Content should be in the buffer
+        (should (= (buffer-size buf) 7))
+        ;; But `def` should NOT be fontified since the line isn't complete
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (should-not (get-text-property (point) 'face))))
+      ;; Now complete the line
+      (pi-coding-agent--fontify-sync "def hello():\n" lang)
+      (let ((buf (pi-coding-agent--fontify-get-buffer lang)))
+        (with-current-buffer buf
+          (goto-char (point-min))
+          ;; Now `def` SHOULD be fontified
+          (let ((face (get-text-property (point) 'face)))
+            (should (or (eq face 'font-lock-keyword-face)
+                        (and (listp face)
+                             (memq 'font-lock-keyword-face face))))))))))
 
 (ert-deftest pi-coding-agent-test-toolcall-dedup-on-tool-execution-start ()
   "tool_execution_start skips overlay creation when toolcall_start already created it."
@@ -2267,85 +2300,215 @@ a slot, so downstream consumers that skip blanks still get N content lines."
 (ert-deftest pi-coding-agent-test-fontify-buffer-tail-single-line ()
   "fontify-buffer-tail returns content for a single complete line.
 Only complete lines (terminated by newline) are extracted."
-  (let ((buf (get-buffer-create " *pi-fontify:python*")))
-    (unwind-protect
-        (with-current-buffer buf
-          (erase-buffer)
-          (insert "x = 1\n")
-          (let ((result (pi-coding-agent--fontify-buffer-tail "python" 5)))
-            (should result)
-            (should (equal (substring-no-properties (car result)) "x = 1"))
-            (should-not (cdr result))))
-      (kill-buffer buf))))
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--fontify-sync "x = 1\n" "python")
+    (let ((result (pi-coding-agent--fontify-buffer-tail "python" 5)))
+      (should result)
+      (should (equal (substring-no-properties (car result)) "x = 1"))
+      (should-not (cdr result)))))
 
 (ert-deftest pi-coding-agent-test-fontify-buffer-tail-respects-n ()
   "fontify-buffer-tail returns exactly N non-blank lines, not N+1.
 Regression: forward-line -1 from the last newline skipped the last
 complete line, making the extracted content one line too many."
-  (let ((buf (get-buffer-create " *pi-fontify:test*")))
-    (unwind-protect
-        (with-current-buffer buf
-          (erase-buffer)
-          (dotimes (i 15) (insert (format "line%d\n" (1+ i))))
-          (let* ((result (pi-coding-agent--fontify-buffer-tail "test" 10))
-                 (tail (car result))
-                 (line-count (length (split-string
-                                      (substring-no-properties tail) "\n" t))))
-            (should result)
-            (should (= line-count 10))
-            (should (cdr result))))  ; has-hidden = t
-      (kill-buffer buf))))
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((content (mapconcat (lambda (i) (format "line%d\n" (1+ i)))
+                              (number-sequence 0 14) "")))
+      (pi-coding-agent--fontify-sync content "test")
+      (let* ((result (pi-coding-agent--fontify-buffer-tail "test" 10))
+             (tail (car result))
+             (line-count (length (split-string
+                                  (substring-no-properties tail) "\n" t))))
+        (should result)
+        (should (= line-count 10))
+        (should (cdr result))))))  ; has-hidden = t
 
 (ert-deftest pi-coding-agent-test-fontify-buffer-tail-empty-buffer ()
   "fontify-buffer-tail returns nil for empty or nonexistent buffer."
-  ;; Nonexistent buffer
-  (should-not (pi-coding-agent--fontify-buffer-tail "nosuchlang" 5))
-  ;; Empty buffer
-  (let ((buf (get-buffer-create " *pi-fontify:python*")))
-    (unwind-protect
-        (progn
-          (with-current-buffer buf (erase-buffer))
-          (should-not (pi-coding-agent--fontify-buffer-tail "python" 5)))
-      (kill-buffer buf))))
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    ;; No fontify buffer created yet for this language
+    (should-not (pi-coding-agent--fontify-buffer-tail "nosuchlang" 5))
+    ;; Sync empty content: fontify buffer exists but is empty
+    (pi-coding-agent--fontify-sync "" "python")
+    (should-not (pi-coding-agent--fontify-buffer-tail "python" 5))))
 
 (ert-deftest pi-coding-agent-test-fontify-buffer-tail-preserves-properties ()
   "fontify-buffer-tail preserves text properties from fontification."
-  (let ((buf (get-buffer-create " *pi-fontify:python*")))
-    (unwind-protect
-        (with-current-buffer buf
-          (erase-buffer)
-          (insert (propertize "def" 'face 'font-lock-keyword-face))
-          (insert " foo():\n    pass\n")
-          (let* ((result (pi-coding-agent--fontify-buffer-tail "python" 5))
-                 (tail (car result)))
-            (should tail)
-            (should (eq (get-text-property 0 'face tail)
-                        'font-lock-keyword-face))))
-      (kill-buffer buf))))
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    ;; Manually insert propertized content into the fontify buffer
+    (pi-coding-agent--fontify-sync "" "python") ; create buffer
+    (let ((fb (pi-coding-agent--fontify-get-buffer "python")))
+      (with-current-buffer fb
+        (insert (propertize "def" 'face 'font-lock-keyword-face))
+        (insert " foo():\n    pass\n")))
+    (let* ((result (pi-coding-agent--fontify-buffer-tail "python" 5))
+           (tail (car result)))
+      (should tail)
+      (should (eq (get-text-property 0 'face tail)
+                  'font-lock-keyword-face)))))
 
 (ert-deftest pi-coding-agent-test-fontify-buffer-tail-strips-blank-lines ()
   "fontify-buffer-tail excludes blank lines from returned content.
 Blank lines between non-blank lines must not appear in the result,
 otherwise the displayed line count fluctuates as the tail window
 moves over regions with varying numbers of blank lines."
-  (let ((buf (get-buffer-create " *pi-fontify:test*")))
-    (unwind-protect
-        (with-current-buffer buf
-          (erase-buffer)
-          ;; Content with blank lines between code blocks
-          (insert "line1\nline2\n\nline3\n\nline4\nline5\n")
-          (let* ((result (pi-coding-agent--fontify-buffer-tail "test" 3))
-                 (tail (substring-no-properties (car result)))
-                 (lines (split-string tail "\n" t)))
-            (should result)
-            ;; Should return exactly 3 non-blank lines with no blanks
-            (should (= (length lines) 3))
-            (should (equal lines '("line3" "line4" "line5")))
-            ;; Total line count in string should equal non-blank count
-            ;; (no blank lines padding the result)
-            (should (= (length (split-string tail "\n"))
-                        3))))
-      (kill-buffer buf))))
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--fontify-sync
+     "line1\nline2\n\nline3\n\nline4\nline5\n" "test")
+    (let* ((result (pi-coding-agent--fontify-buffer-tail "test" 3))
+           (tail (substring-no-properties (car result)))
+           (lines (split-string tail "\n" t)))
+      (should result)
+      ;; Should return exactly 3 non-blank lines with no blanks
+      (should (= (length lines) 3))
+      (should (equal lines '("line3" "line4" "line5")))
+      ;; Total line count in string should equal non-blank count
+      ;; (no blank lines padding the result)
+      (should (= (length (split-string tail "\n")) 3)))))
+
+;;; Fontify Buffer Session Scoping (Issue #8)
+
+(ert-deftest pi-coding-agent-test-fontify-session-isolation ()
+  "Two sessions writing the same language get separate fontify buffers."
+  (pi-coding-agent-test--with-two-sessions buf-a buf-b
+    (with-current-buffer buf-a
+      (pi-coding-agent--fontify-sync "x = 1\n" "python"))
+    (with-current-buffer buf-b
+      (pi-coding-agent--fontify-sync "y = 2\n" "python"))
+    (let ((fb-a (with-current-buffer buf-a
+                  (pi-coding-agent--fontify-get-buffer "python")))
+          (fb-b (with-current-buffer buf-b
+                  (pi-coding-agent--fontify-get-buffer "python"))))
+      (should fb-a)
+      (should fb-b)
+      (should-not (eq fb-a fb-b))
+      (should (equal (with-current-buffer fb-a (buffer-string)) "x = 1\n"))
+      (should (equal (with-current-buffer fb-b (buffer-string)) "y = 2\n")))))
+
+(ert-deftest pi-coding-agent-test-fontify-interleaved-deltas ()
+  "Interleaved deltas from two sessions produce correct content in each."
+  (pi-coding-agent-test--with-two-sessions buf-a buf-b
+    ;; Interleave: A1, B1, A2, B2
+    (with-current-buffer buf-a
+      (pi-coding-agent--fontify-sync "def a():\n" "python"))
+    (with-current-buffer buf-b
+      (pi-coding-agent--fontify-sync "class B:\n" "python"))
+    (with-current-buffer buf-a
+      (pi-coding-agent--fontify-sync "def a():\n    pass\n" "python"))
+    (with-current-buffer buf-b
+      (pi-coding-agent--fontify-sync "class B:\n    x = 1\n" "python"))
+    (let ((fb-a (with-current-buffer buf-a
+                  (pi-coding-agent--fontify-get-buffer "python")))
+          (fb-b (with-current-buffer buf-b
+                  (pi-coding-agent--fontify-get-buffer "python"))))
+      (should (equal (with-current-buffer fb-a (buffer-string))
+                     "def a():\n    pass\n"))
+      (should (equal (with-current-buffer fb-b (buffer-string))
+                     "class B:\n    x = 1\n")))))
+
+(ert-deftest pi-coding-agent-test-fontify-reset-session-isolated ()
+  "Fontify-reset in one session does not affect the other."
+  (pi-coding-agent-test--with-two-sessions buf-a buf-b
+    (with-current-buffer buf-a
+      (pi-coding-agent--fontify-sync "x = 1\n" "python"))
+    (with-current-buffer buf-b
+      (pi-coding-agent--fontify-sync "y = 2\n" "python"))
+    ;; Reset session A
+    (with-current-buffer buf-a
+      (pi-coding-agent--fontify-reset '(:path "/tmp/foo.py")))
+    ;; Session B untouched
+    (let ((fb-b (with-current-buffer buf-b
+                  (pi-coding-agent--fontify-get-buffer "python"))))
+      (should (equal (with-current-buffer fb-b (buffer-string)) "y = 2\n")))
+    ;; Session A empty
+    (let ((fb-a (with-current-buffer buf-a
+                  (pi-coding-agent--fontify-get-buffer "python"))))
+      (should (= (buffer-size fb-a) 0)))))
+
+(ert-deftest pi-coding-agent-test-fontify-cleanup-kills-session-buffers ()
+  "Cleanup-on-kill removes the session's fontify buffers."
+  (let ((buf (generate-new-buffer "*test-chat-cleanup*"))
+        fontify-buf)
+    (with-current-buffer buf
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--fontify-sync "x = 1\n" "python")
+      (setq fontify-buf (gethash "python" pi-coding-agent--fontify-buffers))
+      (should (buffer-live-p fontify-buf)))
+    ;; Kill the chat buffer (triggers cleanup-on-kill)
+    (kill-buffer buf)
+    ;; Fontify buffer should be dead
+    (should-not (buffer-live-p fontify-buf))))
+
+(ert-deftest pi-coding-agent-test-fontify-cleanup-preserves-other-sessions ()
+  "Cleanup-on-kill removes only this session's fontify buffers."
+  (pi-coding-agent-test--with-two-sessions buf-a buf-b
+    (with-current-buffer buf-a
+      (pi-coding-agent--fontify-sync "x = 1\n" "python"))
+    (with-current-buffer buf-b
+      (pi-coding-agent--fontify-sync "y = 2\n" "python"))
+    (let ((fb-a (with-current-buffer buf-a
+                  (pi-coding-agent--fontify-get-buffer "python")))
+          (fb-b (with-current-buffer buf-b
+                  (pi-coding-agent--fontify-get-buffer "python"))))
+      ;; Kill session A
+      (kill-buffer buf-a)
+      (should-not (buffer-live-p fb-a))
+      (should (buffer-live-p fb-b)))))
+
+(ert-deftest pi-coding-agent-test-fontify-cleanup-no-buffers ()
+  "Cleanup-on-kill handles sessions with no fontify buffers."
+  (let ((buf (generate-new-buffer "*test-chat-no-fontify*")))
+    (with-current-buffer buf
+      (pi-coding-agent-chat-mode))
+    ;; Should not error
+    (kill-buffer buf)))
+
+(ert-deftest pi-coding-agent-test-fontify-cleanup-multiple-languages ()
+  "Cleanup-on-kill removes fontify buffers for all languages in the session."
+  (let ((buf (generate-new-buffer "*test-chat-multi*"))
+        fb-py fb-js)
+    (with-current-buffer buf
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--fontify-sync "x = 1\n" "python")
+      (pi-coding-agent--fontify-sync "var x;\n" "javascript")
+      (setq fb-py (gethash "python" pi-coding-agent--fontify-buffers))
+      (setq fb-js (gethash "javascript" pi-coding-agent--fontify-buffers))
+      (should (buffer-live-p fb-py))
+      (should (buffer-live-p fb-js)))
+    (kill-buffer buf)
+    (should-not (buffer-live-p fb-py))
+    (should-not (buffer-live-p fb-js))))
+
+;;; Fontify Error Handling
+
+(ert-deftest pi-coding-agent-test-fontify-sync-happy-path-no-errors ()
+  "fontify-sync with a working mode succeeds without errors."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--fontify-sync "x = 1\nprint('hi')\n" "python")
+    (let ((buf (pi-coding-agent--fontify-get-buffer "python")))
+      (should buf)
+      (should (= (buffer-size buf) (length "x = 1\nprint('hi')\n"))))))
+
+(ert-deftest pi-coding-agent-test-fontify-sync-survives-font-lock-error ()
+  "fontify-sync gracefully continues when font-lock signals an error.
+Content is still inserted even though fontification fails."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (cl-letf (((symbol-function 'font-lock-default-fontify-region)
+               (lambda (&rest _) (error "Broken font-lock"))))
+      (pi-coding-agent--fontify-sync "x = 1\n" "python"))
+    ;; Content should still be in the buffer despite the error
+    (let ((buf (pi-coding-agent--fontify-get-buffer "python")))
+      (should buf)
+      (should (equal (with-current-buffer buf (buffer-string)) "x = 1\n")))))
+
+;;; Extract Text from Content
 
 (ert-deftest pi-coding-agent-test-extract-text-from-content-single-block ()
   "Extract-text-from-content handles single text block efficiently."

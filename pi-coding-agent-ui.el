@@ -366,6 +366,7 @@ This is a read-only buffer showing the conversation history."
   (setq-local markdown-hide-markup t)
   (add-to-invisibility-spec 'markdown-markup)
   (setq-local pi-coding-agent--tool-args-cache (make-hash-table :test 'equal))
+  (setq-local pi-coding-agent--fontify-buffers (make-hash-table :test 'equal))
   ;; Disable hl-line-mode: its post-command-hook overlay update causes
   ;; scroll oscillation in buffers with invisible text + variable heights.
   (setq-local global-hl-line-mode nil)
@@ -565,6 +566,13 @@ Set by display-tool-start, used by display-tool-end.")
 Enables dedup guard in tool_execution_start to skip overlay creation
 when the overlay was already created by the streaming event path.
 Set at toolcall_start, consumed and cleared at tool_execution_start.")
+
+(defvar-local pi-coding-agent--fontify-buffers nil
+  "Hash table mapping language strings to fontification cache buffers.
+Each chat buffer tracks its own fontify buffers so parallel sessions
+writing the same language don't corrupt each other's syntax state.
+Initialized in `pi-coding-agent-chat-mode'; cleaned up by
+`pi-coding-agent--kill-fontify-buffers' when the session ends.")
 
 (defvar-local pi-coding-agent--assistant-header-shown nil
   "Non-nil if Assistant header has been shown for current prompt.

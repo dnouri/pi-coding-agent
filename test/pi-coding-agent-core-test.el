@@ -290,15 +290,16 @@
     (pi-coding-agent--update-state-from-event (list :type "message_start" :message msg))
     (should (plist-get pi-coding-agent--state :current-message))))
 
-(ert-deftest pi-coding-agent-test-event-message-update-accumulates-text ()
-  "message_update event updates current message with delta."
+(ert-deftest pi-coding-agent-test-event-message-update-is-state-noop ()
+  "message_update event does not modify state.
+Display is handled by the display handler, not by state updates."
   (let ((pi-coding-agent--state (list :current-message '(:role "assistant" :content "Hello"))))
     (pi-coding-agent--update-state-from-event
      '(:type "message_update"
        :message (:role "assistant")
        :assistantMessageEvent (:type "text_delta" :delta " world")))
     (should (equal (plist-get (plist-get pi-coding-agent--state :current-message) :content)
-                   "Hello world"))))
+                   "Hello"))))
 
 (ert-deftest pi-coding-agent-test-event-message-end-clears-current-message ()
   "message_end event clears current-message."
