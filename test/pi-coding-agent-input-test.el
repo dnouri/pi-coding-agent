@@ -2583,5 +2583,44 @@ display-agent-end must finalize the pending overlay with error face."
     ;; Inline backticks shouldn't affect heading transform
     (should (string-match-p "^## Heading" (buffer-string)))))
 
+;;; Input Mode — GFM Syntax Highlighting
+
+(ert-deftest pi-coding-agent-test-input-mode-derives-from-gfm ()
+  "Input mode derives from gfm-mode for markdown syntax highlighting."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (should (derived-mode-p 'gfm-mode))))
+
+(ert-deftest pi-coding-agent-test-input-mode-no-hidden-markup ()
+  "Input mode does NOT hide markup — users need to see what they type."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (should-not markdown-hide-markup)))
+
+(ert-deftest pi-coding-agent-test-input-mode-fontifies-markdown ()
+  "Input mode fontifies basic markdown syntax (bold, code spans)."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (insert "some **bold** text")
+    (font-lock-ensure)
+    ;; The word "bold" should have markdown-bold-face
+    (goto-char (point-min))
+    (search-forward "bold")
+    (should (memq 'markdown-bold-face
+                  (let ((f (get-text-property (1- (point)) 'face)))
+                    (if (listp f) f (list f)))))))
+
+(ert-deftest pi-coding-agent-test-input-mode-keybindings-override ()
+  "Pi input keybindings take precedence over gfm-mode bindings."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (should (eq (key-binding (kbd "C-c C-c")) 'pi-coding-agent-send))
+    (should (eq (key-binding (kbd "C-c C-k")) 'pi-coding-agent-abort))
+    (should (eq (key-binding (kbd "C-c C-p")) 'pi-coding-agent-menu))
+    (should (eq (key-binding (kbd "M-p")) 'pi-coding-agent-previous-input))
+    (should (eq (key-binding (kbd "M-n")) 'pi-coding-agent-next-input))
+    (should (eq (key-binding (kbd "TAB")) 'pi-coding-agent-complete))
+    (should (eq (key-binding (kbd "C-c C-s")) 'pi-coding-agent-queue-steering))))
+
 (provide 'pi-coding-agent-input-test)
 ;;; pi-coding-agent-input-test.el ends here
