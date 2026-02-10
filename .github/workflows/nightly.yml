@@ -24,7 +24,7 @@ jobs:
   integration:
     name: Integration (pi@${{ matrix.pi_version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:

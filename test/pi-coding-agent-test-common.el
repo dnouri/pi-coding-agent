@@ -21,11 +21,11 @@
 (defvar pi-coding-agent-test-rpc-timeout 10
   "Timeout in seconds for RPC calls in tests.")
 
-(defvar pi-coding-agent-test-integration-timeout 300
+(defvar pi-coding-agent-test-integration-timeout 600
   "Timeout in seconds for integration tests.
-The steer test requires two LLM round-trips.  With qwen3:1.7b on
-CPU-only CI runners (5x slower than local), two turns can take up to
-170s.  300s provides sufficient margin for noisy shared runners.")
+The steer test requires two LLM round-trips.  With qwen3:1.7b at
+maxTokens=500 on CPU-only CI runners, each turn can take up to 150s.
+Two turns: ~300s.  600s provides sufficient margin for noisy runners.")
 
 (defvar pi-coding-agent-test-gui-timeout 180
   "Timeout in seconds for GUI tests (includes real LLM responses).
