@@ -187,5 +187,85 @@ This ensures all files get code fences for consistent display."
     ;; Should show "Pi X.Y.Z" or "Pi Unknown" in separator
     (should (string-match-p "Pi " header))))
 
+;;; Copy Visible Text
+
+(defmacro pi-coding-agent-test--with-chat-markup (markdown &rest body)
+  "Insert MARKDOWN into a chat-mode buffer, fontify, then run BODY.
+Buffer is read-only with `inhibit-read-only' used for insertion.
+`font-lock-ensure' runs before BODY to apply invisible/display properties."
+  (declare (indent 1) (debug (stringp body)))
+  `(with-temp-buffer
+     (pi-coding-agent-chat-mode)
+     (let ((inhibit-read-only t))
+       (insert ,markdown))
+     (font-lock-ensure)
+     ,@body))
+
+(ert-deftest pi-coding-agent-test-visible-text-strips-bold-markers ()
+  "visible-text strips invisible bold markers (**)."
+  (pi-coding-agent-test--with-chat-markup "Hello **bold** world"
+    (should (equal (pi-coding-agent--visible-text (point-min) (point-max))
+                   "Hello bold world"))))
+
+(ert-deftest pi-coding-agent-test-visible-text-strips-inline-code-backticks ()
+  "visible-text strips invisible backticks around inline code."
+  (pi-coding-agent-test--with-chat-markup "Use `foo` here"
+    (should (equal (pi-coding-agent--visible-text (point-min) (point-max))
+                   "Use foo here"))))
+
+(ert-deftest pi-coding-agent-test-visible-text-strips-code-fences ()
+  "visible-text strips invisible code fences and language label."
+  (pi-coding-agent-test--with-chat-markup "```python\ndef foo():\n    pass\n```\n"
+    (let ((result (pi-coding-agent--visible-text (point-min) (point-max))))
+      (should (string-match-p "def foo" result))
+      (should-not (string-match-p "```" result))
+      (should-not (string-match-p "python" result)))))
+
+(ert-deftest pi-coding-agent-test-visible-text-strips-setext-underline ()
+  "visible-text strips display=\"\" setext underline."
+  (pi-coding-agent-test--with-chat-markup "Assistant\n=========\n\nHello\n"
+    (let ((result (pi-coding-agent--visible-text (point-min) (point-max))))
+      (should (string-match-p "Assistant" result))
+      (should-not (string-match-p "=====" result))
+      (should (string-match-p "Hello" result)))))
+
+(ert-deftest pi-coding-agent-test-visible-text-strips-atx-heading-prefix ()
+  "visible-text strips display=\"\" ATX heading prefix characters."
+  (pi-coding-agent-test--with-chat-markup "## Code Example\n\nSome text\n"
+    (let ((result (pi-coding-agent--visible-text (point-min) (point-max))))
+      (should (string-match-p "Code Example" result))
+      (should (string-match-p "Some text" result))
+      (should-not (string-match-p "^##" result)))))
+
+(ert-deftest pi-coding-agent-test-visible-text-preserves-plain-text ()
+  "visible-text preserves text that has no hidden markup."
+  (pi-coding-agent-test--with-chat-markup "Just plain text with no markup"
+    (should (equal (pi-coding-agent--visible-text (point-min) (point-max))
+                   "Just plain text with no markup"))))
+
+(ert-deftest pi-coding-agent-test-copy-visible-command-puts-on-kill-ring ()
+  "pi-coding-agent-copy-visible copies visible text to kill ring."
+  (pi-coding-agent-test--with-chat-markup "Hello **bold** world"
+    (pi-coding-agent-copy-visible (point-min) (point-max))
+    (should (equal (car kill-ring) "Hello bold world"))))
+
+(ert-deftest pi-coding-agent-test-copy-visible-text-defcustom-default ()
+  "pi-coding-agent-copy-visible-text defcustom defaults to nil."
+  (should (eq pi-coding-agent-copy-visible-text nil)))
+
+(ert-deftest pi-coding-agent-test-filter-strips-when-enabled ()
+  "When copy-visible-text is t, kill-ring-save strips hidden markup."
+  (pi-coding-agent-test--with-chat-markup "Hello **bold** world"
+    (let ((pi-coding-agent-copy-visible-text t))
+      (kill-ring-save (point-min) (point-max))
+      (should (equal (car kill-ring) "Hello bold world")))))
+
+(ert-deftest pi-coding-agent-test-filter-preserves-when-disabled ()
+  "When copy-visible-text is nil, kill-ring-save keeps raw markdown."
+  (pi-coding-agent-test--with-chat-markup "Hello **bold** world"
+    (let ((pi-coding-agent-copy-visible-text nil))
+      (kill-ring-save (point-min) (point-max))
+      (should (equal (car kill-ring) "Hello **bold** world")))))
+
 (provide 'pi-coding-agent-ui-test)
 ;;; pi-coding-agent-ui-test.el ends here
