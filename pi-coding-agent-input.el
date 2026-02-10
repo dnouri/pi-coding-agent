@@ -228,8 +228,11 @@ For backward search: go to current input (nil index)."
 
 ;;;; Input Mode
 
-(define-derived-mode pi-coding-agent-input-mode text-mode "Pi-Input"
-  "Major mode for composing pi prompts."
+(define-derived-mode pi-coding-agent-input-mode gfm-mode "Pi-Input"
+  "Major mode for composing pi prompts.
+Derives from `gfm-mode' for GitHub Flavored Markdown syntax
+highlighting (bold, italic, code spans, fenced blocks, etc.).
+Markup is kept visible so users see exactly what they type."
   :group 'pi-coding-agent
   (setq-local header-line-format '(:eval (pi-coding-agent--header-line-string)))
   (add-hook 'completion-at-point-functions #'pi-coding-agent--command-capf nil t)
