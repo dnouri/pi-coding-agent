@@ -154,6 +154,20 @@ When phscroll is not available, tables wrap like other content."
   :type 'boolean
   :group 'pi-coding-agent)
 
+(defcustom pi-coding-agent-copy-visible-text nil
+  "Whether to strip hidden markdown markup when copying from the chat buffer.
+When non-nil, copy commands (`kill-ring-save', `kill-region') produce
+only the visible text — bold markers (**), backticks, code fences,
+and setext underlines are removed.  When nil, the raw buffer content
+including hidden markup is copied (useful for pasting into other
+markdown-aware contexts).
+
+Regardless of this setting, you can use `pi-coding-agent-copy-visible'
+for an explicit copy-visible-only operation, or toggle markup visibility
+with `markdown-toggle-markup-hiding'."
+  :type 'boolean
+  :group 'pi-coding-agent)
+
 ;;;; Faces
 
 (defface pi-coding-agent-timestamp
@@ -353,6 +367,47 @@ This makes wrapped lines show the blockquote indicator."
                        'wrap-prefix pi-coding-agent--blockquote-wrap-prefix)
     t))
 
+;;;; Copy Visible Text
+
+(defun pi-coding-agent--visible-text (beg end)
+  "Return visible text between BEG and END, stripping hidden markup.
+Skips characters with `invisible' property matching `buffer-invisibility-spec'
+and characters with `display' property equal to the empty string."
+  (let ((result nil)
+        (pos beg))
+    (while (< pos end)
+      (let* ((inv (get-text-property pos 'invisible))
+             (disp (get-text-property pos 'display))
+             (next (min (next-single-char-property-change pos 'invisible nil end)
+                        (next-single-char-property-change pos 'display nil end))))
+        (cond
+         ((and inv (invisible-p inv)) nil)
+         ((equal disp "") nil)
+         (t (push (buffer-substring-no-properties pos next) result)))
+        (setq pos next)))
+    (apply #'concat (nreverse result))))
+
+(defun pi-coding-agent--filter-buffer-substring (beg end &optional delete)
+  "Filter function for `filter-buffer-substring-function' in chat buffers.
+When `pi-coding-agent-copy-visible-text' is non-nil, returns only visible
+text between BEG and END.  If DELETE is non-nil, also removes the region.
+Otherwise delegates to the default filter."
+  (if pi-coding-agent-copy-visible-text
+      (prog1 (pi-coding-agent--visible-text beg end)
+        (when delete (delete-region beg end)))
+    (buffer-substring--filter beg end delete)))
+
+(defun pi-coding-agent-copy-visible (beg end)
+  "Copy visible text from BEG to END, stripping hidden markup.
+Like `kill-ring-save' but always removes text hidden by
+`markdown-hide-markup', regardless of `pi-coding-agent-copy-visible-text'.
+Suitable for binding to a key in `pi-coding-agent-chat-mode-map'."
+  (interactive "r")
+  (let ((text (pi-coding-agent--visible-text beg end)))
+    (kill-new text)
+    (setq deactivate-mark t)
+    (message "Copied %d characters" (length text))))
+
 (define-derived-mode pi-coding-agent-chat-mode gfm-mode "Pi-Chat"
   "Major mode for displaying pi conversation.
 Derives from `gfm-mode' for syntax highlighting of code blocks.
@@ -365,6 +420,9 @@ This is a read-only buffer showing the conversation history."
   ;; Hide markdown markup (**, `, ```) for cleaner display
   (setq-local markdown-hide-markup t)
   (add-to-invisibility-spec 'markdown-markup)
+  ;; Strip hidden markup from copy operations (M-w, C-w)
+  (setq-local filter-buffer-substring-function
+              #'pi-coding-agent--filter-buffer-substring)
   (setq-local pi-coding-agent--tool-args-cache (make-hash-table :test 'equal))
   (setq-local pi-coding-agent--fontify-buffers (make-hash-table :test 'equal))
   ;; Disable hl-line-mode: its post-command-hook overlay update causes
