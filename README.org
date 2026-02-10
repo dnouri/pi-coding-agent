@@ -208,8 +208,15 @@ Example configuration with =use-package=:
   (pi-coding-agent-bash-preview-lines 5)          ; Lines shown for bash output
   (pi-coding-agent-context-warning-threshold 70)  ; Warn when context exceeds this %
   (pi-coding-agent-context-error-threshold 90)    ; Critical when context exceeds this %
-  (pi-coding-agent-visit-file-other-window t))    ; RET opens file in other window (nil for same)
+  (pi-coding-agent-visit-file-other-window t)     ; RET opens file in other window (nil for same)
+  ;; (pi-coding-agent-copy-visible-text t)          ; Strip hidden markup on copy (default: raw markdown)
+  )
 #+end_src
+
+Copying from the chat buffer preserves raw markdown by default — useful
+for pasting into docs, Slack, or any markdown-aware context.  Set
+=pi-coding-agent-copy-visible-text= to =t= to strip hidden markup, or
+bind =pi-coding-agent-copy-visible= for an explicit "copy visible" command.
 
 * Testing
 
