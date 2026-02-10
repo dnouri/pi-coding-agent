@@ -43,8 +43,6 @@ jobs:
         with:
           node-version: '20'
       
-      # Extract PI_VERSION from Makefile (single source of truth)
-      # For 'pinned' use Makefile default; for 'latest' override
       - name: Get pi version
         run: |
           if [ "${{ matrix.pi_version }}" = "pinned" ]; then
@@ -52,12 +50,6 @@ jobs:
           else
             echo "PI_VERSION=${{ matrix.pi_version }}" >> $GITHUB_ENV
           fi
-      
-      - name: Cache npm dependencies
-        uses: actions/cache@v4
-        with:
-          path: .cache
-          key: deps-${{ runner.os }}-pi-${{ env.PI_VERSION }}
       
       - name: Setup Ollama model
         run: |
@@ -95,7 +87,6 @@ jobs:
         with:
           node-version: '20'
       
-      # Extract PI_VERSION from Makefile (single source of truth)
       - name: Get pi version
         run: |
           if [ "${{ matrix.pi_version }}" = "pinned" ]; then
@@ -103,12 +94,6 @@ jobs:
           else
             echo "PI_VERSION=${{ matrix.pi_version }}" >> $GITHUB_ENV
           fi
-      
-      - name: Cache npm dependencies
-        uses: actions/cache@v4
-        with:
-          path: .cache
-          key: deps-${{ runner.os }}-pi-${{ env.PI_VERSION }}
       
       - name: Setup Ollama model
         run: |
