@@ -130,7 +130,7 @@ breaking auto-scroll for subsequent turns."
 (ert-deftest pi-coding-agent-gui-test-tool-overlay-bounded ()
   "Test that tool block overlay doesn't extend beyond tool output.
 Regression test: overlay with rear-advance was extending to subsequent content."
-  (pi-coding-agent-gui-test-with-session
+  (pi-coding-agent-gui-test-with-fresh-session
     (let ((test-file (pi-coding-agent-gui-test-create-temp-file "overlay-test.txt" "BEFORE\n")))
       (unwind-protect
           (progn
