@@ -25,16 +25,6 @@ jobs:
         with:
           node-version: '20'
       
-      # Extract PI_VERSION from Makefile (single source of truth)
-      - name: Get pi version
-        run: echo "PI_VERSION=$(grep '^PI_VERSION' Makefile | head -1 | sed 's/.*?= *//')" >> $GITHUB_ENV
-      
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: .cache
-          key: deps-${{ runner.os }}-pi-${{ env.PI_VERSION }}
-      
       - name: Setup Ollama model
         run: |
           # Wait for Ollama to be ready
