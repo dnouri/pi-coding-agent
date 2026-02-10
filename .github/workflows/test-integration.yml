@@ -8,7 +8,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     services:
       ollama:
         image: ollama/ollama:0.11.11
@@ -50,6 +50,12 @@ jobs:
             exit 1
           }
           echo "Model qwen3:1.7b is ready"
+          
+          # Warm up: first inference loads weights into memory (10-30s cold start)
+          echo "Warming up model..."
+          curl -s http://localhost:11434/api/generate \
+            -d '{"model":"qwen3:1.7b","prompt":"hi","stream":false,"think":false,"options":{"num_predict":1}}' > /dev/null
+          echo "Warmup complete"
       
       - name: Run tests
         run: make test-integration-ci

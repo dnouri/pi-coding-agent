@@ -24,7 +24,7 @@ jobs:
   integration:
     name: Integration (pi@${{ matrix.pi_version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -63,6 +63,9 @@ jobs:
         run: |
           for i in {1..30}; do curl -s http://localhost:11434/api/tags && break; sleep 1; done
           curl -s http://localhost:11434/api/pull -d '{"name":"qwen3:1.7b"}' | tail -1
+          # Warm up: first inference loads weights into memory (10-30s cold start)
+          curl -s http://localhost:11434/api/generate \
+            -d '{"model":"qwen3:1.7b","prompt":"hi","stream":false,"think":false,"options":{"num_predict":1}}' > /dev/null
       
       - name: Run tests
         run: make test-integration-ci PI_VERSION=${{ env.PI_VERSION }}
@@ -111,6 +114,9 @@ jobs:
         run: |
           for i in {1..30}; do curl -s http://localhost:11434/api/tags && break; sleep 1; done
           curl -s http://localhost:11434/api/pull -d '{"name":"qwen3:1.7b"}' | tail -1
+          # Warm up: first inference loads weights into memory (10-30s cold start)
+          curl -s http://localhost:11434/api/generate \
+            -d '{"model":"qwen3:1.7b","prompt":"hi","stream":false,"think":false,"options":{"num_predict":1}}' > /dev/null
       
       - name: Run tests
         run: make test-gui-ci PI_VERSION=${{ env.PI_VERSION }}
