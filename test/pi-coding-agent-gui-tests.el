@@ -38,7 +38,7 @@
     (should-not (pi-coding-agent-gui-test-at-end-p))
     (let ((line-before (pi-coding-agent-gui-test-top-line-number)))
       (should (> line-before 1))
-      (pi-coding-agent-gui-test-send "/no_think Say: ok")
+      (pi-coding-agent-gui-test-send "Say: ok")
       (should (= line-before (pi-coding-agent-gui-test-top-line-number))))))
 
 (ert-deftest pi-coding-agent-gui-test-scroll-preserved-tool-use ()
@@ -52,8 +52,16 @@
             (should-not (pi-coding-agent-gui-test-at-end-p))
             (let ((line-before (pi-coding-agent-gui-test-top-line-number)))
               (should (> line-before 1))
-              ;; /no_think prevents qwen3 from skipping tool calls
-              (pi-coding-agent-gui-test-send (format "/no_think Read %s" test-file))
+              ;; Send without waiting for idle — model may re-call read (~2%)
+              (pi-coding-agent-gui-test-send
+               (format "Read the file %s" test-file) t)
+              ;; Wait for tool output, then check scroll preserved
+              (should
+               (pi-coding-agent-test-wait-until
+                (lambda () (pi-coding-agent-gui-test-chat-matches "^read "))
+                pi-coding-agent-test-gui-timeout
+                pi-coding-agent-test-poll-interval
+                (plist-get pi-coding-agent-gui-test--session :process)))
               (should (= line-before (pi-coding-agent-gui-test-top-line-number)))))
         (pi-coding-agent-gui-test-delete-temp-file test-file)))))
 
@@ -69,7 +77,7 @@ breaking auto-scroll for subsequent turns."
     ;; Explicitly scroll to end (main test purpose) and verify auto-scroll works
     (pi-coding-agent-gui-test-scroll-to-end)
     (should (pi-coding-agent-gui-test-at-end-p))
-    (pi-coding-agent-gui-test-send "/no_think Say: ok")
+    (pi-coding-agent-gui-test-send "Say: ok")
     (should (pi-coding-agent-gui-test-at-end-p))))
 
 ;;;; Window Management Tests
@@ -101,12 +109,22 @@ breaking auto-scroll for subsequent turns."
     (let ((test-file (pi-coding-agent-gui-test-create-temp-file "tool-test.txt" "XYZ123\n")))
       (unwind-protect
           (progn
-            ;; /no_think prevents qwen3 from using internal reasoning that skips tool calls
-            (pi-coding-agent-gui-test-send (format "/no_think Read the file %s" test-file))
-            ;; Tool header proves tool was invoked
-            (should (pi-coding-agent-gui-test-chat-matches "^read "))
-            ;; File content should appear inside the tool output block
-            (should (pi-coding-agent-gui-test-chat-text-in-tool-block-p "XYZ123")))
+            ;; Don't wait for idle: the model occasionally re-calls the read
+            ;; tool (qwen3:1.7b ~2% re-call rate), causing an infinite loop
+            ;; in the agent.  Instead, poll for the expected content.
+            ;; Note: /no_think dropped — spike testing showed it actually
+            ;; *reduces* tool call reliability with qwen3:1.7b.
+            (pi-coding-agent-gui-test-send
+             (format "Read the file %s" test-file) t)
+            ;; Wait for tool output to appear (not for idle)
+            (should
+             (pi-coding-agent-test-wait-until
+              (lambda ()
+                (and (pi-coding-agent-gui-test-chat-matches "^read ")
+                     (pi-coding-agent-gui-test-chat-text-in-tool-block-p "XYZ123")))
+              pi-coding-agent-test-gui-timeout
+              pi-coding-agent-test-poll-interval
+              (plist-get pi-coding-agent-gui-test--session :process))))
         (pi-coding-agent-gui-test-delete-temp-file test-file)))))
 
 (ert-deftest pi-coding-agent-gui-test-tool-overlay-bounded ()
@@ -117,9 +135,8 @@ Regression test: overlay with rear-advance was extending to subsequent content."
       (unwind-protect
           (progn
             ;; Ask to read file AND say something after
-            ;; /no_think prevents qwen3 from using internal reasoning that skips tool calls
             (pi-coding-agent-gui-test-send
-             (format "/no_think Call the read tool on %s and show me its contents. After the tool output, say ENDMARKER." test-file))
+             (format "Read the file %s and after showing the result, say ENDMARKER." test-file))
             ;; Wait for both tool output and the text response
             (should (pi-coding-agent-gui-test-chat-contains "BEFORE"))
             (should (pi-coding-agent-gui-test-chat-contains "ENDMARKER"))
