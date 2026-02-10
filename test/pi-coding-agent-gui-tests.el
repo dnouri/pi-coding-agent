@@ -134,18 +134,21 @@ Regression test: overlay with rear-advance was extending to subsequent content."
     (let ((test-file (pi-coding-agent-gui-test-create-temp-file "overlay-test.txt" "BEFORE\n")))
       (unwind-protect
           (progn
+            ;; Step 1: Read the file (simple prompt, ~85% tool call rate)
             ;; Send without waiting for idle — avoids race where
-            ;; wait-for-idle returns before streaming starts, and
-            ;; avoids timeout from model re-calling read (~2%).
+            ;; wait-for-idle returns before streaming starts.
             (pi-coding-agent-gui-test-send
-             (format "Read the file %s and after showing the result, say ENDMARKER." test-file) t)
-            ;; Poll for both tool output and the ENDMARKER text
+             (format "Read the file %s" test-file) t)
+            ;; Wait for tool output to appear
             (should
              (pi-coding-agent-test-wait-until
               (lambda () (pi-coding-agent-gui-test-chat-contains "BEFORE"))
               pi-coding-agent-test-gui-timeout
               pi-coding-agent-test-poll-interval
               (plist-get pi-coding-agent-gui-test--session :process)))
+            ;; Step 2: Get text AFTER the tool block (separate turn)
+            ;; Simple text prompt — no tool needed, very reliable.
+            (pi-coding-agent-gui-test-send "Say ENDMARKER" t)
             (should
              (pi-coding-agent-test-wait-until
               (lambda () (pi-coding-agent-gui-test-chat-contains "ENDMARKER"))
