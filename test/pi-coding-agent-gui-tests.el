@@ -134,12 +134,24 @@ Regression test: overlay with rear-advance was extending to subsequent content."
     (let ((test-file (pi-coding-agent-gui-test-create-temp-file "overlay-test.txt" "BEFORE\n")))
       (unwind-protect
           (progn
-            ;; Ask to read file AND say something after
+            ;; Send without waiting for idle — avoids race where
+            ;; wait-for-idle returns before streaming starts, and
+            ;; avoids timeout from model re-calling read (~2%).
             (pi-coding-agent-gui-test-send
-             (format "Read the file %s and after showing the result, say ENDMARKER." test-file))
-            ;; Wait for both tool output and the text response
-            (should (pi-coding-agent-gui-test-chat-contains "BEFORE"))
-            (should (pi-coding-agent-gui-test-chat-contains "ENDMARKER"))
+             (format "Read the file %s and after showing the result, say ENDMARKER." test-file) t)
+            ;; Poll for both tool output and the ENDMARKER text
+            (should
+             (pi-coding-agent-test-wait-until
+              (lambda () (pi-coding-agent-gui-test-chat-contains "BEFORE"))
+              pi-coding-agent-test-gui-timeout
+              pi-coding-agent-test-poll-interval
+              (plist-get pi-coding-agent-gui-test--session :process)))
+            (should
+             (pi-coding-agent-test-wait-until
+              (lambda () (pi-coding-agent-gui-test-chat-contains "ENDMARKER"))
+              pi-coding-agent-test-gui-timeout
+              pi-coding-agent-test-poll-interval
+              (plist-get pi-coding-agent-gui-test--session :process)))
             ;; Now check: ENDMARKER should NOT be inside a tool-block overlay
             (with-current-buffer (plist-get pi-coding-agent-gui-test--session :chat-buffer)
               (goto-char (point-min))
