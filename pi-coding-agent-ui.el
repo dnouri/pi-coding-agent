@@ -54,6 +54,7 @@
 (declare-function pi-coding-agent-toggle-tool-section "pi-coding-agent-render")
 (declare-function pi-coding-agent-visit-file "pi-coding-agent-render")
 (declare-function pi-coding-agent--cleanup-on-kill "pi-coding-agent-render")
+(declare-function pi-coding-agent--restore-tool-properties "pi-coding-agent-render")
 
 ;; pi-coding-agent-input.el (input buffer commands)
 (declare-function pi-coding-agent-quit "pi-coding-agent-input")
@@ -435,6 +436,9 @@ This is a read-only buffer showing the conversation history."
 
   ;; Add wrap-prefix to blockquotes so wrapped lines show the indicator
   (font-lock-add-keywords nil '((pi-coding-agent--fontify-blockquote-wrap-prefix)) 'append)
+
+  ;; Run after font-lock to undo markdown damage in tool overlays.
+  (jit-lock-register #'pi-coding-agent--restore-tool-properties)
 
   ;; Enable phscroll for horizontal table scrolling, offer install if missing
   (pi-coding-agent--maybe-install-phscroll)
