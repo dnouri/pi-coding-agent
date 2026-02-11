@@ -588,6 +588,45 @@ TYPE is :chat or :input.  Returns the buffer."
             (:input (pi-coding-agent-input-mode))))
         buf))))
 
+;;;; Project Buffer Discovery
+
+(defun pi-coding-agent-project-buffers ()
+  "Return all pi chat buffers for the current project directory.
+Matches buffer names by prefix against the abbreviated project dir.
+Returns a list ordered by `buffer-list' recency (most recent first)."
+  (let ((prefix (format "*pi-coding-agent-chat:%s"
+                        (abbreviate-file-name
+                         (pi-coding-agent--session-directory)))))
+    (cl-remove-if-not
+     (lambda (buf)
+       (string-prefix-p prefix (buffer-name buf)))
+     (buffer-list))))
+
+;;;; Window Hiding
+
+(defun pi-coding-agent--hide-buffers ()
+  "Hide all pi windows (chat and input) for the current session.
+Uses `delete-window' when the frame has other windows, or
+`bury-buffer' for sole-window frames.  A second pass buries any
+pi buffer that `switch-to-prev-buffer' may have landed on."
+  (let* ((chat-buf (pi-coding-agent--get-chat-buffer))
+         (input-buf (pi-coding-agent--get-input-buffer))
+         (pi-bufs (list chat-buf input-buf)))
+    ;; First pass: delete or bury each pi window
+    (dolist (buf pi-bufs)
+      (when (buffer-live-p buf)
+        (dolist (win (get-buffer-window-list buf nil t))
+          (if (> (length (window-list (window-frame win))) 1)
+              (delete-window win)
+            (with-selected-window win
+              (bury-buffer))))))
+    ;; Second pass: if bury-buffer landed on the paired pi buffer, bury again
+    (dolist (buf pi-bufs)
+      (when (buffer-live-p buf)
+        (dolist (win (get-buffer-window-list buf nil t))
+          (with-selected-window win
+            (bury-buffer)))))))
+
 ;;;; Buffer-Local Session Variables
 
 (defvar-local pi-coding-agent--process nil

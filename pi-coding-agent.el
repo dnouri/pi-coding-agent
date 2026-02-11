@@ -41,7 +41,7 @@
 ;;     Install from: https://github.com/misohena/phscroll
 ;;
 ;; Usage:
-;;   M-x pi           Start a session in current project
+;;   M-x pi           DWIM: toggle, reuse, or create session
 ;;   C-u M-x pi       Start a named session
 ;;
 ;; Key Bindings:
@@ -129,24 +129,54 @@ Returns the chat buffer."
 ;;;###autoload
 (defun pi-coding-agent (&optional session)
   "Start or switch to pi coding agent session in current project.
-With prefix arg, prompt for SESSION name to allow multiple sessions.
-If already in a pi buffer and no SESSION specified, redisplays current session."
+Without prefix arg, DWIM behavior:
+  - From a pi buffer: toggle visibility (hide windows).
+  - Existing session for project: switch to it.
+  - No session: create a new one.
+With prefix arg, prompt for SESSION name to create a new session.
+When called from Lisp with a string SESSION, create or switch to
+that named session (backward-compatible)."
   (interactive
    (list (when current-prefix-arg
            (read-string "Session name: "))))
   (pi-coding-agent--check-dependencies)
-  (let (chat-buf input-buf)
-    (if (and (derived-mode-p 'pi-coding-agent-chat-mode 'pi-coding-agent-input-mode)
-             (not session))
-        ;; Already in pi buffer with no new session requested - use current session
-        (setq chat-buf (pi-coding-agent--get-chat-buffer)
-              input-buf (pi-coding-agent--get-input-buffer))
-      ;; Find or create session for current directory
-      (let ((dir (pi-coding-agent--session-directory)))
-        (setq chat-buf (pi-coding-agent--setup-session dir session))
-        (setq input-buf (buffer-local-value 'pi-coding-agent--input-buffer chat-buf))))
-    ;; Display and focus
-    (pi-coding-agent--display-buffers chat-buf input-buf)))
+  (cond
+   ;; In a pi buffer with no session arg: toggle visibility
+   ((and (derived-mode-p 'pi-coding-agent-chat-mode 'pi-coding-agent-input-mode)
+         (not session))
+    (pi-coding-agent--hide-buffers))
+   ;; Existing session for this project (no session arg): reuse it
+   ((and (not session)
+         (car (pi-coding-agent-project-buffers)))
+    (let* ((chat-buf (car (pi-coding-agent-project-buffers)))
+           (input-buf (buffer-local-value 'pi-coding-agent--input-buffer chat-buf)))
+      (pi-coding-agent--display-buffers chat-buf input-buf)))
+   ;; Otherwise: create or find named session
+   (t
+    (let* ((dir (pi-coding-agent--session-directory))
+           (chat-buf (pi-coding-agent--setup-session dir session))
+           (input-buf (buffer-local-value 'pi-coding-agent--input-buffer chat-buf)))
+      (pi-coding-agent--display-buffers chat-buf input-buf)))))
+
+;;;###autoload
+(defun pi-coding-agent-toggle ()
+  "Toggle pi coding agent window visibility for the current project.
+If pi windows are visible, hide them.  If hidden but a session
+exists, show them.  If no session exists, signal an error."
+  (interactive)
+  (let ((chat-buf (car (pi-coding-agent-project-buffers))))
+    (cond
+     ;; No session at all
+     ((null chat-buf)
+      (user-error "No pi session for this project"))
+     ;; Session visible: hide it
+     ((get-buffer-window-list chat-buf nil t)
+      (with-current-buffer chat-buf
+        (pi-coding-agent--hide-buffers)))
+     ;; Session hidden: show it
+     (t
+      (let ((input-buf (buffer-local-value 'pi-coding-agent--input-buffer chat-buf)))
+        (pi-coding-agent--display-buffers chat-buf input-buf))))))
 
 ;;;; Performance Optimizations
 
