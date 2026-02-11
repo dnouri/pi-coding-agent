@@ -872,6 +872,20 @@ since we don't display them locally. Let pi's message_start handle it."
     (should (equal (cdr (assoc "my-ext" pi-coding-agent--extension-status))
                    "Processing..."))))
 
+(ert-deftest pi-coding-agent-test-extension-ui-set-status-strips-ansi ()
+  "extension_ui_request setStatus strips ANSI escape codes."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--extension-status nil)
+    (pi-coding-agent--handle-extension-ui-request
+     '(:type "extension_ui_request"
+       :id "req-ansi"
+       :method "setStatus"
+       :statusKey "plan-mode"
+       :statusText "\e[38;5;226m⏸ plan\e[39m"))
+    (should (equal (cdr (assoc "plan-mode" pi-coding-agent--extension-status))
+                   "⏸ plan"))))
+
 (ert-deftest pi-coding-agent-test-extension-ui-set-status-clear ()
   "extension_ui_request setStatus with nil clears the status."
   (with-temp-buffer
