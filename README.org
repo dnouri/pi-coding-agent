@@ -209,14 +209,19 @@ Example configuration with =use-package=:
   (pi-coding-agent-context-warning-threshold 70)  ; Warn when context exceeds this %
   (pi-coding-agent-context-error-threshold 90)    ; Critical when context exceeds this %
   (pi-coding-agent-visit-file-other-window t)     ; RET opens file in other window (nil for same)
-  ;; (pi-coding-agent-copy-visible-text t)          ; Strip hidden markup on copy (default: raw markdown)
+  ;; (pi-coding-agent-copy-raw-markdown t)            ; Keep raw markdown on copy (default: strip hidden markup)
+  ;; (pi-coding-agent-input-markdown-highlighting t)  ; GFM syntax highlighting in input buffer
   )
 #+end_src
 
-Copying from the chat buffer preserves raw markdown by default — useful
-for pasting into docs, Slack, or any markdown-aware context.  Set
-=pi-coding-agent-copy-visible-text= to =t= to strip hidden markup, or
-bind =pi-coding-agent-copy-visible= for an explicit "copy visible" command.
+Copying from the chat buffer strips hidden markdown markup by default —
+=M-w= and =C-w= produce the visible text you see on screen.  Set
+=pi-coding-agent-copy-raw-markdown= to =t= for raw markdown, useful
+when pasting into docs, Slack, or other markdown-aware contexts.
+
+The input buffer uses plain =text-mode= by default.  Set
+=pi-coding-agent-input-markdown-highlighting= to =t= for GFM syntax
+highlighting (bold, code spans, fenced blocks) in new sessions.
 
 * Testing
 

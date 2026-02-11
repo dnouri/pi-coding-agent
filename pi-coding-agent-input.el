@@ -228,12 +228,31 @@ For backward search: go to current input (nil index)."
 
 ;;;; Input Mode
 
-(define-derived-mode pi-coding-agent-input-mode gfm-mode "Pi-Input"
+(defun pi-coding-agent--input-mode-strip-metadata-keywords ()
+  "Remove markdown metadata font-lock keywords from the current buffer.
+Strips YAML, declarative, and pandoc metadata matchers that would
+otherwise highlight lines ending with `:' as metadata keys."
+  (font-lock-remove-keywords nil
+    (cl-remove-if-not
+     (lambda (kw)
+       (and (listp kw) (symbolp (car kw))
+            (string-match-p "metadata" (symbol-name (car kw)))))
+     markdown-mode-font-lock-keywords)))
+
+(define-derived-mode pi-coding-agent-input-mode text-mode "Pi-Input"
   "Major mode for composing pi prompts.
-Derives from `gfm-mode' for GitHub Flavored Markdown syntax
-highlighting (bold, italic, code spans, fenced blocks, etc.).
-Markup is kept visible so users see exactly what they type."
+Defaults to plain `text-mode'.  Set
+`pi-coding-agent-input-markdown-highlighting' to non-nil for GFM
+syntax highlighting while preserving mode identity and keybindings."
   :group 'pi-coding-agent
+  (when pi-coding-agent-input-markdown-highlighting
+    (gfm-mode)
+    (setq major-mode 'pi-coding-agent-input-mode)
+    (setq mode-name "Pi-Input")
+    (use-local-map pi-coding-agent-input-mode-map)
+    ;; Users see exactly what they type — never hide markup in input.
+    (setq-local markdown-hide-markup nil)
+    (pi-coding-agent--input-mode-strip-metadata-keywords))
   (setq-local header-line-format '(:eval (pi-coding-agent--header-line-string)))
   (add-hook 'completion-at-point-functions #'pi-coding-agent--command-capf nil t)
   (add-hook 'completion-at-point-functions #'pi-coding-agent--file-reference-capf nil t)

@@ -2583,35 +2583,57 @@ display-agent-end must finalize the pending overlay with error face."
     ;; Inline backticks shouldn't affect heading transform
     (should (string-match-p "^## Heading" (buffer-string)))))
 
-;;; Input Mode — GFM Syntax Highlighting
+;;; Input Mode — Markdown Highlighting (opt-in)
 
-(ert-deftest pi-coding-agent-test-input-mode-derives-from-gfm ()
-  "Input mode derives from gfm-mode for markdown syntax highlighting."
+(ert-deftest pi-coding-agent-test-input-mode-gfm-when-enabled ()
+  "With markdown highlighting enabled, input mode has GFM font-lock."
   (with-temp-buffer
-    (pi-coding-agent-input-mode)
-    (should (derived-mode-p 'gfm-mode))))
+    (let ((pi-coding-agent-input-markdown-highlighting t))
+      (pi-coding-agent-input-mode)
+      (should (derived-mode-p 'pi-coding-agent-input-mode))
+      (insert "some **bold** text")
+      (font-lock-ensure)
+      (goto-char (point-min))
+      (search-forward "bold")
+      (should (memq 'markdown-bold-face
+                    (let ((f (get-text-property (1- (point)) 'face)))
+                      (if (listp f) f (list f))))))))
+
+(ert-deftest pi-coding-agent-test-input-mode-no-metadata-face ()
+  "With markdown highlighting, lines ending with colon have no metadata face."
+  (with-temp-buffer
+    (let ((pi-coding-agent-input-markdown-highlighting t))
+      (pi-coding-agent-input-mode)
+      (insert "Fix the bug:\n- item\n")
+      (font-lock-ensure)
+      (goto-char (point-min))
+      (let ((f (get-text-property (point) 'face)))
+        (should-not (memq 'markdown-metadata-key-face
+                          (if (listp f) f (list f))))))))
 
 (ert-deftest pi-coding-agent-test-input-mode-no-hidden-markup ()
-  "Input mode does NOT hide markup — users need to see what they type."
+  "Input mode does NOT hide markup, even when user customizes it globally."
   (with-temp-buffer
-    (pi-coding-agent-input-mode)
-    (should-not markdown-hide-markup)))
+    (let ((pi-coding-agent-input-markdown-highlighting t)
+          (markdown-hide-markup t))
+      (pi-coding-agent-input-mode)
+      (should-not markdown-hide-markup))))
 
-(ert-deftest pi-coding-agent-test-input-mode-fontifies-markdown ()
-  "Input mode fontifies basic markdown syntax (bold, code spans)."
+(ert-deftest pi-coding-agent-test-input-mode-no-fontification-without-gfm ()
+  "Without markdown highlighting, bold text gets no markdown face."
   (with-temp-buffer
-    (pi-coding-agent-input-mode)
-    (insert "some **bold** text")
-    (font-lock-ensure)
-    ;; The word "bold" should have markdown-bold-face
-    (goto-char (point-min))
-    (search-forward "bold")
-    (should (memq 'markdown-bold-face
-                  (let ((f (get-text-property (1- (point)) 'face)))
-                    (if (listp f) f (list f)))))))
+    (let ((pi-coding-agent-input-markdown-highlighting nil))
+      (pi-coding-agent-input-mode)
+      (insert "some **bold** text")
+      (font-lock-ensure)
+      (goto-char (point-min))
+      (search-forward "bold")
+      (should-not (memq 'markdown-bold-face
+                        (let ((f (get-text-property (1- (point)) 'face)))
+                          (if (listp f) f (list f))))))))
 
-(ert-deftest pi-coding-agent-test-input-mode-keybindings-override ()
-  "Pi input keybindings take precedence over gfm-mode bindings."
+(ert-deftest pi-coding-agent-test-input-mode-keybindings ()
+  "Pi input keybindings are active in input mode."
   (with-temp-buffer
     (pi-coding-agent-input-mode)
     (should (eq (key-binding (kbd "C-c C-c")) 'pi-coding-agent-send))
