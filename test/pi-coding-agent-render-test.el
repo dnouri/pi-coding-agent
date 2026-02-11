@@ -2896,6 +2896,62 @@ which caused major performance issues with large buffers."
          '(:content [(:type "text" :text "output")]))
         (should-not hook-called)))))
 
+(ert-deftest pi-coding-agent-test-streaming-fontify-does-not-bleed-into-tool ()
+  "Tool content must retain tool-output face after gfm-mode fontification.
+Markdown patterns (#, **, __) in bash output must not acquire display,
+invisible, or markdown face properties."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event '(:type "agent_start"))
+    (pi-coding-agent--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "text_delta" :delta "Running.\n")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash" :toolCallId "c1" :args (:command "report")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_update"
+       :toolCallId "c1"
+       :partialResult
+       (:content [(:type "text"
+                   :text "# Heading\necho \"**bold**\"\necho \"__init__.py\"\n")])))
+    ;; Simulate jit-lock: font-lock + registered cleanup
+    (font-lock-ensure (point-min) (point-max))
+    (pi-coding-agent--restore-tool-properties (point-min) (point-max))
+    (dolist (pattern '("# Heading" "**bold**" "__init__"))
+      (goto-char (point-min))
+      (search-forward pattern)
+      (let ((pos (match-beginning 0)))
+        (should-not (get-text-property pos 'display))
+        (should-not (get-text-property pos 'invisible))
+        (should (eq (get-text-property pos 'face)
+                    'pi-coding-agent-tool-output))))))
+
+(ert-deftest pi-coding-agent-test-tool-header-no-markdown-damage ()
+  "Tool header must retain tool-command face after gfm-mode fontification.
+Markdown patterns in multi-line bash commands must not acquire display,
+invisible, or markdown face properties."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event '(:type "agent_start"))
+    (pi-coding-agent--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "text_delta" :delta "Running.\n")))
+    (pi-coding-agent--display-tool-start "bash" '(:command "echo"))
+    (pi-coding-agent--display-tool-update-header
+     "bash" '(:command "echo \"# Build\"\necho \"**done**\"\necho \"__init__.py\""))
+    ;; Simulate jit-lock: font-lock + registered cleanup
+    (font-lock-ensure (point-min) (point-max))
+    (pi-coding-agent--restore-tool-properties (point-min) (point-max))
+    (dolist (pattern '("**done**" "__init__"))
+      (goto-char (point-min))
+      (search-forward pattern)
+      (let ((pos (match-beginning 0)))
+        (should-not (get-text-property pos 'display))
+        (should-not (get-text-property pos 'invisible))
+        (should (eq (get-text-property pos 'face)
+                    'pi-coding-agent-tool-command))))))
+
 (ert-deftest pi-coding-agent-test-normal-insert-does-call-hooks ()
   "Control test: normal inserts DO trigger hooks.
 This validates that our hook-based tests are meaningful."

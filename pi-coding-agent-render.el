@@ -853,7 +853,8 @@ Uses `font-lock-face' to survive gfm-mode refontification."
            name))))))
 
 (defun pi-coding-agent--display-tool-start (tool-name args)
-  "Display header for tool TOOL-NAME with ARGS and create overlay."
+  "Insert tool header for TOOL-NAME with ARGS and create pending overlay.
+Records the header-end position for later content insertion."
   (let* ((header-display (pi-coding-agent--tool-header tool-name args))
          (path (pi-coding-agent--tool-path args))
          (inhibit-read-only t))
@@ -1711,14 +1712,57 @@ correct context, not blocks from earlier in the buffer."
         (funcall orig-fun prop (if lim (max lim limit) limit)))
     (funcall orig-fun prop lim)))
 
+(defun pi-coding-agent--restore-tool-properties (beg end)
+  "Strip markdown text properties from the pending tool overlay in BEG..END.
+Removes properties that gfm-mode fontification applies to markup
+patterns in tool output:
+- `display' (\"\"): hides # in headings
+- `invisible' (markdown-markup): hides ** __ and heading markup
+- `font-lock-multiline': causes fontification region extensions
+- `face': overrides tool faces with markdown heading/bold faces
+Restores intended faces for both the header and content regions."
+  (when-let* ((ov pi-coding-agent--pending-tool-overlay)
+              (ov-start (overlay-start ov))
+              (ov-end (overlay-end ov))
+              (header-end-marker (overlay-get ov 'pi-coding-agent-header-end))
+              (header-end (marker-position header-end-marker)))
+    (when (and (< beg ov-end) (> end ov-start))
+      (let ((inhibit-read-only t))
+        ;; Header: restore face from font-lock-face (varies per span)
+        (let ((hdr-beg (max beg ov-start))
+              (hdr-end (min end header-end)))
+          (when (< hdr-beg hdr-end)
+            (remove-text-properties
+             hdr-beg hdr-end
+             '(display nil invisible nil font-lock-multiline nil))
+            (let ((pos hdr-beg))
+              (while (< pos hdr-end)
+                (let* ((fl-face (get-text-property pos 'font-lock-face))
+                       (next (or (next-single-property-change
+                                  pos 'font-lock-face nil hdr-end)
+                                 hdr-end)))
+                  (when fl-face
+                    (put-text-property pos next 'face fl-face))
+                  (setq pos next))))
+            (put-text-property hdr-beg hdr-end 'fontified t)))
+        ;; Content: uniform tool-output face
+        (let ((cnt-beg (max beg header-end))
+              (cnt-end (min end ov-end)))
+          (when (< cnt-beg cnt-end)
+            (remove-text-properties
+             cnt-beg cnt-end
+             '(display nil invisible nil font-lock-multiline nil))
+            (put-text-property cnt-beg cnt-end 'face
+                               'pi-coding-agent-tool-output)
+            (put-text-property cnt-beg cnt-end 'fontified t)))))))
+
 (defun pi-coding-agent--fontify-streaming-region ()
   "Fontify newly streamed message text incrementally.
 Called by idle timer during streaming.  Only fontifies message text
 that hasn't been fontified yet, tracked via the variable
 `pi-coding-agent--last-fontified-pos'.  Skips the pending tool
-overlay region — tool content is pre-fontified in a temp buffer
-and marked with the `fontified' property to prevent jit-lock from
-overriding it with gfm-mode faces."
+overlay region to avoid applying gfm-mode faces to tool content
+via `font-lock-ensure' (which is not cleaned up by jit-lock)."
   (when (and pi-coding-agent--message-start-marker
              pi-coding-agent--streaming-marker
              (marker-position pi-coding-agent--message-start-marker)
