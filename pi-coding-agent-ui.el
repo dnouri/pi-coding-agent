@@ -155,17 +155,24 @@ When phscroll is not available, tables wrap like other content."
   :type 'boolean
   :group 'pi-coding-agent)
 
-(defcustom pi-coding-agent-copy-visible-text nil
-  "Whether to strip hidden markdown markup when copying from the chat buffer.
-When non-nil, copy commands (`kill-ring-save', `kill-region') produce
-only the visible text — bold markers (**), backticks, code fences,
-and setext underlines are removed.  When nil, the raw buffer content
-including hidden markup is copied (useful for pasting into other
-markdown-aware contexts).
+(defcustom pi-coding-agent-input-markdown-highlighting nil
+  "Whether to enable GFM syntax highlighting in the input buffer.
+When non-nil, the input buffer gets GitHub Flavored Markdown
+highlighting (bold, italic, code spans, fenced blocks).  When nil,
+the input buffer uses plain `text-mode'.
 
-Regardless of this setting, you can use `pi-coding-agent-copy-visible'
-for an explicit copy-visible-only operation, or toggle markup visibility
-with `markdown-toggle-markup-hiding'."
+Takes effect for new sessions; existing input buffers keep their mode."
+  :type 'boolean
+  :group 'pi-coding-agent)
+
+(defcustom pi-coding-agent-copy-raw-markdown nil
+  "Whether to copy raw markdown from the chat buffer.
+When non-nil, copy commands (`kill-ring-save', `kill-region') preserve
+raw markdown — bold markers (**), backticks, code fences, and setext
+underlines are kept.  Useful for pasting into docs, Slack, or other
+markdown-aware contexts.
+
+When nil (the default), only the visible text is copied."
   :type 'boolean
   :group 'pi-coding-agent)
 
@@ -390,24 +397,13 @@ and characters with `display' property equal to the empty string."
 
 (defun pi-coding-agent--filter-buffer-substring (beg end &optional delete)
   "Filter function for `filter-buffer-substring-function' in chat buffers.
-When `pi-coding-agent-copy-visible-text' is non-nil, returns only visible
+When `pi-coding-agent-copy-raw-markdown' is nil, returns only visible
 text between BEG and END.  If DELETE is non-nil, also removes the region.
 Otherwise delegates to the default filter."
-  (if pi-coding-agent-copy-visible-text
-      (prog1 (pi-coding-agent--visible-text beg end)
-        (when delete (delete-region beg end)))
-    (buffer-substring--filter beg end delete)))
-
-(defun pi-coding-agent-copy-visible (beg end)
-  "Copy visible text from BEG to END, stripping hidden markup.
-Like `kill-ring-save' but always removes text hidden by
-`markdown-hide-markup', regardless of `pi-coding-agent-copy-visible-text'.
-Suitable for binding to a key in `pi-coding-agent-chat-mode-map'."
-  (interactive "r")
-  (let ((text (pi-coding-agent--visible-text beg end)))
-    (kill-new text)
-    (setq deactivate-mark t)
-    (message "Copied %d characters" (length text))))
+  (if pi-coding-agent-copy-raw-markdown
+      (buffer-substring--filter beg end delete)
+    (prog1 (pi-coding-agent--visible-text beg end)
+      (when delete (delete-region beg end)))))
 
 (define-derived-mode pi-coding-agent-chat-mode gfm-mode "Pi-Chat"
   "Major mode for displaying pi conversation.

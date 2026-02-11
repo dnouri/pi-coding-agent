@@ -93,10 +93,11 @@ This ensures all files get code fences for consistent display."
     (should-not (buffer-local-value 'global-hl-line-mode (current-buffer)))))
 
 (ert-deftest pi-coding-agent-test-input-mode-derives-from-text ()
-  "pi-coding-agent-input-mode is derived from text-mode."
+  "pi-coding-agent-input-mode derives from text-mode, not gfm-mode by default."
   (with-temp-buffer
     (pi-coding-agent-input-mode)
-    (should (derived-mode-p 'text-mode))))
+    (should (derived-mode-p 'text-mode))
+    (should-not (derived-mode-p 'gfm-mode))))
 
 (ert-deftest pi-coding-agent-test-input-mode-not-read-only ()
   "pi-coding-agent-input-mode allows editing."
@@ -243,27 +244,20 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
     (should (equal (pi-coding-agent--visible-text (point-min) (point-max))
                    "Just plain text with no markup"))))
 
-(ert-deftest pi-coding-agent-test-copy-visible-command-puts-on-kill-ring ()
-  "pi-coding-agent-copy-visible copies visible text to kill ring."
+(ert-deftest pi-coding-agent-test-copy-raw-markdown-defcustom-default ()
+  "pi-coding-agent-copy-raw-markdown defcustom defaults to nil."
+  (should (eq pi-coding-agent-copy-raw-markdown nil)))
+
+(ert-deftest pi-coding-agent-test-kill-ring-save-strips-by-default ()
+  "kill-ring-save strips hidden markup by default."
   (pi-coding-agent-test--with-chat-markup "Hello **bold** world"
-    (pi-coding-agent-copy-visible (point-min) (point-max))
+    (kill-ring-save (point-min) (point-max))
     (should (equal (car kill-ring) "Hello bold world"))))
 
-(ert-deftest pi-coding-agent-test-copy-visible-text-defcustom-default ()
-  "pi-coding-agent-copy-visible-text defcustom defaults to nil."
-  (should (eq pi-coding-agent-copy-visible-text nil)))
-
-(ert-deftest pi-coding-agent-test-filter-strips-when-enabled ()
-  "When copy-visible-text is t, kill-ring-save strips hidden markup."
+(ert-deftest pi-coding-agent-test-kill-ring-save-keeps-raw-when-enabled ()
+  "When copy-raw-markdown is t, kill-ring-save keeps raw markdown."
   (pi-coding-agent-test--with-chat-markup "Hello **bold** world"
-    (let ((pi-coding-agent-copy-visible-text t))
-      (kill-ring-save (point-min) (point-max))
-      (should (equal (car kill-ring) "Hello bold world")))))
-
-(ert-deftest pi-coding-agent-test-filter-preserves-when-disabled ()
-  "When copy-visible-text is nil, kill-ring-save keeps raw markdown."
-  (pi-coding-agent-test--with-chat-markup "Hello **bold** world"
-    (let ((pi-coding-agent-copy-visible-text nil))
+    (let ((pi-coding-agent-copy-raw-markdown t))
       (kill-ring-save (point-min) (point-max))
       (should (equal (car kill-ring) "Hello **bold** world")))))
 
