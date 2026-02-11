@@ -408,6 +408,8 @@ Shows success or final failure with raw error."
   "Handle setStatus method from EVENT."
   (let ((key (plist-get event :statusKey))
         (text (plist-get event :statusText)))
+    (when text
+      (setq text (ansi-color-filter-apply text)))
     (if text
         (setq pi-coding-agent--extension-status
               (cons (cons key text)
