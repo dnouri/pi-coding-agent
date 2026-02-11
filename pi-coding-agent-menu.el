@@ -218,13 +218,15 @@ Call this when starting a new session to ensure no stale state persists."
         pi-coding-agent--assistant-header-shown nil
         pi-coding-agent--local-user-message nil
         pi-coding-agent--extension-status nil
+        pi-coding-agent--working-message nil
         pi-coding-agent--in-code-block nil
         pi-coding-agent--in-thinking-block nil
         pi-coding-agent--thinking-marker nil
         pi-coding-agent--thinking-start-marker nil
         pi-coding-agent--thinking-raw nil
         pi-coding-agent--line-parse-state 'line-start
-        pi-coding-agent--pending-tool-overlay nil)
+        pi-coding-agent--pending-tool-overlay nil
+        pi-coding-agent--activity-phase "idle")
   ;; Use accessors for cross-module state
   (pi-coding-agent--set-last-usage nil)
   (pi-coding-agent--clear-followup-queue)
@@ -519,14 +521,16 @@ Optional CUSTOM-INSTRUCTIONS provide guidance for the compaction summary."
   (when-let ((proc (pi-coding-agent--get-process))
              (chat-buf (pi-coding-agent--get-chat-buffer)))
     (message "Pi: Compacting...")
-    (pi-coding-agent--spinner-start)
+    (with-current-buffer chat-buf
+      (pi-coding-agent--set-activity-phase "compact"))
     (pi-coding-agent--rpc-async proc
                    (if custom-instructions
                        (list :type "compact" :customInstructions custom-instructions)
                      '(:type "compact"))
                    (lambda (response)
-                     ;; Pass chat-buf explicitly (callback may run in arbitrary context)
-                     (pi-coding-agent--spinner-stop chat-buf)
+                     (when (buffer-live-p chat-buf)
+                       (with-current-buffer chat-buf
+                         (pi-coding-agent--set-activity-phase "idle")))
                      (if (plist-get response :success)
                          (when (buffer-live-p chat-buf)
                            (with-current-buffer chat-buf

@@ -259,7 +259,6 @@ When user aborts, they want to stop everything - including queued messages."
       ;; Mock send functions to detect if queue processing sends the message
       (cl-letf (((symbol-function 'pi-coding-agent--prepare-and-send)
                  (lambda (_text) (setq message-was-sent t)))
-                ((symbol-function 'pi-coding-agent--spinner-stop) #'ignore)
                 ((symbol-function 'pi-coding-agent--fontify-timer-stop) #'ignore)
                 ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
         ;; Simulate agent_end arriving after abort
@@ -400,8 +399,7 @@ When user aborts, they want to stop everything - including queued messages."
             (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
                       ((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'pi-coding-agent--send-prompt)
-                       (lambda (text) (setq sent-prompt text)))
-                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore))
+                       (lambda (text) (setq sent-prompt text))))
               (pi-coding-agent-queue-followup))
             ;; Should send as normal prompt
             (should (equal sent-prompt "Do something else"))
@@ -579,8 +577,7 @@ correct position in the conversation."
             (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
                       ((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'pi-coding-agent--send-prompt)
-                       (lambda (text) (setq sent-prompt text)))
-                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore))
+                       (lambda (text) (setq sent-prompt text))))
               (pi-coding-agent-send))
             ;; Should send literal command (pi handles expansion)
             (should (equal sent-prompt "/greet world"))))
@@ -807,8 +804,7 @@ mixed together like:
             (insert "First message")
             (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
                       ((symbol-function 'process-live-p) (lambda (_) t))
-                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore)
-                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore))
+                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore))
               (pi-coding-agent-send)))
           ;; After normal send, variable should store the message text
           (with-current-buffer chat-buf
@@ -855,8 +851,7 @@ When pi echoes it back via message_start, we should NOT display it again."
             (insert "Hello pi")
             (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
                       ((symbol-function 'process-live-p) (lambda (_) t))
-                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore)
-                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore))
+                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore))
               (pi-coding-agent-send)))
           ;; Now simulate pi echoing the message back via message_start
           (with-current-buffer chat-buf
@@ -909,8 +904,6 @@ On agent_end, we pop from queue and send (which displays the message)."
                       ((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'pi-coding-agent--send-prompt)
                        (lambda (text) (setq sent-prompt text)))
-                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore)
-                      ((symbol-function 'pi-coding-agent--spinner-stop) #'ignore)
                       ((symbol-function 'pi-coding-agent--fontify-timer-stop) #'ignore)
                       ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
               (pi-coding-agent--handle-display-event '(:type "agent_end")))
@@ -952,8 +945,6 @@ On agent_end, we pop from queue and send (which displays the message)."
                       ((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'pi-coding-agent--send-prompt)
                        (lambda (text) (push text sent-prompts)))
-                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore)
-                      ((symbol-function 'pi-coding-agent--spinner-stop) #'ignore)
                       ((symbol-function 'pi-coding-agent--fontify-timer-stop) #'ignore)
                       ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
               ;; First agent_end
@@ -1981,40 +1972,135 @@ Pi handles command expansion on the server side."
     (let ((header (pi-coding-agent--header-line-string)))
       (should (string-match-p "high" header)))))
 
-(ert-deftest pi-coding-agent-test-header-line-shows-streaming-indicator ()
-  "Header line shows spinner when streaming."
+(ert-deftest pi-coding-agent-test-header-line-shows-activity-phase ()
+  "Header line shows the current activity phase label."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
-    (setq pi-coding-agent--state '(:model "claude-sonnet-4"))
-    (pi-coding-agent--spinner-start)
-    (unwind-protect
-        (let ((header (pi-coding-agent--header-line-string)))
-          (should (string-match-p "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]" header)))
-      (pi-coding-agent--spinner-stop))))
+    (setq pi-coding-agent--state '(:model "claude-sonnet-4" :thinking-level "high")
+          pi-coding-agent--activity-phase "thinking")
+    (let ((header (pi-coding-agent--header-line-string)))
+      (should (string-match-p "thinking" header)))))
 
-(ert-deftest pi-coding-agent-test-spinner-stop-with-explicit-buffer ()
-  "Spinner stops correctly when buffer is passed explicitly.
-Regression test for #24: spinner wouldn't stop if callback ran in
-arbitrary buffer context (e.g., process sentinel)."
-  (let* ((chat-buf (generate-new-buffer "*pi-coding-agent-chat:test-spinner/*"))
-         (original-spinning pi-coding-agent--spinning-sessions))
+(ert-deftest pi-coding-agent-test-header-line-shows-idle ()
+  "Header line shows idle activity phase with fixed-width padding."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--state '(:model "claude-sonnet-4" :thinking-level "high")
+          pi-coding-agent--activity-phase "idle")
+    (let ((header (substring-no-properties (pi-coding-agent--header-line-string))))
+      (should (string-match-p "idle    " header)))))
+
+(ert-deftest pi-coding-agent-test-header-line-phase-is-padded ()
+  "Header line activity phase slot is always 8 characters wide."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--state '(:model "claude-sonnet-4" :thinking-level "high")
+          pi-coding-agent--activity-phase "running")
+    (let* ((header (substring-no-properties (pi-coding-agent--header-line-string)))
+           (pos (string-match "running" header)))
+      (should pos)
+      (should (equal (substring header pos (+ pos 8)) "running ")))))
+
+(ert-deftest pi-coding-agent-test-header-line-shows-thinking-activity-phase ()
+  "Header line shows semantic activity label during streaming."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--state '(:model "claude-sonnet-4")
+          pi-coding-agent--activity-phase "thinking")
+    (let ((header (pi-coding-agent--header-line-string)))
+      (should (string-match-p "thinking" header)))))
+
+(ert-deftest pi-coding-agent-test-abort-send-resets-activity-phase ()
+  "Abort send resets activity phase and status to idle in CHAT-BUF."
+  (let ((chat-buf (generate-new-buffer "*pi-coding-agent-chat:test-abort-send/*")))
     (unwind-protect
         (progn
           (with-current-buffer chat-buf
             (pi-coding-agent-chat-mode)
-            (pi-coding-agent--spinner-start))
-          ;; Verify spinner started
-          (should (memq chat-buf pi-coding-agent--spinning-sessions))
-          ;; Stop from different buffer context (simulating sentinel/callback)
+            (setq pi-coding-agent--activity-phase "running"
+                  pi-coding-agent--status 'streaming))
+          ;; Simulate callback/sentinel context by calling from other buffer
           (with-temp-buffer
-            ;; Without explicit buffer, this would fail to remove chat-buf
-            (pi-coding-agent--spinner-stop chat-buf))
-          ;; Verify spinner stopped
-          (should-not (memq chat-buf pi-coding-agent--spinning-sessions)))
-      ;; Cleanup
-      (setq pi-coding-agent--spinning-sessions original-spinning)
+            (pi-coding-agent--abort-send chat-buf))
+          (with-current-buffer chat-buf
+            (should (equal pi-coding-agent--activity-phase "idle"))
+            (should (eq pi-coding-agent--status 'idle))))
       (when (buffer-live-p chat-buf)
         (kill-buffer chat-buf)))))
+
+(ert-deftest pi-coding-agent-test-working-message-in-header ()
+  "Header line includes transient working message when set."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--state '(:model "claude-sonnet-4")
+          pi-coding-agent--working-message "📖 Skimming…")
+    (let ((header (substring-no-properties (pi-coding-agent--header-line-string))))
+      (should (string-match-p "Skimming" header)))))
+
+(ert-deftest pi-coding-agent-test-header-no-pipes-when-minimal ()
+  "Header has no pipe separators when only identity group is present."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--state '(:model "claude-sonnet-4")
+          pi-coding-agent--cached-stats nil
+          pi-coding-agent--session-name nil
+          pi-coding-agent--extension-status nil
+          pi-coding-agent--working-message nil)
+    (let ((header (substring-no-properties (pi-coding-agent--header-line-string))))
+      (should-not (string-match-p "│" header)))))
+
+(ert-deftest pi-coding-agent-test-header-pipes-collapse-correctly ()
+  "Header renders only needed pipes when stats and context groups are set."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--state '(:model (:name "claude-sonnet-4" :contextWindow 200000))
+          pi-coding-agent--cached-stats '(:tokens (:input 1000 :output 500 :cacheRead 0 :cacheWrite 0)
+                                   :cost 0.05)
+          pi-coding-agent--last-usage '(:input 100 :output 50 :cacheRead 0 :cacheWrite 0)
+          pi-coding-agent--session-name "My Session"
+          pi-coding-agent--extension-status nil
+          pi-coding-agent--working-message nil)
+    (let ((header (substring-no-properties (pi-coding-agent--header-line-string)))
+          (count 0)
+          (start 0))
+      (while (string-match "│" header start)
+        (setq count (1+ count)
+              start (match-end 0)))
+      (should (= count 2)))))
+
+(ert-deftest pi-coding-agent-test-header-all-groups-present ()
+  "Header shows three group separators when all groups have content."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--state '(:model (:name "claude-sonnet-4" :contextWindow 200000))
+          pi-coding-agent--cached-stats '(:tokens (:input 1000 :output 500 :cacheRead 0 :cacheWrite 0)
+                                   :cost 0.05)
+          pi-coding-agent--last-usage '(:input 100 :output 50 :cacheRead 0 :cacheWrite 0)
+          pi-coding-agent--session-name "My Session"
+          pi-coding-agent--extension-status '(("ext" . "Git: synced"))
+          pi-coding-agent--working-message "📖 Skimming…")
+    (let ((header (substring-no-properties (pi-coding-agent--header-line-string)))
+          (count 0)
+          (start 0))
+      (while (string-match "│" header start)
+        (setq count (1+ count)
+              start (match-end 0)))
+      (should (= count 3))
+      (should (string-match-p "My Session" header))
+      (should (string-match-p "Git: synced · 📖 Skimming…" header)))))
+
+(ert-deftest pi-coding-agent-test-header-session-name-in-context-group ()
+  "Context group shows session name when set, collapses when nil."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--state '(:model "claude-sonnet-4")
+          pi-coding-agent--session-name "Refactor auth")
+    (let ((header (substring-no-properties (pi-coding-agent--header-line-string))))
+      (should (string-match-p "Refactor auth" header))
+      (should (string-match-p "│" header)))
+    (setq pi-coding-agent--session-name nil)
+    (let ((header (substring-no-properties (pi-coding-agent--header-line-string))))
+      (should-not (string-match-p "│" header)))))
 
 (ert-deftest pi-coding-agent-test-format-tokens-compact ()
   "Tokens formatted compactly."
