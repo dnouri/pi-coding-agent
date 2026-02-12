@@ -550,8 +550,8 @@ TYPE is :chat or :input.  Returns the buffer."
 Used to suppress ATX heading transforms inside code.")
 
 (defvar-local pi-coding-agent--in-thinking-block nil
-  "Non-nil when streaming inside a thinking block.
-Used to add blockquote prefix to each line.")
+  "Non-nil while processing a thinking block for the current message.
+Used for lifecycle resets when new messages or turns begin.")
 
 (defvar-local pi-coding-agent--thinking-marker nil
   "Marker for insertion point inside the current thinking block.

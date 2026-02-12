@@ -170,6 +170,29 @@ Models may send \\n\\n before thinking content too."
     (goto-char (point-min))
     (should-not (re-search-forward "^>\\s-*$" nil t))))
 
+(ert-deftest pi-coding-agent-test-thinking-normalization-preserves-first-line-indentation ()
+  "Normalization should trim blank boundaries without stripping indentation."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-thinking-start)
+    (pi-coding-agent--display-thinking-delta "\n\n  indented thought")
+    (pi-coding-agent--display-thinking-end "")
+    (should (string-match-p "^>   indented thought" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-thinking-whitespace-only-delta-does-not-rewrite-buffer ()
+  "Adding ignorable trailing whitespace should not rewrite rendered thinking."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-thinking-start)
+    (pi-coding-agent--display-thinking-delta "Stable")
+    (let ((before (buffer-string))
+          (before-tick (buffer-chars-modified-tick)))
+      (pi-coding-agent--display-thinking-delta "\n")
+      (should (equal before (buffer-string)))
+      (should (= before-tick (buffer-chars-modified-tick))))))
+
 (ert-deftest pi-coding-agent-test-thinking-paragraph-spacing-no-runaway-blank-lines ()
   "Thinking paragraphs keep a single readable separator, not multiple blanks."
   (with-temp-buffer
@@ -2927,55 +2950,37 @@ Commands with embedded newlines should not have any lines deleted."
       (should-not (marker-buffer marker))
       (should-not (marker-buffer start-marker)))))
 
-(ert-deftest pi-coding-agent-test-message-start-clears-previous-thinking-marker ()
-  "message_start should clear stale thinking markers and stream state."
+(defun pi-coding-agent-test--assert-message-start-clears-thinking-state (event)
+  "Assert that message_start EVENT clears all thinking-stream state."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (pi-coding-agent--display-agent-start)
     (pi-coding-agent--display-thinking-start)
     (let ((marker pi-coding-agent--thinking-marker)
           (start-marker pi-coding-agent--thinking-start-marker))
-      (pi-coding-agent--handle-display-event
-       '(:type "message_start" :message (:role "assistant")))
+      (pi-coding-agent--handle-display-event event)
       (should-not pi-coding-agent--thinking-marker)
       (should-not pi-coding-agent--thinking-start-marker)
       (should-not pi-coding-agent--thinking-raw)
       (should-not (marker-buffer marker))
       (should-not (marker-buffer start-marker)))))
+
+(ert-deftest pi-coding-agent-test-message-start-clears-previous-thinking-marker ()
+  "message_start should clear stale thinking markers and stream state."
+  (pi-coding-agent-test--assert-message-start-clears-thinking-state
+   '(:type "message_start" :message (:role "assistant"))))
 
 (ert-deftest pi-coding-agent-test-message-start-user-clears-previous-thinking-marker ()
   "message_start for user should also clear stale thinking state."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    (pi-coding-agent--display-agent-start)
-    (pi-coding-agent--display-thinking-start)
-    (let ((marker pi-coding-agent--thinking-marker)
-          (start-marker pi-coding-agent--thinking-start-marker))
-      (pi-coding-agent--handle-display-event
-       '(:type "message_start"
-         :message (:role "user" :content [(:type "text" :text "hi")])) )
-      (should-not pi-coding-agent--thinking-marker)
-      (should-not pi-coding-agent--thinking-start-marker)
-      (should-not pi-coding-agent--thinking-raw)
-      (should-not (marker-buffer marker))
-      (should-not (marker-buffer start-marker)))))
+  (pi-coding-agent-test--assert-message-start-clears-thinking-state
+   '(:type "message_start"
+     :message (:role "user" :content [(:type "text" :text "hi")]))))
 
 (ert-deftest pi-coding-agent-test-message-start-custom-clears-previous-thinking-marker ()
   "message_start for custom messages should clear stale thinking state."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    (pi-coding-agent--display-agent-start)
-    (pi-coding-agent--display-thinking-start)
-    (let ((marker pi-coding-agent--thinking-marker)
-          (start-marker pi-coding-agent--thinking-start-marker))
-      (pi-coding-agent--handle-display-event
-       '(:type "message_start"
-         :message (:role "custom" :display t :content "done")))
-      (should-not pi-coding-agent--thinking-marker)
-      (should-not pi-coding-agent--thinking-start-marker)
-      (should-not pi-coding-agent--thinking-raw)
-      (should-not (marker-buffer marker))
-      (should-not (marker-buffer start-marker)))))
+  (pi-coding-agent-test--assert-message-start-clears-thinking-state
+   '(:type "message_start"
+     :message (:role "custom" :display t :content "done"))))
 
 (ert-deftest pi-coding-agent-test-blockquote-has-wrap-prefix ()
   "Blockquotes have wrap-prefix for continuation lines after font-lock."
