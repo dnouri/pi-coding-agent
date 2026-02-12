@@ -1442,12 +1442,68 @@ Call inside `with-temp-buffer' after `pi-coding-agent-chat-mode'."
     (goto-char (point-min))  ;; On opening fence
     (should-not (pi-coding-agent--code-block-line-at-point))))
 
+(ert-deftest pi-coding-agent-test-code-block-line-at-point-tilde-fence ()
+  "Should support markdown tilde fences as code blocks."
+  (with-temp-buffer
+    (insert "~~~python\nline one\nline two\n~~~")
+    (goto-char (point-min))
+    (forward-line 2)  ;; On "line two"
+    (should (= 2 (pi-coding-agent--code-block-line-at-point)))))
+
+(ert-deftest pi-coding-agent-test-code-block-line-at-point-ignores-deep-indent-fence ()
+  "Should ignore fences indented four spaces (not fenced code markers)."
+  (with-temp-buffer
+    (insert "    ```python\nline one\n    ```")
+    (goto-char (point-min))
+    (forward-line 1)  ;; On "line one"
+    (should-not (pi-coding-agent--code-block-line-at-point))))
+
+(ert-deftest pi-coding-agent-test-code-block-line-at-point-after-closing-fence ()
+  "Should return nil when point is outside a fenced block."
+  (with-temp-buffer
+    (insert "```python\nline one\n```\noutside")
+    (goto-char (point-min))
+    (forward-line 3)  ;; On "outside"
+    (should-not (pi-coding-agent--code-block-line-at-point))))
+
+(ert-deftest pi-coding-agent-test-code-block-line-at-point-ignores-faux-closing-fence ()
+  "Closing fence marker with trailing text should not close the block."
+  (with-temp-buffer
+    (insert "```python\nline one\n``` not-a-close\nline two\n```")
+    (goto-char (point-min))
+    (forward-line 3)  ;; On "line two"
+    (should (= 3 (pi-coding-agent--code-block-line-at-point)))))
+
 (ert-deftest pi-coding-agent-test-code-block-line-at-point-no-fence ()
   "Should return nil when not in a code block."
   (with-temp-buffer
     (insert "just plain text\nno fences here")
     (goto-char (point-min))
     (should-not (pi-coding-agent--code-block-line-at-point))))
+
+(ert-deftest pi-coding-agent-test-tool-line-at-point-expanded-read-ignores-earlier-unclosed-fence ()
+  "Expanded read line lookup should ignore unrelated earlier unclosed fences."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-tool-preview-lines 2)
+          (inhibit-read-only t))
+      (insert "```python\nunclosed\n")
+      (pi-coding-agent--display-tool-start "read" '(:path "/tmp/test.py"))
+      (pi-coding-agent--display-tool-end
+       "read" '(:path "/tmp/test.py")
+       '((:type "text" :text "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\n"))
+       nil nil)
+      (goto-char (point-min))
+      (re-search-forward "\.\.\. ([0-9]+ more lines)" nil t)
+      (let ((btn (button-at (match-beginning 0))))
+        (should btn)
+        (pi-coding-agent--toggle-tool-output btn))
+      (goto-char (point-min))
+      (search-forward "line 6")
+      (let ((ov (seq-find (lambda (o) (overlay-get o 'pi-coding-agent-tool-block))
+                          (overlays-at (point)))))
+        (should ov)
+        (should (= 6 (pi-coding-agent--tool-line-at-point ov)))))))
 
 (ert-deftest pi-coding-agent-test-tool-overlay-stores-path ()
   "Tool overlay should store the file path for navigation."
@@ -2791,6 +2847,55 @@ Commands with embedded newlines should not have any lines deleted."
     (should (search-forward "> First line." nil t))
     (should (search-forward "> Second line." nil t))))
 
+(ert-deftest pi-coding-agent-test-agent-end-clears-thinking-marker-buffer ()
+  "agent_end should detach thinking marker from the chat buffer."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-thinking-start)
+    (let ((marker pi-coding-agent--thinking-marker))
+      (pi-coding-agent--display-agent-end)
+      (should-not pi-coding-agent--thinking-marker)
+      (should-not (marker-buffer marker)))))
+
+(ert-deftest pi-coding-agent-test-message-start-clears-previous-thinking-marker ()
+  "message_start should detach leftover thinking marker from prior message."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-thinking-start)
+    (let ((marker pi-coding-agent--thinking-marker))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_start" :message (:role "assistant")))
+      (should-not pi-coding-agent--thinking-marker)
+      (should-not (marker-buffer marker)))))
+
+(ert-deftest pi-coding-agent-test-message-start-user-clears-previous-thinking-marker ()
+  "message_start for user should also detach leftover thinking marker."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-thinking-start)
+    (let ((marker pi-coding-agent--thinking-marker))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_start"
+         :message (:role "user" :content [(:type "text" :text "hi")])) )
+      (should-not pi-coding-agent--thinking-marker)
+      (should-not (marker-buffer marker)))))
+
+(ert-deftest pi-coding-agent-test-message-start-custom-clears-previous-thinking-marker ()
+  "message_start for custom messages should clear stale thinking marker."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-thinking-start)
+    (let ((marker pi-coding-agent--thinking-marker))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_start"
+         :message (:role "custom" :display t :content "done")))
+      (should-not pi-coding-agent--thinking-marker)
+      (should-not (marker-buffer marker)))))
+
 (ert-deftest pi-coding-agent-test-blockquote-has-wrap-prefix ()
   "Blockquotes have wrap-prefix for continuation lines after font-lock."
   (with-temp-buffer
@@ -2823,6 +2928,148 @@ are only present in tool_execution_start, not tool_execution_end."
            :isError nil))
     ;; Should have python markdown code fence
     (should (string-match-p "```python" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-markdown-fence-delimiter-defaults-to-backticks ()
+  "Fence delimiter should use backticks when content has no backtick fence."
+  (should (equal "```"
+                 (pi-coding-agent--markdown-fence-delimiter "plain text"))))
+
+(ert-deftest pi-coding-agent-test-markdown-fence-delimiter-avoids-tilde-collisions ()
+  "Fence delimiter should exceed the longest tilde run in content."
+  (let ((content "before\n~~~~\n```bash\necho hi\n```\nafter"))
+    (should (equal "~~~~~"
+                   (pi-coding-agent--markdown-fence-delimiter content)))))
+
+(ert-deftest pi-coding-agent-test-wrap-in-src-block-uses-safe-fence ()
+  "Wrapped source blocks should use a delimiter that cannot close content."
+  (let ((wrapped (pi-coding-agent--wrap-in-src-block
+                  "```elisp\n(message \"hi\")\n```\n~~~~"
+                  "markdown")))
+    (should (string-prefix-p "~~~~~markdown\n" wrapped))
+    (should (string-suffix-p "\n~~~~~" wrapped))))
+
+(ert-deftest pi-coding-agent-test-read-tool-fences-handle-nested-backticks ()
+  "Consecutive read blocks keep wrapper fence markup hidden.
+Inner backtick fences in read output must not affect later wrappers."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    ;; First read output includes a nested markdown fence.
+    (pi-coding-agent--display-tool-start "read" '(:path "/tmp/test.md"))
+    (pi-coding-agent--display-tool-end
+     "read" '(:path "/tmp/test.md")
+     '((:type "text" :text "before\n```bash\necho hi\n```\nafter\n"))
+     nil nil)
+    ;; Second read output is plain text.
+    (pi-coding-agent--display-tool-start "read" '(:path "/tmp/test.md"))
+    (pi-coding-agent--display-tool-end
+     "read" '(:path "/tmp/test.md")
+     '((:type "text" :text "plain\nline\n"))
+     nil nil)
+    ;; Apply markdown font-lock so hidden markup properties are set.
+    (font-lock-ensure (point-min) (point-max))
+    (let ((wrapper-openers nil))
+      (goto-char (point-min))
+      (while (re-search-forward "^\\([`~]\\)\\1\\1+markdown$" nil t)
+        (let* ((line-start (match-beginning 0))
+               (line-end (line-end-position))
+               (all-hidden t)
+               (pos line-start))
+          (while (< pos line-end)
+            (unless (eq (get-char-property pos 'invisible) 'markdown-markup)
+              (setq all-hidden nil))
+            (setq pos (1+ pos)))
+          (push all-hidden wrapper-openers)))
+      (setq wrapper-openers (nreverse wrapper-openers))
+      ;; Two read wrappers, and each opener line is fully hidden.
+      (should (equal (length wrapper-openers) 2))
+      (dolist (hidden wrapper-openers)
+        (should hidden)))))
+
+(ert-deftest pi-coding-agent-test-thinking-markdown-after-collapsed-read ()
+  "Thinking markdown remains styled after a collapsed read tool block."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((long-content
+           (string-join
+            (mapcar (lambda (n) (format "line %03d" n))
+                    (number-sequence 1 140))
+            "\n")))
+      (pi-coding-agent--display-tool-start
+       "read" '(:path "/tmp/TODO-RPC-enhancements.md"))
+      (pi-coding-agent--display-tool-end
+       "read" '(:path "/tmp/TODO-RPC-enhancements.md")
+       `((:type "text" :text ,long-content))
+       nil nil)
+      (should (string-match-p "\.\.\. ([0-9]+ more lines)" (buffer-string)))
+
+      (pi-coding-agent--display-agent-start)
+      (pi-coding-agent--display-thinking-start)
+      (pi-coding-agent--display-thinking-delta
+       "**Reviewing documentation editing guidelines**")
+      (pi-coding-agent--display-thinking-end "")
+      (pi-coding-agent--render-complete-message)
+      (font-lock-ensure (point-min) (point-max))
+
+      (goto-char (point-min))
+      (re-search-forward "Reviewing documentation editing guidelines" nil t)
+      (let* ((review-pos (match-beginning 0))
+             (line-start (line-beginning-position))
+             (star-pos (+ line-start 2))
+             (line-face (get-text-property line-start 'face))
+             (review-face (get-text-property review-pos 'face)))
+        (should (or (eq line-face 'markdown-blockquote-face)
+                    (and (listp line-face)
+                         (memq 'markdown-blockquote-face line-face))))
+        (should (eq (get-text-property star-pos 'invisible) 'markdown-markup))
+        (should (or (eq review-face 'markdown-bold-face)
+                    (and (listp review-face)
+                         (memq 'markdown-bold-face review-face))))))))
+
+(ert-deftest pi-coding-agent-test-thinking-delta-after-toolcall-start-stays-blockquote ()
+  "Thinking markdown stays a blockquote even if toolcall_start arrives first.
+Some providers can interleave content blocks by contentIndex.  A thinking delta
+that arrives after toolcall_start must still render as thinking markdown, not
+as plain tool output."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event '(:type "agent_start"))
+    (pi-coding-agent--handle-display-event
+     '(:type "message_start" :message (:role "assistant")))
+    (pi-coding-agent--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "thinking_start")))
+    ;; Out-of-order interleave: toolcall starts before thinking text chunk.
+    (pi-coding-agent--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "toolcall_start" :contentIndex 0)
+       :message (:role "assistant"
+                 :content [(:type "toolCall" :id "call_1" :name "read"
+                            :arguments (:path "/tmp/AGENTS.md"))])))
+    (pi-coding-agent--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "thinking_delta"
+                               :delta "**Reviewing documentation editing guidelines**")))
+    (pi-coding-agent--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "thinking_end" :content "")))
+    (pi-coding-agent--handle-display-event
+     '(:type "message_end" :message (:role "assistant" :stopReason "toolUse")))
+    (font-lock-ensure (point-min) (point-max))
+    (goto-char (point-min))
+    (re-search-forward "Reviewing documentation editing guidelines" nil t)
+    (let* ((review-pos (match-beginning 0))
+           (line-start (line-beginning-position))
+           (line-face (get-text-property line-start 'face))
+           (review-face (get-text-property review-pos 'face)))
+      (should (string-prefix-p "> "
+                               (buffer-substring-no-properties
+                                line-start (line-end-position))))
+      (should (or (eq line-face 'markdown-blockquote-face)
+                  (and (listp line-face)
+                       (memq 'markdown-blockquote-face line-face))))
+      (should (or (eq review-face 'markdown-bold-face)
+                  (and (listp review-face)
+                       (memq 'markdown-bold-face review-face)))))))
 
 (ert-deftest pi-coding-agent-test-write-tool-gets-syntax-highlighting ()
   "Write tool displays content from args with syntax highlighting.
