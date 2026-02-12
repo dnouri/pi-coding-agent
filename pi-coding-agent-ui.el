@@ -34,7 +34,7 @@
 ;; - Buffer-local session variables (the shared mutable state)
 ;; - Buffer creation, naming, and navigation
 ;; - Display primitives (append-to-chat, scroll preservation, separators)
-;; - Header-line formatting and spinner
+;; - Header-line formatting and activity phases
 ;; - Sending infrastructure (send-prompt, abort-send)
 ;; - Major mode definitions (chat-mode, input-mode)
 
@@ -222,6 +222,11 @@ Subtle blue-tinted background derived from the current theme."
 (defface pi-coding-agent-model-name
   '((t :inherit font-lock-type-face))
   "Face for model name in header line."
+  :group 'pi-coding-agent)
+
+(defface pi-coding-agent-activity-phase
+  '((t :inherit shadow))
+  "Face for activity phase label in header line."
   :group 'pi-coding-agent)
 
 (defface pi-coding-agent-retry-notice
@@ -565,6 +570,21 @@ Starts as `line-start' because content begins after separator newline.")
 
 ;; pi-coding-agent--status is defined in pi-coding-agent-core.el as the single source of truth
 ;; for session activity state (idle, sending, streaming, compacting)
+
+(defvar-local pi-coding-agent--activity-phase "idle"
+  "Fine-grained activity phase for header-line display.
+One of: `thinking', `replying', `running', `compact', or `idle'.
+Always populated and rendered in a fixed-width slot.")
+
+(defun pi-coding-agent--set-activity-phase (phase)
+  "Set activity PHASE for header-line display in current chat buffer.
+PHASE should be one of: `thinking', `replying', `running', `compact', `idle'.
+Returns non-nil when the phase changed.
+Also triggers a header-line refresh when changed."
+  (unless (equal pi-coding-agent--activity-phase phase)
+    (setq pi-coding-agent--activity-phase phase)
+    (force-mode-line-update t)
+    t))
 
 (defvar-local pi-coding-agent--cached-stats nil
   "Cached session statistics for header-line display.
@@ -924,63 +944,6 @@ Removes common prefixes like \"Claude \" and suffixes like \" (latest)\"."
     (replace-regexp-in-string " (latest)$" "")
     (replace-regexp-in-string "^claude-" "")))
 
-(defvar pi-coding-agent--spinner-frames ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
-  "Frames for the busy spinner animation.")
-
-(defvar pi-coding-agent--spinner-index 0
-  "Current frame index in the spinner animation (shared for sync).")
-
-(defvar pi-coding-agent--spinner-timer nil
-  "Timer for animating spinners (shared across sessions).")
-
-(defvar pi-coding-agent--spinning-sessions nil
-  "List of chat buffers currently spinning.")
-
-(defun pi-coding-agent--spinner-start ()
-  "Start the spinner for current session."
-  (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
-    (when (and chat-buf (not (memq chat-buf pi-coding-agent--spinning-sessions)))
-      (push chat-buf pi-coding-agent--spinning-sessions)
-      ;; Start global timer if not running
-      (unless pi-coding-agent--spinner-timer
-        (setq pi-coding-agent--spinner-index 0)
-        (setq pi-coding-agent--spinner-timer
-              (run-with-timer 0 0.1 #'pi-coding-agent--spinner-tick))))))
-
-(defun pi-coding-agent--spinner-stop (&optional chat-buf)
-  "Stop the spinner for current session.
-CHAT-BUF is the buffer to stop spinning; if nil, uses current context.
-Note: When called from async callbacks, pass CHAT-BUF explicitly."
-  (let ((chat-buf (or chat-buf (pi-coding-agent--get-chat-buffer))))
-    (setq pi-coding-agent--spinning-sessions (delq chat-buf pi-coding-agent--spinning-sessions))
-    ;; Stop global timer if no sessions spinning
-    (when (and pi-coding-agent--spinner-timer (null pi-coding-agent--spinning-sessions))
-      (cancel-timer pi-coding-agent--spinner-timer)
-      (setq pi-coding-agent--spinner-timer nil))))
-
-(defun pi-coding-agent--spinner-tick ()
-  "Advance spinner to next frame and update spinning sessions."
-  (setq pi-coding-agent--spinner-index
-        (mod (1+ pi-coding-agent--spinner-index) (length pi-coding-agent--spinner-frames)))
-  ;; Only update windows showing spinning sessions
-  (dolist (buf pi-coding-agent--spinning-sessions)
-    (when (buffer-live-p buf)
-      (let ((input-buf (buffer-local-value 'pi-coding-agent--input-buffer buf)))
-        ;; Update input buffer's header line (where spinner shows)
-        (when (and input-buf (buffer-live-p input-buf))
-          (dolist (win (get-buffer-window-list input-buf nil t))
-            (with-selected-window win
-              (force-mode-line-update))))))))
-
-(defun pi-coding-agent--spinner-current ()
-  "Return current spinner frame if this session is spinning."
-  (let ((chat-buf (cond
-                   ((derived-mode-p 'pi-coding-agent-chat-mode) (current-buffer))
-                   ((derived-mode-p 'pi-coding-agent-input-mode) pi-coding-agent--chat-buffer)
-                   (t nil))))
-    (when (and chat-buf (memq chat-buf pi-coding-agent--spinning-sessions))
-      (aref pi-coding-agent--spinner-frames pi-coding-agent--spinner-index))))
-
 ;;; Header-Line Formatting
 
 (defvar pi-coding-agent--header-model-map
@@ -1075,9 +1038,12 @@ Accesses state from the linked chat buffer."
          (model-short (if (string-empty-p model-name) "..."
                         (pi-coding-agent--shorten-model-name model-name)))
          (thinking (or (plist-get state :thinking-level) ""))
-         (status-str (if-let ((spinner (pi-coding-agent--spinner-current)))
-                         (concat " " spinner)
-                       "  ")))  ; Same width as " ⠋" to prevent jumping
+         (activity-phase (or (and chat-buf
+                                  (buffer-local-value 'pi-coding-agent--activity-phase chat-buf))
+                             "idle"))
+         (activity-phase-str
+          (propertize (format "%-8s" activity-phase)
+                      'face 'pi-coding-agent-activity-phase)))
     (concat
      ;; Model (clickable)
      (propertize model-short
@@ -1092,8 +1058,8 @@ Accesses state from the linked chat buffer."
                            'mouse-face 'highlight
                            'help-echo "mouse-1: Cycle thinking level"
                            'local-map pi-coding-agent--header-thinking-map)))
-     ;; Spinner/status (right after model/thinking)
-     status-str
+     ;; Activity phase (fixed-width slot after model/thinking)
+     (concat " " activity-phase-str)
      ;; Stats (if available)
      (pi-coding-agent--header-format-stats stats last-usage model-obj)
      ;; Extension status (if any)
@@ -1155,12 +1121,11 @@ Shows an error message if process is unavailable."
 
 (defun pi-coding-agent--abort-send (chat-buf)
   "Clean up after a failed send attempt in CHAT-BUF.
-Stops spinner and resets status to idle."
+Resets activity phase and status to idle."
   (when (buffer-live-p chat-buf)
     (with-current-buffer chat-buf
-      (pi-coding-agent--spinner-stop)
       (setq pi-coding-agent--status 'idle)
-      (force-mode-line-update))))
+      (pi-coding-agent--set-activity-phase "idle"))))
 
 
 (provide 'pi-coding-agent-ui)

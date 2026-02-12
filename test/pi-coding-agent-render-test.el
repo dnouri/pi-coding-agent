@@ -487,8 +487,7 @@ since we don't display them locally. Let pi's message_start handle it."
             (insert "/fix-tests")
             (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
                       ((symbol-function 'process-live-p) (lambda (_) t))
-                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore)
-                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore))
+                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore))
               (pi-coding-agent-send)))
           
           ;; KEY ASSERTION: assistant-header-shown should still be t
@@ -2653,6 +2652,81 @@ Commands with embedded newlines should not have any lines deleted."
      '(:type "message_update"
        :assistantMessageEvent (:type "thinking_delta" :delta "Analyzing...")))
     (should (string-match-p "Analyzing..." (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-thinking-on-agent-start ()
+  "Activity phase becomes thinking on agent_start."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "idle")
+    (pi-coding-agent--handle-display-event '(:type "agent_start"))
+    (should (equal pi-coding-agent--activity-phase "thinking"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-replying-on-text-delta ()
+  "Activity phase becomes replying on text_delta."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "idle")
+    (pi-coding-agent--handle-display-event '(:type "agent_start"))
+    (pi-coding-agent--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "text_delta" :delta "Hello")))
+    (should (equal pi-coding-agent--activity-phase "replying"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-running-on-tool-start ()
+  "Activity phase becomes running on tool_execution_start."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "idle")
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolCallId "tool-1"
+       :toolName "bash"
+       :args (:command "ls")))
+    (should (equal pi-coding-agent--activity-phase "running"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-thinking-on-tool-end ()
+  "Activity phase returns to thinking on tool_execution_end."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "running")
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolCallId "tool-1"
+       :toolName "bash"
+       :args (:command "ls")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_end"
+       :toolCallId "tool-1"
+       :toolName "bash"
+       :result (:content nil)
+       :isError nil))
+    (should (equal pi-coding-agent--activity-phase "thinking"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-compact-on-compaction ()
+  "Activity phase becomes compact on auto_compaction_start."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "idle")
+    (pi-coding-agent--handle-display-event
+     '(:type "auto_compaction_start" :reason "threshold"))
+    (should (equal pi-coding-agent--activity-phase "compact"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-idle-on-agent-end ()
+  "Activity phase becomes idle on agent_end."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "thinking")
+    (pi-coding-agent--handle-display-event '(:type "agent_end"))
+    (should (equal pi-coding-agent--activity-phase "idle"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-idle-on-compaction-end ()
+  "Activity phase becomes idle on auto_compaction_end."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "compact")
+    (pi-coding-agent--handle-display-event
+     '(:type "auto_compaction_end" :aborted t :result nil))
+    (should (equal pi-coding-agent--activity-phase "idle"))))
 
 (ert-deftest pi-coding-agent-test-display-compaction-result-shows-header-tokens-summary ()
   "pi-coding-agent--display-compaction-result shows header, token count, and summary."
