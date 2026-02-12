@@ -559,6 +559,14 @@ Unlike `pi-coding-agent--streaming-marker', this marker stays anchored
 in thinking text when other content blocks (for example, tool headers)
 interleave during streaming.")
 
+(defvar-local pi-coding-agent--thinking-start-marker nil
+  "Marker for the start of the current thinking block.
+Used to rewrite thinking content in place after whitespace normalization.")
+
+(defvar-local pi-coding-agent--thinking-raw nil
+  "Accumulated raw thinking deltas for the current thinking block.
+Normalized and re-rendered incrementally to avoid excess whitespace.")
+
 (defvar-local pi-coding-agent--line-parse-state 'line-start
   "Parsing state for current line during streaming.
 Values:
