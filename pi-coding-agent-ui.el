@@ -553,6 +553,12 @@ Used to suppress ATX heading transforms inside code.")
   "Non-nil when streaming inside a thinking block.
 Used to add blockquote prefix to each line.")
 
+(defvar-local pi-coding-agent--thinking-marker nil
+  "Marker for insertion point inside the current thinking block.
+Unlike `pi-coding-agent--streaming-marker', this marker stays anchored
+in thinking text when other content blocks (for example, tool headers)
+interleave during streaming.")
+
 (defvar-local pi-coding-agent--line-parse-state 'line-start
   "Parsing state for current line during streaming.
 Values:
