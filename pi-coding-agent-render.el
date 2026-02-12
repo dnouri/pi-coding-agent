@@ -184,6 +184,21 @@ on each delta - fontification happens at message end instead."
           (insert transformed)
           (set-marker pi-coding-agent--streaming-marker (point)))))))
 
+(defun pi-coding-agent--thinking-insert-position ()
+  "Return insertion position for thinking text.
+Prefers `pi-coding-agent--thinking-marker' when available so interleaved
+tool headers do not move the thinking insertion point."
+  (if (and pi-coding-agent--thinking-marker
+           (marker-position pi-coding-agent--thinking-marker))
+      (marker-position pi-coding-agent--thinking-marker)
+    (marker-position pi-coding-agent--streaming-marker)))
+
+(defun pi-coding-agent--clear-thinking-marker ()
+  "Detach and clear `pi-coding-agent--thinking-marker'."
+  (when (markerp pi-coding-agent--thinking-marker)
+    (set-marker pi-coding-agent--thinking-marker nil))
+  (setq pi-coding-agent--thinking-marker nil))
+
 (defun pi-coding-agent--display-thinking-start ()
   "Insert opening marker for thinking block (blockquote)."
   (when pi-coding-agent--streaming-marker
@@ -193,10 +208,15 @@ on each delta - fontification happens at message end instead."
         (save-excursion
           (goto-char (marker-position pi-coding-agent--streaming-marker))
           (insert "> ")
-          (set-marker pi-coding-agent--streaming-marker (point)))))))
+          ;; Track thinking insertion separately so it stays anchored even if
+          ;; other block types (tool headers) interleave in the same message.
+          ;; Keep insertion-type nil so inserts at this exact point happen
+          ;; after the marker (we then advance it explicitly per delta).
+          (pi-coding-agent--clear-thinking-marker)
+          (setq pi-coding-agent--thinking-marker (copy-marker (point) nil)))))))
 
 (defun pi-coding-agent--display-thinking-delta (delta)
-  "Display streaming thinking DELTA at the streaming marker.
+  "Display streaming thinking DELTA in the current thinking block.
 Transforms newlines to include blockquote prefix.
 Inhibits modification hooks to prevent expensive jit-lock fontification
 on each delta - fontification happens at message end instead."
@@ -207,9 +227,10 @@ on each delta - fontification happens at message end instead."
           (transformed (replace-regexp-in-string "\n" "\n> " delta)))
       (pi-coding-agent--with-scroll-preservation
         (save-excursion
-          (goto-char (marker-position pi-coding-agent--streaming-marker))
+          (goto-char (pi-coding-agent--thinking-insert-position))
           (insert transformed)
-          (set-marker pi-coding-agent--streaming-marker (point)))))))
+          (when pi-coding-agent--thinking-marker
+            (set-marker pi-coding-agent--thinking-marker (point))))))))
 
 (defun pi-coding-agent--display-thinking-end (_content)
   "End thinking block (blockquote).
@@ -219,10 +240,10 @@ CONTENT is ignored - we use what was already streamed."
     (let ((inhibit-read-only t))
       (pi-coding-agent--with-scroll-preservation
         (save-excursion
-          (goto-char (marker-position pi-coding-agent--streaming-marker))
+          (goto-char (pi-coding-agent--thinking-insert-position))
           ;; End blockquote with blank line
           (insert "\n\n")
-          (set-marker pi-coding-agent--streaming-marker (point)))))))
+          (pi-coding-agent--clear-thinking-marker))))))
 
 (defun pi-coding-agent--display-agent-end ()
   "Finalize agent turn: normalize whitespace, handle abort, process queue.
@@ -230,6 +251,8 @@ Note: status is set to `idle' by the event handler."
   ;; Reset per-turn state for clean next turn.
   (setq pi-coding-agent--local-user-message nil)
   (setq pi-coding-agent--streaming-tool-id nil)
+  (setq pi-coding-agent--in-thinking-block nil)
+  (pi-coding-agent--clear-thinking-marker)
   (let ((was-aborted pi-coding-agent--aborted))
     (let ((inhibit-read-only t))
       (pi-coding-agent--tool-overlay-finalize 'pi-coding-agent-tool-block-error)
@@ -525,6 +548,9 @@ Updates buffer-local state and renders display updates."
     ("message_start"
      (let* ((message (plist-get event :message))
             (role (plist-get message :role)))
+       ;; A new message starts a fresh rendering context.
+       (setq pi-coding-agent--in-thinking-block nil)
+       (pi-coding-agent--clear-thinking-marker)
        (pcase role
          ("user"
           ;; User message from pi - check if we displayed it locally
@@ -1065,10 +1091,27 @@ Extracts text from content blocks and delegates to
       (pi-coding-agent--display-tool-streaming-text
        raw-output pi-coding-agent-bash-preview-lines))))
 
+(defun pi-coding-agent--markdown-fence-delimiter (content)
+  "Return a markdown fence delimiter safe for CONTENT.
+Uses triple backticks by default.  If CONTENT contains triple-backtick
+runs, uses a tilde fence longer than any tilde run in CONTENT."
+  (let ((text (or content "")))
+    (if (string-match-p "```+" text)
+        (let ((max-tilde-run 0)
+              (pos 0))
+          (while (string-match "~+" text pos)
+            (setq max-tilde-run
+                  (max max-tilde-run
+                       (- (match-end 0) (match-beginning 0))))
+            (setq pos (match-end 0)))
+          (make-string (max 3 (1+ max-tilde-run)) ?~))
+      "```")))
+
 (defun pi-coding-agent--wrap-in-src-block (content lang)
   "Wrap CONTENT in a markdown fenced code block with LANG.
 Returns markdown string for syntax highlighting."
-  (format "```%s\n%s\n```" (or lang "") content))
+  (let ((fence (pi-coding-agent--markdown-fence-delimiter content)))
+    (format "%s%s\n%s\n%s" fence (or lang "") content fence)))
 
 (defun pi-coding-agent--render-tool-content (content lang)
   "Render CONTENT with optional syntax highlighting for LANG.
@@ -1433,18 +1476,68 @@ Diff format: [+-] LINENUM content (e.g., '+ 7     code' or '-12     code')."
     (when (looking-at "^[+-] *\\([0-9]+\\)")
       (string-to-number (match-string 1)))))
 
-(defun pi-coding-agent--code-block-line-at-point ()
-  "Return line number within code block content at point.
-Searches backward for opening fence (```), counts lines from there.
-Returns nil if not inside a code block or if on the fence line itself."
+(defun pi-coding-agent--fence-line-info-at-point ()
+  "Return fence info for current line, or nil when not on a fence line.
+Return value is plist `(:char CHAR :len LEN :trailing TEXT)'.
+TEXT is everything after the fence run on this line.
+Only recognizes fences indented by at most three spaces."
   (save-excursion
-    (let ((orig-line (line-number-at-pos)))
+    (beginning-of-line)
+    (let ((indent-start (point)))
+      (skip-chars-forward " ")
+      (let ((indent (- (point) indent-start))
+            (char (char-after)))
+        (when (and (<= indent 3)
+                   (memq char '(?` ?~)))
+          (let ((start (point)))
+            (skip-chars-forward (char-to-string char))
+            (let ((len (- (point) start)))
+              (when (>= len 3)
+                (list :char char
+                      :len len
+                      :trailing (buffer-substring-no-properties
+                                 (point) (line-end-position)))))))))))
+
+(defun pi-coding-agent--fence-closing-line-p (fence line-info)
+  "Return non-nil when LINE-INFO closes FENCE.
+FENCE and LINE-INFO are plists from
+`pi-coding-agent--fence-line-info-at-point'."
+  (and line-info
+       (= (plist-get line-info :char) (plist-get fence :char))
+       (>= (plist-get line-info :len) (plist-get fence :len))
+       (string-match-p "^[ \t]*$" (plist-get line-info :trailing))))
+
+(defun pi-coding-agent--code-block-line-at-point (&optional start-pos)
+  "Return line number within code block content at point.
+Supports both backtick and tilde fenced blocks.  Returns nil unless
+point is on a content line inside an open fenced block.
+When START-POS is non-nil, parse fences starting from that position."
+  (save-excursion
+    (let* ((target-line (line-number-at-pos))
+           (scan-start (or start-pos (point-min)))
+           (open-fence nil)
+           (open-line nil)
+           (result nil)
+           line-no)
+      (goto-char scan-start)
       (beginning-of-line)
-      (when (re-search-backward "^```" nil t)
-        (let ((fence-line (line-number-at-pos)))
-          ;; Only return line number if we're after the fence line
-          (when (> orig-line fence-line)
-            (- orig-line fence-line)))))))
+      (setq line-no (line-number-at-pos))
+      (while (and (<= line-no target-line) (not result))
+        (let ((line-info (pi-coding-agent--fence-line-info-at-point)))
+          (cond
+           (open-fence
+            (cond
+             ((pi-coding-agent--fence-closing-line-p open-fence line-info)
+              (setq open-fence nil)
+              (setq open-line nil))
+             ((= line-no target-line)
+              (setq result (- line-no open-line)))))
+           (line-info
+            (setq open-fence line-info)
+            (setq open-line line-no))))
+        (forward-line 1)
+        (setq line-no (1+ line-no)))
+      result)))
 
 (defun pi-coding-agent--tool-line-at-point (overlay)
   "Calculate file line number at point for tool OVERLAY.
@@ -1467,7 +1560,7 @@ For read/write: count lines from header + apply line-map for stripped blanks."
            (when (and (>= map-index 0) (< map-index (length line-map)))
              (+ (aref line-map map-index) (1- offset))))))
      ;; Fallback: code block position + offset (for expanded view or no line-map)
-     (when-let ((block-line (pi-coding-agent--code-block-line-at-point)))
+     (when-let ((block-line (pi-coding-agent--code-block-line-at-point header-end)))
        (+ block-line (1- offset)))
      ;; Last fallback to line 1
      1)))
