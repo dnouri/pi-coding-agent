@@ -193,11 +193,74 @@ tool headers do not move the thinking insertion point."
       (marker-position pi-coding-agent--thinking-marker)
     (marker-position pi-coding-agent--streaming-marker)))
 
-(defun pi-coding-agent--clear-thinking-marker ()
-  "Detach and clear `pi-coding-agent--thinking-marker'."
+(defun pi-coding-agent--thinking-normalize-text (text)
+  "Normalize streaming thinking TEXT for stable markdown rendering.
+Removes boundary blank lines and collapses internal blank-line runs to
+at most one empty paragraph separator while preserving indentation."
+  (let* ((source (or text ""))
+         (without-leading-blank-lines
+          (replace-regexp-in-string "\\`\\(?:[ \t]*\n\\)+" "" source))
+         (without-boundary-blank-lines
+          (replace-regexp-in-string "\\(?:\n[ \t]*\\)+\\'" ""
+                                    without-leading-blank-lines)))
+    (if (string-empty-p without-boundary-blank-lines)
+        ""
+      (replace-regexp-in-string
+       "\n\\(?:[ \t]*\n\\)\\{2,\\}" "\n\n"
+       without-boundary-blank-lines))))
+
+(defun pi-coding-agent--thinking-blockquote-text (text)
+  "Convert normalized thinking TEXT to markdown blockquote lines."
+  (if (string-empty-p text)
+      ""
+    (concat "> " (replace-regexp-in-string "\n" "\n> " text))))
+
+(defun pi-coding-agent--render-thinking-content ()
+  "Render normalized accumulated thinking content in place.
+Returns non-nil when meaningful content remains after normalization."
+  (when (and (markerp pi-coding-agent--thinking-start-marker)
+             (markerp pi-coding-agent--thinking-marker)
+             (marker-position pi-coding-agent--thinking-start-marker)
+             (marker-position pi-coding-agent--thinking-marker))
+    (let* ((start (marker-position pi-coding-agent--thinking-start-marker))
+           (end (marker-position pi-coding-agent--thinking-marker))
+           (normalized (pi-coding-agent--thinking-normalize-text
+                        pi-coding-agent--thinking-raw))
+           (rendered (pi-coding-agent--thinking-blockquote-text normalized)))
+      (when (<= start end)
+        (let ((existing (buffer-substring-no-properties start end)))
+          (unless (equal existing rendered)
+            (goto-char start)
+            (delete-region start end)
+            (insert rendered)
+            (set-marker pi-coding-agent--thinking-marker (point)))))
+      (and (<= start end)
+           (not (string-empty-p normalized))))))
+
+(defun pi-coding-agent--ensure-thinking-separator ()
+  "Ensure exactly one blank line separator at point.
+Normalizes any existing newline run to two newlines."
+  (let ((start (point))
+        (scan (point))
+        (newline-count 0))
+    (while (eq (char-after scan) ?\n)
+      (setq newline-count (1+ newline-count))
+      (setq scan (1+ scan)))
+    (cond
+     ((< newline-count 2)
+      (insert (make-string (- 2 newline-count) ?\n)))
+     ((> newline-count 2)
+      (delete-region (+ start 2) (+ start newline-count))))))
+
+(defun pi-coding-agent--reset-thinking-state ()
+  "Detach and clear all thinking-stream state for the current turn."
   (when (markerp pi-coding-agent--thinking-marker)
     (set-marker pi-coding-agent--thinking-marker nil))
-  (setq pi-coding-agent--thinking-marker nil))
+  (when (markerp pi-coding-agent--thinking-start-marker)
+    (set-marker pi-coding-agent--thinking-start-marker nil))
+  (setq pi-coding-agent--thinking-marker nil
+        pi-coding-agent--thinking-start-marker nil
+        pi-coding-agent--thinking-raw nil))
 
 (defun pi-coding-agent--display-thinking-start ()
   "Insert opening marker for thinking block (blockquote)."
@@ -207,30 +270,43 @@ tool headers do not move the thinking insertion point."
       (pi-coding-agent--with-scroll-preservation
         (save-excursion
           (goto-char (marker-position pi-coding-agent--streaming-marker))
-          (insert "> ")
           ;; Track thinking insertion separately so it stays anchored even if
           ;; other block types (tool headers) interleave in the same message.
           ;; Keep insertion-type nil so inserts at this exact point happen
           ;; after the marker (we then advance it explicitly per delta).
-          (pi-coding-agent--clear-thinking-marker)
-          (setq pi-coding-agent--thinking-marker (copy-marker (point) nil)))))))
+          (pi-coding-agent--reset-thinking-state)
+          (setq pi-coding-agent--thinking-raw "")
+          (let ((start (point)))
+            (insert "> ")
+            (setq pi-coding-agent--thinking-start-marker
+                  (copy-marker start nil))
+            (setq pi-coding-agent--thinking-marker
+                  (copy-marker (point) nil))))))))
 
 (defun pi-coding-agent--display-thinking-delta (delta)
   "Display streaming thinking DELTA in the current thinking block.
-Transforms newlines to include blockquote prefix.
+Normalizes boundary and paragraph whitespace while streaming.
 Inhibits modification hooks to prevent expensive jit-lock fontification
 on each delta - fontification happens at message end instead."
   (when (and delta pi-coding-agent--streaming-marker)
     (let ((inhibit-read-only t)
-          (inhibit-modification-hooks t)
-          ;; Transform newlines to include blockquote prefix on next line
-          (transformed (replace-regexp-in-string "\n" "\n> " delta)))
-      (pi-coding-agent--with-scroll-preservation
-        (save-excursion
-          (goto-char (pi-coding-agent--thinking-insert-position))
-          (insert transformed)
-          (when pi-coding-agent--thinking-marker
-            (set-marker pi-coding-agent--thinking-marker (point))))))))
+          (inhibit-modification-hooks t))
+      (if (and pi-coding-agent--thinking-start-marker
+               pi-coding-agent--thinking-marker)
+          (progn
+            (setq pi-coding-agent--thinking-raw
+                  (concat (or pi-coding-agent--thinking-raw "") delta))
+            (pi-coding-agent--with-scroll-preservation
+              (save-excursion
+                (pi-coding-agent--render-thinking-content))))
+        ;; Fallback for malformed event streams that skip thinking_start.
+        (let ((transformed (replace-regexp-in-string "\n" "\n> " delta)))
+          (pi-coding-agent--with-scroll-preservation
+            (save-excursion
+              (goto-char (pi-coding-agent--thinking-insert-position))
+              (insert transformed)
+              (when pi-coding-agent--thinking-marker
+                (set-marker pi-coding-agent--thinking-marker (point))))))))))
 
 (defun pi-coding-agent--display-thinking-end (_content)
   "End thinking block (blockquote).
@@ -240,10 +316,15 @@ CONTENT is ignored - we use what was already streamed."
     (let ((inhibit-read-only t))
       (pi-coding-agent--with-scroll-preservation
         (save-excursion
-          (goto-char (pi-coding-agent--thinking-insert-position))
-          ;; End blockquote with blank line
-          (insert "\n\n")
-          (pi-coding-agent--clear-thinking-marker))))))
+          (if (and pi-coding-agent--thinking-start-marker
+                   pi-coding-agent--thinking-marker)
+              (when (pi-coding-agent--render-thinking-content)
+                (goto-char (pi-coding-agent--thinking-insert-position))
+                (pi-coding-agent--ensure-thinking-separator))
+            ;; Fallback for malformed event streams that skip thinking_start.
+            (goto-char (pi-coding-agent--thinking-insert-position))
+            (pi-coding-agent--ensure-thinking-separator))
+          (pi-coding-agent--reset-thinking-state))))))
 
 (defun pi-coding-agent--display-agent-end ()
   "Finalize agent turn: normalize whitespace, handle abort, process queue.
@@ -252,7 +333,7 @@ Note: status is set to `idle' by the event handler."
   (setq pi-coding-agent--local-user-message nil)
   (setq pi-coding-agent--streaming-tool-id nil)
   (setq pi-coding-agent--in-thinking-block nil)
-  (pi-coding-agent--clear-thinking-marker)
+  (pi-coding-agent--reset-thinking-state)
   (let ((was-aborted pi-coding-agent--aborted))
     (let ((inhibit-read-only t))
       (pi-coding-agent--tool-overlay-finalize 'pi-coding-agent-tool-block-error)
@@ -550,7 +631,7 @@ Updates buffer-local state and renders display updates."
             (role (plist-get message :role)))
        ;; A new message starts a fresh rendering context.
        (setq pi-coding-agent--in-thinking-block nil)
-       (pi-coding-agent--clear-thinking-marker)
+       (pi-coding-agent--reset-thinking-state)
        (pcase role
          ("user"
           ;; User message from pi - check if we displayed it locally

@@ -71,6 +71,9 @@
           pi-coding-agent--extension-status '(("ext1" . "status"))
           pi-coding-agent--message-start-marker (point-marker)
           pi-coding-agent--streaming-marker (point-marker)
+          pi-coding-agent--thinking-marker (point-marker)
+          pi-coding-agent--thinking-start-marker (point-marker)
+          pi-coding-agent--thinking-raw "pending"
           pi-coding-agent--in-code-block t
           pi-coding-agent--in-thinking-block t
           pi-coding-agent--line-parse-state 'code-fence
@@ -90,6 +93,9 @@
     (should (null pi-coding-agent--extension-status))
     (should (null pi-coding-agent--message-start-marker))
     (should (null pi-coding-agent--streaming-marker))
+    (should (null pi-coding-agent--thinking-marker))
+    (should (null pi-coding-agent--thinking-start-marker))
+    (should (null pi-coding-agent--thinking-raw))
     (should (null pi-coding-agent--in-code-block))
     (should (null pi-coding-agent--in-thinking-block))
     (should (eq pi-coding-agent--line-parse-state 'line-start))

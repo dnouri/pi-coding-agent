@@ -207,6 +207,12 @@ Prefers session name over first message when available."
 (defun pi-coding-agent--reset-session-state ()
   "Reset all session-specific state for a new session.
 Call this when starting a new session to ensure no stale state persists."
+  (dolist (marker (list pi-coding-agent--message-start-marker
+                        pi-coding-agent--streaming-marker
+                        pi-coding-agent--thinking-marker
+                        pi-coding-agent--thinking-start-marker))
+    (when (markerp marker)
+      (set-marker marker nil)))
   (setq pi-coding-agent--session-name nil
         pi-coding-agent--cached-stats nil
         pi-coding-agent--assistant-header-shown nil
@@ -214,6 +220,9 @@ Call this when starting a new session to ensure no stale state persists."
         pi-coding-agent--extension-status nil
         pi-coding-agent--in-code-block nil
         pi-coding-agent--in-thinking-block nil
+        pi-coding-agent--thinking-marker nil
+        pi-coding-agent--thinking-start-marker nil
+        pi-coding-agent--thinking-raw nil
         pi-coding-agent--line-parse-state 'line-start
         pi-coding-agent--pending-tool-overlay nil)
   ;; Use accessors for cross-module state
