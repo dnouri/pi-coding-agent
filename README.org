@@ -15,6 +15,7 @@ An Emacs frontend for the [[https://shittycodingagent.ai/][pi coding agent]].
 
 - Compose prompts in a full Emacs buffer: multi-line, copy/paste, macros, support for Vi bindings
 - Chat history as a markdown buffer: copy, save, search, navigate
+- Fork the converstaion at any point in the chat buffer (f)
 - Live streaming output as bash commands and tool operations run
 - Syntax-highlighted code blocks and diffs
 - Collapsible tool output with smart preview (expand with TAB)
@@ -120,6 +121,7 @@ For multiple sessions in the same directory, use =C-u M-x pi= to create a named 
 | =TAB=         | chat    | Toggle section                    |
 | =S-TAB=       | chat    | Cycle all folds                   |
 | =RET=         | chat    | Visit file at point (other window)|
+| =f=           | chat    | Fork from point                   |
 | =q=           | chat    | Quit session                      |
 
 Press =C-c C-p= to access the full menu with model selection, thinking level,
@@ -185,8 +187,9 @@ When a conversation gets long, the AI's context window fills up. The menu
   preserving key information. Use when context is filling up. If you don't
   compact manually, pi does it automatically when needed.
 
-- *Fork* (=f=): Creates a new session starting from a previous message.
-  Go back to any point and take the conversation in a new direction.
+- *Fork* (=f=): Branches the conversation from any earlier turn.
+  Press =f= on any turn in the chat buffer, or use the menu to pick
+  from a list.
 
 - *Export* (=e=): Saves the conversation as an HTML file for sharing or
   archiving.

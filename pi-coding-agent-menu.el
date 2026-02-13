@@ -567,6 +567,38 @@ Optional CUSTOM-INSTRUCTIONS provide guidance for the compaction summary."
 
 ;;;; Fork
 
+(defun pi-coding-agent--flatten-tree (nodes)
+  "Flatten tree NODES into a hash table mapping id to node plist.
+NODES is a vector of tree node plists, each with `:children' vector.
+Returns a hash table for O(1) lookup by id."
+  (let ((index (make-hash-table :test 'equal)))
+    (cl-labels ((walk (ns)
+                  (seq-doseq (node ns)
+                    (puthash (plist-get node :id) node index)
+                    (let ((children (plist-get node :children)))
+                      (when (and children (> (length children) 0))
+                        (walk children))))))
+      (walk nodes))
+    index))
+
+(defun pi-coding-agent--active-branch-user-ids (index leaf-id)
+  "Return chronological list of user message IDs on the active branch.
+INDEX is a hash table from `pi-coding-agent--flatten-tree'.
+LEAF-ID is the current leaf node ID.  Walk from leaf to root via
+`:parentId', collecting IDs of nodes with type \"message\" and role
+\"user\".  Returns list in root-to-leaf (chronological) order."
+  (when leaf-id
+    (let ((user-ids nil)
+          (current-id leaf-id))
+      (while current-id
+        (let ((node (gethash current-id index)))
+          (when (and node
+                     (equal (plist-get node :type) "message")
+                     (equal (plist-get node :role) "user"))
+            (push (plist-get node :id) user-ids))
+          (setq current-id (and node (plist-get node :parentId)))))
+      user-ids)))
+
 (defun pi-coding-agent--format-fork-message (msg &optional index)
   "Format MSG for display in fork selector.
 MSG is a plist with :entryId and :text.
@@ -593,6 +625,87 @@ Shows a selector of user messages and creates a fork from the selected one."
                              (pi-coding-agent--show-fork-selector proc messages)))
                        (message "Pi: Failed to get fork messages"))))))
 
+(defun pi-coding-agent--resolve-fork-entry (response ordinal heading-count)
+  "Resolve a fork entry ID from get_tree RESPONSE.
+ORDINAL is the 0-based user turn index.  HEADING-COUNT is the number
+of visible You headings in the buffer.  Returns (ENTRY-ID . PREVIEW)
+or nil if the ordinal could not be mapped."
+  (when (plist-get response :success)
+    (let* ((data (plist-get response :data))
+           (tree (plist-get data :tree))
+           (leaf-id (plist-get data :leafId))
+           (index (pi-coding-agent--flatten-tree tree))
+           (all-user-ids (pi-coding-agent--active-branch-user-ids index leaf-id))
+           ;; Take last N to handle compaction (compacted-away
+           ;; user messages at start of path aren't rendered)
+           (visible-ids (last all-user-ids heading-count))
+           (entry-id (nth ordinal visible-ids))
+           (node (and entry-id (gethash entry-id index))))
+      (when entry-id
+        (cons entry-id (plist-get node :preview))))))
+
+(defun pi-coding-agent-fork-at-point ()
+  "Fork conversation from the user turn at point.
+Determines which user message point is in (or after), confirms with
+a preview, then forks.  Only works when the session is idle."
+  (interactive)
+  (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+    (unless chat-buf
+      (user-error "Pi: No chat buffer"))
+    (with-current-buffer chat-buf
+      (let* ((headings (pi-coding-agent--collect-you-headings))
+             (ordinal (pi-coding-agent--user-turn-index-at-point headings)))
+        (cond
+         ((not (eq pi-coding-agent--status 'idle))
+          (message "Pi: Cannot fork while streaming"))
+         ((not ordinal)
+          (message "Pi: No user message at point"))
+         (t
+          (let ((heading-count (length headings))
+                (proc (pi-coding-agent--get-process)))
+            (unless proc
+              (user-error "Pi: No active process"))
+            (pi-coding-agent--rpc-async proc '(:type "get_tree")
+              (lambda (response)
+                (let ((result (pi-coding-agent--resolve-fork-entry
+                               response ordinal heading-count)))
+                  (cond
+                   ((not result)
+                    (message "Pi: Could not map turn to entry ID"))
+                   ((with-current-buffer chat-buf
+                      (y-or-n-p (format "Fork from: %s? " (or (cdr result) "?"))))
+                    (with-current-buffer chat-buf
+                      (pi-coding-agent--execute-fork proc (car result)))))))))))))))
+
+(defun pi-coding-agent--execute-fork (proc entry-id)
+  "Execute fork to ENTRY-ID via PROC.
+Sends the fork RPC, then on success: refreshes state, reloads history,
+and pre-fills the input buffer with the forked message text.
+Captures chat and input buffers at call time (before the async RPC)."
+  (let ((chat-buf (pi-coding-agent--get-chat-buffer))
+        (input-buf (pi-coding-agent--get-input-buffer)))
+    (pi-coding-agent--rpc-async proc (list :type "fork" :entryId entry-id)
+      (lambda (response)
+        (if (plist-get response :success)
+            (let* ((data (plist-get response :data))
+                   (text (plist-get data :text)))
+              ;; Refresh state to get new session-file
+              (pi-coding-agent--rpc-async proc '(:type "get_state")
+                (lambda (resp)
+                  (pi-coding-agent--apply-state-response chat-buf resp)))
+              ;; Reload and display the forked session
+              (pi-coding-agent--load-session-history
+               proc
+               (lambda (count)
+                 (message "Pi: Branched to new session (%d messages)" count))
+               chat-buf)
+              ;; Pre-fill input with the forked message text
+              (when (buffer-live-p input-buf)
+                (with-current-buffer input-buf
+                  (erase-buffer)
+                  (when text (insert text)))))
+          (message "Pi: Branch failed"))))))
+
 (defun pi-coding-agent--show-fork-selector (proc messages)
   "Show selector for MESSAGES and fork on selection.
 PROC is the pi process.
@@ -613,34 +726,9 @@ MESSAGES is a vector of plists from get_fork_messages."
                                         '(metadata (display-sort-function . identity))
                                       (complete-with-action action choice-strings string pred)))
                                   nil t))
-         (selected (cdr (assoc choice formatted)))
-         ;; Capture buffers before async call (callback runs in arbitrary context)
-         (chat-buf (pi-coding-agent--get-chat-buffer))
-         (input-buf (pi-coding-agent--get-input-buffer)))
+         (selected (cdr (assoc choice formatted))))
     (when selected
-      (let ((entry-id (plist-get selected :entryId)))
-        (pi-coding-agent--rpc-async proc (list :type "fork" :entryId entry-id)
-                       (lambda (response)
-                         (if (plist-get response :success)
-                             (let* ((data (plist-get response :data))
-                                    (text (plist-get data :text)))
-                               ;; Refresh state to get new session-file
-                               (pi-coding-agent--rpc-async proc '(:type "get_state")
-                                 (lambda (resp)
-                                   (pi-coding-agent--apply-state-response chat-buf resp)))
-                               ;; Reload and display the forked session
-                               (pi-coding-agent--load-session-history
-                                proc
-                                (lambda (count)
-                                  (message "Pi: Branched to new session (%d messages)" count))
-                                chat-buf)
-                               ;; Pre-fill input with the selected message text
-                               (when (buffer-live-p input-buf)
-                                 (with-current-buffer input-buf
-                                   (erase-buffer)
-                                   ;; text may be nil if RPC returns null
-                                   (when text (insert text)))))
-                           (message "Pi: Branch failed"))))))))
+      (pi-coding-agent--execute-fork proc (plist-get selected :entryId)))))
 
 ;;;; Custom Commands
 
