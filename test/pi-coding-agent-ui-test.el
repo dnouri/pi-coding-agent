@@ -261,5 +261,199 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
       (kill-ring-save (point-min) (point-max))
       (should (equal (car kill-ring) "Hello **bold** world")))))
 
+;;; Chat Navigation Behavior
+
+(ert-deftest pi-coding-agent-test-next-message-from-top ()
+  "n from point-min reaches first You heading."
+  (with-temp-buffer
+    (pi-coding-agent-test--insert-chat-turns)
+    (goto-char (point-min))
+    (pi-coding-agent-next-message)
+    (should (looking-at "You · 10:00"))))
+
+(ert-deftest pi-coding-agent-test-next-message-successive ()
+  "Successive n reaches each You heading in order."
+  (with-temp-buffer
+    (pi-coding-agent-test--insert-chat-turns)
+    (goto-char (point-min))
+    (pi-coding-agent-next-message)
+    (should (looking-at "You · 10:00"))
+    (pi-coding-agent-next-message)
+    (should (looking-at "You · 10:05"))
+    (pi-coding-agent-next-message)
+    (should (looking-at "You · 10:10"))))
+
+(ert-deftest pi-coding-agent-test-next-message-at-last ()
+  "n at last You heading keeps point and shows message."
+  (with-temp-buffer
+    (pi-coding-agent-test--insert-chat-turns)
+    (goto-char (point-min))
+    (pi-coding-agent-next-message)
+    (pi-coding-agent-next-message)
+    (pi-coding-agent-next-message)
+    (should (looking-at "You · 10:10"))
+    (let ((pos (point)))
+      (pi-coding-agent-next-message)
+      ;; Point stays on the last heading
+      (should (= (point) pos)))))
+
+(ert-deftest pi-coding-agent-test-previous-message-from-last ()
+  "p from last You heading reaches previous."
+  (with-temp-buffer
+    (pi-coding-agent-test--insert-chat-turns)
+    (goto-char (point-min))
+    ;; Navigate to last heading first
+    (pi-coding-agent-next-message)
+    (pi-coding-agent-next-message)
+    (pi-coding-agent-next-message)
+    (should (looking-at "You · 10:10"))
+    (pi-coding-agent-previous-message)
+    (should (looking-at "You · 10:05"))))
+
+(ert-deftest pi-coding-agent-test-previous-message-at-first ()
+  "p at first You heading keeps point."
+  (with-temp-buffer
+    (pi-coding-agent-test--insert-chat-turns)
+    (goto-char (point-min))
+    (pi-coding-agent-next-message)
+    (should (looking-at "You · 10:00"))
+    (let ((pos (point)))
+      (pi-coding-agent-previous-message)
+      ;; Point stays on the first heading
+      (should (= (point) pos)))))
+
+;;; Turn Detection
+
+(ert-deftest pi-coding-agent-test-turn-index-on-first-heading ()
+  "Turn index is 0 when point is on first You heading."
+  (with-temp-buffer
+    (pi-coding-agent-test--insert-chat-turns)
+    (goto-char (point-min))
+    (pi-coding-agent-next-message)
+    (should (= (pi-coding-agent--user-turn-index-at-point) 0))))
+
+(ert-deftest pi-coding-agent-test-turn-index-in-first-body ()
+  "Turn index is 0 when point is in first user message body."
+  (with-temp-buffer
+    (pi-coding-agent-test--insert-chat-turns)
+    (goto-char (point-min))
+    (pi-coding-agent-next-message)
+    (forward-line 2) ; skip heading + underline into body
+    (should (= (pi-coding-agent--user-turn-index-at-point) 0))))
+
+(ert-deftest pi-coding-agent-test-turn-index-on-underline ()
+  "Turn index is 0 when point is on === underline of first You."
+  (with-temp-buffer
+    (pi-coding-agent-test--insert-chat-turns)
+    (goto-char (point-min))
+    (pi-coding-agent-next-message)
+    (forward-line 1) ; on ===
+    (should (= (pi-coding-agent--user-turn-index-at-point) 0))))
+
+(ert-deftest pi-coding-agent-test-turn-index-on-second-heading ()
+  "Turn index is 1 on second You heading."
+  (with-temp-buffer
+    (pi-coding-agent-test--insert-chat-turns)
+    (goto-char (point-min))
+    (pi-coding-agent-next-message)
+    (pi-coding-agent-next-message)
+    (should (= (pi-coding-agent--user-turn-index-at-point) 1))))
+
+(ert-deftest pi-coding-agent-test-turn-index-on-assistant-heading ()
+  "Turn index is index of preceding You when point is on Assistant heading."
+  (with-temp-buffer
+    (pi-coding-agent-test--insert-chat-turns)
+    (goto-char (point-min))
+    ;; Navigate to first You, then move into assistant section
+    (pi-coding-agent-next-message)
+    (forward-line 4) ; past heading + underline + body + blank → "Assistant"
+    (should (looking-at "Assistant"))
+    (should (= (pi-coding-agent--user-turn-index-at-point) 0))))
+
+(ert-deftest pi-coding-agent-test-turn-index-in-assistant-body ()
+  "Turn index is index of preceding You when point is in assistant response."
+  (with-temp-buffer
+    (pi-coding-agent-test--insert-chat-turns)
+    (goto-char (point-min))
+    (pi-coding-agent-next-message)
+    (forward-line 6) ; heading + underline + body + blank + Assistant + underline → response
+    (should (looking-at "First answer"))
+    (should (= (pi-coding-agent--user-turn-index-at-point) 0))))
+
+(ert-deftest pi-coding-agent-test-turn-index-before-first-you ()
+  "Turn index is nil before first You heading."
+  (with-temp-buffer
+    (pi-coding-agent-test--insert-chat-turns)
+    (goto-char (point-min))
+    (should-not (pi-coding-agent--user-turn-index-at-point))))
+
+(ert-deftest pi-coding-agent-test-turn-index-empty-buffer ()
+  "Turn index is nil in empty buffer."
+  (with-temp-buffer
+    (should-not (pi-coding-agent--user-turn-index-at-point))))
+
+(ert-deftest pi-coding-agent-test-turn-index-no-false-match ()
+  "Turn index ignores text starting with You without setext underline."
+  (with-temp-buffer
+    (insert "You mentioned something\nRegular text\n\n"
+            "You · 10:00\n===========\nFirst question\n")
+    (goto-char (point-min))
+    ;; Point is on "You mentioned" which has no === underline
+    (should-not (pi-coding-agent--user-turn-index-at-point))
+    ;; Move to the real heading
+    (goto-char (point-max))
+    (should (= (pi-coding-agent--user-turn-index-at-point) 0))))
+
+;;; You Heading Detection
+
+(ert-deftest pi-coding-agent-test-heading-re-matches-plain-you ()
+  "Heading regex matches bare `You' at start of line."
+  (should (string-match-p pi-coding-agent--you-heading-re "You")))
+
+(ert-deftest pi-coding-agent-test-heading-re-matches-you-with-timestamp ()
+  "Heading regex matches `You · 22:10' at start of line."
+  (should (string-match-p pi-coding-agent--you-heading-re "You · 22:10")))
+
+(ert-deftest pi-coding-agent-test-heading-re-rejects-you-colon ()
+  "Heading regex does not match `You:' (old broken pattern)."
+  (should-not (string-match-p pi-coding-agent--you-heading-re "You: hello")))
+
+(ert-deftest pi-coding-agent-test-heading-re-rejects-mid-line ()
+  "Heading regex does not match `You' mid-line."
+  (should-not (string-match-p pi-coding-agent--you-heading-re "  You · 22:10")))
+
+(ert-deftest pi-coding-agent-test-heading-re-rejects-you-prefix ()
+  "Heading regex does not match words starting with You like `Your'."
+  (should-not (string-match-p pi-coding-agent--you-heading-re "Your code is fine")))
+
+(ert-deftest pi-coding-agent-test-at-you-heading-p-true ()
+  "Predicate returns t when on a valid You setext heading."
+  (with-temp-buffer
+    (insert "You · 22:10\n===========\n")
+    (goto-char (point-min))
+    (should (pi-coding-agent--at-you-heading-p))))
+
+(ert-deftest pi-coding-agent-test-at-you-heading-p-no-underline ()
+  "Predicate returns nil when You line lacks setext underline."
+  (with-temp-buffer
+    (insert "You · 22:10\nSome text\n")
+    (goto-char (point-min))
+    (should-not (pi-coding-agent--at-you-heading-p))))
+
+(ert-deftest pi-coding-agent-test-at-you-heading-p-short-underline ()
+  "Predicate returns t with minimum 3-char underline."
+  (with-temp-buffer
+    (insert "You\n===\n")
+    (goto-char (point-min))
+    (should (pi-coding-agent--at-you-heading-p))))
+
+(ert-deftest pi-coding-agent-test-at-you-heading-p-wrong-line ()
+  "Predicate returns nil when not on the heading line."
+  (with-temp-buffer
+    (insert "You · 22:10\n===========\nBody text\n")
+    (goto-char (point-max))
+    (forward-line -1)  ; on "Body text"
+    (should-not (pi-coding-agent--at-you-heading-p))))
+
 (provide 'pi-coding-agent-ui-test)
 ;;; pi-coding-agent-ui-test.el ends here

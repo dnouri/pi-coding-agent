@@ -71,6 +71,7 @@
 (declare-function pi-coding-agent-resume-session "pi-coding-agent-menu")
 (declare-function pi-coding-agent-select-model "pi-coding-agent-menu")
 (declare-function pi-coding-agent-cycle-thinking "pi-coding-agent-menu")
+(declare-function pi-coding-agent-fork-at-point "pi-coding-agent-menu")
 
 ;; Optional: phscroll for horizontal table scrolling
 (require 'phscroll nil t)
@@ -333,6 +334,7 @@ Returns \"text\" for unrecognized extensions to ensure consistent fencing."
     (define-key map (kbd "C-c C-p") #'pi-coding-agent-menu)
     (define-key map (kbd "n") #'pi-coding-agent-next-message)
     (define-key map (kbd "p") #'pi-coding-agent-previous-message)
+    (define-key map (kbd "f") #'pi-coding-agent-fork-at-point)
     (define-key map (kbd "TAB") #'pi-coding-agent-toggle-tool-section)
     (define-key map (kbd "<tab>") #'pi-coding-agent-toggle-tool-section)
     (define-key map (kbd "RET") #'pi-coding-agent-visit-file)
@@ -340,16 +342,85 @@ Returns \"text\" for unrecognized extensions to ensure consistent fencing."
     map)
   "Keymap for `pi-coding-agent-chat-mode'.")
 
+;;;; You Heading Detection
+
+(defconst pi-coding-agent--you-heading-re
+  "^You\\( · .*\\)?$"
+  "Regex matching the first line of a user turn setext heading.
+Matches `You' at line start, optionally followed by ` · <timestamp>'.
+Must be verified with `pi-coding-agent--at-you-heading-p' to confirm
+the next line is a setext underline (===), avoiding false matches on
+user message text starting with \"You\".")
+
+(defun pi-coding-agent--at-you-heading-p ()
+  "Return non-nil if current line is a You setext heading.
+Checks that the current line matches `pi-coding-agent--you-heading-re'
+and the next line is a setext underline (three or more `=' characters)."
+  (and (save-excursion
+         (beginning-of-line)
+         (looking-at pi-coding-agent--you-heading-re))
+       (save-excursion
+         (forward-line 1)
+         (looking-at "^=\\{3,\\}$"))))
+
+;;;; Turn Detection
+
+(defun pi-coding-agent--collect-you-headings ()
+  "Return list of buffer positions of all You setext headings.
+Scans from `point-min', returns positions in chronological order."
+  (let (headings)
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward pi-coding-agent--you-heading-re nil t)
+        (let ((pos (match-beginning 0)))
+          (save-excursion
+            (goto-char pos)
+            (when (pi-coding-agent--at-you-heading-p)
+              (push pos headings))))))
+    (nreverse headings)))
+
+(defun pi-coding-agent--user-turn-index-at-point (&optional headings)
+  "Return 0-based index of the user turn at or before point.
+HEADINGS is an optional pre-computed list from
+`pi-coding-agent--collect-you-headings'; when nil, the buffer is scanned.
+Returns nil if point is before the first You heading."
+  (let ((headings (or headings (pi-coding-agent--collect-you-headings)))
+        (limit (point))
+        (index 0)
+        (result nil))
+    (dolist (h headings)
+      (when (<= h limit)
+        (setq result index))
+      (setq index (1+ index)))
+    result))
+
+;;;; Chat Navigation
+
+(defun pi-coding-agent--find-you-heading (search-fn)
+  "Find the next You setext heading using SEARCH-FN.
+SEARCH-FN is `re-search-forward' or `re-search-backward'.
+Returns the position of the heading line start, or nil if not found."
+  (save-excursion
+    (let ((found nil))
+      (while (and (not found)
+                  (funcall search-fn pi-coding-agent--you-heading-re nil t))
+        (let ((candidate (match-beginning 0)))
+          (save-excursion
+            (goto-char candidate)
+            (when (pi-coding-agent--at-you-heading-p)
+              (setq found candidate)))))
+      found)))
+
 (defun pi-coding-agent-next-message ()
   "Move to the next user message in the chat buffer."
   (interactive)
   (let ((pos (save-excursion
                (forward-line 1)
-               (re-search-forward "^You:" nil t))))
+               (pi-coding-agent--find-you-heading #'re-search-forward))))
     (if pos
         (progn
           (goto-char pos)
-          (beginning-of-line))
+          (when (get-buffer-window) (recenter 0)))
       (message "No more messages"))))
 
 (defun pi-coding-agent-previous-message ()
@@ -357,9 +428,11 @@ Returns \"text\" for unrecognized extensions to ensure consistent fencing."
   (interactive)
   (let ((pos (save-excursion
                (beginning-of-line)
-               (re-search-backward "^You:" nil t))))
+               (pi-coding-agent--find-you-heading #'re-search-backward))))
     (if pos
-        (goto-char pos)
+        (progn
+          (goto-char pos)
+          (when (get-buffer-window) (recenter 0)))
       (message "No previous message"))))
 
 (defconst pi-coding-agent--blockquote-wrap-prefix
