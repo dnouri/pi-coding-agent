@@ -138,5 +138,73 @@ Buffers are killed after BODY completes, even on error."
        (ignore-errors (kill-buffer ,buf-a))
        (ignore-errors (kill-buffer ,buf-b)))))
 
+;;;; Tree Fixtures
+
+(defun pi-coding-agent-test--build-tree (&rest specs)
+  "Build a conversation tree from flat node SPECS.
+Each SPEC is (ID PARENT-OVERRIDE TYPE &rest PROPS) where:
+- ID is the node identifier string
+- PARENT-OVERRIDE is nil (auto-chain to previous node) or a parent ID
+- TYPE is \"message\", \"compaction\", \"model_change\", etc.
+- PROPS are keyword plist properties (:role, :preview, etc.)
+First node with nil PARENT-OVERRIDE becomes the root.
+Returns (:tree VECTOR :leafId LAST-ID)."
+  (let ((nodes (make-hash-table :test 'equal))
+        (child-ids (make-hash-table :test 'equal))
+        (roots nil)
+        (prev-id nil)
+        (last-id nil))
+    ;; Pass 1: create nodes, track parent-child relationships
+    (dolist (spec specs)
+      (let* ((id (nth 0 spec))
+             (parent-override (nth 1 spec))
+             (type (nth 2 spec))
+             (props (nthcdr 3 spec))
+             (parent-id (or parent-override prev-id))
+             (node (append (list :id id :type type)
+                           (when parent-id (list :parentId parent-id))
+                           props)))
+        (puthash id node nodes)
+        (if parent-id
+            (puthash parent-id
+                     (append (gethash parent-id child-ids) (list id))
+                     child-ids)
+          (push id roots))
+        (setq prev-id id
+              last-id id)))
+    ;; Pass 2: build nested structure with :children vectors
+    (cl-labels ((build (id)
+                  (let* ((node (gethash id nodes))
+                         (kids (gethash id child-ids))
+                         (child-vec (if kids
+                                        (apply #'vector (mapcar #'build kids))
+                                      [])))
+                    (append node (list :children child-vec)))))
+      (list :tree (apply #'vector (mapcar #'build (nreverse roots)))
+            :leafId last-id))))
+
+(defun pi-coding-agent-test--make-3turn-tree ()
+  "Return tree data for a 3-turn conversation: u1→a1→u2→a2→u3→a3."
+  (pi-coding-agent-test--build-tree
+   '("u1" nil "message" :role "user" :preview "First question")
+   '("a1" nil "message" :role "assistant" :preview "First answer")
+   '("u2" nil "message" :role "user" :preview "Second question")
+   '("a2" nil "message" :role "assistant" :preview "Second answer")
+   '("u3" nil "message" :role "user" :preview "Third question")
+   '("a3" nil "message" :role "assistant" :preview "Third answer")))
+
+;;;; Chat Buffer Fixtures
+
+(defun pi-coding-agent-test--insert-chat-turns ()
+  "Insert a 3-turn chat with setext headings into current buffer.
+Returns the buffer with content ready for navigation tests."
+  (insert "Pi 1.0.0\n========\nWelcome\n\n"
+          "You · 10:00\n===========\nFirst question\n\n"
+          "Assistant\n=========\nFirst answer\n\n"
+          "You · 10:05\n===========\nSecond question\n\n"
+          "Assistant\n=========\nSecond answer\n\n"
+          "You · 10:10\n===========\nThird question\n\n"
+          "Assistant\n=========\nThird answer\n"))
+
 (provide 'pi-coding-agent-test-common)
 ;;; pi-coding-agent-test-common.el ends here
