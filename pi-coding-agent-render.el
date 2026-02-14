@@ -81,9 +81,8 @@ visual spacing when `markdown-hide-markup' is enabled."
   (setq pi-coding-agent--line-parse-state 'line-start)
   (setq pi-coding-agent--in-code-block nil)
   (setq pi-coding-agent--in-thinking-block nil)
-  (pi-coding-agent--spinner-start)
-  (pi-coding-agent--fontify-timer-start)
-  (force-mode-line-update))
+  (pi-coding-agent--set-activity-phase "thinking")
+  (pi-coding-agent--fontify-timer-start))
 
 (defun pi-coding-agent--process-streaming-char (char state in-block)
   "Process CHAR with current STATE and IN-BLOCK flag.
@@ -354,7 +353,7 @@ Note: status is set to `idle' by the event handler."
           (skip-chars-backward "\n")
           (delete-region (point) (point-max))
           (insert "\n"))))
-    (pi-coding-agent--spinner-stop)
+    (pi-coding-agent--set-activity-phase "idle")
     (pi-coding-agent--fontify-timer-stop)
     (pi-coding-agent--refresh-header)
     ;; Check follow-up queue and send next message if any (unless aborted)
@@ -673,6 +672,7 @@ Updates buffer-local state and renders display updates."
                  (event-type (plist-get msg-event :type)))
        (pcase event-type
          ("text_delta"
+          (pi-coding-agent--set-activity-phase "replying")
           (pi-coding-agent--display-message-delta (plist-get msg-event :delta)))
          ("thinking_start"
           (pi-coding-agent--display-thinking-start))
@@ -734,6 +734,7 @@ Updates buffer-local state and renders display updates."
          (pi-coding-agent--set-last-usage (plist-get message :usage))))
      (pi-coding-agent--render-complete-message))
     ("tool_execution_start"
+     (pi-coding-agent--set-activity-phase "running")
      (let ((tool-call-id (plist-get event :toolCallId))
            (args (plist-get event :args)))
        ;; Cache args for tool_execution_end (which doesn't include args)
@@ -754,6 +755,7 @@ Updates buffer-local state and renders display updates."
                (overlay-put ov 'pi-coding-agent-tool-path path)))
          (pi-coding-agent--display-tool-start (plist-get event :toolName) args))))
     ("tool_execution_end"
+     (pi-coding-agent--set-activity-phase "thinking")
      (let* ((tool-call-id (plist-get event :toolCallId))
             (result (plist-get event :result))
             ;; Retrieve cached args since tool_execution_end doesn't include them
@@ -769,13 +771,13 @@ Updates buffer-local state and renders display updates."
      (pi-coding-agent--display-tool-update (plist-get event :partialResult)))
     ("auto_compaction_start"
      (setq pi-coding-agent--status 'compacting)
-     (pi-coding-agent--spinner-start)
+     (pi-coding-agent--set-activity-phase "compact")
      (let ((reason (plist-get event :reason)))
        (message "Pi: %sAuto-compacting... (C-c C-k to cancel)"
                 (if (equal reason "overflow") "Context overflow, " ""))))
     ("auto_compaction_end"
-     (pi-coding-agent--spinner-stop)
      (setq pi-coding-agent--status 'idle)
+     (pi-coding-agent--set-activity-phase "idle")
      (if (pi-coding-agent--normalize-boolean (plist-get event :aborted))
          (progn
            (message "Pi: Auto-compaction cancelled")
