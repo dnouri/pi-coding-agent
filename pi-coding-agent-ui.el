@@ -604,28 +604,26 @@ Returns a list ordered by `buffer-list' recency (most recent first)."
 
 ;;;; Window Hiding
 
-(defun pi-coding-agent--hide-buffers ()
-  "Hide all pi windows (chat and input) for the current session.
-Uses `delete-window' when the frame has other windows, or
-`bury-buffer' for sole-window frames.  A second pass buries any
-pi buffer that `switch-to-prev-buffer' may have landed on."
-  (let* ((chat-buf (pi-coding-agent--get-chat-buffer))
-         (input-buf (pi-coding-agent--get-input-buffer))
-         (pi-bufs (list chat-buf input-buf)))
-    ;; First pass: delete or bury each pi window
-    (dolist (buf pi-bufs)
+(defun pi-coding-agent--hide-session-windows ()
+  "Hide windows belonging to the current pi session.
+Deletes this session's input windows first (the child splits created
+by `pi-coding-agent--display-buffers'), then chat windows.  If a
+window is the sole window in its frame, buries the buffer instead.
+
+Must be called from a pi chat or input buffer.  Only affects windows
+of the current session — other sessions' windows are untouched."
+  (let ((chat-buf (pi-coding-agent--get-chat-buffer))
+        (input-buf (pi-coding-agent--get-input-buffer)))
+    ;; Input windows first — they're always child splits, so
+    ;; delete-window succeeds and the parent (chat) reclaims space.
+    ;; Then chat windows — if sole window in frame, bury instead.
+    (dolist (buf (list input-buf chat-buf))
       (when (buffer-live-p buf)
         (dolist (win (get-buffer-window-list buf nil t))
           (if (> (length (window-list (window-frame win))) 1)
               (delete-window win)
             (with-selected-window win
-              (bury-buffer))))))
-    ;; Second pass: if bury-buffer landed on the paired pi buffer, bury again
-    (dolist (buf pi-bufs)
-      (when (buffer-live-p buf)
-        (dolist (win (get-buffer-window-list buf nil t))
-          (with-selected-window win
-            (bury-buffer)))))))
+              (bury-buffer))))))))
 
 ;;;; Buffer-Local Session Variables
 
