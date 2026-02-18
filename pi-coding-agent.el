@@ -41,7 +41,7 @@
 ;;     Install from: https://github.com/misohena/phscroll
 ;;
 ;; Usage:
-;;   M-x pi           DWIM: toggle, reuse, or create session
+;;   M-x pi           DWIM: hide, reuse, or create session
 ;;   C-u M-x pi       Start a named session
 ;;
 ;; Key Bindings:
@@ -163,6 +163,7 @@ With prefix arg, prompt for SESSION name to create a named session."
 If pi windows are visible, hide them.  If hidden but a session
 exists, show them.  If no session exists, signal an error."
   (interactive)
+  (pi-coding-agent--check-dependencies)
   (let ((chat-buf (car (pi-coding-agent-project-buffers))))
     (cond
      ;; No session at all

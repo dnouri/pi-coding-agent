@@ -610,21 +610,13 @@ Deletes input windows (the child splits created by
 `pi-coding-agent--display-buffers') and replaces the chat buffer in
 its window with the previous buffer via `bury-buffer'.
 
-This mirrors how `pi-coding-agent-quit' handles windows: input splits
-are deleted, chat windows stay but show a different buffer.  Vertical
-splits and other arrangements are kept intact.
-
 Must be called from a pi chat or input buffer.  Only affects windows
 of the current session — other sessions' windows are untouched."
   (let ((chat-buf (pi-coding-agent--get-chat-buffer))
         (input-buf (pi-coding-agent--get-input-buffer)))
-    ;; Delete input windows — they're child splits that should collapse,
-    ;; giving their space back to the chat window above.
     (when (buffer-live-p input-buf)
       (dolist (win (get-buffer-window-list input-buf nil t))
         (ignore-errors (delete-window win))))
-    ;; Replace chat buffer in its window with the previous buffer.
-    ;; Don't delete the window — that would collapse vertical splits.
     (when (buffer-live-p chat-buf)
       (dolist (win (get-buffer-window-list chat-buf nil t))
         (with-selected-window win
