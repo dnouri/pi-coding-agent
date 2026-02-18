@@ -2,6 +2,8 @@
 
 EMACS ?= emacs
 BATCH = $(EMACS) --batch -Q -L .
+# Keep this checkout first in load-path even after package-initialize.
+LOCAL_LOAD_PATH = --eval "(setq load-path (cons (expand-file-name \".\") load-path))"
 
 # Pi CLI version — single source of truth (workflows extract this automatically)
 PI_VERSION ?= 0.52.9
@@ -73,6 +75,7 @@ test: .deps-stamp
 		--eval "(setq load-prefer-newer t)" \
 		--eval "(require 'package)" \
 		--eval "(package-initialize)" \
+		$(LOCAL_LOAD_PATH) \
 		-l pi-coding-agent \
 		-l pi-coding-agent-core-test \
 		-l pi-coding-agent-ui-test \
@@ -87,6 +90,7 @@ test: .deps-stamp
 # Usage: make test-render (much faster than `make test` during development)
 BATCH_TEST = $(BATCH) -L test --eval "(setq load-prefer-newer t)" \
 	--eval "(require 'package)" --eval "(package-initialize)" \
+	$(LOCAL_LOAD_PATH) \
 	-l pi-coding-agent
 
 test-core: .deps-stamp
@@ -149,6 +153,7 @@ test-integration: clean .deps-stamp setup-pi
 		$(BATCH) -L test \
 			--eval "(require 'package)" \
 			--eval "(package-initialize)" \
+			$(LOCAL_LOAD_PATH) \
 			-l pi-coding-agent -l pi-coding-agent-integration-test -f ert-run-tests-batch-and-exit; \
 		status=$$?; rm -rf "$$PI_CODING_AGENT_DIR"; exit $$status
 
@@ -161,6 +166,7 @@ test-integration-ci: clean .deps-stamp setup-pi
 	$(BATCH) -L test \
 		--eval "(require 'package)" \
 		--eval "(package-initialize)" \
+		$(LOCAL_LOAD_PATH) \
 		-l pi-coding-agent -l pi-coding-agent-integration-test -f ert-run-tests-batch-and-exit
 
 # ============================================================
@@ -219,6 +225,7 @@ compile: .deps-stamp
 	@$(BATCH) \
 		--eval "(require 'package)" \
 		--eval "(package-initialize)" \
+		$(LOCAL_LOAD_PATH) \
 		--eval "(setq byte-compile-error-on-warn t)" \
 		-f batch-byte-compile pi-coding-agent-core.el pi-coding-agent-ui.el pi-coding-agent-render.el pi-coding-agent-input.el pi-coding-agent-menu.el pi-coding-agent.el
 
