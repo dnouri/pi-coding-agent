@@ -522,14 +522,139 @@ Shows success or final failure with raw error."
             (assoc-delete-all key pi-coding-agent--extension-status)))
     (force-mode-line-update t)))
 
+(defconst pi-coding-agent--extension-editor-help-text
+  "C-c C-c submit · C-c C-k cancel"
+  "Help text shown while an extension editor request is active.")
+
+(defvar pi-coding-agent--extension-editor-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'pi-coding-agent--extension-editor-submit)
+    (define-key map (kbd "C-c C-k") #'pi-coding-agent--extension-editor-cancel)
+    map)
+  "Keymap for `pi-coding-agent--extension-editor-mode'.")
+
+(defvar-local pi-coding-agent--extension-editor-completed nil
+  "Non-nil when current extension editor request has been completed.")
+
+(defvar-local pi-coding-agent--extension-editor-submit-callback nil
+  "Submit callback for current extension editor request.")
+
+(defvar-local pi-coding-agent--extension-editor-cancel-callback nil
+  "Cancel callback for current extension editor request.")
+
+(defvar-local pi-coding-agent--extension-editor-restore-window nil
+  "Window to restore when the extension editor closes.")
+
+(defvar-local pi-coding-agent--extension-editor-restore-buffer nil
+  "Buffer to restore when the extension editor closes.")
+
+(define-derived-mode pi-coding-agent--extension-editor-mode text-mode "Pi-Extension-Editor"
+  "Major mode for extension-driven multi-line editor prompts."
+  (setq-local header-line-format
+              (format "Extension editor — %s"
+                      pi-coding-agent--extension-editor-help-text))
+  (add-hook 'kill-buffer-hook #'pi-coding-agent--extension-editor-on-kill nil t))
+
+(defun pi-coding-agent--extension-editor-restore-window-buffer ()
+  "Restore the pre-editor buffer to the extension editor window."
+  (when (and (window-live-p pi-coding-agent--extension-editor-restore-window)
+             (buffer-live-p pi-coding-agent--extension-editor-restore-buffer))
+    (set-window-buffer pi-coding-agent--extension-editor-restore-window
+                       pi-coding-agent--extension-editor-restore-buffer)
+    (select-window pi-coding-agent--extension-editor-restore-window)))
+
+(defun pi-coding-agent--extension-editor-complete (value cancelled &optional from-kill)
+  "Complete extension editor request with VALUE or CANCELLED.
+If FROM-KILL is non-nil, do not call `kill-buffer' (already killing)."
+  (unless pi-coding-agent--extension-editor-completed
+    (setq pi-coding-agent--extension-editor-completed t)
+    (if cancelled
+        (when pi-coding-agent--extension-editor-cancel-callback
+          (funcall pi-coding-agent--extension-editor-cancel-callback))
+      (when pi-coding-agent--extension-editor-submit-callback
+        (funcall pi-coding-agent--extension-editor-submit-callback value)))
+    (pi-coding-agent--extension-editor-restore-window-buffer)
+    (unless from-kill
+      (kill-buffer (current-buffer)))))
+
+(defun pi-coding-agent--extension-editor-submit ()
+  "Submit current extension editor text."
+  (interactive)
+  (pi-coding-agent--extension-editor-complete
+   (buffer-substring-no-properties (point-min) (point-max))
+   nil))
+
+(defun pi-coding-agent--extension-editor-cancel ()
+  "Cancel current extension editor request."
+  (interactive)
+  (pi-coding-agent--extension-editor-complete nil t))
+
+(defun pi-coding-agent--extension-editor-on-kill ()
+  "Cancel extension editor request when buffer is killed directly."
+  (unless pi-coding-agent--extension-editor-completed
+    (pi-coding-agent--extension-editor-complete nil t t)))
+
+(defun pi-coding-agent--show-extension-editor (title prefill on-submit on-cancel)
+  "Show extension editor with TITLE and PREFILL.
+Calls ON-SUBMIT with edited text, or ON-CANCEL if dismissed."
+  (let* ((input-buf (and (buffer-live-p pi-coding-agent--input-buffer)
+                         pi-coding-agent--input-buffer))
+         (input-win (and input-buf
+                         (car (get-buffer-window-list input-buf nil t))))
+         (target-win (or input-win (selected-window)))
+         (restore-buf (if (and input-win input-buf)
+                          input-buf
+                        (window-buffer target-win)))
+         (editor-buf (generate-new-buffer "*pi-coding-agent-extension-editor*")))
+    (with-current-buffer editor-buf
+      (pi-coding-agent--extension-editor-mode)
+      (setq-local pi-coding-agent--extension-editor-submit-callback on-submit)
+      (setq-local pi-coding-agent--extension-editor-cancel-callback on-cancel)
+      (setq-local pi-coding-agent--extension-editor-restore-window target-win)
+      (setq-local pi-coding-agent--extension-editor-restore-buffer restore-buf)
+      (setq-local header-line-format
+                  (format "%s — %s"
+                          (or title "Extension editor")
+                          pi-coding-agent--extension-editor-help-text))
+      (when prefill
+        (insert prefill))
+      (goto-char (point-max)))
+    (set-window-buffer target-win editor-buf)
+    (select-window target-win)
+    (message "Pi: Extension editor active (%s)"
+             pi-coding-agent--extension-editor-help-text)))
+
+(defun pi-coding-agent--extension-ui-editor (event proc)
+  "Handle editor method from EVENT, responding via PROC."
+  (let ((id (plist-get event :id))
+        (title (plist-get event :title))
+        (prefill (plist-get event :prefill)))
+    (if proc
+        (pi-coding-agent--show-extension-editor
+         title
+         prefill
+         (lambda (value)
+           (pi-coding-agent--send-extension-ui-response
+            proc
+            (list :type "extension_ui_response"
+                  :id id
+                  :value value)))
+         (lambda ()
+           (pi-coding-agent--send-extension-ui-response
+            proc
+            (list :type "extension_ui_response"
+                  :id id
+                  :cancelled t))))
+      (message "Pi: Ignoring extension editor request (no active process)"))))
+
 (defun pi-coding-agent--extension-ui-unsupported (event proc)
   "Handle unsupported method from EVENT by sending cancelled via PROC."
   (when proc
-    (pi-coding-agent--rpc-async proc
-                   (list :type "extension_ui_response"
-                         :id (plist-get event :id)
-                         :cancelled t)
-                   #'ignore)))
+    (pi-coding-agent--send-extension-ui-response
+     proc
+     (list :type "extension_ui_response"
+           :id (plist-get event :id)
+           :cancelled t))))
 
 (defun pi-coding-agent--handle-extension-ui-request (event)
   "Handle extension_ui_request EVENT from pi.
@@ -537,13 +662,14 @@ Dispatches to appropriate handler based on method."
   (let ((method (plist-get event :method))
         (proc pi-coding-agent--process))
     (pcase method
-      ("notify"         (pi-coding-agent--extension-ui-notify event))
-      ("confirm"        (pi-coding-agent--extension-ui-confirm event proc))
-      ("select"         (pi-coding-agent--extension-ui-select event proc))
-      ("input"          (pi-coding-agent--extension-ui-input event proc))
+      ("notify"          (pi-coding-agent--extension-ui-notify event))
+      ("confirm"         (pi-coding-agent--extension-ui-confirm event proc))
+      ("select"          (pi-coding-agent--extension-ui-select event proc))
+      ("input"           (pi-coding-agent--extension-ui-input event proc))
+      ("editor"          (pi-coding-agent--extension-ui-editor event proc))
       ("set_editor_text" (pi-coding-agent--extension-ui-set-editor-text event))
-      ("setStatus"      (pi-coding-agent--extension-ui-set-status event))
-      (_                (pi-coding-agent--extension-ui-unsupported event proc)))))
+      ("setStatus"       (pi-coding-agent--extension-ui-set-status event))
+      (_                 (pi-coding-agent--extension-ui-unsupported event proc)))))
 
 (defun pi-coding-agent--display-no-model-warning ()
   "Display warning when no model is available.

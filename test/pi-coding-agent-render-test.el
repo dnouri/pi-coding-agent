@@ -1004,10 +1004,14 @@ since we don't display them locally. Let pi's message_start handle it."
 
 (ert-deftest pi-coding-agent-test-extension-ui-unknown-cancels ()
   "extension_ui_request with unknown method sends cancelled response."
-  (let ((response-sent nil))
-    (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
-               (lambda (_proc msg _cb)
-                 (setq response-sent msg))))
+  (let ((response-sent nil)
+        (rpc-async-called nil))
+    (cl-letf (((symbol-function 'pi-coding-agent--send-extension-ui-response)
+               (lambda (_proc msg)
+                 (setq response-sent msg)))
+              ((symbol-function 'pi-coding-agent--rpc-async)
+               (lambda (&rest _)
+                 (setq rpc-async-called t))))
       (with-temp-buffer
         (pi-coding-agent-chat-mode)
         (let ((pi-coding-agent--process t))
@@ -1018,15 +1022,23 @@ since we don't display them locally. Let pi's message_start handle it."
              :widgetKey "my-ext"
              :widgetLines ["Line 1"])))
         (should response-sent)
+        (should-not rpc-async-called)
         (should (equal (plist-get response-sent :type) "extension_ui_response"))
         (should (equal (plist-get response-sent :id) "req-9"))
         (should (eq (plist-get response-sent :cancelled) t))))))
 
-(ert-deftest pi-coding-agent-test-extension-ui-editor-cancels ()
-  "extension_ui_request editor method sends cancelled (not supported)."
-  (let ((response-sent nil))
-    (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
-               (lambda (_proc msg _cb)
+(ert-deftest pi-coding-agent-test-extension-ui-editor-submit ()
+  "extension_ui_request editor method sends value response on submit."
+  (let ((response-sent nil)
+        (title-seen nil)
+        (prefill-seen nil))
+    (cl-letf (((symbol-function 'pi-coding-agent--show-extension-editor)
+               (lambda (title prefill on-submit _on-cancel)
+                 (setq title-seen title
+                       prefill-seen prefill)
+                 (funcall on-submit "edited text")))
+              ((symbol-function 'pi-coding-agent--send-extension-ui-response)
+               (lambda (_proc msg)
                  (setq response-sent msg))))
       (with-temp-buffer
         (pi-coding-agent-chat-mode)
@@ -1035,9 +1047,36 @@ since we don't display them locally. Let pi's message_start handle it."
            '(:type "extension_ui_request"
              :id "req-10"
              :method "editor"
+             :title "Edit prompt"
+             :prefill "some text")))
+        (should (equal title-seen "Edit prompt"))
+        (should (equal prefill-seen "some text"))
+        (should response-sent)
+        (should (equal (plist-get response-sent :type) "extension_ui_response"))
+        (should (equal (plist-get response-sent :id) "req-10"))
+        (should (equal (plist-get response-sent :value) "edited text"))))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-editor-cancel ()
+  "extension_ui_request editor method sends cancelled response on cancel."
+  (let ((response-sent nil))
+    (cl-letf (((symbol-function 'pi-coding-agent--show-extension-editor)
+               (lambda (_title _prefill _on-submit on-cancel)
+                 (funcall on-cancel)))
+              ((symbol-function 'pi-coding-agent--send-extension-ui-response)
+               (lambda (_proc msg)
+                 (setq response-sent msg))))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (let ((pi-coding-agent--process t))
+          (pi-coding-agent--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-11"
+             :method "editor"
              :title "Edit:"
              :prefill "some text")))
         (should response-sent)
+        (should (equal (plist-get response-sent :type) "extension_ui_response"))
+        (should (equal (plist-get response-sent :id) "req-11"))
         (should (eq (plist-get response-sent :cancelled) t))))))
 
 ;;; Pretty-Print JSON Helper
