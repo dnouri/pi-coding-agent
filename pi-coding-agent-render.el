@@ -481,6 +481,14 @@ Shows success or final failure with raw error."
                (_ ""))
              msg)))
 
+(defun pi-coding-agent--extension-ui-send-response (proc response)
+  "Send extension UI RESPONSE via PROC and reconcile potential session switches."
+  (when proc
+    (pi-coding-agent--send-extension-ui-response proc response)
+    ;; Extensions may call `ctx.newSession()` immediately after receiving a UI
+    ;; response. Reconcile state here, and again on agent_end as fallback.
+    (pi-coding-agent--extension-ui-sync-session-state)))
+
 (defun pi-coding-agent--extension-ui-confirm (event proc)
   "Handle confirm method from EVENT, responding via PROC."
   (let* ((id (plist-get event :id))
@@ -490,11 +498,11 @@ Shows success or final failure with raw error."
          (separator (if (string-suffix-p ":" title) " " ": "))
          (prompt (format "%s%s%s " title separator msg))
          (confirmed (yes-or-no-p prompt)))
-    (when proc
-      (pi-coding-agent--send-extension-ui-response proc
-                     (list :type "extension_ui_response"
-                           :id id
-                           :confirmed (if confirmed t :json-false))))))
+    (pi-coding-agent--extension-ui-send-response
+     proc
+     (list :type "extension_ui_response"
+           :id id
+           :confirmed (if confirmed t :json-false)))))
 
 (defun pi-coding-agent--extension-ui-select (event proc)
   "Handle select method from EVENT, responding via PROC."
@@ -502,11 +510,11 @@ Shows success or final failure with raw error."
          (title (plist-get event :title))
          (options (append (plist-get event :options) nil))
          (selected (completing-read (concat title " ") options nil t)))
-    (when proc
-      (pi-coding-agent--send-extension-ui-response proc
-                     (list :type "extension_ui_response"
-                           :id id
-                           :value selected)))))
+    (pi-coding-agent--extension-ui-send-response
+     proc
+     (list :type "extension_ui_response"
+           :id id
+           :value selected))))
 
 (defun pi-coding-agent--extension-ui-input (event proc)
   "Handle input method from EVENT, responding via PROC."
@@ -514,11 +522,11 @@ Shows success or final failure with raw error."
          (title (plist-get event :title))
          (placeholder (plist-get event :placeholder))
          (value (read-string (concat title " ") placeholder)))
-    (when proc
-      (pi-coding-agent--send-extension-ui-response proc
-                     (list :type "extension_ui_response"
-                           :id id
-                           :value value)))))
+    (pi-coding-agent--extension-ui-send-response
+     proc
+     (list :type "extension_ui_response"
+           :id id
+           :value value))))
 
 (defun pi-coding-agent--extension-ui-set-editor-text (event)
   "Handle set_editor_text method from EVENT."
@@ -569,50 +577,53 @@ Converts JSON null representation to nil."
              (previous-id (pi-coding-agent--extension-ui-normalize-session-value
                            (plist-get pi-coding-agent--state :session-id))))
         (setq pi-coding-agent--extension-ui-session-sync-in-flight t)
-        (pi-coding-agent--rpc-async
-         proc
-         '(:type "get_state")
-         (lambda (state-response)
-           (when (buffer-live-p chat-buf)
-             (with-current-buffer chat-buf
-               (let ((finish
-                      (lambda ()
-                        (setq pi-coding-agent--extension-ui-session-sync-in-flight nil))))
-                 (condition-case nil
-                     (if (plist-get state-response :success)
-                         (let* ((new-state (pi-coding-agent--extract-state-from-response state-response))
-                                (new-file (pi-coding-agent--extension-ui-normalize-session-value
-                                           (plist-get new-state :session-file)))
-                                (new-id (pi-coding-agent--extension-ui-normalize-session-value
-                                         (plist-get new-state :session-id)))
-                                (session-changed (or (not (equal previous-file new-file))
-                                                     (not (equal previous-id new-id)))))
-                           (pi-coding-agent--apply-state-response chat-buf state-response)
-                           (if session-changed
-                               (pi-coding-agent--rpc-async
-                                proc
-                                '(:type "get_messages")
-                                (lambda (messages-response)
-                                  (when (buffer-live-p chat-buf)
-                                    (with-current-buffer chat-buf
-                                      (condition-case nil
-                                          (let* ((messages-data (plist-get messages-response :data))
-                                                 (messages (and (plist-get messages-response :success)
-                                                                (plist-get messages-data :messages))))
-                                            (if (vectorp messages)
-                                                (progn
-                                                  (pi-coding-agent--display-session-history messages chat-buf)
-                                                  (pi-coding-agent--set-last-usage
-                                                   (pi-coding-agent--extract-last-usage messages)))
-                                              (pi-coding-agent--clear-chat-buffer))
-                                            (pi-coding-agent--refresh-header))
-                                        (error nil))
-                                      (funcall finish)))))
-                             (pi-coding-agent--refresh-header)
-                             (funcall finish)))
-                       (funcall finish))
-                   (error
-                    (funcall finish))))))))))))
+        (condition-case nil
+            (pi-coding-agent--rpc-async
+             proc
+             '(:type "get_state")
+             (lambda (state-response)
+               (when (buffer-live-p chat-buf)
+                 (with-current-buffer chat-buf
+                   (let ((finish
+                          (lambda ()
+                            (setq pi-coding-agent--extension-ui-session-sync-in-flight nil))))
+                     (condition-case nil
+                         (if (plist-get state-response :success)
+                             (let* ((new-state (pi-coding-agent--extract-state-from-response state-response))
+                                    (new-file (pi-coding-agent--extension-ui-normalize-session-value
+                                               (plist-get new-state :session-file)))
+                                    (new-id (pi-coding-agent--extension-ui-normalize-session-value
+                                             (plist-get new-state :session-id)))
+                                    (session-changed (or (not (equal previous-file new-file))
+                                                         (not (equal previous-id new-id)))))
+                               (pi-coding-agent--apply-state-response chat-buf state-response)
+                               (if session-changed
+                                   (pi-coding-agent--rpc-async
+                                    proc
+                                    '(:type "get_messages")
+                                    (lambda (messages-response)
+                                      (when (buffer-live-p chat-buf)
+                                        (with-current-buffer chat-buf
+                                          (condition-case nil
+                                              (let* ((messages-data (plist-get messages-response :data))
+                                                     (messages (and (plist-get messages-response :success)
+                                                                    (plist-get messages-data :messages))))
+                                                (if (vectorp messages)
+                                                    (progn
+                                                      (pi-coding-agent--display-session-history messages chat-buf)
+                                                      (pi-coding-agent--set-last-usage
+                                                       (pi-coding-agent--extract-last-usage messages)))
+                                                  (pi-coding-agent--clear-chat-buffer))
+                                                (pi-coding-agent--refresh-header))
+                                            (error nil))
+                                          (funcall finish)))))
+                                 (pi-coding-agent--refresh-header)
+                                 (funcall finish)))
+                           (funcall finish))
+                       (error
+                        (funcall finish))))))))
+          (error
+           (setq pi-coding-agent--extension-ui-session-sync-in-flight nil)))))))
 
 (defconst pi-coding-agent--extension-editor-help-text
   "C-c C-c submit · C-c C-k cancel"
@@ -730,13 +741,13 @@ Calls ON-SUBMIT with edited text, or ON-CANCEL if dismissed."
          title
          prefill
          (lambda (value)
-           (pi-coding-agent--send-extension-ui-response
+           (pi-coding-agent--extension-ui-send-response
             proc
             (list :type "extension_ui_response"
                   :id id
                   :value value)))
          (lambda ()
-           (pi-coding-agent--send-extension-ui-response
+           (pi-coding-agent--extension-ui-send-response
             proc
             (list :type "extension_ui_response"
                   :id id
@@ -745,12 +756,11 @@ Calls ON-SUBMIT with edited text, or ON-CANCEL if dismissed."
 
 (defun pi-coding-agent--extension-ui-unsupported (event proc)
   "Handle unsupported method from EVENT by sending cancelled via PROC."
-  (when proc
-    (pi-coding-agent--send-extension-ui-response
-     proc
-     (list :type "extension_ui_response"
-           :id (plist-get event :id)
-           :cancelled t))))
+  (pi-coding-agent--extension-ui-send-response
+   proc
+   (list :type "extension_ui_response"
+         :id (plist-get event :id)
+         :cancelled t)))
 
 (defun pi-coding-agent--handle-extension-ui-request (event)
   "Handle extension_ui_request EVENT from pi.
@@ -1016,7 +1026,10 @@ Updates buffer-local state and renders display updates."
        ;; Process followup queue after successful compaction
        (pi-coding-agent--process-followup-queue)))
     ("agent_end"
-     (pi-coding-agent--display-agent-end))
+     (pi-coding-agent--display-agent-end)
+     ;; Fallback: extensions can switch sessions without explicit RPC
+     ;; session-switch events (e.g., from hooks/tool-driven flows).
+     (pi-coding-agent--extension-ui-sync-session-state))
     ("auto_retry_start"
      (pi-coding-agent--display-retry-start event))
     ("auto_retry_end"

@@ -931,6 +931,22 @@ since we don't display them locally. Let pi's message_start handle it."
                                   :error "Extension failed"))
       (should (string-match-p "Extension error" (buffer-string))))))
 
+(ert-deftest pi-coding-agent-test-handle-display-event-agent-end-syncs-extension-state ()
+  "agent_end triggers extension session reconciliation fallback."
+  (let ((display-called nil)
+        (sync-called nil))
+    (cl-letf (((symbol-function 'pi-coding-agent--display-agent-end)
+               (lambda ()
+                 (setq display-called t)))
+              ((symbol-function 'pi-coding-agent--extension-ui-sync-session-state)
+               (lambda ()
+                 (setq sync-called t))))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (pi-coding-agent--handle-display-event '(:type "agent_end"))
+        (should display-called)
+        (should sync-called)))))
+
 (ert-deftest pi-coding-agent-test-handle-display-event-message-error ()
   "pi-coding-agent--handle-display-event handles message_update with error type."
   (with-temp-buffer
@@ -977,12 +993,16 @@ since we don't display them locally. Let pi's message_start handle it."
 
 (ert-deftest pi-coding-agent-test-extension-ui-confirm-yes ()
   "extension_ui_request confirm method uses yes-or-no-p and sends response."
-  (let ((response-sent nil))
+  (let ((response-sent nil)
+        (sync-called nil))
     (cl-letf (((symbol-function 'yes-or-no-p)
                (lambda (_prompt) t))
               ((symbol-function 'pi-coding-agent--send-extension-ui-response)
                (lambda (_proc msg)
-                 (setq response-sent msg))))
+                 (setq response-sent msg)))
+              ((symbol-function 'pi-coding-agent--extension-ui-sync-session-state)
+               (lambda ()
+                 (setq sync-called t))))
       (with-temp-buffer
         (pi-coding-agent-chat-mode)
         (let ((pi-coding-agent--process t))
@@ -993,6 +1013,7 @@ since we don't display them locally. Let pi's message_start handle it."
              :title "Delete file?"
              :message "This cannot be undone")))
         (should response-sent)
+        (should sync-called)
         (should (equal (plist-get response-sent :type) "extension_ui_response"))
         (should (equal (plist-get response-sent :id) "req-2"))
         (should (eq (plist-get response-sent :confirmed) t))))))
@@ -1272,7 +1293,7 @@ since we don't display them locally. Let pi's message_start handle it."
     (should (string-match-p "·" result))))
 
 (ert-deftest pi-coding-agent-test-extension-ui-unknown-cancels ()
-  "extension_ui_request with unknown method sends cancelled response."
+  "Unknown extension UI methods send cancelled response and trigger sync attempt."
   (let ((response-sent nil)
         (rpc-async-called nil))
     (cl-letf (((symbol-function 'pi-coding-agent--send-extension-ui-response)
@@ -1291,7 +1312,7 @@ since we don't display them locally. Let pi's message_start handle it."
              :widgetKey "my-ext"
              :widgetLines ["Line 1"])))
         (should response-sent)
-        (should-not rpc-async-called)
+        (should rpc-async-called)
         (should (equal (plist-get response-sent :type) "extension_ui_response"))
         (should (equal (plist-get response-sent :id) "req-9"))
         (should (eq (plist-get response-sent :cancelled) t))))))
