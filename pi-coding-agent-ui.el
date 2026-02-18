@@ -605,25 +605,30 @@ Returns a list ordered by `buffer-list' recency (most recent first)."
 ;;;; Window Hiding
 
 (defun pi-coding-agent--hide-session-windows ()
-  "Hide windows belonging to the current pi session.
-Deletes this session's input windows first (the child splits created
-by `pi-coding-agent--display-buffers'), then chat windows.  If a
-window is the sole window in its frame, buries the buffer instead.
+  "Hide the current pi session, preserving the frame's window layout.
+Deletes input windows (the child splits created by
+`pi-coding-agent--display-buffers') and replaces the chat buffer in
+its window with the previous buffer via `bury-buffer'.
+
+This mirrors how `pi-coding-agent-quit' handles windows: input splits
+are deleted, chat windows stay but show a different buffer.  Vertical
+splits and other arrangements are kept intact.
 
 Must be called from a pi chat or input buffer.  Only affects windows
 of the current session — other sessions' windows are untouched."
   (let ((chat-buf (pi-coding-agent--get-chat-buffer))
         (input-buf (pi-coding-agent--get-input-buffer)))
-    ;; Input windows first — they're always child splits, so
-    ;; delete-window succeeds and the parent (chat) reclaims space.
-    ;; Then chat windows — if sole window in frame, bury instead.
-    (dolist (buf (list input-buf chat-buf))
-      (when (buffer-live-p buf)
-        (dolist (win (get-buffer-window-list buf nil t))
-          (if (> (length (window-list (window-frame win))) 1)
-              (delete-window win)
-            (with-selected-window win
-              (bury-buffer))))))))
+    ;; Delete input windows — they're child splits that should collapse,
+    ;; giving their space back to the chat window above.
+    (when (buffer-live-p input-buf)
+      (dolist (win (get-buffer-window-list input-buf nil t))
+        (ignore-errors (delete-window win))))
+    ;; Replace chat buffer in its window with the previous buffer.
+    ;; Don't delete the window — that would collapse vertical splits.
+    (when (buffer-live-p chat-buf)
+      (dolist (win (get-buffer-window-list chat-buf nil t))
+        (with-selected-window win
+          (bury-buffer))))))
 
 ;;;; Buffer-Local Session Variables
 
