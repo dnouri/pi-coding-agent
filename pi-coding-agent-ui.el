@@ -802,6 +802,10 @@ Extracted from session_info entries when session is loaded or switched.")
 Each entry is a plist with :name, :description, :source.
 Source is \"prompt\", \"extension\", or \"skill\".")
 
+(defvar-local pi-coding-agent--startup-header-generation 0
+  "Generation counter for startup header insertions.
+Used to ignore stale async version callbacks after buffer refreshes.")
+
 (defun pi-coding-agent--set-commands (commands)
   "Set COMMANDS in current buffer and propagate to sibling session buffers.
 COMMANDS is a list of plists with :name, :description, :source.
@@ -1007,16 +1011,121 @@ Displays warnings for missing dependencies."
 (defconst pi-coding-agent-version "1.3.2"
   "Version of pi-coding-agent.")
 
-(defun pi-coding-agent--get-pi-coding-agent-version ()
-  "Get pi CLI version by running `pi --version'."
-  (condition-case nil
-      (string-trim (shell-command-to-string "pi --version"))
-    (error "Unknown")))
+(defconst pi-coding-agent--startup-header-placeholder-version "…"
+  "Placeholder shown until `pi --version' resolves asynchronously.")
 
-(defun pi-coding-agent--format-startup-header ()
-  "Format the startup header string with styled separator."
-  (let* ((pi-coding-agent-cli-version (pi-coding-agent--get-pi-coding-agent-version))
-         (separator (pi-coding-agent--make-separator (format "Pi %s" pi-coding-agent-cli-version))))
+(defconst pi-coding-agent--version-lock-error-regexp "Lock file is already being held"
+  "Regexp matching lockfile contention errors from pi CLI startup.")
+
+(defconst pi-coding-agent--version-retry-attempts 3
+  "Maximum number of async retries for `pi --version' lock conflicts.")
+
+(defconst pi-coding-agent--version-retry-delay 0.15
+  "Seconds to wait before retrying `pi --version' after lock conflict.")
+
+(defun pi-coding-agent--version-lock-error-p (stdout stderr)
+  "Return non-nil if STDOUT/STDERR indicate lockfile contention."
+  (let ((output (mapconcat #'identity (delq nil (list stdout stderr)) "\n")))
+    (string-match-p pi-coding-agent--version-lock-error-regexp output)))
+
+(defun pi-coding-agent--finish-pi-version-process (proc)
+  "Collect `pi --version' result from PROC and invoke its callback."
+  (let ((callback (process-get proc 'pi-coding-agent-version-callback))
+        (stdout-buf (process-get proc 'pi-coding-agent-version-stdout-buf))
+        (stderr-buf (process-get proc 'pi-coding-agent-version-stderr-buf)))
+    (unwind-protect
+        (let* ((stdout (when (buffer-live-p stdout-buf)
+                         (string-trim
+                          (with-current-buffer stdout-buf
+                            (buffer-string)))))
+               (stderr (when (buffer-live-p stderr-buf)
+                         (string-trim
+                          (with-current-buffer stderr-buf
+                            (buffer-string)))))
+               (exit-code (process-exit-status proc))
+               (version (cond
+                         ((and stdout (not (string-empty-p stdout))) stdout)
+                         ((and (= exit-code 0)
+                               stderr
+                               (not (string-empty-p stderr))) stderr)
+                         (t nil)))
+               (success (and (= exit-code 0) version)))
+          (when callback
+            (funcall callback
+                     (list :success success
+                           :version version
+                           :stdout stdout
+                           :stderr stderr
+                           :exit-code exit-code))))
+      (when (buffer-live-p stdout-buf)
+        (kill-buffer stdout-buf))
+      (when (buffer-live-p stderr-buf)
+        (kill-buffer stderr-buf)))))
+
+(defun pi-coding-agent--run-pi-version-once-async (callback)
+  "Run `pi --version' asynchronously and call CALLBACK with result plist.
+CALLBACK receives a plist with keys :success, :version, :stdout, :stderr,
+and :exit-code."
+  (let ((stdout-buf (generate-new-buffer " *pi-coding-agent-version-stdout*"))
+        (stderr-buf (generate-new-buffer " *pi-coding-agent-version-stderr*")))
+    (condition-case err
+        (let ((proc (make-process
+                     :name "pi-version"
+                     :command '("pi" "--version")
+                     :connection-type 'pipe
+                     :buffer stdout-buf
+                     :stderr stderr-buf
+                     :noquery t
+                     :sentinel
+                     (lambda (proc _event)
+                       (when (memq (process-status proc) '(exit signal))
+                         (pi-coding-agent--finish-pi-version-process proc))))))
+          (process-put proc 'pi-coding-agent-version-callback callback)
+          (process-put proc 'pi-coding-agent-version-stdout-buf stdout-buf)
+          (process-put proc 'pi-coding-agent-version-stderr-buf stderr-buf)
+          proc)
+      (error
+       (when (buffer-live-p stdout-buf)
+         (kill-buffer stdout-buf))
+       (when (buffer-live-p stderr-buf)
+         (kill-buffer stderr-buf))
+       (funcall callback
+                (list :success nil
+                      :version nil
+                      :stdout nil
+                      :stderr (error-message-string err)
+                      :exit-code -1))))))
+
+(defun pi-coding-agent--request-pi-version-async (callback &optional attempt)
+  "Resolve pi CLI version asynchronously and call CALLBACK with string or nil.
+Retries lockfile contention errors up to
+`pi-coding-agent--version-retry-attempts'."
+  (let ((attempt (or attempt 1)))
+    (pi-coding-agent--run-pi-version-once-async
+     (lambda (result)
+       (let ((version (plist-get result :version))
+             (stdout (plist-get result :stdout))
+             (stderr (plist-get result :stderr)))
+         (cond
+          (version
+           (funcall callback version))
+          ((and (< attempt pi-coding-agent--version-retry-attempts)
+                (pi-coding-agent--version-lock-error-p stdout stderr))
+           (run-at-time pi-coding-agent--version-retry-delay nil
+                        #'pi-coding-agent--request-pi-version-async
+                        callback
+                        (1+ attempt)))
+          (t
+           (funcall callback nil))))))))
+
+(defun pi-coding-agent--format-startup-header (&optional pi-coding-agent-cli-version)
+  "Format startup header with optional PI-CODING-AGENT-CLI-VERSION.
+When version is nil, uses a placeholder while async version lookup runs."
+  (let* ((pi-coding-agent-cli-version
+          (or pi-coding-agent-cli-version
+              pi-coding-agent--startup-header-placeholder-version))
+         (separator (pi-coding-agent--make-separator
+                     (format "Pi %s" pi-coding-agent-cli-version))))
     (concat
      separator "\n"
      "C-c C-c   send prompt\n"
@@ -1024,9 +1133,54 @@ Displays warnings for missing dependencies."
      "C-c C-r   resume session\n"
      "C-c C-p   menu\n")))
 
+(defun pi-coding-agent--replace-startup-header (start-marker end-marker version)
+  "Replace startup header region START-MARKER..END-MARKER with VERSION."
+  (when (and (markerp start-marker)
+             (markerp end-marker)
+             (eq (marker-buffer start-marker) (current-buffer))
+             (eq (marker-buffer end-marker) (current-buffer)))
+    (let ((start (marker-position start-marker))
+          (end (marker-position end-marker)))
+      (when (and start end (<= start end))
+        (let ((inhibit-read-only t))
+          (save-excursion
+            (goto-char start)
+            (delete-region start end)
+            (insert (pi-coding-agent--format-startup-header version))
+            (set-marker end-marker (point))))))))
+
+(defun pi-coding-agent--insert-startup-header ()
+  "Insert startup header at point and refresh version asynchronously.
+In batch mode (`noninteractive'), inserts only the placeholder header."
+  (let* ((generation (cl-incf pi-coding-agent--startup-header-generation))
+         (chat-buf (current-buffer))
+         (start-marker (copy-marker (point) t)))
+    (insert (pi-coding-agent--format-startup-header))
+    (let ((end-marker (copy-marker (point) t)))
+      (if noninteractive
+          (progn
+            (set-marker start-marker nil)
+            (set-marker end-marker nil))
+        (pi-coding-agent--request-pi-version-async
+         (lambda (version)
+           (unwind-protect
+               (when (and version
+                          (buffer-live-p chat-buf))
+                 (with-current-buffer chat-buf
+                   (when (and (derived-mode-p 'pi-coding-agent-chat-mode)
+                              (= generation pi-coding-agent--startup-header-generation))
+                     (pi-coding-agent--replace-startup-header
+                      start-marker end-marker version))))
+             (set-marker start-marker nil)
+             (set-marker end-marker nil))))))))
+
 (defun pi-coding-agent--display-startup-header ()
-  "Display the startup header in the chat buffer."
-  (pi-coding-agent--append-to-chat (pi-coding-agent--format-startup-header)))
+  "Display startup header in the chat buffer without blocking process startup."
+  (let ((inhibit-read-only t))
+    (pi-coding-agent--with-scroll-preservation
+      (save-excursion
+        (goto-char (point-max))
+        (pi-coding-agent--insert-startup-header)))))
 
 ;;;; Header Line
 

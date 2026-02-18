@@ -30,6 +30,33 @@
     (with-current-buffer "*pi-coding-agent-input:/tmp/pi-coding-agent-test-modes/*"
       (should (derived-mode-p 'pi-coding-agent-input-mode)))))
 
+(ert-deftest pi-coding-agent-test-startup-starts-rpc-before-version-probe ()
+  "RPC process starts before async version probe is requested."
+  (unless (fboundp 'pi-coding-agent--request-pi-version-async)
+    (ert-skip "Async version lookup not available in loaded package"))
+  (let ((default-directory "/tmp/pi-coding-agent-test-startup-order/")
+        (events nil)
+        (noninteractive nil))
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pi-coding-agent--start-process)
+               (lambda (_)
+                 (push 'start-rpc events)
+                 'mock-process))
+              ((symbol-function 'pi-coding-agent--request-pi-version-async)
+               (lambda (_callback &optional _attempt)
+                 (push 'request-version events)
+                 nil))
+              ((symbol-function 'pi-coding-agent--display-buffers) #'ignore))
+      (unwind-protect
+          (progn
+            (pi-coding-agent)
+            (should (equal (nreverse events)
+                           '(start-rpc request-version))))
+        (ignore-errors
+          (kill-buffer "*pi-coding-agent-chat:/tmp/pi-coding-agent-test-startup-order/*"))
+        (ignore-errors
+          (kill-buffer "*pi-coding-agent-input:/tmp/pi-coding-agent-test-startup-order/*"))))))
+
 ;;; DWIM & Toggle
 
 (ert-deftest pi-coding-agent-test-dwim-reuses-existing-session ()
