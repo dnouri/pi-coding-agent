@@ -945,6 +945,103 @@ since we don't display them locally. Let pi's message_start handle it."
                          "Prefilled text")))
       (kill-buffer input-buf))))
 
+(ert-deftest pi-coding-agent-test-extension-ui-set-editor-text-syncs-session-change ()
+  "set_editor_text reconciles state and reloads history when session changed by extension."
+  (let ((input-buf (get-buffer-create "*pi-test-input*"))
+        (rpc-types nil)
+        (history-called nil)
+        (history-messages nil)
+        (refresh-count 0))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (setq pi-coding-agent--input-buffer input-buf
+                pi-coding-agent--process 'mock-proc
+                pi-coding-agent--state '(:session-file "/tmp/old.jsonl" :session-id "old-id"))
+          (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc cmd cb)
+                       (push (plist-get cmd :type) rpc-types)
+                       (pcase (plist-get cmd :type)
+                         ("get_state"
+                          (funcall cb
+                                   '(:success t
+                                     :data (:sessionFile "/tmp/new.jsonl"
+                                            :sessionId "new-id"
+                                            :isStreaming :false
+                                            :isCompacting :false
+                                            :thinkingLevel "off"
+                                            :messageCount 0
+                                            :pendingMessageCount 0))))
+                         ("get_messages"
+                          (funcall cb '(:success t :data (:messages [])))))))
+                    ((symbol-function 'pi-coding-agent--display-session-history)
+                     (lambda (messages &optional _chat-buf)
+                       (setq history-called t
+                             history-messages messages)))
+                    ((symbol-function 'pi-coding-agent--refresh-header)
+                     (lambda ()
+                       (setq refresh-count (1+ refresh-count)))))
+            (pi-coding-agent--handle-extension-ui-request
+             '(:type "extension_ui_request"
+               :id "req-sync"
+               :method "set_editor_text"
+               :text "Prefilled text"))
+            (should (equal (with-current-buffer input-buf (buffer-string))
+                           "Prefilled text"))
+            (should history-called)
+            (should (vectorp history-messages))
+            (should (equal (nreverse rpc-types) '("get_state" "get_messages")))
+            (should (= refresh-count 1))
+            (should-not pi-coding-agent--extension-ui-session-sync-in-flight)))
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-set-editor-text-syncs-session-no-change ()
+  "set_editor_text reconciles state without reloading history when session is unchanged."
+  (let ((input-buf (get-buffer-create "*pi-test-input*"))
+        (rpc-types nil)
+        (history-called nil)
+        (refresh-count 0))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (setq pi-coding-agent--input-buffer input-buf
+                pi-coding-agent--process 'mock-proc
+                pi-coding-agent--state '(:session-file "/tmp/same.jsonl" :session-id "same-id"))
+          (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc cmd cb)
+                       (push (plist-get cmd :type) rpc-types)
+                       (pcase (plist-get cmd :type)
+                         ("get_state"
+                          (funcall cb
+                                   '(:success t
+                                     :data (:sessionFile "/tmp/same.jsonl"
+                                            :sessionId "same-id"
+                                            :isStreaming :false
+                                            :isCompacting :false
+                                            :thinkingLevel "off"
+                                            :messageCount 0
+                                            :pendingMessageCount 0))))
+                         ("get_messages"
+                          (funcall cb '(:success t :data (:messages [])))))))
+                    ((symbol-function 'pi-coding-agent--display-session-history)
+                     (lambda (&rest _)
+                       (setq history-called t)))
+                    ((symbol-function 'pi-coding-agent--refresh-header)
+                     (lambda ()
+                       (setq refresh-count (1+ refresh-count)))))
+            (pi-coding-agent--handle-extension-ui-request
+             '(:type "extension_ui_request"
+               :id "req-sync-2"
+               :method "set_editor_text"
+               :text "Prefilled text"))
+            (should (equal (with-current-buffer input-buf (buffer-string))
+                           "Prefilled text"))
+            (should-not history-called)
+            (should (equal (nreverse rpc-types) '("get_state")))
+            (should (= refresh-count 1))
+            (should-not pi-coding-agent--extension-ui-session-sync-in-flight)))
+      (kill-buffer input-buf))))
+
 (ert-deftest pi-coding-agent-test-extension-ui-set-status ()
   "extension_ui_request setStatus updates extension status storage."
   (with-temp-buffer

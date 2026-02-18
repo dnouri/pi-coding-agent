@@ -511,7 +511,10 @@ Shows success or final failure with raw error."
       (when (buffer-live-p input-buf)
         (with-current-buffer input-buf
           (erase-buffer)
-          (insert text))))))
+          (insert text))))
+    ;; Extensions can trigger `ctx.newSession()` internally without emitting an
+    ;; RPC session-switch event. Reconcile state here so Emacs follows along.
+    (pi-coding-agent--extension-ui-sync-session-state "set_editor_text")))
 
 (defun pi-coding-agent--extension-ui-set-status (event)
   "Handle setStatus method from EVENT."
@@ -526,6 +529,92 @@ Shows success or final failure with raw error."
       (setq pi-coding-agent--extension-status
             (assoc-delete-all key pi-coding-agent--extension-status)))
     (force-mode-line-update t)))
+
+(defun pi-coding-agent--extension-ui-normalize-session-value (value)
+  "Normalize session identity VALUE from state/get_state.
+Converts JSON null representation to nil."
+  (if (pi-coding-agent--json-null-p value) nil value))
+
+(defun pi-coding-agent--extension-ui-sync-session-state (&optional trigger)
+  "Sync state after extension UI requests, handling extension-triggered session switches.
+TRIGGER is a short string for diagnostics."
+  (unless pi-coding-agent--extension-ui-session-sync-in-flight
+    (when-let ((proc pi-coding-agent--process)
+               (chat-buf (pi-coding-agent--get-chat-buffer)))
+      (let* ((previous-file (pi-coding-agent--extension-ui-normalize-session-value
+                             (plist-get pi-coding-agent--state :session-file)))
+             (previous-id (pi-coding-agent--extension-ui-normalize-session-value
+                           (plist-get pi-coding-agent--state :session-id))))
+        (setq pi-coding-agent--extension-ui-session-sync-in-flight t)
+        (pi-coding-agent--extension-ui-debug-log
+         "session-sync start trigger=%s prev-file=%s prev-id=%s"
+         (or trigger "unknown")
+         previous-file
+         previous-id)
+        (pi-coding-agent--rpc-async
+         proc
+         '(:type "get_state")
+         (lambda (state-response)
+           (when (buffer-live-p chat-buf)
+             (with-current-buffer chat-buf
+               (let ((finish
+                      (lambda ()
+                        (setq pi-coding-agent--extension-ui-session-sync-in-flight nil))))
+                 (condition-case err
+                     (if (plist-get state-response :success)
+                         (let* ((new-state (pi-coding-agent--extract-state-from-response state-response))
+                                (new-file (pi-coding-agent--extension-ui-normalize-session-value
+                                           (plist-get new-state :session-file)))
+                                (new-id (pi-coding-agent--extension-ui-normalize-session-value
+                                         (plist-get new-state :session-id)))
+                                (session-changed (or (not (equal previous-file new-file))
+                                                     (not (equal previous-id new-id)))))
+                           (pi-coding-agent--apply-state-response chat-buf state-response)
+                           (if session-changed
+                               (progn
+                                 (pi-coding-agent--extension-ui-debug-log
+                                  "session-sync changed trigger=%s new-file=%s new-id=%s"
+                                  (or trigger "unknown")
+                                  new-file
+                                  new-id)
+                                 (pi-coding-agent--rpc-async
+                                  proc
+                                  '(:type "get_messages")
+                                  (lambda (messages-response)
+                                    (when (buffer-live-p chat-buf)
+                                      (with-current-buffer chat-buf
+                                        (condition-case err2
+                                            (let* ((messages-data (plist-get messages-response :data))
+                                                   (messages (and (plist-get messages-response :success)
+                                                                  (plist-get messages-data :messages))))
+                                              (if (vectorp messages)
+                                                  (progn
+                                                    (pi-coding-agent--display-session-history messages chat-buf)
+                                                    (pi-coding-agent--set-last-usage
+                                                     (pi-coding-agent--extract-last-usage messages)))
+                                                (pi-coding-agent--clear-chat-buffer))
+                                              (pi-coding-agent--refresh-header))
+                                          (error
+                                           (pi-coding-agent--extension-ui-debug-log
+                                            "session-sync get_messages-error=%s"
+                                            (error-message-string err2))))
+                                        (funcall finish))))))
+                             (pi-coding-agent--extension-ui-debug-log
+                              "session-sync unchanged trigger=%s"
+                              (or trigger "unknown"))
+                             (pi-coding-agent--refresh-header)
+                             (funcall finish)))
+                       (progn
+                         (pi-coding-agent--extension-ui-debug-log
+                          "session-sync get_state-failed trigger=%s error=%s"
+                          (or trigger "unknown")
+                          (or (plist-get state-response :error) "unknown"))
+                         (funcall finish)))
+                   (error
+                    (pi-coding-agent--extension-ui-debug-log
+                     "session-sync error=%s"
+                     (error-message-string err))
+                    (funcall finish))))))))))))
 
 (defconst pi-coding-agent--extension-editor-help-text
   "C-c C-c submit · C-c C-k cancel"
@@ -2307,6 +2396,7 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
   (when (and chat-buf (buffer-live-p chat-buf))
     (with-current-buffer chat-buf
       (let ((inhibit-read-only t))
+        (pi-coding-agent--reset-session-state)
         (erase-buffer)
         (insert (pi-coding-agent--format-startup-header) "\n")
         (when (vectorp messages)
