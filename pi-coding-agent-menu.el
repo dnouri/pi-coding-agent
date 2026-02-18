@@ -43,6 +43,12 @@
 (require 'pi-coding-agent-render)
 (require 'transient)
 
+;; Forward references for functions in other modules.
+(declare-function pi-coding-agent--clear-chat-buffer "pi-coding-agent-ui")
+(declare-function pi-coding-agent--collect-you-headings "pi-coding-agent-ui")
+(declare-function pi-coding-agent--user-turn-index-at-point "pi-coding-agent-ui"
+                  (&optional headings))
+
 (when (and (not (bound-and-true-p byte-compile-current-file))
            (or (not (boundp 'transient-version))
                (version< transient-version "0.9.0")))

@@ -47,7 +47,12 @@
 
 ;; Forward references for functions in other modules
 (declare-function pi-coding-agent-compact "pi-coding-agent-menu" (&optional custom-instructions))
+(declare-function pi-coding-agent--reset-session-state "pi-coding-agent-ui")
+(declare-function pi-coding-agent--clear-chat-buffer "pi-coding-agent-ui")
 (declare-function phscroll-region "phscroll" (beg end))
+
+;; Declared in `pi-coding-agent-ui.el'.
+(defvar pi-coding-agent--extension-ui-session-sync-in-flight)
 
 ;;;; Response Display
 
@@ -461,9 +466,9 @@ Shows success or final failure with raw error."
              msg)))
 
 (defun pi-coding-agent--extension-ui-send-response (proc response &optional chat-buf)
-  "Send extension UI RESPONSE via PROC and reconcile potential session switches.
+  "Send extension UI RESPONSE via PROC and reconcile potential session drift.
 Optional CHAT-BUF pins reconciliation to a known chat buffer, even if the
-callback runs from another buffer (for example, extension editor buffers)."
+callback runs from another buffer, for example extension editor buffers."
   (when proc
     (pi-coding-agent--send-extension-ui-response proc response)
     ;; Extensions may call `ctx.newSession()` immediately after receiving a UI
@@ -541,9 +546,9 @@ Converts JSON null representation to nil."
   (if (pi-coding-agent--json-null-p value) nil value))
 
 (defun pi-coding-agent--extension-ui-sync-session-state (&optional proc chat-buf)
-  "Sync state after extension UI requests, handling extension-triggered session switches.
-Optional PROC and CHAT-BUF allow callers to reconcile from non-chat buffers
-(for example, extension editor submit/cancel callbacks)."
+  "Sync state after extension UI requests and handle extension-triggered drift.
+Optional PROC and CHAT-BUF let callers reconcile from non-chat buffers, for
+example extension editor submit/cancel callbacks."
   (let* ((chat-buf (or chat-buf
                        (and (processp proc)
                             (process-get proc 'pi-coding-agent-chat-buffer))
