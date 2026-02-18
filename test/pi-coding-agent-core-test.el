@@ -551,5 +551,33 @@ Display is handled by the display handler, not by state updates."
   "Elapsed formatter rounds to milliseconds with suffix."
   (should (equal (pi-coding-agent-test-format-elapsed 1.23456) "1.235s")))
 
+;;;; Executable Customization Tests
+
+(defun pi-coding-agent-test--capture-process-command (executable extra-args)
+  "Return the command list that `--start-process' would pass to make-process.
+Mocks `make-process' to capture :command, binding
+`pi-coding-agent-executable' to EXECUTABLE and
+`pi-coding-agent-extra-args' to EXTRA-ARGS."
+  (let ((pi-coding-agent-executable executable)
+        (pi-coding-agent-extra-args extra-args)
+        (captured nil))
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest args)
+                 (setq captured (plist-get args :command))
+                 nil)))
+      (ignore-errors (pi-coding-agent--start-process "/tmp/")))
+    captured))
+
+(ert-deftest pi-coding-agent-test-start-process-uses-custom-executable ()
+  "start-process builds command from `pi-coding-agent-executable'."
+  (should (equal (pi-coding-agent-test--capture-process-command '("npx" "pi") nil)
+                 '("npx" "pi" "--mode" "rpc"))))
+
+(ert-deftest pi-coding-agent-test-start-process-custom-executable-with-extra-args ()
+  "start-process combines custom executable and extra-args."
+  (should (equal (pi-coding-agent-test--capture-process-command
+                  '("npx" "pi") '("-e" "/path/to/ext.ts"))
+                 '("npx" "pi" "--mode" "rpc" "-e" "/path/to/ext.ts"))))
+
 (provide 'pi-coding-agent-core-test)
 ;;; pi-coding-agent-core-test.el ends here
