@@ -270,6 +270,18 @@ Normalizes any existing newline run to two newlines."
       (pi-coding-agent--with-scroll-preservation
         (save-excursion
           (goto-char (marker-position pi-coding-agent--streaming-marker))
+          ;; Ensure blockquote starts on its own line with blank-line
+          ;; separation from preceding content (text deltas, tool output).
+          ;; Skip when at message start (right after the setext header).
+          (when (and pi-coding-agent--message-start-marker
+                     (> (point)
+                        (marker-position pi-coding-agent--message-start-marker)))
+            (unless (bolp)
+              (insert "\n"))
+            (unless (save-excursion
+                      (forward-line -1)
+                      (looking-at-p "^$"))
+              (insert "\n")))
           ;; Track thinking insertion separately so it stays anchored even if
           ;; other block types (tool headers) interleave in the same message.
           ;; Keep insertion-type nil so inserts at this exact point happen

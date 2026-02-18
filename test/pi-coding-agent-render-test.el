@@ -234,6 +234,28 @@ Models may send \\n\\n before thinking content too."
       (should (string-match-p "Reviewing docs\n\nread /tmp/AGENTS\\.md" text))
       (should-not (string-match-p "Reviewing docs\n\n\n" text)))))
 
+(ert-deftest pi-coding-agent-test-thinking-after-text-has-blank-line-separator ()
+  "Second thinking block after text_delta is separated by blank line.
+Without this, the blockquote > prefix leaks onto the text line."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    ;; First thinking block
+    (pi-coding-agent--display-thinking-start)
+    (pi-coding-agent--display-thinking-delta "First thought.")
+    (pi-coding-agent--display-thinking-end "")
+    ;; Text between blocks
+    (pi-coding-agent--display-message-delta "Here is my answer.")
+    ;; Second thinking block
+    (pi-coding-agent--display-thinking-start)
+    (pi-coding-agent--display-thinking-delta "Second thought.")
+    (pi-coding-agent--display-thinking-end "")
+    (let ((text (buffer-string)))
+      ;; The > must start on its own line, separated by blank line from text
+      (should (string-match-p "my answer\\.\n\n> Second thought\\." text))
+      ;; The > must NOT be glued to the text
+      (should-not (string-match-p "my answer\\.>" text)))))
+
 (ert-deftest pi-coding-agent-test-spacing-blank-line-before-tool ()
   "Tool block is preceded by blank line when after text."
   (with-temp-buffer
