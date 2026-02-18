@@ -30,7 +30,7 @@
 
 (defun pi-coding-agent-integration--skip-unless-available ()
   "Skip test if integration tests should not run."
-  (unless (executable-find "pi")
+  (unless (executable-find (car pi-coding-agent-executable))
     (ert-skip "pi executable not found"))
   (unless (getenv "PI_RUN_INTEGRATION")
     (ert-skip "PI_RUN_INTEGRATION not set - opt-in required")))
