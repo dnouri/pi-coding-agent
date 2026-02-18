@@ -93,6 +93,16 @@ prompt once on first session start.  Set to nil to suppress."
 
 ;;;; Customization
 
+(defcustom pi-coding-agent-executable '("pi")
+  "Command to invoke the pi binary, as a list of strings.
+The first element is the program; remaining elements are passed
+before \"--mode rpc\" and `pi-coding-agent-extra-args'.
+
+For npx users:
+  (setq pi-coding-agent-executable \\='(\"npx\" \"pi\"))"
+  :type '(repeat string)
+  :group 'pi-coding-agent)
+
 (defcustom pi-coding-agent-rpc-timeout 30
   "Default timeout in seconds for synchronous RPC calls.
 Some operations like model loading may need more time."
@@ -993,13 +1003,14 @@ https://github.com/misohena/phscroll")
 (defun pi-coding-agent--check-pi ()
   "Check if pi binary is available.
 Returns t if available, nil otherwise."
-  (and (executable-find "pi") t))
+  (and (executable-find (car pi-coding-agent-executable)) t))
 
 (defun pi-coding-agent--check-dependencies ()
   "Check all required dependencies.
 Displays warnings for missing dependencies."
   (unless (pi-coding-agent--check-pi)
-    (display-warning 'pi "pi binary not found. Install with: npm install -g @mariozechner/pi-coding-agent"
+    (display-warning 'pi (format "%s not found in PATH. Install with: npm install -g @mariozechner/pi-coding-agent"
+                                 (car pi-coding-agent-executable))
                      :error)))
 
 ;;;; Startup Header

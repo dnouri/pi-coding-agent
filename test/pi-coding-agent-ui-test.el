@@ -455,5 +455,34 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
     (forward-line -1)  ; on "Body text"
     (should-not (pi-coding-agent--at-you-heading-p))))
 
+;;; Executable Customization
+
+(ert-deftest pi-coding-agent-test-check-pi-uses-executable ()
+  "check-pi uses car of `pi-coding-agent-executable' for lookup."
+  (let ((pi-coding-agent-executable '("npx" "pi")))
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (cmd) (when (equal cmd "npx") "/usr/bin/npx"))))
+      (should (pi-coding-agent--check-pi)))))
+
+(ert-deftest pi-coding-agent-test-check-pi-returns-nil-when-missing ()
+  "check-pi returns nil when executable is not found."
+  (let ((pi-coding-agent-executable '("nonexistent-binary")))
+    (cl-letf (((symbol-function 'executable-find) (lambda (_) nil)))
+      (should-not (pi-coding-agent--check-pi)))))
+
+(ert-deftest pi-coding-agent-test-executable-default-value ()
+  "Default value of pi-coding-agent-executable is (\"pi\")."
+  (should (equal (default-value 'pi-coding-agent-executable) '("pi"))))
+
+(ert-deftest pi-coding-agent-test-check-dependencies-names-executable ()
+  "Warning message includes the actual executable name."
+  (let ((pi-coding-agent-executable '("my-custom-pi"))
+        (warning-text nil))
+    (cl-letf (((symbol-function 'executable-find) (lambda (_) nil))
+              ((symbol-function 'display-warning)
+               (lambda (_type msg &rest _) (setq warning-text msg))))
+      (pi-coding-agent--check-dependencies)
+      (should (string-match-p "my-custom-pi" warning-text)))))
+
 (provide 'pi-coding-agent-ui-test)
 ;;; pi-coding-agent-ui-test.el ends here

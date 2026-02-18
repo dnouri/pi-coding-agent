@@ -171,6 +171,8 @@ containing EVENT, then clears this process's pending requests table."
                pending)
       (clrhash pending))))
 
+(defvar pi-coding-agent-executable)  ; forward decl — core.el cannot require ui.el
+
 (defvar pi-coding-agent-extra-args nil
   "Extra arguments to pass to the pi command.
 A list of strings that will be appended to the base command.
@@ -185,7 +187,7 @@ Returns the process object."
   (let ((default-directory directory))
     (make-process
      :name "pi"
-     :command `("pi" "--mode" "rpc" ,@pi-coding-agent-extra-args)
+     :command `(,@pi-coding-agent-executable "--mode" "rpc" ,@pi-coding-agent-extra-args)
      :connection-type 'pipe
      :filter #'pi-coding-agent--process-filter
      :sentinel #'pi-coding-agent--process-sentinel)))
