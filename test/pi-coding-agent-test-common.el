@@ -119,8 +119,8 @@ Automatically cleans up chat and input buffers."
                ((symbol-function 'pi-coding-agent--display-buffers) #'ignore))
        (unwind-protect
            (progn (pi-coding-agent) ,@body)
-         (ignore-errors (kill-buffer (pi-coding-agent--chat-buffer-name ,dir nil)))
-         (ignore-errors (kill-buffer (pi-coding-agent--input-buffer-name ,dir nil)))))))
+         (ignore-errors (kill-buffer (pi-coding-agent--buffer-name :chat ,dir nil)))
+         (ignore-errors (kill-buffer (pi-coding-agent--buffer-name :input ,dir nil)))))))
 
 ;;;; Two-Session Fixture
 

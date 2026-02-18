@@ -588,6 +588,40 @@ TYPE is :chat or :input.  Returns the buffer."
             (:input (pi-coding-agent-input-mode))))
         buf))))
 
+;;;; Project Buffer Discovery
+
+(defun pi-coding-agent-project-buffers ()
+  "Return all pi chat buffers for the current project directory.
+Matches buffer names by prefix against the abbreviated project dir.
+Returns a list ordered by `buffer-list' recency (most recent first)."
+  (let ((prefix (format "*pi-coding-agent-chat:%s"
+                        (abbreviate-file-name
+                         (pi-coding-agent--session-directory)))))
+    (cl-remove-if-not
+     (lambda (buf)
+       (string-prefix-p prefix (buffer-name buf)))
+     (buffer-list))))
+
+;;;; Window Hiding
+
+(defun pi-coding-agent--hide-session-windows ()
+  "Hide the current pi session, preserving the frame's window layout.
+Deletes input windows (the child splits created by
+`pi-coding-agent--display-buffers') and replaces the chat buffer in
+its window with the previous buffer via `bury-buffer'.
+
+Must be called from a pi chat or input buffer.  Only affects windows
+of the current session — other sessions' windows are untouched."
+  (let ((chat-buf (pi-coding-agent--get-chat-buffer))
+        (input-buf (pi-coding-agent--get-input-buffer)))
+    (when (buffer-live-p input-buf)
+      (dolist (win (get-buffer-window-list input-buf nil t))
+        (ignore-errors (delete-window win))))
+    (when (buffer-live-p chat-buf)
+      (dolist (win (get-buffer-window-list chat-buf nil t))
+        (with-selected-window win
+          (bury-buffer))))))
+
 ;;;; Buffer-Local Session Variables
 
 (defvar-local pi-coding-agent--process nil
