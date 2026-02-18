@@ -126,12 +126,12 @@ tmux new-session -d -s test -x 120 -y 40 \
 sleep 2 && tmux capture-pane -t test -p
 ```
 
-To start a full interactive pi session in tmux:
+To start a full interactive pi-coding-agent session in tmux:
 ```bash
 tmux new-session -d -s test -x 120 -y 40 \
   "emacs -nw -Q --eval \"(progn (require 'package) (package-initialize) \
     (add-to-list 'load-path \\\"$PWD\\\") \
-    (require 'pi-coding-agent) (pi))\""
+    (require 'pi-coding-agent) (pi-coding-agent))\""
 ```
 
 Common gotchas:
@@ -139,7 +139,7 @@ Common gotchas:
 - **Sleep timing**: use `sleep 2` for UI ops, `sleep 10`+ for LLM responses
 - **Buffer names** follow `*pi-coding-agent-{chat,input}:<dir>*` (abbreviated),
   e.g. `*pi-coding-agent-chat:~/co/pi-coding-agent/*`
-- **Window focus**: the pi layout has two windows; `C-x o` switches between them.
+- **Window focus**: the pi-coding-agent layout has two windows; `C-x o` switches between them.
   Prefer spike scripts over interactive `tmux send-keys` when possible —
   they're reproducible, debuggable, and don't require tracking focus state
 
