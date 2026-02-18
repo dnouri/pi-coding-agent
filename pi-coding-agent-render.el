@@ -237,7 +237,7 @@ Returns non-nil when meaningful content remains after normalization."
       (and (<= start end)
            (not (string-empty-p normalized))))))
 
-(defun pi-coding-agent--ensure-thinking-separator ()
+(defun pi-coding-agent--ensure-blank-line-separator ()
   "Ensure exactly one blank line separator at point.
 Normalizes any existing newline run to two newlines."
   (let ((start (point))
@@ -251,6 +251,17 @@ Normalizes any existing newline run to two newlines."
       (insert (make-string (- 2 newline-count) ?\n)))
      ((> newline-count 2)
       (delete-region (+ start 2) (+ start newline-count))))))
+
+(defun pi-coding-agent--ensure-blank-line-before-block ()
+  "Ensure point is on a fresh line with a blank line above.
+Used before inserting a new block (thinking, tool) so it is visually
+separated from preceding content."
+  (unless (bolp)
+    (insert "\n"))
+  (unless (save-excursion
+            (forward-line -1)
+            (looking-at-p "^$"))
+    (insert "\n")))
 
 (defun pi-coding-agent--reset-thinking-state ()
   "Detach and clear all thinking-stream state for the current turn."
@@ -270,18 +281,11 @@ Normalizes any existing newline run to two newlines."
       (pi-coding-agent--with-scroll-preservation
         (save-excursion
           (goto-char (marker-position pi-coding-agent--streaming-marker))
-          ;; Ensure blockquote starts on its own line with blank-line
-          ;; separation from preceding content (text deltas, tool output).
-          ;; Skip when at message start (right after the setext header).
+          ;; No separator needed when this is the first content in the message.
           (when (and pi-coding-agent--message-start-marker
                      (> (point)
                         (marker-position pi-coding-agent--message-start-marker)))
-            (unless (bolp)
-              (insert "\n"))
-            (unless (save-excursion
-                      (forward-line -1)
-                      (looking-at-p "^$"))
-              (insert "\n")))
+            (pi-coding-agent--ensure-blank-line-before-block))
           ;; Track thinking insertion separately so it stays anchored even if
           ;; other block types (tool headers) interleave in the same message.
           ;; Keep insertion-type nil so inserts at this exact point happen
@@ -332,10 +336,10 @@ CONTENT is ignored - we use what was already streamed."
                    pi-coding-agent--thinking-marker)
               (when (pi-coding-agent--render-thinking-content)
                 (goto-char (pi-coding-agent--thinking-insert-position))
-                (pi-coding-agent--ensure-thinking-separator))
+                (pi-coding-agent--ensure-blank-line-separator))
             ;; Fallback for malformed event streams that skip thinking_start.
             (goto-char (pi-coding-agent--thinking-insert-position))
-            (pi-coding-agent--ensure-thinking-separator))
+            (pi-coding-agent--ensure-blank-line-separator))
           (pi-coding-agent--reset-thinking-state))))))
 
 (defun pi-coding-agent--display-agent-end ()
@@ -980,15 +984,7 @@ Records the header-end position for later content insertion."
     (pi-coding-agent--with-scroll-preservation
       (save-excursion
         (goto-char (point-max))
-        ;; Terminate current line if mid-line (e.g., text delta without
-        ;; trailing newline before toolcall_start)
-        (unless (bolp)
-          (insert "\n"))
-        ;; Add blank line before tool if previous line has content
-        (unless (save-excursion
-                  (forward-line -1)
-                  (looking-at-p "^$"))
-          (insert "\n"))
+        (pi-coding-agent--ensure-blank-line-before-block)
         ;; Create overlay at start of tool block, storing path for navigation
         (setq pi-coding-agent--pending-tool-overlay
               (pi-coding-agent--tool-overlay-create tool-name path))

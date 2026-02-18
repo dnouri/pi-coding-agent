@@ -235,8 +235,7 @@ Models may send \\n\\n before thinking content too."
       (should-not (string-match-p "Reviewing docs\n\n\n" text)))))
 
 (ert-deftest pi-coding-agent-test-thinking-after-text-has-blank-line-separator ()
-  "Second thinking block after text_delta is separated by blank line.
-Without this, the blockquote > prefix leaks onto the text line."
+  "Second thinking block after text delta is separated by blank line."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (pi-coding-agent--display-agent-start)
