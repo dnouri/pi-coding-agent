@@ -43,6 +43,12 @@
 (require 'pi-coding-agent-render)
 (require 'transient)
 
+;; Forward references for functions in other modules.
+(declare-function pi-coding-agent--clear-chat-buffer "pi-coding-agent-ui")
+(declare-function pi-coding-agent--collect-you-headings "pi-coding-agent-ui")
+(declare-function pi-coding-agent--user-turn-index-at-point "pi-coding-agent-ui"
+                  (&optional headings))
+
 (when (and (not (bound-and-true-p byte-compile-current-file))
            (or (not (boundp 'transient-version))
                (version< transient-version "0.9.0")))
@@ -203,48 +209,6 @@ Prefers session name over first message when available."
       ;; Fallback to filename if metadata extraction fails
       (let ((filename (file-name-nondirectory path)))
         (cons filename path)))))
-
-(defun pi-coding-agent--reset-session-state ()
-  "Reset all session-specific state for a new session.
-Call this when starting a new session to ensure no stale state persists."
-  (dolist (marker (list pi-coding-agent--message-start-marker
-                        pi-coding-agent--streaming-marker
-                        pi-coding-agent--thinking-marker
-                        pi-coding-agent--thinking-start-marker))
-    (when (markerp marker)
-      (set-marker marker nil)))
-  (setq pi-coding-agent--session-name nil
-        pi-coding-agent--cached-stats nil
-        pi-coding-agent--assistant-header-shown nil
-        pi-coding-agent--local-user-message nil
-        pi-coding-agent--extension-status nil
-        pi-coding-agent--in-code-block nil
-        pi-coding-agent--in-thinking-block nil
-        pi-coding-agent--thinking-marker nil
-        pi-coding-agent--thinking-start-marker nil
-        pi-coding-agent--thinking-raw nil
-        pi-coding-agent--line-parse-state 'line-start
-        pi-coding-agent--pending-tool-overlay nil)
-  ;; Use accessors for cross-module state
-  (pi-coding-agent--set-last-usage nil)
-  (pi-coding-agent--clear-followup-queue)
-  (pi-coding-agent--set-aborted nil)
-  (pi-coding-agent--set-message-start-marker nil)
-  (pi-coding-agent--set-streaming-marker nil)
-  (when pi-coding-agent--tool-args-cache
-    (clrhash pi-coding-agent--tool-args-cache)))
-
-(defun pi-coding-agent--clear-chat-buffer ()
-  "Clear the chat buffer and display fresh startup header.
-Used when starting a new session."
-  (when-let ((chat-buf (pi-coding-agent--get-chat-buffer)))
-    (with-current-buffer chat-buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (pi-coding-agent--format-startup-header))
-        (insert "\n")
-        (pi-coding-agent--reset-session-state)
-        (goto-char (point-max))))))
 
 (defun pi-coding-agent--load-session-history (proc callback &optional chat-buf)
   "Load and display session history from PROC.

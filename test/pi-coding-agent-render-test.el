@@ -846,6 +846,22 @@ since we don't display them locally. Let pi's message_start handle it."
                                   :error "Extension failed"))
       (should (string-match-p "Extension error" (buffer-string))))))
 
+(ert-deftest pi-coding-agent-test-handle-display-event-agent-end-syncs-extension-state ()
+  "agent_end triggers extension session reconciliation fallback."
+  (let ((display-called nil)
+        (sync-called nil))
+    (cl-letf (((symbol-function 'pi-coding-agent--display-agent-end)
+               (lambda ()
+                 (setq display-called t)))
+              ((symbol-function 'pi-coding-agent--extension-ui-sync-session-state)
+               (lambda ()
+                 (setq sync-called t))))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (pi-coding-agent--handle-display-event '(:type "agent_end"))
+        (should display-called)
+        (should sync-called)))))
+
 (ert-deftest pi-coding-agent-test-handle-display-event-message-error ()
   "pi-coding-agent--handle-display-event handles message_update with error type."
   (with-temp-buffer
@@ -892,12 +908,16 @@ since we don't display them locally. Let pi's message_start handle it."
 
 (ert-deftest pi-coding-agent-test-extension-ui-confirm-yes ()
   "extension_ui_request confirm method uses yes-or-no-p and sends response."
-  (let ((response-sent nil))
+  (let ((response-sent nil)
+        (sync-called nil))
     (cl-letf (((symbol-function 'yes-or-no-p)
                (lambda (_prompt) t))
               ((symbol-function 'pi-coding-agent--send-extension-ui-response)
                (lambda (_proc msg)
-                 (setq response-sent msg))))
+                 (setq response-sent msg)))
+              ((symbol-function 'pi-coding-agent--extension-ui-sync-session-state)
+               (lambda (&rest _)
+                 (setq sync-called t))))
       (with-temp-buffer
         (pi-coding-agent-chat-mode)
         (let ((pi-coding-agent--process t))
@@ -908,6 +928,7 @@ since we don't display them locally. Let pi's message_start handle it."
              :title "Delete file?"
              :message "This cannot be undone")))
         (should response-sent)
+        (should sync-called)
         (should (equal (plist-get response-sent :type) "extension_ui_response"))
         (should (equal (plist-get response-sent :id) "req-2"))
         (should (eq (plist-get response-sent :confirmed) t))))))
@@ -996,6 +1017,103 @@ since we don't display them locally. Let pi's message_start handle it."
                          "Prefilled text")))
       (kill-buffer input-buf))))
 
+(ert-deftest pi-coding-agent-test-extension-ui-set-editor-text-syncs-session-change ()
+  "set_editor_text reconciles state and reloads history when session changed by extension."
+  (let ((input-buf (get-buffer-create "*pi-test-input*"))
+        (rpc-types nil)
+        (history-called nil)
+        (history-messages nil)
+        (refresh-count 0))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (setq pi-coding-agent--input-buffer input-buf
+                pi-coding-agent--process 'mock-proc
+                pi-coding-agent--state '(:session-file "/tmp/old.jsonl" :session-id "old-id"))
+          (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc cmd cb)
+                       (push (plist-get cmd :type) rpc-types)
+                       (pcase (plist-get cmd :type)
+                         ("get_state"
+                          (funcall cb
+                                   '(:success t
+                                     :data (:sessionFile "/tmp/new.jsonl"
+                                            :sessionId "new-id"
+                                            :isStreaming :false
+                                            :isCompacting :false
+                                            :thinkingLevel "off"
+                                            :messageCount 0
+                                            :pendingMessageCount 0))))
+                         ("get_messages"
+                          (funcall cb '(:success t :data (:messages [])))))))
+                    ((symbol-function 'pi-coding-agent--display-session-history)
+                     (lambda (messages &optional _chat-buf)
+                       (setq history-called t
+                             history-messages messages)))
+                    ((symbol-function 'pi-coding-agent--refresh-header)
+                     (lambda ()
+                       (setq refresh-count (1+ refresh-count)))))
+            (pi-coding-agent--handle-extension-ui-request
+             '(:type "extension_ui_request"
+               :id "req-sync"
+               :method "set_editor_text"
+               :text "Prefilled text"))
+            (should (equal (with-current-buffer input-buf (buffer-string))
+                           "Prefilled text"))
+            (should history-called)
+            (should (vectorp history-messages))
+            (should (equal (nreverse rpc-types) '("get_state" "get_messages")))
+            (should (= refresh-count 1))
+            (should-not pi-coding-agent--extension-ui-session-sync-in-flight)))
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-set-editor-text-syncs-session-no-change ()
+  "set_editor_text reconciles state without reloading history when session is unchanged."
+  (let ((input-buf (get-buffer-create "*pi-test-input*"))
+        (rpc-types nil)
+        (history-called nil)
+        (refresh-count 0))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (setq pi-coding-agent--input-buffer input-buf
+                pi-coding-agent--process 'mock-proc
+                pi-coding-agent--state '(:session-file "/tmp/same.jsonl" :session-id "same-id"))
+          (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc cmd cb)
+                       (push (plist-get cmd :type) rpc-types)
+                       (pcase (plist-get cmd :type)
+                         ("get_state"
+                          (funcall cb
+                                   '(:success t
+                                     :data (:sessionFile "/tmp/same.jsonl"
+                                            :sessionId "same-id"
+                                            :isStreaming :false
+                                            :isCompacting :false
+                                            :thinkingLevel "off"
+                                            :messageCount 0
+                                            :pendingMessageCount 0))))
+                         ("get_messages"
+                          (funcall cb '(:success t :data (:messages [])))))))
+                    ((symbol-function 'pi-coding-agent--display-session-history)
+                     (lambda (&rest _)
+                       (setq history-called t)))
+                    ((symbol-function 'pi-coding-agent--refresh-header)
+                     (lambda ()
+                       (setq refresh-count (1+ refresh-count)))))
+            (pi-coding-agent--handle-extension-ui-request
+             '(:type "extension_ui_request"
+               :id "req-sync-2"
+               :method "set_editor_text"
+               :text "Prefilled text"))
+            (should (equal (with-current-buffer input-buf (buffer-string))
+                           "Prefilled text"))
+            (should-not history-called)
+            (should (equal (nreverse rpc-types) '("get_state")))
+            (should (= refresh-count 1))
+            (should-not pi-coding-agent--extension-ui-session-sync-in-flight)))
+      (kill-buffer input-buf))))
+
 (ert-deftest pi-coding-agent-test-extension-ui-set-status ()
   "extension_ui_request setStatus updates extension status storage."
   (with-temp-buffer
@@ -1054,11 +1172,15 @@ since we don't display them locally. Let pi's message_start handle it."
     (should (string-match-p "·" result))))
 
 (ert-deftest pi-coding-agent-test-extension-ui-unknown-cancels ()
-  "extension_ui_request with unknown method sends cancelled response."
-  (let ((response-sent nil))
-    (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
-               (lambda (_proc msg _cb)
-                 (setq response-sent msg))))
+  "Unknown extension UI methods send cancelled response and trigger sync attempt."
+  (let ((response-sent nil)
+        (rpc-async-called nil))
+    (cl-letf (((symbol-function 'pi-coding-agent--send-extension-ui-response)
+               (lambda (_proc msg)
+                 (setq response-sent msg)))
+              ((symbol-function 'pi-coding-agent--rpc-async)
+               (lambda (&rest _)
+                 (setq rpc-async-called t))))
       (with-temp-buffer
         (pi-coding-agent-chat-mode)
         (let ((pi-coding-agent--process t))
@@ -1069,15 +1191,23 @@ since we don't display them locally. Let pi's message_start handle it."
              :widgetKey "my-ext"
              :widgetLines ["Line 1"])))
         (should response-sent)
+        (should rpc-async-called)
         (should (equal (plist-get response-sent :type) "extension_ui_response"))
         (should (equal (plist-get response-sent :id) "req-9"))
         (should (eq (plist-get response-sent :cancelled) t))))))
 
-(ert-deftest pi-coding-agent-test-extension-ui-editor-cancels ()
-  "extension_ui_request editor method sends cancelled (not supported)."
-  (let ((response-sent nil))
-    (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
-               (lambda (_proc msg _cb)
+(ert-deftest pi-coding-agent-test-extension-ui-editor-submit ()
+  "extension_ui_request editor method sends value response on submit."
+  (let ((response-sent nil)
+        (title-seen nil)
+        (prefill-seen nil))
+    (cl-letf (((symbol-function 'pi-coding-agent--show-extension-editor)
+               (lambda (title prefill on-submit _on-cancel)
+                 (setq title-seen title
+                       prefill-seen prefill)
+                 (funcall on-submit "edited text")))
+              ((symbol-function 'pi-coding-agent--send-extension-ui-response)
+               (lambda (_proc msg)
                  (setq response-sent msg))))
       (with-temp-buffer
         (pi-coding-agent-chat-mode)
@@ -1086,10 +1216,144 @@ since we don't display them locally. Let pi's message_start handle it."
            '(:type "extension_ui_request"
              :id "req-10"
              :method "editor"
+             :title "Edit prompt"
+             :prefill "some text")))
+        (should (equal title-seen "Edit prompt"))
+        (should (equal prefill-seen "some text"))
+        (should response-sent)
+        (should (equal (plist-get response-sent :type) "extension_ui_response"))
+        (should (equal (plist-get response-sent :id) "req-10"))
+        (should (equal (plist-get response-sent :value) "edited text"))))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-editor-cancel ()
+  "extension_ui_request editor method sends cancelled response on cancel."
+  (let ((response-sent nil))
+    (cl-letf (((symbol-function 'pi-coding-agent--show-extension-editor)
+               (lambda (_title _prefill _on-submit on-cancel)
+                 (funcall on-cancel)))
+              ((symbol-function 'pi-coding-agent--send-extension-ui-response)
+               (lambda (_proc msg)
+                 (setq response-sent msg))))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (let ((pi-coding-agent--process t))
+          (pi-coding-agent--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-11"
+             :method "editor"
              :title "Edit:"
              :prefill "some text")))
         (should response-sent)
+        (should (equal (plist-get response-sent :type) "extension_ui_response"))
+        (should (equal (plist-get response-sent :id) "req-11"))
         (should (eq (plist-get response-sent :cancelled) t))))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-editor-submit-syncs-from-non-chat-buffer ()
+  "Editor submit should sync session even when callback runs outside chat buffer."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((chat-buf (current-buffer))
+          (response-sent nil)
+          (rpc-types nil)
+          (callback-ran-outside-chat nil)
+          (pi-coding-agent--process 'mock-proc)
+          (pi-coding-agent--state '(:session-file "/tmp/old.jsonl" :session-id "old-id")))
+      (cl-letf (((symbol-function 'pi-coding-agent--show-extension-editor)
+                 (lambda (_title _prefill on-submit _on-cancel)
+                   (with-temp-buffer
+                     (setq callback-ran-outside-chat (not (eq (current-buffer) chat-buf)))
+                     (funcall on-submit "edited text"))))
+                ((symbol-function 'pi-coding-agent--send-extension-ui-response)
+                 (lambda (_proc msg)
+                   (setq response-sent msg)))
+                ((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (_proc cmd _cb)
+                   (push (plist-get cmd :type) rpc-types))))
+        (pi-coding-agent--handle-extension-ui-request
+         '(:type "extension_ui_request"
+           :id "req-editor-sync"
+           :method "editor"
+           :title "Edit prompt"
+           :prefill "some text"))
+        (should callback-ran-outside-chat)
+        (should response-sent)
+        (should (equal (plist-get response-sent :id) "req-editor-sync"))
+        (should (member "get_state" rpc-types))))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-handoff-flow-editor-then-set-editor-text-syncs ()
+  "Handoff-like flow syncs session and reloads history after set_editor_text."
+  (let* ((input-buf (get-buffer-create "*pi-test-input-handoff*"))
+         (state-response
+          '(:success t
+            :data (:sessionFile "/tmp/new.jsonl"
+                   :sessionId "new-id"
+                   :isStreaming :false
+                   :isCompacting :false
+                   :thinkingLevel "off"
+                   :messageCount 1
+                   :pendingMessageCount 0)))
+         (messages-response
+          '(:success t
+            :data (:messages [(:role "assistant"
+                               :content [(:type "text" :text "History")]
+                               :usage (:input 1 :output 2))])))
+         (response-count 0)
+         (rpc-types nil)
+         (history-called nil)
+         (refresh-count 0)
+         (callback-ran-outside-chat nil))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (let ((chat-buf (current-buffer)))
+            (setq pi-coding-agent--process 'mock-proc
+                  pi-coding-agent--input-buffer input-buf
+                  pi-coding-agent--state '(:session-file "/tmp/old.jsonl" :session-id "old-id"))
+            (cl-letf (((symbol-function 'pi-coding-agent--show-extension-editor)
+                       (lambda (_title _prefill on-submit _on-cancel)
+                         (with-temp-buffer
+                           (setq callback-ran-outside-chat (not (eq (current-buffer) chat-buf)))
+                           (funcall on-submit "edited handoff prompt"))))
+                      ((symbol-function 'pi-coding-agent--send-extension-ui-response)
+                       (lambda (_proc _msg)
+                         (setq response-count (1+ response-count))))
+                      ((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_proc cmd cb)
+                         (push (plist-get cmd :type) rpc-types)
+                         (pcase (plist-get cmd :type)
+                           ("get_state" (funcall cb state-response))
+                           ("get_messages" (funcall cb messages-response)))))
+                      ((symbol-function 'pi-coding-agent--display-session-history)
+                       (lambda (messages &optional _chat-buf)
+                         (setq history-called (vectorp messages))))
+                      ((symbol-function 'pi-coding-agent--refresh-header)
+                       (lambda ()
+                         (setq refresh-count (1+ refresh-count)))))
+              ;; 1) User submits extension editor response.
+              (pi-coding-agent--handle-extension-ui-request
+               '(:type "extension_ui_request"
+                 :id "req-handoff-editor"
+                 :method "editor"
+                 :title "Edit handoff prompt"
+                 :prefill "draft"))
+              ;; 2) Extension creates a new session, then asks UI to prefill editor.
+              (pi-coding-agent--handle-extension-ui-request
+               '(:type "extension_ui_request"
+                 :id "req-handoff-set"
+                 :method "set_editor_text"
+                 :text "edited handoff prompt"))
+              (should callback-ran-outside-chat)
+              (should (= response-count 1))
+              (should history-called)
+              (should (member "get_state" rpc-types))
+              (should (member "get_messages" rpc-types))
+              (should (equal (with-current-buffer input-buf (buffer-string))
+                             "edited handoff prompt"))
+              (should (equal (plist-get pi-coding-agent--state :session-id) "new-id"))
+              (should-not pi-coding-agent--extension-ui-session-sync-in-flight)
+              (should (> refresh-count 0)))))
+      (when (buffer-live-p input-buf)
+        (kill-buffer input-buf)))))
 
 ;;; Pretty-Print JSON Helper
 
