@@ -119,8 +119,20 @@ Automatically cleans up chat and input buffers."
                ((symbol-function 'pi-coding-agent--display-buffers) #'ignore))
        (unwind-protect
            (progn (pi-coding-agent) ,@body)
-         (ignore-errors (kill-buffer (pi-coding-agent--buffer-name :chat ,dir nil)))
-         (ignore-errors (kill-buffer (pi-coding-agent--buffer-name :input ,dir nil)))))))
+         (pi-coding-agent-test--kill-session-buffers ,dir)))))
+
+(defun pi-coding-agent-test--chat-buffer-name (dir &optional session)
+  "Return the chat buffer name for DIR and optional SESSION."
+  (pi-coding-agent--buffer-name :chat dir session))
+
+(defun pi-coding-agent-test--input-buffer-name (dir &optional session)
+  "Return the input buffer name for DIR and optional SESSION."
+  (pi-coding-agent--buffer-name :input dir session))
+
+(defun pi-coding-agent-test--kill-session-buffers (dir &optional session)
+  "Kill chat and input buffers for DIR and optional SESSION."
+  (ignore-errors (kill-buffer (pi-coding-agent-test--chat-buffer-name dir session)))
+  (ignore-errors (kill-buffer (pi-coding-agent-test--input-buffer-name dir session))))
 
 ;;;; Two-Session Fixture
 

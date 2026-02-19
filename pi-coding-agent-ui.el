@@ -598,6 +598,8 @@ TYPE is :chat or :input.  Returns the buffer."
         existing
       (let ((buf (generate-new-buffer name)))
         (with-current-buffer buf
+          ;; Keep canonical session directory for exact matching.
+          (setq default-directory dir)
           (pcase type
             (:chat (pi-coding-agent-chat-mode))
             (:input (pi-coding-agent-input-mode))))
@@ -605,35 +607,45 @@ TYPE is :chat or :input.  Returns the buffer."
 
 ;;;; Project Buffer Discovery
 
+(defun pi-coding-agent--normalize-directory (dir)
+  "Normalize DIR for exact path comparisons.
+Returns an expanded absolute path with a trailing slash."
+  (file-name-as-directory (expand-file-name dir)))
+
 (defun pi-coding-agent-project-buffers ()
-  "Return all pi chat buffers for the current project directory.
-Matches buffer names by prefix against the abbreviated project dir.
+  "Return pi chat buffers for the current project directory.
+Matches buffers by exact `default-directory', not by `buffer-name' prefix.
 Returns a list ordered by `buffer-list' recency (most recent first)."
-  (let ((prefix (format "*pi-coding-agent-chat:%s"
-                        (abbreviate-file-name
-                         (pi-coding-agent--session-directory)))))
+  (let ((target-dir (pi-coding-agent--normalize-directory
+                     (pi-coding-agent--session-directory))))
     (cl-remove-if-not
      (lambda (buf)
-       (string-prefix-p prefix (buffer-name buf)))
+       (and (buffer-live-p buf)
+            (with-current-buffer buf
+              (and (derived-mode-p 'pi-coding-agent-chat-mode)
+                   (stringp default-directory)
+                   (string=
+                    (pi-coding-agent--normalize-directory default-directory)
+                    target-dir)))))
      (buffer-list))))
 
 ;;;; Window Hiding
 
 (defun pi-coding-agent--hide-session-windows ()
-  "Hide the current pi session, preserving the frame's window layout.
-Deletes input windows (the child splits created by
-`pi-coding-agent--display-buffers') and replaces the chat buffer in
-its window with the previous buffer via `bury-buffer'.
+  "Hide the current pi session in the selected frame.
+Preserves this frame's window layout by deleting input windows (the
+child splits created by `pi-coding-agent--display-buffers') and
+replacing chat windows with their previous buffers via `bury-buffer'.
 
 Must be called from a pi chat or input buffer.  Only affects windows
-of the current session — other sessions' windows are untouched."
+of the current session in the selected frame."
   (let ((chat-buf (pi-coding-agent--get-chat-buffer))
         (input-buf (pi-coding-agent--get-input-buffer)))
     (when (buffer-live-p input-buf)
-      (dolist (win (get-buffer-window-list input-buf nil t))
+      (dolist (win (get-buffer-window-list input-buf nil))
         (ignore-errors (delete-window win))))
     (when (buffer-live-p chat-buf)
-      (dolist (win (get-buffer-window-list chat-buf nil t))
+      (dolist (win (get-buffer-window-list chat-buf nil))
         (with-selected-window win
           (bury-buffer))))))
 
@@ -875,16 +887,122 @@ Works from either chat or input buffer."
 
 ;;;; Display
 
+(defun pi-coding-agent--window-can-split-for-input-p (window)
+  "Return non-nil if WINDOW can be split into chat and input windows."
+  (>= (window-total-height window)
+      (* 2 window-min-height)))
+
+(defun pi-coding-agent--input-height-for-window (window)
+  "Return input pane height to use when splitting WINDOW.
+Clamps `pi-coding-agent-input-window-height' to the maximum that still
+leaves at least `window-min-height' lines for chat."
+  (let* ((window-height (window-total-height window))
+         (max-input-height (- window-height window-min-height)))
+    (max window-min-height
+         (min pi-coding-agent-input-window-height
+              max-input-height))))
+
+(defun pi-coding-agent--windows-by-height (&optional windows)
+  "Return live WINDOWS sorted by descending height.
+If WINDOWS is nil, use all non-minibuffer windows in the selected frame."
+  (sort (cl-remove-if-not #'window-live-p
+                          (copy-sequence (or windows (window-list nil 'no-mini))))
+        (lambda (a b)
+          (> (window-total-height a)
+             (window-total-height b)))))
+
+(defun pi-coding-agent--window-with-most-height (&optional windows)
+  "Return the tallest window from WINDOWS.
+If WINDOWS is nil, use all non-minibuffer windows in the selected frame."
+  (car (pi-coding-agent--windows-by-height windows)))
+
+(defun pi-coding-agent--best-display-window (&optional preferred)
+  "Return best window for displaying chat+input.
+Use PREFERRED when it can be split, else pick the tallest splittable
+window in the frame.  Falls back to PREFERRED or selected window."
+  (or (and preferred
+           (window-live-p preferred)
+           (pi-coding-agent--window-can-split-for-input-p preferred)
+           preferred)
+      (cl-find-if #'pi-coding-agent--window-can-split-for-input-p
+                  (pi-coding-agent--windows-by-height))
+      preferred
+      (selected-window)))
+
+(defun pi-coding-agent--preferred-display-window (chat-wins input-wins selected)
+  "Return preferred base window for displaying chat+input.
+CHAT-WINS and INPUT-WINS are existing session windows.  SELECTED is the
+currently selected window."
+  (cond
+   ;; Input-only visible: prefer selected non-input window so we can
+   ;; replace it cleanly and avoid duplicate input windows.
+   ((and input-wins (not chat-wins)
+         (not (memq selected input-wins))
+         (pi-coding-agent--window-can-split-for-input-p selected))
+    selected)
+   (chat-wins (pi-coding-agent--window-with-most-height chat-wins))
+   (input-wins (pi-coding-agent--window-with-most-height input-wins))
+   (t selected)))
+
+(defun pi-coding-agent--delete-extra-input-windows (input-wins target)
+  "Delete windows in INPUT-WINS except TARGET."
+  (dolist (win input-wins)
+    (unless (eq win target)
+      (ignore-errors (delete-window win)))))
+
+(defun pi-coding-agent--paired-input-window (chat-win input-buf)
+  "Return input window below CHAT-WIN showing INPUT-BUF, or nil."
+  (when (window-live-p chat-win)
+    (let ((below (window-in-direction 'below chat-win)))
+      (and below
+           (eq (window-buffer below) input-buf)
+           below))))
+
+(defun pi-coding-agent--best-input-window (chat-buf input-buf)
+  "Return best visible window for INPUT-BUF in current frame.
+Prefer the input window below the selected CHAT-BUF window, then the
+selected input window, then the tallest input window."
+  (let* ((input-wins (get-buffer-window-list input-buf nil))
+         (selected (selected-window))
+         (selected-chat-win (and (eq (window-buffer selected) chat-buf)
+                                 selected)))
+    (or (pi-coding-agent--paired-input-window selected-chat-win input-buf)
+        (and (memq selected input-wins)
+             selected)
+        (pi-coding-agent--window-with-most-height input-wins))))
+
+(defun pi-coding-agent--focus-input-window (chat-buf input-buf)
+  "Select a visible INPUT-BUF window for the CHAT-BUF session."
+  (when-let ((win (pi-coding-agent--best-input-window chat-buf input-buf)))
+    (select-window win)))
+
 (defun pi-coding-agent--display-buffers (chat-buf input-buf)
-  "Display CHAT-BUF and INPUT-BUF in current window, split vertically.
-Does not affect other windows in the frame."
-  ;; Use current window for chat, split for input
-  (switch-to-buffer chat-buf)
-  (with-current-buffer chat-buf
-    (goto-char (point-max)))
-  (let ((input-win (split-window nil (- pi-coding-agent-input-window-height) 'below)))
-    (set-window-buffer input-win input-buf)
-    (select-window input-win)))
+  "Ensure CHAT-BUF and INPUT-BUF are visible.
+Uses a split window with chat above and input below.  Falls back to a
+larger window when the selected one cannot be split."
+  (let* ((chat-wins (get-buffer-window-list chat-buf nil))
+         (input-wins (get-buffer-window-list input-buf nil))
+         (selected (selected-window))
+         (preferred (pi-coding-agent--preferred-display-window
+                     chat-wins input-wins selected))
+         (target (pi-coding-agent--best-display-window preferred))
+         (input-win nil))
+    ;; Remove stale input windows when restoring from an input-only view.
+    (when (and input-wins (not chat-wins))
+      (pi-coding-agent--delete-extra-input-windows input-wins target))
+    (with-selected-window target
+      (unless (pi-coding-agent--window-can-split-for-input-p target)
+        (delete-other-windows target))
+      (unless (pi-coding-agent--window-can-split-for-input-p target)
+        (user-error "Window too small for chat + input layout"))
+      (switch-to-buffer chat-buf)
+      (with-current-buffer chat-buf
+        (goto-char (point-max)))
+      (let ((input-height (pi-coding-agent--input-height-for-window target)))
+        (setq input-win (split-window nil (- input-height) 'below))
+        (set-window-buffer input-win input-buf)))
+    (when (window-live-p input-win)
+      (select-window input-win))))
 
 ;;; Scroll Behavior
 ;;
