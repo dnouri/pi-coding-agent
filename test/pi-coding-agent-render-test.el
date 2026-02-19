@@ -959,7 +959,7 @@ since we don't display them locally. Let pi's message_start handle it."
   "extension_ui_request input method uses read-string and sends response."
   (let ((response-sent nil))
     (cl-letf (((symbol-function 'read-string)
-               (lambda (_prompt &optional _initial) "user input"))
+               (lambda (&rest _args) "user input"))
               ((symbol-function 'pi-coding-agent--send-extension-ui-response)
                (lambda (_proc msg)
                  (setq response-sent msg))))
