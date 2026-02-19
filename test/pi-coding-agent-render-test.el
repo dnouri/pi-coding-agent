@@ -2902,6 +2902,21 @@ Commands with embedded newlines should not have any lines deleted."
        :assistantMessageEvent (:type "text_delta" :delta "Hello")))
     (should (equal pi-coding-agent--activity-phase "replying"))))
 
+(ert-deftest pi-coding-agent-test-activity-phase-running-on-toolcall-start ()
+  "Activity phase becomes running when tool call generation starts."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "thinking")
+    (pi-coding-agent--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "toolcall_start" :contentIndex 0)
+       :message (:role "assistant"
+                 :content [(:type "toolCall"
+                            :id "call_1"
+                            :name "read"
+                            :arguments (:path "/tmp/file.txt"))])))
+    (should (equal pi-coding-agent--activity-phase "running"))))
+
 (ert-deftest pi-coding-agent-test-activity-phase-running-on-tool-start ()
   "Activity phase becomes running on tool_execution_start."
   (with-temp-buffer

@@ -708,6 +708,7 @@ Updates buffer-local state and renders display updates."
           (unless pi-coding-agent--streaming-tool-id
             (when-let* ((tool-call (pi-coding-agent--extract-tool-call
                                     event msg-event)))
+              (pi-coding-agent--set-activity-phase "running")
               ;; Clear fontification buffer so incremental sync starts
               ;; fresh for each tool call
               (pi-coding-agent--fontify-reset
