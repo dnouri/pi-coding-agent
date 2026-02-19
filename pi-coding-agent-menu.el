@@ -471,13 +471,17 @@ The name is displayed in the resume picker and header-line."
          (input (or (plist-get tokens :input) 0))
          (output (or (plist-get tokens :output) 0))
          (total (or (plist-get tokens :total) 0))
+         (cache-read (or (plist-get tokens :cacheRead) 0))
+         (cache-write (or (plist-get tokens :cacheWrite) 0))
          (cost (or (plist-get stats :cost) 0))
          (messages (or (plist-get stats :userMessages) 0))
          (tools (or (plist-get stats :toolCalls) 0)))
-    (format "Tokens: %s in / %s out (%s total) | Cost: $%.2f | Messages: %d | Tools: %d"
+    (format "Tokens: %s in / %s out (%s total) | Cache: R%s / W%s | Cost: $%.2f | Messages: %d | Tools: %d"
             (pi-coding-agent--format-number input)
             (pi-coding-agent--format-number output)
             (pi-coding-agent--format-number total)
+            (pi-coding-agent--format-number cache-read)
+            (pi-coding-agent--format-number cache-write)
             cost messages tools)))
 
 (defun pi-coding-agent-session-stats ()

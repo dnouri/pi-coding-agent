@@ -1946,15 +1946,21 @@ Pi handles command expansion on the server side."
       (delete-process fake-proc))))
 
 (ert-deftest pi-coding-agent-test-format-session-stats ()
-  "Format session stats returns readable string."
-  (let ((stats '(:tokens (:input 50000 :output 10000 :total 60000)
+  "Format session stats returns readable string with cache details."
+  (let ((stats '(:tokens (:input 50000 :output 10000 :total 60000
+                         :cacheRead 123000 :cacheWrite 4567)
                  :cost 0.45
                  :userMessages 5
                  :toolCalls 12)))
     (let ((result (pi-coding-agent--format-session-stats stats)))
-      (should (string-match-p "50,000" result))  ; input tokens formatted
-      (should (string-match-p "\\$0.45" result)) ; cost
-      (should (string-match-p "5" result)))))    ; messages
+      (should (string-match-p "50,000" result))
+      (should (string-match-p "10,000" result))
+      (should (string-match-p "60,000" result))
+      (should (string-match-p "123,000" result))
+      (should (string-match-p "4,567" result))
+      (should (string-match-p "\\$0.45" result))
+      (should (string-match-p "Messages: 5" result))
+      (should (string-match-p "Tools: 12" result)))))
 
 (ert-deftest pi-coding-agent-test-header-line-shows-model ()
   "Header line displays current model."
@@ -2328,16 +2334,19 @@ Errors still consume context, so their usage data is valid for display."
   "Stats format returns nil when stats is nil."
   (should (null (pi-coding-agent--header-format-stats nil nil nil))))
 
-(ert-deftest pi-coding-agent-test-header-format-stats-shows-tokens ()
-  "Stats format shows token counts."
+(ert-deftest pi-coding-agent-test-header-format-stats-shows-cost-and-context ()
+  "Header stats format shows only cost and context usage."
   (let* ((stats '(:tokens (:input 1000 :output 500 :cacheRead 2000 :cacheWrite 100)
                   :cost 0.05))
-         (result (pi-coding-agent--header-format-stats stats nil nil)))
-    (should (string-match-p "↑1k" result))
-    (should (string-match-p "↓500" result))
-    (should (string-match-p "R2k" result))
-    (should (string-match-p "W100" result))
-    (should (string-match-p "\\$0.05" result))))
+         (last-usage '(:input 3000 :output 100 :cacheRead 400 :cacheWrite 0))
+         (model-obj '(:contextWindow 200000))
+         (result (pi-coding-agent--header-format-stats stats last-usage model-obj)))
+    (should (string-match-p "\\$0.05" result))
+    (should (string-match-p "1.8%%/200k" result))
+    (should-not (string-match-p "↑" result))
+    (should-not (string-match-p "↓" result))
+    (should-not (string-match-p "R" result))
+    (should-not (string-match-p "W" result))))
 
 ;;; File Reference Completion (@)
 

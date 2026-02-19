@@ -1111,17 +1111,13 @@ Returns nil if CONTEXT-WINDOW is 0."
                          (t nil))))))
 
 (defun pi-coding-agent--header-format-stats (stats last-usage model-obj)
-  "Format session STATS for header line.
+  "Format compact header stats from STATS.
+Shows only cumulative session cost and last-turn context usage.
 LAST-USAGE is the most recent message's token usage.
 MODEL-OBJ contains model info including context window.
 Returns nil if STATS is nil."
   (when stats
-    (let* ((tokens (plist-get stats :tokens))
-           (input (or (plist-get tokens :input) 0))
-           (output (or (plist-get tokens :output) 0))
-           (cache-read (or (plist-get tokens :cacheRead) 0))
-           (cache-write (or (plist-get tokens :cacheWrite) 0))
-           (cost (or (plist-get stats :cost) 0))
+    (let* ((cost (or (plist-get stats :cost) 0))
            ;; Context percentage from LAST message usage, not cumulative totals.
            (last-input (or (plist-get last-usage :input) 0))
            (last-output (or (plist-get last-usage :output) 0))
@@ -1130,10 +1126,7 @@ Returns nil if STATS is nil."
            (context-tokens (+ last-input last-output last-cache-read last-cache-write))
            (context-window (or (plist-get model-obj :contextWindow) 0)))
       (concat
-       " │ ↑" (pi-coding-agent--format-tokens-compact input)
-       " ↓" (pi-coding-agent--format-tokens-compact output)
-       " R" (pi-coding-agent--format-tokens-compact cache-read)
-       " W" (pi-coding-agent--format-tokens-compact cache-write)
+       " │"
        (format " $%.2f" cost)
        (pi-coding-agent--header-format-context context-tokens context-window)))))
 
