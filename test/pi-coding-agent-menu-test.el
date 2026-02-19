@@ -69,6 +69,7 @@
           pi-coding-agent--local-user-message "user text"
           pi-coding-agent--aborted t
           pi-coding-agent--extension-status '(("ext1" . "status"))
+          pi-coding-agent--working-message "Reading README..."
           pi-coding-agent--message-start-marker (point-marker)
           pi-coding-agent--streaming-marker (point-marker)
           pi-coding-agent--thinking-marker (point-marker)
@@ -77,7 +78,8 @@
           pi-coding-agent--in-code-block t
           pi-coding-agent--in-thinking-block t
           pi-coding-agent--line-parse-state 'code-fence
-          pi-coding-agent--pending-tool-overlay (make-overlay 1 1))
+          pi-coding-agent--pending-tool-overlay (make-overlay 1 1)
+          pi-coding-agent--activity-phase "running")
     ;; Add entry to tool-args-cache
     (puthash "tool-1" '(:path "/test") pi-coding-agent--tool-args-cache)
     ;; Clear the buffer
@@ -91,6 +93,7 @@
     (should (null pi-coding-agent--local-user-message))
     (should (null pi-coding-agent--aborted))
     (should (null pi-coding-agent--extension-status))
+    (should (null pi-coding-agent--working-message))
     (should (null pi-coding-agent--message-start-marker))
     (should (null pi-coding-agent--streaming-marker))
     (should (null pi-coding-agent--thinking-marker))
@@ -100,6 +103,7 @@
     (should (null pi-coding-agent--in-thinking-block))
     (should (eq pi-coding-agent--line-parse-state 'line-start))
     (should (null pi-coding-agent--pending-tool-overlay))
+    (should (equal pi-coding-agent--activity-phase "idle"))
     ;; Tool args cache should be empty
     (should (= 0 (hash-table-count pi-coding-agent--tool-args-cache)))))
 
@@ -424,15 +428,17 @@ Also verifies that the new session-file is stored in state for reload to work."
       (when (buffer-live-p chat-buf)
         (kill-buffer chat-buf)))))
 
-(ert-deftest pi-coding-agent-test-send-stops-spinner-when-process-dead ()
-  "Sending when process is dead stops spinner and resets status."
-  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-spinner-dead*"))
-        (input-buf (get-buffer-create "*pi-coding-agent-test-spinner-dead-input*")))
+(ert-deftest pi-coding-agent-test-send-resets-activity-when-process-dead ()
+  "Sending when process is dead resets activity phase and status."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-process-dead*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-process-dead-input*")))
     (unwind-protect
         (progn
           (with-current-buffer chat-buf
             (pi-coding-agent-chat-mode)
-            (setq pi-coding-agent--input-buffer input-buf)
+            (setq pi-coding-agent--input-buffer input-buf
+                  pi-coding-agent--activity-phase "running"
+                  pi-coding-agent--status 'idle)
             ;; Set up dead process
             (let ((dead-proc (start-process "test-dead" nil "true")))
               (should (pi-coding-agent-test-wait-for-process-exit dead-proc))
@@ -442,8 +448,9 @@ Also verifies that the new session-file is stored in state for reload to work."
             (setq pi-coding-agent--chat-buffer chat-buf)
             (insert "test message")
             (pi-coding-agent-send))
-          ;; Verify spinner stopped and status reset
+          ;; Verify activity phase and status reset
           (with-current-buffer chat-buf
+            (should (equal pi-coding-agent--activity-phase "idle"))
             (should (eq pi-coding-agent--status 'idle))))
       (when (buffer-live-p chat-buf) (kill-buffer chat-buf))
       (when (buffer-live-p input-buf) (kill-buffer input-buf)))))
@@ -529,7 +536,7 @@ Also verifies that the new session-file is stored in state for reload to work."
                        (lambda (_proc msg _cb)
                          (setq sent-message (plist-get msg :message))))
                       ((symbol-function 'read-string)
-                       (lambda (_prompt) "world")))
+                       (lambda (&rest _args) "world")))
               (pi-coding-agent--run-custom-command cmd)
               ;; Should send literal /greet world, NOT expanded prompt
               (should (equal sent-message "/greet world")))))
@@ -551,7 +558,7 @@ Also verifies that the new session-file is stored in state for reload to work."
                        (lambda (_proc msg _cb)
                          (setq sent-message (plist-get msg :message))))
                       ((symbol-function 'read-string)
-                       (lambda (_prompt) "")))
+                       (lambda (&rest _args) "")))
               (pi-coding-agent--run-custom-command cmd)
               ;; Should send just /mycommand without trailing space
               (should (equal sent-message "/mycommand")))))

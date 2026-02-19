@@ -34,7 +34,7 @@
 ;; - Buffer-local session variables (the shared mutable state)
 ;; - Buffer creation, naming, and navigation
 ;; - Display primitives (append-to-chat, scroll preservation, separators)
-;; - Header-line formatting and spinner
+;; - Header-line formatting and activity phases
 ;; - Sending infrastructure (send-prompt, abort-send)
 ;; - Major mode definitions (chat-mode, input-mode)
 
@@ -233,6 +233,11 @@ Subtle blue-tinted background derived from the current theme."
 (defface pi-coding-agent-model-name
   '((t :inherit font-lock-type-face))
   "Face for model name in header line."
+  :group 'pi-coding-agent)
+
+(defface pi-coding-agent-activity-phase
+  '((t :inherit shadow))
+  "Face for activity phase label in header line."
   :group 'pi-coding-agent)
 
 (defface pi-coding-agent-retry-notice
@@ -697,6 +702,22 @@ Starts as `line-start' because content begins after separator newline.")
 ;; pi-coding-agent--status is defined in pi-coding-agent-core.el as the single source of truth
 ;; for session activity state (idle, sending, streaming, compacting)
 
+(defvar-local pi-coding-agent--activity-phase "idle"
+  "Fine-grained activity phase for header-line display.
+One of \"thinking\", \"replying\", \"running\",
+\"compact\", or \"idle\".
+Always populated and rendered in a fixed-width slot.")
+
+(defun pi-coding-agent--set-activity-phase (phase)
+  "Set activity PHASE for header-line display in current chat buffer.
+PHASE should be one of \"thinking\", \"replying\",
+\"running\", \"compact\", \"idle\".
+Returns non-nil when the phase changed."
+  (unless (equal pi-coding-agent--activity-phase phase)
+    (setq pi-coding-agent--activity-phase phase)
+    (force-mode-line-update t)
+    t))
+
 (defvar-local pi-coding-agent--cached-stats nil
   "Cached session statistics for header-line display.
 Updated after each agent turn completes.")
@@ -800,8 +821,10 @@ When set but different from pi's message, we display pi's version
 
 (defvar-local pi-coding-agent--extension-status nil
   "Alist of extension status messages for header-line display.
-Keys are extension identifiers (strings), values are status text.
-Displayed in header-line after model/thinking info with | separator.")
+Keys are extension identifiers (strings), values are status text.")
+
+(defvar-local pi-coding-agent--working-message nil
+  "Transient extension working message for header-line display.")
 
 (defvar-local pi-coding-agent--session-name nil
   "Cached session name for header-line display.
@@ -1056,63 +1079,6 @@ Removes common prefixes like \"Claude \" and suffixes like \" (latest)\"."
     (replace-regexp-in-string " (latest)$" "")
     (replace-regexp-in-string "^claude-" "")))
 
-(defvar pi-coding-agent--spinner-frames ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
-  "Frames for the busy spinner animation.")
-
-(defvar pi-coding-agent--spinner-index 0
-  "Current frame index in the spinner animation (shared for sync).")
-
-(defvar pi-coding-agent--spinner-timer nil
-  "Timer for animating spinners (shared across sessions).")
-
-(defvar pi-coding-agent--spinning-sessions nil
-  "List of chat buffers currently spinning.")
-
-(defun pi-coding-agent--spinner-start ()
-  "Start the spinner for current session."
-  (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
-    (when (and chat-buf (not (memq chat-buf pi-coding-agent--spinning-sessions)))
-      (push chat-buf pi-coding-agent--spinning-sessions)
-      ;; Start global timer if not running
-      (unless pi-coding-agent--spinner-timer
-        (setq pi-coding-agent--spinner-index 0)
-        (setq pi-coding-agent--spinner-timer
-              (run-with-timer 0 0.1 #'pi-coding-agent--spinner-tick))))))
-
-(defun pi-coding-agent--spinner-stop (&optional chat-buf)
-  "Stop the spinner for current session.
-CHAT-BUF is the buffer to stop spinning; if nil, uses current context.
-Note: When called from async callbacks, pass CHAT-BUF explicitly."
-  (let ((chat-buf (or chat-buf (pi-coding-agent--get-chat-buffer))))
-    (setq pi-coding-agent--spinning-sessions (delq chat-buf pi-coding-agent--spinning-sessions))
-    ;; Stop global timer if no sessions spinning
-    (when (and pi-coding-agent--spinner-timer (null pi-coding-agent--spinning-sessions))
-      (cancel-timer pi-coding-agent--spinner-timer)
-      (setq pi-coding-agent--spinner-timer nil))))
-
-(defun pi-coding-agent--spinner-tick ()
-  "Advance spinner to next frame and update spinning sessions."
-  (setq pi-coding-agent--spinner-index
-        (mod (1+ pi-coding-agent--spinner-index) (length pi-coding-agent--spinner-frames)))
-  ;; Only update windows showing spinning sessions
-  (dolist (buf pi-coding-agent--spinning-sessions)
-    (when (buffer-live-p buf)
-      (let ((input-buf (buffer-local-value 'pi-coding-agent--input-buffer buf)))
-        ;; Update input buffer's header line (where spinner shows)
-        (when (and input-buf (buffer-live-p input-buf))
-          (dolist (win (get-buffer-window-list input-buf nil t))
-            (with-selected-window win
-              (force-mode-line-update))))))))
-
-(defun pi-coding-agent--spinner-current ()
-  "Return current spinner frame if this session is spinning."
-  (let ((chat-buf (cond
-                   ((derived-mode-p 'pi-coding-agent-chat-mode) (current-buffer))
-                   ((derived-mode-p 'pi-coding-agent-input-mode) pi-coding-agent--chat-buffer)
-                   (t nil))))
-    (when (and chat-buf (memq chat-buf pi-coding-agent--spinning-sessions))
-      (aref pi-coding-agent--spinner-frames pi-coding-agent--spinner-index))))
-
 ;;; Header-Line Formatting
 
 (defvar pi-coding-agent--header-model-map
@@ -1132,55 +1098,93 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
 (defun pi-coding-agent--header-format-context (context-tokens context-window)
   "Format context usage as percentage with color coding.
 CONTEXT-TOKENS is the tokens used, CONTEXT-WINDOW is the max.
+When CONTEXT-TOKENS is nil, usage is unknown and rendered as \"?\".
 Returns nil if CONTEXT-WINDOW is 0."
   (when (> context-window 0)
-    (let* ((pct (* (/ (float context-tokens) context-window) 100))
-           ;; Note: %% needed because % has special meaning in header-line-format
-           (pct-str (format " %.1f%%%%/%s" pct
-                            (pi-coding-agent--format-tokens-compact context-window))))
-      (propertize pct-str
-                  'face (cond
-                         ((> pct pi-coding-agent-context-error-threshold) 'error)
-                         ((> pct pi-coding-agent-context-warning-threshold) 'warning)
-                         (t nil))))))
+    (if (null context-tokens)
+        (format " ?/%s" (pi-coding-agent--format-tokens-compact context-window))
+      (let* ((pct (* (/ (float context-tokens) context-window) 100))
+             ;; Note: %% needed because % has special meaning in header-line-format
+             (pct-str (format " %.1f%%%%/%s" pct
+                              (pi-coding-agent--format-tokens-compact context-window))))
+        (propertize pct-str
+                    'face (cond
+                           ((> pct pi-coding-agent-context-error-threshold) 'error)
+                           ((> pct pi-coding-agent-context-warning-threshold) 'warning)
+                           (t nil)))))))
 
 (defun pi-coding-agent--header-format-stats (stats last-usage model-obj)
-  "Format session STATS for header line.
+  "Format compact header stats from STATS.
+Shows only cumulative session cost and last-turn context usage.
 LAST-USAGE is the most recent message's token usage.
 MODEL-OBJ contains model info including context window.
 Returns nil if STATS is nil."
   (when stats
-    (let* ((tokens (plist-get stats :tokens))
-           (input (or (plist-get tokens :input) 0))
-           (output (or (plist-get tokens :output) 0))
-           (cache-read (or (plist-get tokens :cacheRead) 0))
-           (cache-write (or (plist-get tokens :cacheWrite) 0))
-           (cost (or (plist-get stats :cost) 0))
+    (let* ((cost (or (plist-get stats :cost) 0))
            ;; Context percentage from LAST message usage, not cumulative totals.
-           (last-input (or (plist-get last-usage :input) 0))
-           (last-output (or (plist-get last-usage :output) 0))
-           (last-cache-read (or (plist-get last-usage :cacheRead) 0))
-           (last-cache-write (or (plist-get last-usage :cacheWrite) 0))
-           (context-tokens (+ last-input last-output last-cache-read last-cache-write))
+           ;; After compaction, usage is unknown until the next assistant message.
+           (context-tokens (when last-usage
+                             (+ (or (plist-get last-usage :input) 0)
+                                (or (plist-get last-usage :output) 0)
+                                (or (plist-get last-usage :cacheRead) 0)
+                                (or (plist-get last-usage :cacheWrite) 0))))
            (context-window (or (plist-get model-obj :contextWindow) 0)))
       (concat
-       " │ ↑" (pi-coding-agent--format-tokens-compact input)
-       " ↓" (pi-coding-agent--format-tokens-compact output)
-       " R" (pi-coding-agent--format-tokens-compact cache-read)
-       " W" (pi-coding-agent--format-tokens-compact cache-write)
+       " │"
        (format " $%.2f" cost)
        (pi-coding-agent--header-format-context context-tokens context-window)))))
 
 (defun pi-coding-agent--header-format-extension-status (ext-status)
   "Format EXT-STATUS alist for header-line display.
-Returns string with | separator and all extension statuses, or empty string."
+Returns extension statuses joined with \" · \", or empty string."
   (if (null ext-status)
       ""
-    (concat " │ "
-            (mapconcat (lambda (pair)
-                         (propertize (cdr pair) 'face 'pi-coding-agent-retry-notice))
-                       ext-status
-                       " · "))))
+    (mapconcat (lambda (pair)
+                 (propertize (cdr pair) 'face 'pi-coding-agent-retry-notice))
+               ext-status
+               " · ")))
+
+(defun pi-coding-agent--header-format-identity (model-short thinking activity-phase-str)
+  "Format identity group from MODEL-SHORT, THINKING, and ACTIVITY-PHASE-STR."
+  (concat
+   (propertize model-short
+               'face 'pi-coding-agent-model-name
+               'mouse-face 'highlight
+               'help-echo "mouse-1: Select model"
+               'local-map pi-coding-agent--header-model-map)
+   (if (string-empty-p thinking)
+       ""
+     (concat " • "
+             (propertize thinking
+                         'mouse-face 'highlight
+                         'help-echo "mouse-1: Cycle thinking level"
+                         'local-map pi-coding-agent--header-thinking-map)))
+   " " activity-phase-str))
+
+(defun pi-coding-agent--header-format-context-group (session-name)
+  "Format context group from SESSION-NAME.
+Returns a leading-pipe group string or empty string
+when no session name exists."
+  (if (and session-name (not (string-empty-p session-name)))
+      (concat " │ " (pi-coding-agent--truncate-string session-name 30))
+    ""))
+
+(defun pi-coding-agent--header-format-extension-group (ext-status working-message)
+  "Format extension group from EXT-STATUS and WORKING-MESSAGE.
+Returns a leading-pipe group string or empty string
+when no extension info exists."
+  (let* ((status-str (pi-coding-agent--header-format-extension-status ext-status))
+         (working-str (if (and working-message (not (string-empty-p working-message)))
+                          (propertize working-message 'face 'shadow)
+                        ""))
+         (parts nil))
+    (unless (string-empty-p status-str)
+      (push status-str parts))
+    (unless (string-empty-p working-str)
+      (push working-str parts))
+    (if parts
+        (concat " │ " (mapconcat #'identity (nreverse parts) " · "))
+      "")))
 
 (defun pi-coding-agent--header-line-string ()
   "Return formatted header-line string for input buffer.
@@ -1198,6 +1202,7 @@ Accesses state from the linked chat buffer."
          (stats (and chat-buf (buffer-local-value 'pi-coding-agent--cached-stats chat-buf)))
          (last-usage (and chat-buf (buffer-local-value 'pi-coding-agent--last-usage chat-buf)))
          (ext-status (and chat-buf (buffer-local-value 'pi-coding-agent--extension-status chat-buf)))
+         (working-message (and chat-buf (buffer-local-value 'pi-coding-agent--working-message chat-buf)))
          (session-name (and chat-buf (buffer-local-value 'pi-coding-agent--session-name chat-buf)))
          (model-obj (plist-get state :model))
          (model-name (cond
@@ -1207,32 +1212,17 @@ Accesses state from the linked chat buffer."
          (model-short (if (string-empty-p model-name) "..."
                         (pi-coding-agent--shorten-model-name model-name)))
          (thinking (or (plist-get state :thinking-level) ""))
-         (status-str (if-let ((spinner (pi-coding-agent--spinner-current)))
-                         (concat " " spinner)
-                       "  ")))  ; Same width as " ⠋" to prevent jumping
+         (activity-phase (or (and chat-buf
+                                  (buffer-local-value 'pi-coding-agent--activity-phase chat-buf))
+                             "idle"))
+         (activity-phase-str
+          (propertize (format "%-8s" activity-phase)
+                      'face 'pi-coding-agent-activity-phase)))
     (concat
-     ;; Model (clickable)
-     (propertize model-short
-                 'face 'pi-coding-agent-model-name
-                 'mouse-face 'highlight
-                 'help-echo "mouse-1: Select model"
-                 'local-map pi-coding-agent--header-model-map)
-     ;; Thinking level (clickable)
-     (unless (string-empty-p thinking)
-       (concat " • "
-               (propertize thinking
-                           'mouse-face 'highlight
-                           'help-echo "mouse-1: Cycle thinking level"
-                           'local-map pi-coding-agent--header-thinking-map)))
-     ;; Spinner/status (right after model/thinking)
-     status-str
-     ;; Stats (if available)
+     (pi-coding-agent--header-format-identity model-short thinking activity-phase-str)
      (pi-coding-agent--header-format-stats stats last-usage model-obj)
-     ;; Extension status (if any)
-     (pi-coding-agent--header-format-extension-status ext-status)
-     ;; Session name at end (truncated) - like a title
-     (when session-name
-       (concat " │ " (pi-coding-agent--truncate-string session-name 30))))))
+     (pi-coding-agent--header-format-context-group session-name)
+     (pi-coding-agent--header-format-extension-group ext-status working-message))))
 
 ;;; State Management
 
@@ -1287,12 +1277,11 @@ Shows an error message if process is unavailable."
 
 (defun pi-coding-agent--abort-send (chat-buf)
   "Clean up after a failed send attempt in CHAT-BUF.
-Stops spinner and resets status to idle."
+Resets activity phase and status to idle."
   (when (buffer-live-p chat-buf)
     (with-current-buffer chat-buf
-      (pi-coding-agent--spinner-stop)
       (setq pi-coding-agent--status 'idle)
-      (force-mode-line-update))))
+      (pi-coding-agent--set-activity-phase "idle"))))
 
 
 (provide 'pi-coding-agent-ui)
