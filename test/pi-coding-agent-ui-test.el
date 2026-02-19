@@ -183,10 +183,72 @@ This ensures all files get code fences for consistent display."
     (should (string-match-p "send" header))))
 
 (ert-deftest pi-coding-agent-test-startup-header-shows-pi-coding-agent-version ()
-  "Startup header includes pi CLI version."
+  "Startup header includes pi CLI version label."
   (let ((header (pi-coding-agent--format-startup-header)))
-    ;; Should show "Pi X.Y.Z" or "Pi Unknown" in separator
+    ;; Should show "Pi X.Y.Z" or placeholder text in separator.
     (should (string-match-p "Pi " header))))
+
+(ert-deftest pi-coding-agent-test-request-pi-version-async-retries-lock-errors ()
+  "Version lookup retries lockfile failures, then returns success."
+  (unless (fboundp 'pi-coding-agent--request-pi-version-async)
+    (ert-skip "Async version lookup not available in loaded package"))
+  (let ((attempts 0)
+        (delays nil)
+        (resolved-version nil))
+    (cl-letf (((symbol-function 'pi-coding-agent--run-pi-version-once-async)
+               (lambda (callback)
+                 (setq attempts (1+ attempts))
+                 (if (= attempts 1)
+                     (funcall callback
+                              '(:success nil
+                                :version nil
+                                :stdout nil
+                                :stderr "Error: Lock file is already being held"
+                                :exit-code 1))
+                   (funcall callback
+                            '(:success t
+                              :version "0.53.0"
+                              :stdout "0.53.0"
+                              :stderr nil
+                              :exit-code 0)))))
+              ((symbol-function 'run-at-time)
+               (lambda (secs _repeat fn &rest args)
+                 (push secs delays)
+                 (apply fn args)
+                 'mock-timer)))
+      (pi-coding-agent--request-pi-version-async
+       (lambda (version)
+         (setq resolved-version version))))
+    (should (= attempts 2))
+    (should (equal resolved-version "0.53.0"))
+    (should (equal delays (list pi-coding-agent--version-retry-delay)))))
+
+(ert-deftest pi-coding-agent-test-request-pi-version-async-does-not-retry-other-errors ()
+  "Version lookup does not retry non-lock failures."
+  (unless (fboundp 'pi-coding-agent--request-pi-version-async)
+    (ert-skip "Async version lookup not available in loaded package"))
+  (let ((attempts 0)
+        (scheduled nil)
+        (resolved-version 'unset))
+    (cl-letf (((symbol-function 'pi-coding-agent--run-pi-version-once-async)
+               (lambda (callback)
+                 (setq attempts (1+ attempts))
+                 (funcall callback
+                          '(:success nil
+                            :version nil
+                            :stdout nil
+                            :stderr "Some other failure"
+                            :exit-code 1))))
+              ((symbol-function 'run-at-time)
+               (lambda (&rest _)
+                 (setq scheduled t)
+                 'mock-timer)))
+      (pi-coding-agent--request-pi-version-async
+       (lambda (version)
+         (setq resolved-version version))))
+    (should (= attempts 1))
+    (should-not scheduled)
+    (should (null resolved-version))))
 
 ;;; Copy Visible Text
 
