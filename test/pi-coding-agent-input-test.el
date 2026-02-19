@@ -2264,6 +2264,11 @@ Pi handles command expansion on the server side."
     (should (string-match-p "25.0%%" result))
     (should (string-match-p "200k" result))))
 
+(ert-deftest pi-coding-agent-test-header-format-context-shows-unknown-when-tokens-missing ()
+  "Context format shows unknown usage when token count is unavailable."
+  (let ((result (pi-coding-agent--header-format-context nil 200000)))
+    (should (string-match-p "\\?/200k" result))))
+
 (ert-deftest pi-coding-agent-test-header-format-context-warning-over-70 ()
   "Context format uses warning face over 70%."
   (let ((result (pi-coding-agent--header-format-context 150000 200000)))
@@ -2286,6 +2291,32 @@ Pi handles command expansion on the server side."
                  :usage (:input 1000 :output 500 :cacheRead 200 :cacheWrite 50))))
     (should pi-coding-agent--last-usage)
     (should (equal (plist-get pi-coding-agent--last-usage :input) 1000))))
+
+(ert-deftest pi-coding-agent-test-message-end-refreshes-header-for-assistant ()
+  "Assistant message_end refreshes header stats for fresher cost updates."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((refresh-count 0))
+      (cl-letf (((symbol-function 'pi-coding-agent--refresh-header)
+                 (lambda () (setq refresh-count (1+ refresh-count)))))
+        (pi-coding-agent--handle-display-event
+         '(:type "message_end"
+           :message (:role "assistant"
+                     :stopReason "stop"
+                     :usage (:input 100 :output 50 :cacheRead 10 :cacheWrite 5)))))
+      (should (= refresh-count 1)))))
+
+(ert-deftest pi-coding-agent-test-message-end-does-not-refresh-header-for-user ()
+  "User message_end does not trigger header stats refresh."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((refresh-count 0))
+      (cl-letf (((symbol-function 'pi-coding-agent--refresh-header)
+                 (lambda () (setq refresh-count (1+ refresh-count)))))
+        (pi-coding-agent--handle-display-event
+         '(:type "message_end"
+           :message (:role "user" :content "hello"))))
+      (should (= refresh-count 0)))))
 
 (ert-deftest pi-coding-agent-test-message-end-updates-usage-for-tool-use ()
   "message_end with stopReason=toolUse updates pi-coding-agent--last-usage."
@@ -2347,6 +2378,15 @@ Errors still consume context, so their usage data is valid for display."
     (should-not (string-match-p "↓" result))
     (should-not (string-match-p "R" result))
     (should-not (string-match-p "W" result))))
+
+(ert-deftest pi-coding-agent-test-header-format-stats-shows-unknown-context-without-usage ()
+  "Header stats show unknown context when no last assistant usage is available."
+  (let* ((stats '(:tokens (:input 1000 :output 500 :cacheRead 2000 :cacheWrite 100)
+                  :cost 0.05))
+         (model-obj '(:contextWindow 200000))
+         (result (pi-coding-agent--header-format-stats stats nil model-obj)))
+    (should (string-match-p "\\$0.05" result))
+    (should (string-match-p "\\?/200k" result))))
 
 ;;; File Reference Completion (@)
 

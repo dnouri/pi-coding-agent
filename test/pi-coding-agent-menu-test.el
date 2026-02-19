@@ -536,7 +536,7 @@ Also verifies that the new session-file is stored in state for reload to work."
                        (lambda (_proc msg _cb)
                          (setq sent-message (plist-get msg :message))))
                       ((symbol-function 'read-string)
-                       (lambda (_prompt) "world")))
+                       (lambda (&rest _args) "world")))
               (pi-coding-agent--run-custom-command cmd)
               ;; Should send literal /greet world, NOT expanded prompt
               (should (equal sent-message "/greet world")))))
@@ -558,7 +558,7 @@ Also verifies that the new session-file is stored in state for reload to work."
                        (lambda (_proc msg _cb)
                          (setq sent-message (plist-get msg :message))))
                       ((symbol-function 'read-string)
-                       (lambda (_prompt) "")))
+                       (lambda (&rest _args) "")))
               (pi-coding-agent--run-custom-command cmd)
               ;; Should send just /mycommand without trailing space
               (should (equal sent-message "/mycommand")))))

@@ -742,18 +742,23 @@ Updates buffer-local state and renders display updates."
           ;; Error during streaming (e.g., API error)
           (pi-coding-agent--display-error (plist-get msg-event :reason))))))
     ("message_end"
-     (let ((message (plist-get event :message)))
+     (let* ((message (plist-get event :message))
+            (assistant-p (equal (plist-get message :role) "assistant")))
        ;; Display error if message ended with error (e.g., API error)
        (when (equal (plist-get message :stopReason) "error")
          (pi-coding-agent--display-error (plist-get message :errorMessage)))
        ;; Capture usage from assistant messages for context % calculation.
        ;; Skip aborted messages - they may have incomplete usage data and
-       ;; would reset context percentage to 0%.  Matches TUI footer.ts behavior.
+       ;; would reset context percentage.  Matches TUI footer.ts behavior.
        ;; Note: error messages DO have valid usage data (tokens were consumed).
-       (when (and (equal (plist-get message :role) "assistant")
+       (when (and assistant-p
                   (not (equal (plist-get message :stopReason) "aborted"))
                   (plist-get message :usage))
-         (pi-coding-agent--set-last-usage (plist-get message :usage))))
+         (pi-coding-agent--set-last-usage (plist-get message :usage)))
+       ;; Refresh cumulative stats after each assistant message_end so
+       ;; cost and totals update without waiting for agent_end.
+       (when assistant-p
+         (pi-coding-agent--refresh-header)))
      (pi-coding-agent--render-complete-message))
     ("tool_execution_start"
      (pi-coding-agent--set-activity-phase "running")

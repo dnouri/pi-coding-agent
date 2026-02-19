@@ -1098,17 +1098,20 @@ Removes common prefixes like \"Claude \" and suffixes like \" (latest)\"."
 (defun pi-coding-agent--header-format-context (context-tokens context-window)
   "Format context usage as percentage with color coding.
 CONTEXT-TOKENS is the tokens used, CONTEXT-WINDOW is the max.
+When CONTEXT-TOKENS is nil, usage is unknown and rendered as \"?\".
 Returns nil if CONTEXT-WINDOW is 0."
   (when (> context-window 0)
-    (let* ((pct (* (/ (float context-tokens) context-window) 100))
-           ;; Note: %% needed because % has special meaning in header-line-format
-           (pct-str (format " %.1f%%%%/%s" pct
-                            (pi-coding-agent--format-tokens-compact context-window))))
-      (propertize pct-str
-                  'face (cond
-                         ((> pct pi-coding-agent-context-error-threshold) 'error)
-                         ((> pct pi-coding-agent-context-warning-threshold) 'warning)
-                         (t nil))))))
+    (if (null context-tokens)
+        (format " ?/%s" (pi-coding-agent--format-tokens-compact context-window))
+      (let* ((pct (* (/ (float context-tokens) context-window) 100))
+             ;; Note: %% needed because % has special meaning in header-line-format
+             (pct-str (format " %.1f%%%%/%s" pct
+                              (pi-coding-agent--format-tokens-compact context-window))))
+        (propertize pct-str
+                    'face (cond
+                           ((> pct pi-coding-agent-context-error-threshold) 'error)
+                           ((> pct pi-coding-agent-context-warning-threshold) 'warning)
+                           (t nil)))))))
 
 (defun pi-coding-agent--header-format-stats (stats last-usage model-obj)
   "Format compact header stats from STATS.
@@ -1119,11 +1122,12 @@ Returns nil if STATS is nil."
   (when stats
     (let* ((cost (or (plist-get stats :cost) 0))
            ;; Context percentage from LAST message usage, not cumulative totals.
-           (last-input (or (plist-get last-usage :input) 0))
-           (last-output (or (plist-get last-usage :output) 0))
-           (last-cache-read (or (plist-get last-usage :cacheRead) 0))
-           (last-cache-write (or (plist-get last-usage :cacheWrite) 0))
-           (context-tokens (+ last-input last-output last-cache-read last-cache-write))
+           ;; After compaction, usage is unknown until the next assistant message.
+           (context-tokens (when last-usage
+                             (+ (or (plist-get last-usage :input) 0)
+                                (or (plist-get last-usage :output) 0)
+                                (or (plist-get last-usage :cacheRead) 0)
+                                (or (plist-get last-usage :cacheWrite) 0))))
            (context-window (or (plist-get model-obj :contextWindow) 0)))
       (concat
        " │"
