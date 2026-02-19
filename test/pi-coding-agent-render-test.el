@@ -255,6 +255,36 @@ Models may send \\n\\n before thinking content too."
       ;; The > must NOT be glued to the text
       (should-not (string-match-p "my answer\\.>" text)))))
 
+(ert-deftest pi-coding-agent-test-thinking-delta-allows-syntax-propertize ()
+  "Thinking deltas must allow `syntax-propertize' cache to stay in sync.
+Each delta rewrites the entire blockquote.  If `before-change-functions'
+are suppressed (via `inhibit-modification-hooks'), `syntax-ppss-flush-cache'
+never fires and `syntax-propertize--done' stays stale.  Then when
+`font-lock-ensure' runs, `syntax-propertize' skips the rewritten region,
+markdown's syntax properties are missing, and blockquote font-lock
+keywords can't match — leaving `fontified' t but no faces.
+
+This test simulates the jit-lock scenario: fontify first, then stream
+more deltas, then verify syntax-propertize--done was properly reset."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-thinking-start)
+    ;; Send initial content
+    (pi-coding-agent--display-thinking-delta "First paragraph with text.")
+    ;; Fontify — this pushes syntax-propertize--done forward
+    (font-lock-ensure (point-min) (point-max))
+    (let ((done-before (bound-and-true-p syntax-propertize--done)))
+      ;; Now stream more content (triggers rewrite)
+      (pi-coding-agent--display-thinking-delta "\n\nSecond paragraph.")
+      ;; syntax-propertize--done must have been reset to before the
+      ;; rewritten region, so font-lock-ensure will re-propertize
+      (let ((done-after (bound-and-true-p syntax-propertize--done))
+            (thinking-start (marker-position
+                             pi-coding-agent--thinking-start-marker)))
+        (should (< done-after done-before))
+        (should (<= done-after thinking-start))))))
+
 (ert-deftest pi-coding-agent-test-spacing-blank-line-before-tool ()
   "Tool block is preceded by blank line when after text."
   (with-temp-buffer
@@ -3219,17 +3249,21 @@ which caused major performance issues with large buffers."
         (pi-coding-agent--display-message-delta "Test delta")
         (should-not hook-called)))))
 
-(ert-deftest pi-coding-agent-test-thinking-delta-inhibits-modification-hooks ()
-  "Thinking delta inhibits modification hooks for performance."
+(ert-deftest pi-coding-agent-test-thinking-delta-fires-modification-hooks ()
+  "Thinking delta must allow modification hooks for syntax propertization.
+Suppressing modification hooks via `inhibit-modification-hooks' prevents
+`syntax-ppss-flush-cache' from running, which leaves `syntax-propertize'
+stale and breaks blockquote fontification for large thinking blocks."
   (let ((hook-called nil))
     (cl-flet ((test-hook (beg end len) (setq hook-called t)))
       (with-temp-buffer
         (pi-coding-agent-chat-mode)
         (pi-coding-agent--display-agent-start)
+        (pi-coding-agent--display-thinking-start)
         (add-hook 'after-change-functions #'test-hook nil t)
         (setq hook-called nil)
         (pi-coding-agent--display-thinking-delta "Test thinking")
-        (should-not hook-called)))))
+        (should hook-called)))))
 
 (ert-deftest pi-coding-agent-test-tool-update-inhibits-modification-hooks ()
   "Tool update inhibits modification hooks for performance."

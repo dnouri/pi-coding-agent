@@ -301,12 +301,9 @@ separated from preceding content."
 
 (defun pi-coding-agent--display-thinking-delta (delta)
   "Display streaming thinking DELTA in the current thinking block.
-Normalizes boundary and paragraph whitespace while streaming.
-Inhibits modification hooks to prevent expensive jit-lock fontification
-on each delta - fontification happens at message end instead."
+Normalizes boundary and paragraph whitespace while streaming."
   (when (and delta pi-coding-agent--streaming-marker)
-    (let ((inhibit-read-only t)
-          (inhibit-modification-hooks t))
+    (let ((inhibit-read-only t))
       (if (and pi-coding-agent--thinking-start-marker
                pi-coding-agent--thinking-marker)
           (progn
