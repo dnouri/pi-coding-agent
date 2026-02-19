@@ -76,6 +76,7 @@
 ;; Optional: phscroll for horizontal table scrolling
 (require 'phscroll nil t)
 (declare-function phscroll-mode "phscroll" (&optional arg))
+
 (defcustom pi-coding-agent-phscroll-offer-install t
   "Whether to offer installing `phscroll' for horizontal table scrolling.
 When non-nil and phscroll is not installed, pi-coding-agent will
@@ -703,14 +704,15 @@ Starts as `line-start' because content begins after separator newline.")
 
 (defvar-local pi-coding-agent--activity-phase "idle"
   "Fine-grained activity phase for header-line display.
-One of: `thinking', `replying', `running', `compact', or `idle'.
+One of \"thinking\", \"replying\", \"running\",
+\"compact\", or \"idle\".
 Always populated and rendered in a fixed-width slot.")
 
 (defun pi-coding-agent--set-activity-phase (phase)
   "Set activity PHASE for header-line display in current chat buffer.
-PHASE should be one of: `thinking', `replying', `running', `compact', `idle'.
-Returns non-nil when the phase changed.
-Also triggers a header-line refresh when changed."
+PHASE should be one of \"thinking\", \"replying\",
+\"running\", \"compact\", \"idle\".
+Returns non-nil when the phase changed."
   (unless (equal pi-coding-agent--activity-phase phase)
     (setq pi-coding-agent--activity-phase phase)
     (force-mode-line-update t)
@@ -1137,7 +1139,7 @@ Returns nil if STATS is nil."
 
 (defun pi-coding-agent--header-format-extension-status (ext-status)
   "Format EXT-STATUS alist for header-line display.
-Returns all extension statuses joined with dots, or empty string."
+Returns extension statuses joined with \" · \", or empty string."
   (if (null ext-status)
       ""
     (mapconcat (lambda (pair)
@@ -1176,7 +1178,7 @@ Returns a leading-pipe group string or empty string
 when no extension info exists."
   (let* ((status-str (pi-coding-agent--header-format-extension-status ext-status))
          (working-str (if (and working-message (not (string-empty-p working-message)))
-                          (propertize working-message 'face 'pi-coding-agent-retry-notice)
+                          (propertize working-message 'face 'shadow)
                         ""))
          (parts nil))
     (unless (string-empty-p status-str)
