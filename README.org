@@ -20,6 +20,7 @@ An Emacs frontend for the [[https://shittycodingagent.ai/][pi coding agent]].
 - Syntax-highlighted code blocks and diffs
 - Collapsible tool output with smart preview (expand with TAB)
 - Click the model name or thinking level to change them
+- Rich header line: activity phase, session name, extension status
 - Input history with search (M-p/M-n, C-r)
 - Magit-style transient menu for all commands
 

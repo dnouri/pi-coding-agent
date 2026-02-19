@@ -625,8 +625,7 @@ since we don't display them locally. Let pi's message_start handle it."
             (insert "/fix-tests")
             (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
                       ((symbol-function 'process-live-p) (lambda (_) t))
-                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore)
-                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore))
+                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore))
               (pi-coding-agent-send)))
           
           ;; KEY ASSERTION: assistant-header-shown should still be t
@@ -1037,18 +1036,54 @@ since we don't display them locally. Let pi's message_start handle it."
        :statusText nil))
     (should-not (assoc "my-ext" pi-coding-agent--extension-status))))
 
+(ert-deftest pi-coding-agent-test-extension-ui-set-working-message ()
+  "extension_ui_request setWorkingMessage stores working text."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--working-message nil)
+    (pi-coding-agent--handle-extension-ui-request
+     '(:type "extension_ui_request"
+       :id "req-working"
+       :method "setWorkingMessage"
+       :message "📖 Skimming…"))
+    (should (equal pi-coding-agent--working-message "📖 Skimming…"))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-set-working-message-strips-ansi ()
+  "extension_ui_request setWorkingMessage strips ANSI escape codes."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--working-message nil)
+    (pi-coding-agent--handle-extension-ui-request
+     '(:type "extension_ui_request"
+       :id "req-working-ansi"
+       :method "setWorkingMessage"
+       :message "\e[38;5;39m📖 Skimming…\e[39m"))
+    (should (equal pi-coding-agent--working-message "📖 Skimming…"))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-set-working-message-clear ()
+  "extension_ui_request setWorkingMessage with nil clears message."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--working-message "Old")
+    (pi-coding-agent--handle-extension-ui-request
+     '(:type "extension_ui_request"
+       :id "req-working-clear"
+       :method "setWorkingMessage"
+       :message nil))
+    (should (null pi-coding-agent--working-message))))
+
 (ert-deftest pi-coding-agent-test-header-format-extension-status ()
-  "Extension status formats correctly in header-line."
+  "Extension status formatter returns inline status text without pipe."
   ;; Empty status returns empty string
   (should (equal (pi-coding-agent--header-format-extension-status nil) ""))
   ;; Single status
   (let ((result (pi-coding-agent--header-format-extension-status '(("ext1" . "Processing...")))))
-    (should (string-match-p "│" result))
+    (should-not (string-match-p "│" result))
     (should (string-match-p "Processing" result)))
   ;; Multiple statuses joined with separator
   (let ((result (pi-coding-agent--header-format-extension-status
                  '(("ext1" . "Status 1") ("ext2" . "Status 2")))))
-    (should (string-match-p "│" result))
+    (should-not (string-match-p "│" result))
     (should (string-match-p "Status 1" result))
     (should (string-match-p "Status 2" result))
     (should (string-match-p "·" result))))
@@ -2847,6 +2882,96 @@ Commands with embedded newlines should not have any lines deleted."
      '(:type "message_update"
        :assistantMessageEvent (:type "thinking_delta" :delta "Analyzing...")))
     (should (string-match-p "Analyzing..." (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-thinking-on-agent-start ()
+  "Activity phase becomes thinking on agent_start."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "idle")
+    (pi-coding-agent--handle-display-event '(:type "agent_start"))
+    (should (equal pi-coding-agent--activity-phase "thinking"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-replying-on-text-delta ()
+  "Activity phase becomes replying on text_delta."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "idle")
+    (pi-coding-agent--handle-display-event '(:type "agent_start"))
+    (pi-coding-agent--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "text_delta" :delta "Hello")))
+    (should (equal pi-coding-agent--activity-phase "replying"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-running-on-toolcall-start ()
+  "Activity phase becomes running when tool call generation starts."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "thinking")
+    (pi-coding-agent--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "toolcall_start" :contentIndex 0)
+       :message (:role "assistant"
+                 :content [(:type "toolCall"
+                            :id "call_1"
+                            :name "read"
+                            :arguments (:path "/tmp/file.txt"))])))
+    (should (equal pi-coding-agent--activity-phase "running"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-running-on-tool-start ()
+  "Activity phase becomes running on tool_execution_start."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "idle")
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolCallId "tool-1"
+       :toolName "bash"
+       :args (:command "ls")))
+    (should (equal pi-coding-agent--activity-phase "running"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-thinking-on-tool-end ()
+  "Activity phase returns to thinking on tool_execution_end."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "running")
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolCallId "tool-1"
+       :toolName "bash"
+       :args (:command "ls")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_end"
+       :toolCallId "tool-1"
+       :toolName "bash"
+       :result (:content nil)
+       :isError nil))
+    (should (equal pi-coding-agent--activity-phase "thinking"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-compact-on-compaction ()
+  "Activity phase becomes compact on auto_compaction_start."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "idle")
+    (pi-coding-agent--handle-display-event
+     '(:type "auto_compaction_start" :reason "threshold"))
+    (should (equal pi-coding-agent--activity-phase "compact"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-idle-on-agent-end ()
+  "Activity phase becomes idle on agent_end."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "thinking")
+    (pi-coding-agent--handle-display-event '(:type "agent_end"))
+    (should (equal pi-coding-agent--activity-phase "idle"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-idle-on-compaction-end ()
+  "Activity phase becomes idle on auto_compaction_end."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "compact")
+    (pi-coding-agent--handle-display-event
+     '(:type "auto_compaction_end" :aborted t :result nil))
+    (should (equal pi-coding-agent--activity-phase "idle"))))
 
 (ert-deftest pi-coding-agent-test-display-compaction-result-shows-header-tokens-summary ()
   "pi-coding-agent--display-compaction-result shows header, token count, and summary."
