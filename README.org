@@ -15,7 +15,7 @@ An Emacs frontend for the [[https://shittycodingagent.ai/][pi coding agent]].
 
 - Compose prompts in a full Emacs buffer: multi-line, copy/paste, macros, support for Vi bindings
 - Chat history as a markdown buffer: copy, save, search, navigate
-- Fork the converstaion at any point in the chat buffer (f)
+- Fork the conversation at any point in the chat buffer (f)
 - Live streaming output as bash commands and tool operations run
 - Syntax-highlighted code blocks and diffs
 - Collapsible tool output with smart preview (expand with TAB)
@@ -97,13 +97,24 @@ Or with =use-package=:
 
 * Usage
 
-Start a session with =M-x pi=. This opens two windows:
+Start a session with =M-x pi-coding-agent=. This opens two windows:
 - *Chat buffer* (top): Shows conversation history with rendered markdown
 - *Input buffer* (bottom): Where you compose prompts
 
 Type your prompt and press =C-c C-c= to send. Press =C-c C-p= for the full command menu.
 
-For multiple sessions in the same directory, use =C-u M-x pi= to create a named session.
+If you define =(defalias 'pi 'pi-coding-agent)=, then =M-x pi= works as a
+shortcut.
+
+Running =M-x pi-coding-agent= again from a pi buffer restores missing panes.
+If both chat and input are already visible in the current frame, the layout
+stays unchanged and focus moves to the input window.
+
+Use =M-x pi-coding-agent-toggle= to hide/show session windows in the
+current frame.
+
+For multiple sessions in the same directory, use
+=C-u M-x pi-coding-agent= to create a named session.
 
 * Key Bindings
 
@@ -174,7 +185,8 @@ unfold. Use =S-TAB= to cycle visibility of all turns at once.
 ** 💾 Sessions
 
 Each project directory gets its own session automatically. To run multiple
-sessions in the same directory, use =C-u M-x pi= to create a named session.
+sessions in the same directory, use =C-u M-x pi-coding-agent= to create a
+named session.
 
 Resume (=C-c C-r=) and fork (=C-c C-p f=) present a selection menu:
 pick from previous sessions or conversation messages to start from.

@@ -41,8 +41,11 @@
 ;;     Install from: https://github.com/misohena/phscroll
 ;;
 ;; Usage:
-;;   M-x pi           DWIM: hide, reuse, or create session
-;;   C-u M-x pi       Start a named session
+;;   M-x pi-coding-agent         Start or focus session in current project
+;;   C-u M-x pi-coding-agent     Start a named session
+;;   M-x pi-coding-agent-toggle  Hide/show session windows in current frame
+;;
+;; Many users define an alias: (defalias 'pi 'pi-coding-agent)
 ;;
 ;; Key Bindings:
 ;;   Input buffer:
@@ -89,6 +92,7 @@ Returns the chat buffer."
          (new-session nil))
     ;; Link buffers to each other
     (with-current-buffer chat-buf
+      (setq default-directory dir)
       (pi-coding-agent--set-input-buffer input-buf)
       ;; Start process if not already running
       (unless (and pi-coding-agent--process (process-live-p pi-coding-agent--process))
@@ -123,60 +127,63 @@ Returns the chat buffer."
       (when new-session
         (pi-coding-agent--display-startup-header)))
     (with-current-buffer input-buf
+      (setq default-directory dir)
       (pi-coding-agent--set-chat-buffer chat-buf))
     chat-buf))
 
 ;;;###autoload
 (defun pi-coding-agent (&optional session)
   "Start or switch to pi coding agent session in current project.
-Without prefix arg, DWIM behavior:
-  - From a pi buffer: hide this session (toggle off).
-  - Existing session for project: switch to it.
-  - No session: create a new one.
-With prefix arg, prompt for SESSION name to create a named session."
+With prefix arg, prompt for SESSION name to allow multiple sessions.
+If already in a pi buffer and no SESSION specified, ensures this session
+is visible. When both chat and input are already shown in the current
+frame, keeps layout unchanged and focuses the input window."
   (interactive
    (list (when current-prefix-arg
            (read-string "Session name: "))))
   (pi-coding-agent--check-dependencies)
-  (let ((existing (and (not session)
-                       (car (pi-coding-agent-project-buffers)))))
-    (cond
-     ;; In a pi buffer with no session arg: hide this session
-     ((and (not session)
-           (derived-mode-p 'pi-coding-agent-chat-mode 'pi-coding-agent-input-mode))
-      (pi-coding-agent--hide-session-windows))
-     ;; Existing session for this project (no session arg): reuse it
-     (existing
-      (let ((input-buf (buffer-local-value
-                        'pi-coding-agent--input-buffer existing)))
-        (pi-coding-agent--display-buffers existing input-buf)))
-     ;; Otherwise: create or find named session
-     (t
-      (let* ((dir (pi-coding-agent--session-directory))
-             (chat-buf (pi-coding-agent--setup-session dir session))
-             (input-buf (buffer-local-value 'pi-coding-agent--input-buffer chat-buf)))
-        (pi-coding-agent--display-buffers chat-buf input-buf))))))
+  (let (chat-buf input-buf)
+    (if (and (derived-mode-p 'pi-coding-agent-chat-mode 'pi-coding-agent-input-mode)
+             (not session))
+        ;; Already in pi buffer with no new session requested - use current session
+        (setq chat-buf (pi-coding-agent--get-chat-buffer)
+              input-buf (pi-coding-agent--get-input-buffer))
+      ;; Find or create session for current directory
+      (let ((dir (pi-coding-agent--session-directory)))
+        (setq chat-buf (pi-coding-agent--setup-session dir session))
+        (setq input-buf (buffer-local-value 'pi-coding-agent--input-buffer chat-buf))))
+    ;; When both windows are already visible in current frame, just focus
+    ;; the session input window. Otherwise restore/show the session layout.
+    (if (and (get-buffer-window-list chat-buf nil)
+             (get-buffer-window-list input-buf nil))
+        (pi-coding-agent--focus-input-window chat-buf input-buf)
+      (pi-coding-agent--display-buffers chat-buf input-buf))))
 
 ;;;###autoload
 (defun pi-coding-agent-toggle ()
   "Toggle pi coding agent window visibility for the current project.
-If pi windows are visible, hide them.  If hidden but a session
-exists, show them.  If no session exists, signal an error."
+If pi windows are visible in the current frame, hide them.
+If hidden there but a session exists, show them.
+If no session exists, signal an error."
   (interactive)
   (pi-coding-agent--check-dependencies)
-  (let ((chat-buf (car (pi-coding-agent-project-buffers))))
+  (let* ((chat-buf (if (derived-mode-p 'pi-coding-agent-chat-mode 'pi-coding-agent-input-mode)
+                       (pi-coding-agent--get-chat-buffer)
+                     (car (pi-coding-agent-project-buffers))))
+         (input-buf (and chat-buf
+                         (buffer-local-value 'pi-coding-agent--input-buffer chat-buf))))
     (cond
      ;; No session at all
      ((null chat-buf)
       (user-error "No pi session for this project"))
-     ;; Session visible: hide it
-     ((get-buffer-window-list chat-buf nil t)
+     ;; Session visible in current frame: hide it
+     ((or (get-buffer-window-list chat-buf nil)
+          (and input-buf (get-buffer-window-list input-buf nil)))
       (with-current-buffer chat-buf
         (pi-coding-agent--hide-session-windows)))
      ;; Session hidden: show it
      (t
-      (let ((input-buf (buffer-local-value 'pi-coding-agent--input-buffer chat-buf)))
-        (pi-coding-agent--display-buffers chat-buf input-buf))))))
+      (pi-coding-agent--display-buffers chat-buf input-buf)))))
 
 ;;;; Performance Optimizations
 

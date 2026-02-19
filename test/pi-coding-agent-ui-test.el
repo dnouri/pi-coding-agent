@@ -169,6 +169,52 @@ This ensures all files get code fences for consistent display."
         (ignore-errors (kill-buffer "*pi-coding-agent-chat:/tmp/pi-coding-agent-test-proc2/*"))
         (ignore-errors (kill-buffer "*pi-coding-agent-input:/tmp/pi-coding-agent-test-proc2/*"))))))
 
+(ert-deftest pi-coding-agent-test-display-buffers-uses-current-frame-window-list ()
+  "`pi-coding-agent--display-buffers' should query windows in current frame only."
+  (let ((root "/tmp/pi-coding-agent-test-display-frame-local/")
+        (all-frames-args nil))
+    (make-directory root t)
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil)))
+      (unwind-protect
+          (let* ((chat (pi-coding-agent--setup-session root nil))
+                 (input (buffer-local-value 'pi-coding-agent--input-buffer chat))
+                 (orig-get-buffer-window-list (symbol-function 'get-buffer-window-list)))
+            (delete-other-windows)
+            (cl-letf (((symbol-function 'get-buffer-window-list)
+                       (lambda (buffer minibuf &optional all-frames)
+                         (push all-frames all-frames-args)
+                         (funcall orig-get-buffer-window-list buffer minibuf all-frames))))
+              (pi-coding-agent--display-buffers chat input))
+            (should-not (memq t all-frames-args)))
+        (pi-coding-agent-test--kill-session-buffers root)
+        (delete-other-windows)))))
+
+(ert-deftest pi-coding-agent-test-hide-session-windows-uses-current-frame-window-list ()
+  "`pi-coding-agent--hide-session-windows' should query current frame windows only."
+  (let ((root "/tmp/pi-coding-agent-test-hide-frame-local/")
+        (all-frames-args nil))
+    (make-directory root t)
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil)))
+      (unwind-protect
+          (progn
+            (delete-other-windows)
+            (switch-to-buffer "*scratch*")
+            (setq default-directory root)
+            (pi-coding-agent)
+            (let ((chat (get-buffer (pi-coding-agent-test--chat-buffer-name root)))
+                  (orig-get-buffer-window-list (symbol-function 'get-buffer-window-list)))
+              (with-current-buffer chat
+                (cl-letf (((symbol-function 'get-buffer-window-list)
+                           (lambda (buffer minibuf &optional all-frames)
+                             (push all-frames all-frames-args)
+                             (funcall orig-get-buffer-window-list buffer minibuf all-frames))))
+                  (pi-coding-agent--hide-session-windows)))
+              (should-not (memq t all-frames-args))))
+        (pi-coding-agent-test--kill-session-buffers root)
+        (delete-other-windows)))))
+
 ;;; Startup Header
 
 (ert-deftest pi-coding-agent-test-startup-header-shows-version ()
