@@ -263,10 +263,24 @@ syntax highlighting while preserving mode identity and keybindings."
 
 ;;;; Sending Prompts
 
+(defun pi-coding-agent--accept-input-text (text)
+  "Accept TEXT from input buffer state.
+Adds TEXT to history, resets history navigation, and clears input."
+  (pi-coding-agent--history-add text)
+  (setq pi-coding-agent--input-ring-index nil
+        pi-coding-agent--input-saved nil)
+  (erase-buffer))
+
+(defun pi-coding-agent--queue-followup-text (chat-buf text)
+  "Accept TEXT and enqueue it as a follow-up in CHAT-BUF."
+  (pi-coding-agent--accept-input-text text)
+  (with-current-buffer chat-buf
+    (pi-coding-agent--push-followup text)))
+
 (defun pi-coding-agent-send ()
   "Send the current input buffer contents to pi.
 Clears the input buffer after sending.  Does nothing if buffer is empty.
-If pi is busy (streaming or compacting), adds to local follow-up queue.
+If pi is busy (sending, streaming, or compacting), queues a local follow-up.
 The /compact command is handled locally; other slash commands sent to pi."
   (interactive)
   (let* ((text (string-trim (buffer-string)))
@@ -276,18 +290,10 @@ The /compact command is handled locally; other slash commands sent to pi."
     (cond
      ((string-empty-p text) nil)
      (busy
-      (pi-coding-agent--history-add text)
-      (setq pi-coding-agent--input-ring-index nil
-            pi-coding-agent--input-saved nil)
-      (erase-buffer)
-      (with-current-buffer chat-buf
-        (pi-coding-agent--push-followup text))
+      (pi-coding-agent--queue-followup-text chat-buf text)
       (message "Pi: Message queued (will send after current response)"))
      (t
-      (pi-coding-agent--history-add text)
-      (setq pi-coding-agent--input-ring-index nil
-            pi-coding-agent--input-saved nil)
-      (erase-buffer)
+      (pi-coding-agent--accept-input-text text)
       (with-current-buffer chat-buf
         (pi-coding-agent--prepare-and-send text))))))
 
@@ -508,25 +514,29 @@ Shows error message if RPC fails."
 
 (defun pi-coding-agent-queue-steering ()
   "Send current input as a steering message.
-Steering messages are delivered after the current tool execution,
-interrupting any remaining tools.  Only works when agent is busy.
+When pi is sending or streaming, steering interrupts remaining tools.
 Unlike normal sends, steering is NOT displayed locally - pi will echo
 it back via message_start at the correct position (after current
-assistant output completes)."
+assistant output completes).
+
+When compaction is in progress, steering text is queued as a local
+follow-up and sent after compaction completes."
   (interactive)
   (let ((text (string-trim (buffer-string))))
     (unless (string-empty-p text)
       (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
         (when chat-buf
           (let ((status (buffer-local-value 'pi-coding-agent--status chat-buf)))
-            (if (eq status 'idle)
-                (message "Pi: Nothing to interrupt - use C-c C-c to send")
-              (pi-coding-agent--history-add text)
-              (setq pi-coding-agent--input-ring-index nil
-                    pi-coding-agent--input-saved nil)
-              (erase-buffer)
-              (pi-coding-agent--send-steer-message text)
-              (message "Pi: Steering message sent"))))))))
+            (cond
+             ((eq status 'idle)
+              (message "Pi: Nothing to interrupt - use C-c C-c to send"))
+             ((eq status 'compacting)
+              (pi-coding-agent--queue-followup-text chat-buf text)
+              (message "Pi: Steering queued (will send after compaction)"))
+             (t
+              (when (pi-coding-agent--send-steer-message text)
+                (pi-coding-agent--accept-input-text text)
+                (message "Pi: Steering message sent"))))))))))
 
 (defun pi-coding-agent-queue-followup ()
   "Queue current input as a follow-up message.

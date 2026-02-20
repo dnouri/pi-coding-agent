@@ -316,6 +316,76 @@ When user aborts, they want to stop everything - including queued messages."
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
+(ert-deftest pi-coding-agent-test-queue-steering-send-failure-preserves-input ()
+  "Steering send failures keep input text for retry and avoid success feedback."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-steer-fail*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-queue-steer-fail-input*"))
+        (success-message nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'streaming)
+            (setq pi-coding-agent--input-buffer input-buf)
+            (setq pi-coding-agent--followup-queue nil))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "Retry this steer")
+            (cl-letf (((symbol-function 'pi-coding-agent--send-steer-message)
+                       (lambda (_text) nil))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest _)
+                         (when (and fmt (string-match-p "steering message sent" (downcase fmt)))
+                           (setq success-message t)))))
+              (pi-coding-agent-queue-steering))
+            ;; Failed send should keep input so user can retry.
+            (should (equal (buffer-string) "Retry this steer"))
+            ;; Should not claim success.
+            (should-not success-message)
+            ;; Failed send should not enqueue a normal follow-up.
+            (with-current-buffer chat-buf
+              (should (null pi-coding-agent--followup-queue)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-queue-steering-while-compacting-queues-locally ()
+  "Queue steering during compaction should queue locally instead of sending steer now."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-steer-compacting*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-queue-steer-compacting-input*"))
+        (steer-sent nil)
+        (shown-message nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'compacting)
+            (setq pi-coding-agent--input-buffer input-buf)
+            (setq pi-coding-agent--followup-queue nil))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "Steer during compaction")
+            (cl-letf (((symbol-function 'pi-coding-agent--send-steer-message)
+                       (lambda (_text)
+                         (setq steer-sent t)
+                         t))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (setq shown-message (apply #'format fmt args)))))
+              (pi-coding-agent-queue-steering))
+            ;; Should NOT send steer immediately
+            (should-not steer-sent)
+            ;; Should queue in local follow-up queue
+            (with-current-buffer chat-buf
+              (should (equal pi-coding-agent--followup-queue '("Steer during compaction"))))
+            ;; Should tell user it was queued
+            (should (equal shown-message "Pi: Steering queued (will send after compaction)"))
+            ;; Input should be cleared
+            (should (string-empty-p (buffer-string)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
 (ert-deftest pi-coding-agent-test-queue-followup-uses-local-queue ()
   "Queue follow-up adds to local queue, no RPC sent."
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-followup*"))
