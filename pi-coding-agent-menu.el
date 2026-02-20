@@ -518,32 +518,48 @@ Shows PID, status, and session file."
                status
                (or (and session-file (file-name-nondirectory session-file)) "none"))))))
 
+(defun pi-coding-agent--handle-manual-compaction-response (chat-buf response)
+  "Handle manual compaction RESPONSE for CHAT-BUF.
+Restores idle state, renders success details, and drains queued follow-ups."
+  (when (buffer-live-p chat-buf)
+    (with-current-buffer chat-buf
+      (setq pi-coding-agent--status 'idle)
+      (pi-coding-agent--set-activity-phase "idle")
+      (if (plist-get response :success)
+          (let ((data (plist-get response :data)))
+            (pi-coding-agent--handle-compaction-success
+             (plist-get data :tokensBefore)
+             (plist-get data :summary)
+             (current-time)))
+        (message "Pi: Compact failed%s"
+                 (if-let ((error-text (plist-get response :error)))
+                     (format ": %s" error-text)
+                   "")))
+      (pi-coding-agent--process-followup-queue))))
+
 (defun pi-coding-agent-compact (&optional custom-instructions)
   "Compact conversation context to reduce token usage.
 Optional CUSTOM-INSTRUCTIONS provide guidance for the compaction summary."
   (interactive)
-  (when-let ((proc (pi-coding-agent--get-process))
-             (chat-buf (pi-coding-agent--get-chat-buffer)))
-    (message "Pi: Compacting...")
-    (with-current-buffer chat-buf
-      (pi-coding-agent--set-activity-phase "compact"))
-    (pi-coding-agent--rpc-async proc
-                   (if custom-instructions
-                       (list :type "compact" :customInstructions custom-instructions)
-                     '(:type "compact"))
-                   (lambda (response)
-                     (when (buffer-live-p chat-buf)
-                       (with-current-buffer chat-buf
-                         (pi-coding-agent--set-activity-phase "idle")))
-                     (if (plist-get response :success)
-                         (when (buffer-live-p chat-buf)
-                           (with-current-buffer chat-buf
-                             (let ((data (plist-get response :data)))
-                               (pi-coding-agent--handle-compaction-success
-                                (plist-get data :tokensBefore)
-                                (plist-get data :summary)
-                                (current-time)))))
-                       (message "Pi: Compact failed"))))))
+  (when-let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+    (let ((proc (pi-coding-agent--get-process)))
+      (cond
+       ((null proc)
+        (message "Pi: No process available - try M-x pi-coding-agent-reload or C-c C-p R"))
+       ((not (process-live-p proc))
+        (message "Pi: Process died - try M-x pi-coding-agent-reload or C-c C-p R"))
+       (t
+        (message "Pi: Compacting...")
+        (with-current-buffer chat-buf
+          (setq pi-coding-agent--status 'compacting)
+          (pi-coding-agent--set-activity-phase "compact"))
+        (pi-coding-agent--rpc-async
+         proc
+         (if custom-instructions
+             (list :type "compact" :customInstructions custom-instructions)
+           '(:type "compact"))
+         (lambda (response)
+           (pi-coding-agent--handle-manual-compaction-response chat-buf response))))))))
 
 (defun pi-coding-agent-export-html ()
   "Export session to HTML file."
