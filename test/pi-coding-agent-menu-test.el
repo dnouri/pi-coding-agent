@@ -641,6 +641,91 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
     (should (pi-coding-agent-test--suffix-key-bound-p "A"))
     (should (pi-coding-agent-test--suffix-key-bound-p "B"))))
 
+;;; Manual Compaction
+
+(ert-deftest pi-coding-agent-test-compact-sets-status-and-processes-queued-followup ()
+  "Manual compact marks session compacting and drains local follow-up queue on success."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-compact-status*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-compact-status-input*"))
+        (compact-callback nil)
+        (prepared-text nil)
+        (prompt-sent nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle)
+            (setq pi-coding-agent--process nil)
+            (setq pi-coding-agent--input-buffer input-buf)
+            (setq pi-coding-agent--followup-queue nil))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf))
+          (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                     (lambda () 'mock-proc))
+                    ((symbol-function 'process-live-p)
+                     (lambda (_proc) t))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc cmd cb)
+                       (if (equal (plist-get cmd :type) "compact")
+                           (setq compact-callback cb)
+                         (setq prompt-sent t))))
+                    ((symbol-function 'pi-coding-agent--handle-compaction-success) #'ignore)
+                    ((symbol-function 'pi-coding-agent--prepare-and-send)
+                     (lambda (text) (setq prepared-text text)))
+                    ((symbol-function 'message) #'ignore))
+            (with-current-buffer chat-buf
+              (pi-coding-agent-compact)
+              (should (eq pi-coding-agent--status 'compacting)))
+
+            (with-current-buffer input-buf
+              (insert "queued during compaction")
+              (pi-coding-agent-send)
+              (should (string-empty-p (buffer-string))))
+
+            (with-current-buffer chat-buf
+              (should-not prompt-sent)
+              (should (equal pi-coding-agent--followup-queue '("queued during compaction"))))
+
+            (should (functionp compact-callback))
+            (funcall compact-callback '(:success t :data (:tokensBefore 1234 :summary "Done")))
+
+            (with-current-buffer chat-buf
+              (should (eq pi-coding-agent--status 'idle))
+              (should (null pi-coding-agent--followup-queue)))
+            (should (equal prepared-text "queued during compaction"))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-compact-dead-process-keeps-idle ()
+  "Manual compact should not transition state when process is dead."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-compact-dead-proc*"))
+        (rpc-called nil)
+        (shown-message nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle)
+            (setq pi-coding-agent--followup-queue nil))
+          (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                     (lambda () 'dead-proc))
+                    ((symbol-function 'process-live-p)
+                     (lambda (_proc) nil))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (&rest _args)
+                       (setq rpc-called t)))
+                    ((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (setq shown-message (apply #'format fmt args)))))
+            (with-current-buffer chat-buf
+              (pi-coding-agent-compact)
+              (should (eq pi-coding-agent--status 'idle))))
+          (should-not rpc-called)
+          (should (equal shown-message
+                         "Pi: Process died - try M-x pi-coding-agent-reload or C-c C-p R")))
+      (kill-buffer chat-buf))))
+
 ;;; Fork at Point
 
 (ert-deftest pi-coding-agent-test-fork-at-point-correct-entry-id ()
