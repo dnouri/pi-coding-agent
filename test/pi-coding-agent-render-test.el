@@ -1564,6 +1564,41 @@ Call inside `with-temp-buffer' after `pi-coding-agent-chat-mode'."
 
 ;;; File Navigation (visit-file)
 
+(defun pi-coding-agent-test--open-target-buffer (line-count)
+  "Create and return a fake visited buffer with LINE-COUNT lines."
+  (set-buffer (get-buffer-create "*pi-coding-agent-test-target*"))
+  (erase-buffer)
+  (dotimes (_ line-count)
+    (insert "line\n"))
+  (goto-char (point-min))
+  (current-buffer))
+
+(defun pi-coding-agent-test--visit-file-line (&optional line-count toggle)
+  "Call `pi-coding-agent-visit-file' and return visit metadata.
+Returns plist `(:path PATH :line N :open-kind KIND)'.
+LINE-COUNT controls the size of the fake visited file.  TOGGLE is
+forwarded to `pi-coding-agent-visit-file'."
+  (let ((line-count (or line-count 100))
+        (opened-path nil)
+        (open-kind nil))
+    (unwind-protect
+        (progn
+          (cl-labels ((open-other (path)
+                        (setq opened-path path
+                              open-kind :other)
+                        (pi-coding-agent-test--open-target-buffer line-count))
+                      (open-same (path)
+                        (setq opened-path path
+                              open-kind :same)
+                        (pi-coding-agent-test--open-target-buffer line-count)))
+            (cl-letf (((symbol-function 'find-file-other-window) #'open-other)
+                      ((symbol-function 'find-file) #'open-same))
+              (pi-coding-agent-visit-file toggle)))
+          (list :path opened-path
+                :line (line-number-at-pos)
+                :open-kind open-kind))
+      (ignore-errors (kill-buffer "*pi-coding-agent-test-target*")))))
+
 (ert-deftest pi-coding-agent-test-diff-line-at-point-added ()
   "Should parse line number from added diff line."
   (with-temp-buffer
@@ -1579,11 +1614,12 @@ Call inside `with-temp-buffer' after `pi-coding-agent-chat-mode'."
     (should (= 12 (pi-coding-agent--diff-line-at-point)))))
 
 (ert-deftest pi-coding-agent-test-diff-line-at-point-context ()
-  "Should return nil for context lines (no +/-)."
+  "Should parse line number from context lines.
+Edit diffs include unchanged context rows with a leading space marker."
   (with-temp-buffer
     (insert "  7     context line")
     (goto-char (point-min))
-    (should-not (pi-coding-agent--diff-line-at-point))))
+    (should (= 7 (pi-coding-agent--diff-line-at-point)))))
 
 (ert-deftest pi-coding-agent-test-diff-line-at-point-mid-line ()
   "Should work when point is anywhere on the line."
@@ -1808,23 +1844,10 @@ authoritative args from tool_execution_start should populate it."
     ;; Move to the diff line
     (goto-char (point-min))
     (search-forward "+ 42")
-    ;; Mock find-file-other-window to create a buffer with enough lines
-    ;; Note: goto-char and forward-line are bytecode ops, can't be mocked
-    (let (opened-file)
-      (cl-letf (((symbol-function 'find-file-other-window)
-                 (lambda (path)
-                   (setq opened-file path)
-                   ;; Create a fake buffer with enough lines and switch to it
-                   (set-buffer (get-buffer-create "*test-target*"))
-                   (erase-buffer)
-                   (dotimes (_ 100) (insert "line\n"))
-                   (goto-char (point-min))
-                   (current-buffer))))
-        (pi-coding-agent-visit-file))
-      (should (equal "/tmp/test.el" opened-file))
-      ;; Check we're on line 42 (line-number-at-pos is 1-indexed)
-      (should (= 42 (line-number-at-pos)))
-      (ignore-errors (kill-buffer "*test-target*")))))
+    (let ((result (pi-coding-agent-test--visit-file-line 100)))
+      (should (equal "/tmp/test.el" (plist-get result :path)))
+      (should (eq :other (plist-get result :open-kind)))
+      (should (= 42 (plist-get result :line))))))
 
 (ert-deftest pi-coding-agent-test-visit-file-no-path-errors ()
   "visit-file should error when not on a tool block with path."
@@ -1847,19 +1870,39 @@ authoritative args from tool_execution_start should populate it."
     (goto-char (point-min))
     (search-forward "```")
     (forward-line 2)  ;; On "line 101"
-    ;; Note: goto-char and forward-line are bytecode ops, can't be mocked
-    (cl-letf (((symbol-function 'find-file-other-window)
-               (lambda (_path)
-                 ;; Create a fake buffer with enough lines and switch to it
-                 (set-buffer (get-buffer-create "*test-target*"))
-                 (erase-buffer)
-                 (dotimes (_ 200) (insert "line\n"))
-                 (goto-char (point-min))
-                 (current-buffer))))
-      (pi-coding-agent-visit-file))
-    ;; Line 2 in code block + offset 100 - 1 = 101
-    (should (= 101 (line-number-at-pos)))
-    (ignore-errors (kill-buffer "*test-target*"))))
+    (let ((result (pi-coding-agent-test--visit-file-line 200)))
+      ;; Line 2 in code block + offset 100 - 1 = 101
+      (should (= 101 (plist-get result :line))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-read-beginning-line ()
+  "visit-file should navigate to line 1 from first read content line."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "read" '(:path "/tmp/start.txt"))
+    (pi-coding-agent--display-tool-end "read" '(:path "/tmp/start.txt")
+                          '((:type "text" :text "line1\nline2\nline3"))
+                          nil nil)
+    (goto-char (point-min))
+    (search-forward "line1")
+    (beginning-of-line)
+    (let ((result (pi-coding-agent-test--visit-file-line 20)))
+      (should (= 1 (plist-get result :line))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-toggle-opens-same-window ()
+  "Prefix arg should invert `pi-coding-agent-visit-file-other-window'."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-visit-file-other-window t))
+      (pi-coding-agent--display-tool-start "read" '(:path "/tmp/start.txt"))
+      (pi-coding-agent--display-tool-end "read" '(:path "/tmp/start.txt")
+                            '((:type "text" :text "line1\nline2\nline3"))
+                            nil nil)
+      (goto-char (point-min))
+      (search-forward "line2")
+      (beginning-of-line)
+      (let ((result (pi-coding-agent-test--visit-file-line 20 t)))
+        (should (eq :same (plist-get result :open-kind)))
+        (should (= 2 (plist-get result :line)))))))
 
 (ert-deftest pi-coding-agent-test-visit-file-accounts-for-stripped-blank-lines ()
   "visit-file navigates to correct original line even when blank lines stripped.
@@ -1874,19 +1917,156 @@ File has blanks at lines 3,5. Pressing RET on 'line06' should go to line 6."
     (goto-char (point-min))
     (search-forward "line06")
     (beginning-of-line)
-    ;; Note: forward-line can't be mocked in byte-compiled code (inlined)
-    ;; Instead, check line-number-at-pos after visit-file completes
-    (cl-letf (((symbol-function 'find-file-other-window)
-               (lambda (_path)
-                 (set-buffer (get-buffer-create "*test-target*"))
-                 (erase-buffer)
-                 (dotimes (_ 20) (insert "line\n"))
-                 (goto-char (point-min))
-                 (current-buffer))))
-      (pi-coding-agent-visit-file))
-    ;; Should navigate to line 6, not line 4 (2 blank lines stripped)
-    (should (= 6 (line-number-at-pos)))
-    (ignore-errors (kill-buffer "*test-target*"))))
+    (let ((result (pi-coding-agent-test--visit-file-line 20)))
+      ;; Should navigate to line 6, not line 4 (2 blank lines stripped)
+      (should (= 6 (plist-get result :line))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-preserves-blank-lines-when-not-collapsed ()
+  "visit-file should respect blank lines in non-collapsed read output.
+When full output is visible, line numbers must follow rendered blank lines."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "read" '(:path "/tmp/test.txt"))
+    (pi-coding-agent--display-tool-end "read" '(:path "/tmp/test.txt")
+                          '((:type "text" :text "line1\n\nline3\nline4"))
+                          nil nil)
+    (goto-char (point-min))
+    (search-forward "line3")
+    (beginning-of-line)
+    (let ((result (pi-coding-agent-test--visit-file-line 20)))
+      (should (= 3 (plist-get result :line))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-preserves-blank-lines-when-expanded ()
+  "visit-file should ignore preview line-map when tool output is expanded."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-tool-preview-lines 10))
+      (pi-coding-agent--display-tool-start "read" '(:path "/tmp/test.txt"))
+      ;; 12 non-blank lines + one early blank -> collapsed preview, then expand.
+      (pi-coding-agent--display-tool-end
+       "read" '(:path "/tmp/test.txt")
+       '((:type "text" :text "line1\n\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\nline13"))
+       nil nil)
+      (goto-char (point-min))
+      (re-search-forward "\.\.\. ([0-9]+ more lines)" nil t)
+      (let ((btn (button-at (match-beginning 0))))
+        (should btn)
+        (pi-coding-agent--toggle-tool-output btn))
+      (goto-char (point-min))
+      (search-forward "line3")
+      (beginning-of-line)
+      (let ((result (pi-coding-agent-test--visit-file-line 30)))
+        (should (= 3 (plist-get result :line)))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-collapsed-closing-fence-errors ()
+  "RET on collapsed closing fence should not fall back to line 1."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-tool-preview-lines 2))
+      (pi-coding-agent--display-tool-start "read" '(:path "/tmp/test.txt"))
+      (pi-coding-agent--display-tool-end
+       "read" '(:path "/tmp/test.txt")
+       '((:type "text" :text "line01\nline02\nline03\nline04\nline05\nline06"))
+       nil nil)
+      (goto-char (point-min))
+      ;; Move to closing fence (second ``` line).
+      (re-search-forward "^```$" nil t)
+      (re-search-forward "^```$" nil t)
+      (should-error (pi-coding-agent-visit-file) :type 'user-error))))
+
+(ert-deftest pi-coding-agent-test-visit-file-collapsed-toggle-line-errors ()
+  "RET on collapsed toggle line should not fall back to line 1."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-tool-preview-lines 2))
+      (pi-coding-agent--display-tool-start "read" '(:path "/tmp/test.txt"))
+      (pi-coding-agent--display-tool-end
+       "read" '(:path "/tmp/test.txt")
+       '((:type "text" :text "line01\nline02\nline03\nline04\nline05\nline06"))
+       nil nil)
+      (goto-char (point-min))
+      (re-search-forward "\.\.\. ([0-9]+ more lines)" nil t)
+      (beginning-of-line)
+      (should-error (pi-coding-agent-visit-file) :type 'user-error))))
+
+(ert-deftest pi-coding-agent-test-visit-file-edit-context-line ()
+  "RET on edit diff context line should navigate to that source line."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "edit" '(:path "/tmp/test.el"))
+    (pi-coding-agent--display-tool-end
+     "edit" '(:path "/tmp/test.el")
+     '((:type "text" :text "done"))
+     '(:diff "+ 7     added line\n  9     context line\n-12     removed line")
+     nil)
+    (goto-char (point-min))
+    (re-search-forward "^  9     context line" nil t)
+    (beginning-of-line)
+    (let ((result (pi-coding-agent-test--visit-file-line 30)))
+      (should (= 9 (plist-get result :line))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-edit-context-first-line ()
+  "RET on first unchanged line in edit diff should jump to line 1."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "edit" '(:path "/tmp/greeting.py"))
+    (pi-coding-agent--display-tool-end
+     "edit" '(:path "/tmp/greeting.py")
+     '((:type "text" :text "done"))
+     '(:diff "  1 def make_greeting(name: str) -> str:\n  2     \"\"\"Return a friendly greeting with an uppercased name.\"\"\"\n- 3     return f\"Hello, {name.upperr()}!\"\n+ 3     return f\"Hello, {name.upper()}!\"\n  4 \n  5 \n  6 def main() -> None:\n    ...")
+     nil)
+    (goto-char (point-min))
+    (re-search-forward "^  1 def make_greeting" nil t)
+    (beginning-of-line)
+    (let ((result (pi-coding-agent-test--visit-file-line 30)))
+      (should (= 1 (plist-get result :line))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-generic-path-expanded-line ()
+  "Generic tool output with :path should map expanded lines correctly."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "custom_tool" '(:path "/tmp/custom.txt"))
+    (pi-coding-agent--display-tool-end
+     "custom_tool" '(:path "/tmp/custom.txt")
+     '((:type "text" :text "line01\nline02\nline03\nline04\nline05\nline06"))
+     nil nil)
+    (goto-char (point-min))
+    (search-forward "line06")
+    (beginning-of-line)
+    (let ((result (pi-coding-agent-test--visit-file-line 20)))
+      (should (= 6 (plist-get result :line))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-generic-path-collapsed-line ()
+  "Generic tool output with :path should map collapsed preview lines correctly."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-tool-preview-lines 3))
+      (pi-coding-agent--display-tool-start "custom_tool" '(:path "/tmp/custom.txt"))
+      (pi-coding-agent--display-tool-end
+       "custom_tool" '(:path "/tmp/custom.txt")
+       '((:type "text" :text "line01\nline02\nline03\nline04\nline05\nline06"))
+       nil nil)
+      (goto-char (point-min))
+      (search-forward "line03")
+      (beginning-of-line)
+      (let ((result (pi-coding-agent-test--visit-file-line 20)))
+        (should (= 3 (plist-get result :line)))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-write-ignores-offset ()
+  "write tool should ignore :offset for RET line navigation."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start
+     "write" '(:path "/tmp/out.txt" :offset 100 :content "line1\nline2\nline3"))
+    (pi-coding-agent--display-tool-end
+     "write" '(:path "/tmp/out.txt" :offset 100 :content "line1\nline2\nline3")
+     '((:type "text" :text "wrote file"))
+     nil nil)
+    (goto-char (point-min))
+    (search-forward "line2")
+    (beginning-of-line)
+    (let ((result (pi-coding-agent-test--visit-file-line 120)))
+      (should (= 2 (plist-get result :line))))))
 
 ;;; Visual Line Truncation Tests
 
@@ -3189,6 +3369,17 @@ are only present in tool_execution_start, not tool_execution_end."
            :result (list :content '((:type "text" :text "def hello():\n    pass")))
            :isError nil))
     ;; Should have python markdown code fence
+    (should (string-match-p "```python" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-generic-tool-with-path-uses-path-language ()
+  "Generic tools with :path should use extension-based syntax fences."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "custom_tool" '(:path "/tmp/example.py"))
+    (pi-coding-agent--display-tool-end
+     "custom_tool" '(:path "/tmp/example.py")
+     '((:type "text" :text "def hello():\n    return 1"))
+     nil nil)
     (should (string-match-p "```python" (buffer-string)))))
 
 (ert-deftest pi-coding-agent-test-markdown-fence-delimiter-defaults-to-backticks ()
