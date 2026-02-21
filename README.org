@@ -173,9 +173,11 @@ expand and see everything. File operations (read, write, edit) show full
 syntax highlighting, and edit diffs highlight what changed. Long-running
 commands stream output live so you can watch progress.
 
-Press =RET= on any line within a tool block to open the file at that line
-number. By default, the file opens in the other window so you can keep the
-chat visible. Use =C-u RET= to open in the same window instead.
+Press =RET= on a file-content line in a tool block to open the backing file
+at the matching line number. This works for file tools (=read=, =write=,
+=edit=) and custom tools that include =:path=. By default, the file opens in
+the other window so you can keep the chat visible. Use =C-u RET= to open in
+the same window instead.
 
 ** 📁 Folding Turns
 

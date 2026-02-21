@@ -1376,7 +1376,8 @@ Shows preview lines with expandable toggle for long output."
                  ((or "edit" "read" "write")
                   (pi-coding-agent--path-to-language (pi-coding-agent--tool-path args)))
                  ("bash" "text")  ; wrap in fence for visual consistency
-                 (_ nil)))
+                 (_ (when-let ((path (pi-coding-agent--tool-path args)))
+                      (pi-coding-agent--path-to-language path)))))
          ;; For edit tool with diff, we'll apply diff overlays after insertion
          (is-edit-diff (and (equal tool-name "edit")
                             (not is-error)
@@ -1430,10 +1431,11 @@ Shows preview lines with expandable toggle for long output."
       (when is-error
         (insert (propertize "[error]" 'face 'pi-coding-agent-tool-error) "\n"))
       ;; Store offset for read tool (used for line number calculation)
-      (when-let ((offset (plist-get args :offset)))
-        (when pi-coding-agent--pending-tool-overlay
-          (overlay-put pi-coding-agent--pending-tool-overlay
-                       'pi-coding-agent-tool-offset offset)))
+      (when (and (equal tool-name "read")
+                 (plist-get args :offset)
+                 pi-coding-agent--pending-tool-overlay)
+        (overlay-put pi-coding-agent--pending-tool-overlay
+                     'pi-coding-agent-tool-offset (plist-get args :offset)))
       ;; Store line map for navigation (maps displayed line to original line)
       (when-let ((line-map (plist-get truncation :line-map)))
         (when pi-coding-agent--pending-tool-overlay
@@ -1572,11 +1574,13 @@ Works anywhere inside a tool block overlay."
 
 (defun pi-coding-agent--diff-line-at-point ()
   "Extract line number from diff line at point.
-Returns the line number if point is on a +/- diff line, nil otherwise.
-Diff format: [+-] LINENUM content (e.g., '+ 7     code' or '-12     code')."
+Returns the line number if point is on an added, removed, or context
+line, nil otherwise.
+Diff format: [+- ] LINENUM content.
+For example: '+ 7     code', '-12     code', or '  9     context'."
   (save-excursion
     (beginning-of-line)
-    (when (looking-at "^[+-] *\\([0-9]+\\)")
+    (when (looking-at "^[ +-] *\\([0-9]+\\)\\(?:[ \t]+\\|$\\)")
       (string-to-number (match-string 1)))))
 
 (defun pi-coding-agent--fence-line-info-at-point ()
@@ -1642,31 +1646,46 @@ When START-POS is non-nil, parse fences starting from that position."
         (setq line-no (1+ line-no)))
       result)))
 
+(defun pi-coding-agent--tool-overlay-collapsed-p (overlay)
+  "Return non-nil when OVERLAY is currently collapsed.
+Collapsed tool blocks contain a toggle button whose
+`pi-coding-agent-expanded' property is nil.  Expanded blocks and
+non-collapsible blocks return nil."
+  (when-let ((btn (pi-coding-agent--find-toggle-button-in-region
+                   (overlay-start overlay)
+                   (overlay-end overlay))))
+    (not (button-get btn 'pi-coding-agent-expanded))))
+
 (defun pi-coding-agent--tool-line-at-point (overlay)
   "Calculate file line number at point for tool OVERLAY.
-For edit diffs: parse line from +/- format.
-For read/write: count lines from header + apply line-map for stripped blanks."
-  (let ((tool-name (overlay-get overlay 'pi-coding-agent-tool-name))
-        (offset (or (overlay-get overlay 'pi-coding-agent-tool-offset) 1))
-        (line-map (overlay-get overlay 'pi-coding-agent-line-map))
-        (header-end (overlay-get overlay 'pi-coding-agent-header-end)))
-    (or
-     ;; Edit diff format: explicit line number
-     (and (equal tool-name "edit") (pi-coding-agent--diff-line-at-point))
-     ;; Use line-map if available (handles stripped blank lines)
-     (when (and line-map header-end)
-       (save-excursion
-         (let* ((current-line (line-number-at-pos))
-                (header-line (line-number-at-pos header-end))
-                (lines-from-header (- current-line header-line))
-                (map-index (1- lines-from-header)))
-           (when (and (>= map-index 0) (< map-index (length line-map)))
-             (+ (aref line-map map-index) (1- offset))))))
-     ;; Fallback: code block position + offset (for expanded view or no line-map)
-     (when-let ((block-line (pi-coding-agent--code-block-line-at-point header-end)))
-       (+ block-line (1- offset)))
-     ;; Last fallback to line 1
-     1)))
+For edit diffs: parse line number from added, removed, or context rows.
+For read/write: use line-map only in collapsed preview mode; otherwise
+count directly from the rendered code block."
+  (let* ((tool-name (overlay-get overlay 'pi-coding-agent-tool-name))
+         (offset (if (equal tool-name "read")
+                     (or (overlay-get overlay 'pi-coding-agent-tool-offset) 1)
+                   1))
+         (line-map (overlay-get overlay 'pi-coding-agent-line-map))
+         (header-end (overlay-get overlay 'pi-coding-agent-header-end))
+         (use-line-map (and line-map
+                            header-end
+                            (pi-coding-agent--tool-overlay-collapsed-p overlay))))
+    (if (equal tool-name "edit")
+        ;; Edit navigation uses the explicit line number in diff rows.
+        (pi-coding-agent--diff-line-at-point)
+      (or
+       ;; Collapsed preview strips blank lines, so use line-map there.
+       (when use-line-map
+         (save-excursion
+           (let* ((current-line (line-number-at-pos))
+                  (header-line (line-number-at-pos header-end))
+                  (lines-from-header (- current-line header-line))
+                  (map-index (1- lines-from-header)))
+             (when (and (>= map-index 0) (< map-index (length line-map)))
+               (+ (aref line-map map-index) (1- offset))))))
+       ;; Expanded/full output preserves blank lines: derive from code block.
+       (when-let ((block-line (pi-coding-agent--code-block-line-at-point header-end)))
+         (+ block-line (1- offset)))))))
 
 (defun pi-coding-agent-visit-file (&optional toggle)
   "Visit the file associated with the tool block at point.
@@ -1679,13 +1698,14 @@ that behavior."
   (if-let* ((ov (seq-find (lambda (o) (overlay-get o 'pi-coding-agent-tool-block))
                           (overlays-at (point))))
             (path (overlay-get ov 'pi-coding-agent-tool-path)))
-      (let* ((line (pi-coding-agent--tool-line-at-point ov))
-             (use-other-window (if toggle
-                                   (not pi-coding-agent-visit-file-other-window)
-                                 pi-coding-agent-visit-file-other-window)))
-        (funcall (if use-other-window #'find-file-other-window #'find-file) path)
-        (goto-char (point-min))
-        (forward-line (1- line)))
+      (if-let ((line (pi-coding-agent--tool-line-at-point ov)))
+          (let ((use-other-window (if toggle
+                                      (not pi-coding-agent-visit-file-other-window)
+                                    pi-coding-agent-visit-file-other-window)))
+            (funcall (if use-other-window #'find-file-other-window #'find-file) path)
+            (goto-char (point-min))
+            (forward-line (1- line)))
+        (user-error "No file line at point"))
     (user-error "No file at point")))
 
 ;;;; Diff Overlay Highlighting
