@@ -82,6 +82,17 @@ make test SELECTOR='abort\|followup'
 The `SELECTOR` value is an ERT selector string — a substring match
 against test names.
 
+`make test` is intentionally terse on green runs (summary-focused output).
+For full raw ERT output, use:
+```bash
+make test VERBOSE=1
+make test VERBOSE=1 SELECTOR=toolcall-delta
+```
+
+When tests intentionally trigger minibuffer `message` output, capture/mock
+`message` in the test and assert on it. This keeps batch logs concise
+without losing behavioral coverage.
+
 ## Linting
 
 ```bash
