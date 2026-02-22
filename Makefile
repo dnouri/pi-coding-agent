@@ -14,6 +14,10 @@ PI_BIN_DIR = $(abspath $(dir $(PI_BIN)))
 # Example: make test SELECTOR=fontify-buffer-tail
 SELECTOR ?=
 
+# Verbose output for tests (show full ERT output, including passed lines)
+# Example: make test VERBOSE=1
+VERBOSE ?=
+
 .PHONY: test test-unit test-core test-ui test-render test-input test-menu
 .PHONY: test-integration test-integration-ci test-gui test-gui-ci test-all
 .PHONY: check check-parens compile lint lint-checkdoc lint-package clean clean-cache help
@@ -21,7 +25,7 @@ SELECTOR ?=
 
 help:
 	@echo "Targets:"
-	@echo "  make test             All unit tests (use SELECTOR=pattern to filter)"
+	@echo "  make test             All unit tests (SELECTOR=pattern, VERBOSE=1 for full output)"
 	@echo "  make test-core        Core/RPC tests only"
 	@echo "  make test-ui          UI foundation tests only"
 	@echo "  make test-render      Render tests only"
@@ -71,7 +75,9 @@ SHELL = /bin/bash
 
 test: .deps-stamp
 	@echo "=== Unit Tests ==="
-	@set -o pipefail; $(BATCH) -L test \
+	@set -o pipefail; \
+	OUTPUT=$$(mktemp); \
+	$(BATCH) -L test \
 		--eval "(setq load-prefer-newer t)" \
 		--eval "(require 'package)" \
 		--eval "(package-initialize)" \
@@ -83,8 +89,16 @@ test: .deps-stamp
 		-l pi-coding-agent-input-test \
 		-l pi-coding-agent-menu-test \
 		-l pi-coding-agent-test \
-		$(if $(SELECTOR),--eval '(ert-run-tests-batch-and-exit "$(SELECTOR)")',-f ert-run-tests-batch-and-exit) 2>&1 \
-		| grep -v "^   passed\|^Pi: \|^Running [0-9]\|^$$"
+		$(if $(SELECTOR),--eval '(ert-run-tests-batch-and-exit "$(SELECTOR)")',-f ert-run-tests-batch-and-exit) \
+		>$$OUTPUT 2>&1; \
+	STATUS=$$?; \
+	if [ "$(VERBOSE)" = "1" ] || [ $$STATUS -ne 0 ]; then \
+		cat $$OUTPUT; \
+	else \
+		grep -v "^   passed\|^Pi: \|^Running [0-9]\|^$$" $$OUTPUT; \
+	fi; \
+	rm -f $$OUTPUT; \
+	exit $$STATUS
 
 # Per-module test targets: run tests for a single module in isolation.
 # Usage: make test-render (much faster than `make test` during development)

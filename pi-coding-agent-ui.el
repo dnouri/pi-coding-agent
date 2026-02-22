@@ -120,12 +120,12 @@ Some operations like model loading may need more time."
   :group 'pi-coding-agent)
 
 (defcustom pi-coding-agent-tool-preview-lines 10
-  "Number of lines to show before collapsing tool output."
+  "Maximum visual lines to show before collapsing tool output."
   :type 'natnum
   :group 'pi-coding-agent)
 
 (defcustom pi-coding-agent-bash-preview-lines 5
-  "Number of lines to show for bash output before collapsing.
+  "Maximum visual lines to show for bash output before collapsing.
 Bash output is typically more verbose, so fewer lines are shown."
   :type 'natnum
   :group 'pi-coding-agent)
