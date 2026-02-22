@@ -338,10 +338,15 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
     (pi-coding-agent-next-message)
     (pi-coding-agent-next-message)
     (should (looking-at "You · 10:10"))
-    (let ((pos (point)))
-      (pi-coding-agent-next-message)
+    (let ((pos (point))
+          (shown-message nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq shown-message (apply #'format fmt args)))))
+        (pi-coding-agent-next-message))
       ;; Point stays on the last heading
-      (should (= (point) pos)))))
+      (should (= (point) pos))
+      (should (equal shown-message "No more messages")))))
 
 (ert-deftest pi-coding-agent-test-previous-message-from-last ()
   "p from last You heading reaches previous."
@@ -357,16 +362,21 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
     (should (looking-at "You · 10:05"))))
 
 (ert-deftest pi-coding-agent-test-previous-message-at-first ()
-  "p at first You heading keeps point."
+  "p at first You heading keeps point and shows message."
   (with-temp-buffer
     (pi-coding-agent-test--insert-chat-turns)
     (goto-char (point-min))
     (pi-coding-agent-next-message)
     (should (looking-at "You · 10:00"))
-    (let ((pos (point)))
-      (pi-coding-agent-previous-message)
+    (let ((pos (point))
+          (shown-message nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq shown-message (apply #'format fmt args)))))
+        (pi-coding-agent-previous-message))
       ;; Point stays on the first heading
-      (should (= (point) pos)))))
+      (should (= (point) pos))
+      (should (equal shown-message "No previous message")))))
 
 ;;; Turn Detection
 

@@ -2108,6 +2108,30 @@ When full output is visible, line numbers must follow rendered blank lines."
       (should (equal (plist-get result :content) content))
       (should (= (plist-get result :hidden-lines) 0)))))
 
+(ert-deftest pi-coding-agent-test-truncate-visual-lines-empty-content ()
+  "Empty content has no hidden lines or visual lines."
+  (let ((result (pi-coding-agent--truncate-to-visual-lines "" 5 80)))
+    (should (equal (plist-get result :content) ""))
+    (should (= (plist-get result :hidden-lines) 0))
+    (should (= (plist-get result :visual-lines) 0))))
+
+(ert-deftest pi-coding-agent-test-truncate-visual-lines-zero-max-lines ()
+  "Zero max lines returns an empty preview without crashing."
+  (let* ((content "line1\nline2")
+         (result (pi-coding-agent--truncate-to-visual-lines content 0 80)))
+    (should (equal (plist-get result :content) ""))
+    (should (= (plist-get result :visual-lines) 0))
+    (should (= (plist-get result :hidden-lines) 2))
+    (should (equal (plist-get result :line-map) []))))
+
+(ert-deftest pi-coding-agent-test-truncate-visual-lines-zero-width-falls-back ()
+  "Zero width is treated as width 1 to avoid division errors."
+  (let* ((content "abcdef")
+         (result (pi-coding-agent--truncate-to-visual-lines content 2 0)))
+    (should (equal (plist-get result :content) "ab"))
+    (should (= (plist-get result :visual-lines) 2))
+    (should (= (plist-get result :hidden-lines) 1))))
+
 (ert-deftest pi-coding-agent-test-truncate-visual-lines-trailing-newline ()
   "Trailing newlines don't create phantom hidden lines."
   ;; Content with trailing newline - should count as 3 lines, not 4
@@ -2319,6 +2343,20 @@ Regression test: streaming output with no newlines should still be capped."
 
 ;; ── Toolcall streaming (during LLM generation) ─────────────────────
 
+(defun pi-coding-agent-test--pending-tool-stream-body ()
+  "Return pending tool overlay body as plain text."
+  (let* ((ov pi-coding-agent--pending-tool-overlay)
+         (header-end (overlay-get ov 'pi-coding-agent-header-end)))
+    (buffer-substring-no-properties header-end (overlay-end ov))))
+
+(defun pi-coding-agent-test--pending-tool-content-lines ()
+  "Return streamed content lines without the hidden-output indicator."
+  (let* ((stream (pi-coding-agent-test--pending-tool-stream-body))
+         (lines (split-string (string-trim-right stream "\n+") "\n")))
+    (if (and lines (string= (car lines) "... (earlier output)"))
+        (cdr lines)
+      lines)))
+
 (ert-deftest pi-coding-agent-test-toolcall-start-after-text-has-blank-line ()
   "toolcall_start after text delta without trailing newline has proper spacing."
   (with-temp-buffer
@@ -2494,6 +2532,84 @@ preview excludes.  The display should be a no-op for such deltas."
       ;; Buffer should NOT have been modified — skip-when-unchanged
       (should (= (buffer-modified-tick) modtick-after-complete)))))
 
+(ert-deftest pi-coding-agent-test-toolcall-delta-partial-line-skips-tail-extract ()
+  "Partial-line write deltas skip expensive tail extraction.
+Only complete-line boundaries can change the visible streaming preview."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "line1\n"))
+    (let ((tail-calls 0)
+          (orig (symbol-function 'pi-coding-agent--fontify-buffer-tail)))
+      (cl-letf (((symbol-function 'pi-coding-agent--fontify-buffer-tail)
+                 (lambda (&rest args)
+                   (setq tail-calls (1+ tail-calls))
+                   (apply orig args))))
+        (pi-coding-agent-test--send-delta
+         "write" '(:path "/tmp/foo.py" :content "line1\npartial"))
+        (should (= tail-calls 0))))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-same-size-partial-skips-tail-extract ()
+  "Same-size rewrites of trailing partial lines skip tail extraction."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "line1\nabc"))
+    (let ((tail-calls 0)
+          (orig (symbol-function 'pi-coding-agent--fontify-buffer-tail)))
+      (cl-letf (((symbol-function 'pi-coding-agent--fontify-buffer-tail)
+                 (lambda (&rest args)
+                   (setq tail-calls (1+ tail-calls))
+                   (apply orig args))))
+        (pi-coding-agent-test--send-delta
+         "write" '(:path "/tmp/foo.py" :content "line1\nabd"))
+        (should (= tail-calls 0))))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-fontify-tail-falls-back-to-raw ()
+  "Write preview falls back to raw tail when fontify tail is unavailable."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (cl-letf (((symbol-function 'pi-coding-agent--fontify-buffer-tail)
+               (lambda (&rest _) nil)))
+      (pi-coding-agent-test--send-delta
+       "write" '(:path "/tmp/foo.py" :content "line1\nline2\n")))
+    (let ((content (buffer-string)))
+      (should (string-match-p "line1" content))
+      (should (string-match-p "line2" content)))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-same-size-refreshes-preview ()
+  "Same-size content rewrites still refresh write preview.
+If a provider rewrites accumulated content at the same length,
+the visible tail must update to the new text."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "aa\n"))
+    (should (string-match-p "aa" (buffer-string)))
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "bb\n"))
+    (let ((content (buffer-string)))
+      (should (string-match-p "bb" content))
+      (should-not (string-match-p "aa" content)))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-same-size-unchanged-skips-redraw ()
+  "Same-size duplicate content does not redraw write preview."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "aa\n"))
+    (let ((modtick (buffer-modified-tick)))
+      (pi-coding-agent-test--send-delta
+       "write" '(:path "/tmp/foo.py" :content "aa\n"))
+      (should (= modtick (buffer-modified-tick))))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-empty-content-clears-preview ()
+  "Empty write content clears stale streaming preview text."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "line1\n"))
+    (should (string-match-p "line1" (buffer-string)))
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content ""))
+    (let ((body (pi-coding-agent-test--pending-tool-stream-body)))
+      (should-not (string-match-p "line1" body))
+      (should (string-empty-p (string-trim-right body "\n+"))))))
+
 (ert-deftest pi-coding-agent-test-toolcall-delta-updates-on-new-line ()
   "Completing a new line triggers a display update.
 After a partial line, adding a newline changes the visible tail
@@ -2529,6 +2645,62 @@ as the previous delta that ended at a newline boundary."
         ;; Line count should NOT increase from the partial line
         (should (= lines-after-complete lines-after-partial))))))
 
+(ert-deftest pi-coding-agent-test-toolcall-delta-lang-preview-obeys-visual-cap ()
+  "Language-aware write streaming enforces visual-line preview limits.
+Wrapped lines must stay within `pi-coding-agent-tool-preview-lines'
+during streaming updates."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (let ((pi-coding-agent-tool-preview-lines 3)
+          (content (concat (make-string 36 ?x) "\nline2\nline3\n")))
+      (cl-letf (((symbol-function 'window-width) (lambda (&rest _) 10)))
+        (pi-coding-agent-test--send-delta
+         "write" `(:path "/tmp/foo.py" :content ,content))
+        (let* ((content-lines (pi-coding-agent-test--pending-tool-content-lines))
+               (visual-lines
+                (apply #'+
+                       (mapcar (lambda (line)
+                                 (max 1
+                                      (ceiling (/ (float (length line)) 10))))
+                               content-lines))))
+          (should (<= visual-lines pi-coding-agent-tool-preview-lines)))))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-lang-cap-preserves-syntax-face ()
+  "Visual capping in language-aware streaming keeps syntax faces intact."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (let ((pi-coding-agent-tool-preview-lines 2)
+          (content "def very_long_function_name_that_wraps_many_times(arg):\nline2\n"))
+      (cl-letf (((symbol-function 'window-width) (lambda (&rest _) 10)))
+        (pi-coding-agent-test--send-delta
+         "write" `(:path "/tmp/foo.py" :content ,content)))
+      (goto-char (point-min))
+      (search-forward "def")
+      (let ((face (get-text-property (match-beginning 0) 'face)))
+        (should (or (eq face 'font-lock-keyword-face)
+                    (and (listp face)
+                         (memq 'font-lock-keyword-face face))))))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-rewrites-bounded-preview ()
+  "Write streaming rewrites in place, keeping preview size bounded.
+Multiple deltas should replace the preview instead of appending forever."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (let ((pi-coding-agent-tool-preview-lines 3))
+      (pi-coding-agent-test--send-delta
+       "write" '(:path "/tmp/foo.py" :content "line1\nline2\nline3\n"))
+      (pi-coding-agent-test--send-delta
+       "write" '(:path "/tmp/foo.py" :content
+                "line1\nline2\nline3\nline4\n"))
+      (pi-coding-agent-test--send-delta
+       "write" '(:path "/tmp/foo.py" :content
+                "line1\nline2\nline3\nline4\nline5\n"))
+      (pi-coding-agent-test--send-delta
+       "write" '(:path "/tmp/foo.py" :content
+                "line1\nline2\nline3\nline4\nline5\nline6\n"))
+      (let ((body (pi-coding-agent-test--pending-tool-stream-body)))
+        (should-not (string-match-p "line1" body))
+        (should-not (string-match-p "line2" body))
+        (should (string-match-p "line6" body))
+        (should (= 1 (pi-coding-agent-test--count-matches "line6" body)))))))
+
 (ert-deftest pi-coding-agent-test-fontify-sync-complete-lines-only ()
   "Fontification runs only on complete lines, not partial lines.
 A delta ending mid-line should not fontify the partial part, avoiding
@@ -2556,6 +2728,55 @@ incorrect keyword matching on incomplete tokens."
             (should (or (eq face 'font-lock-keyword-face)
                         (and (listp face)
                              (memq 'font-lock-keyword-face face))))))))))
+
+(ert-deftest pi-coding-agent-test-fontify-sync-replace-keeps-partial-line-unfontified ()
+  "Full-resync path avoids fontifying trailing partial lines."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((lang "python"))
+      (pi-coding-agent--fontify-sync "def hello():\n" lang)
+      (pi-coding-agent--fontify-sync "def he" lang)
+      (let ((buf (pi-coding-agent--fontify-get-buffer lang)))
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (should-not (get-text-property (point) 'face)))))))
+
+(ert-deftest pi-coding-agent-test-fontify-sync-resolves-mode-once-per-buffer ()
+  "fontify-sync resolves markdown language mode only once per buffer.
+This avoids calling `markdown-get-lang-mode' on every tiny delta."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((calls 0))
+      (cl-letf (((symbol-function 'markdown-get-lang-mode)
+                 (lambda (_lang)
+                   (setq calls (1+ calls))
+                   'fundamental-mode)))
+        (pi-coding-agent--fontify-sync "x = 1\n" "python")
+        (pi-coding-agent--fontify-sync "x = 1\ny = 2\n" "python")
+        (pi-coding-agent--fontify-reset '(:path "/tmp/foo.py"))
+        (pi-coding-agent--fontify-sync "z = 3\n" "python")
+        (should (= calls 1))))))
+
+(ert-deftest pi-coding-agent-test-fontify-sync-mode-resolution-error-keeps-content ()
+  "fontify-sync keeps content even when markdown mode resolution fails.
+A mode lookup failure should degrade highlighting, not drop streamed text."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((logged-message nil))
+      (cl-letf (((symbol-function 'markdown-get-lang-mode)
+                 (lambda (_lang)
+                   (error "boom")))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq logged-message (apply #'format fmt args)))))
+        (pi-coding-agent--fontify-sync "x = 1\n" "python")
+        (let ((buf (pi-coding-agent--fontify-get-buffer "python")))
+          (should buf)
+          (with-current-buffer buf
+            (should (equal (buffer-string) "x = 1\n"))))
+        (should (string-match-p
+                 "fontify mode init error for python"
+                 logged-message))))))
 
 (ert-deftest pi-coding-agent-test-toolcall-dedup-on-tool-execution-start ()
   "tool_execution_start skips overlay creation when toolcall_start already created it."
@@ -2719,6 +2940,19 @@ a slot, so downstream consumers that skip blanks still get N content lines."
   (let ((result (pi-coding-agent--get-tail-lines "just one line" 5)))
     (should (equal (car result) "just one line"))
     (should (eq (cdr result) nil))))
+
+(ert-deftest pi-coding-agent-test-get-tail-lines-zero-lines ()
+  "Requesting zero lines returns empty tail without errors."
+  (let ((result (pi-coding-agent--get-tail-lines "line1\nline2" 0)))
+    (should (equal (car result) ""))
+    (should (eq (cdr result) t))))
+
+(ert-deftest pi-coding-agent-test-fontify-buffer-tail-zero-lines ()
+  "fontify-buffer-tail returns nil when N is zero."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--fontify-sync "x = 1\n" "python")
+    (should-not (pi-coding-agent--fontify-buffer-tail "python" 0))))
 
 (ert-deftest pi-coding-agent-test-fontify-buffer-tail-single-line ()
   "fontify-buffer-tail returns content for a single complete line.

@@ -2820,9 +2820,13 @@ display-agent-end must finalize the pending overlay with error face."
   "Input mode does NOT hide markup, even when user customizes it globally."
   (with-temp-buffer
     (let ((pi-coding-agent-input-markdown-highlighting t)
-          (markdown-hide-markup t))
-      (pi-coding-agent-input-mode)
-      (should-not markdown-hide-markup))))
+          (old-default (default-value 'markdown-hide-markup)))
+      (unwind-protect
+          (progn
+            (setq-default markdown-hide-markup t)
+            (pi-coding-agent-input-mode)
+            (should-not markdown-hide-markup))
+        (setq-default markdown-hide-markup old-default)))))
 
 (ert-deftest pi-coding-agent-test-input-mode-no-fontification-without-gfm ()
   "Without markdown highlighting, bold text gets no markdown face."
