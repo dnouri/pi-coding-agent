@@ -256,6 +256,7 @@ This ensures all files get code fences for consistent display."
   (let ((callback nil)
         (messages nil)
         (noninteractive nil)
+        (pi-coding-agent-phscroll-offer-install nil)
         (proc (start-process "pi-coding-agent-test-proc" nil "cat")))
     (unwind-protect
         (with-temp-buffer
@@ -280,6 +281,7 @@ This ensures all files get code fences for consistent display."
   (let ((callback nil)
         (messages nil)
         (noninteractive nil)
+        (pi-coding-agent-phscroll-offer-install nil)
         (proc (start-process "pi-coding-agent-test-proc-a" nil "cat")))
     (unwind-protect
         (with-temp-buffer
