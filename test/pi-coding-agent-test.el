@@ -427,7 +427,8 @@ must decide whether this is a no-op."
 (ert-deftest pi-coding-agent-test-toggle-no-session-errors ()
   "`pi-coding-agent-toggle' signals `user-error' when no session exists."
   (let ((default-directory "/tmp/pi-coding-agent-test-no-session/"))
-    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil)))
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pi-coding-agent--check-dependencies) #'ignore))
       (should-error (pi-coding-agent-toggle) :type 'user-error))))
 
 (ert-deftest pi-coding-agent-test-toggle-shows-in-current-frame-when-only-visible-elsewhere ()
@@ -437,7 +438,8 @@ must decide whether this is a no-op."
         (hide-called nil))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil)))
+              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
+              ((symbol-function 'pi-coding-agent--check-dependencies) #'ignore))
       (unwind-protect
           (progn
             (with-temp-buffer
@@ -467,7 +469,8 @@ must decide whether this is a no-op."
         (input nil))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil)))
+              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
+              ((symbol-function 'pi-coding-agent--check-dependencies) #'ignore))
       (unwind-protect
           (progn
             (delete-other-windows)
@@ -496,7 +499,8 @@ must decide whether this is a no-op."
         (input nil))
     (make-directory root t)
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil)))
+              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
+              ((symbol-function 'pi-coding-agent--check-dependencies) #'ignore))
       (unwind-protect
           (progn
             (delete-other-windows)
