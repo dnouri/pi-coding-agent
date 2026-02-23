@@ -2263,8 +2263,7 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
     (with-current-buffer chat-buf
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (pi-coding-agent--insert-startup-header)
-        (insert "\n")
+        (insert (pi-coding-agent--format-startup-header) "\n")
         (when (vectorp messages)
           (pi-coding-agent--display-history-messages messages))
         (goto-char (point-max))

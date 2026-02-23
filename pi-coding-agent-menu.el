@@ -243,7 +243,7 @@ Used when starting a new session."
     (with-current-buffer chat-buf
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (pi-coding-agent--insert-startup-header)
+        (insert (pi-coding-agent--format-startup-header))
         (insert "\n")
         (pi-coding-agent--reset-session-state)
         (goto-char (point-max))))))
