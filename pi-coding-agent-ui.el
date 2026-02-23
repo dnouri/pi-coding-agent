@@ -654,9 +654,19 @@ of the current session in the selected frame."
 (defvar-local pi-coding-agent--process nil
   "The pi RPC subprocess for this session.")
 
+(defvar-local pi-coding-agent--process-version nil
+  "Detected pi CLI version for the current process.")
+
 (defun pi-coding-agent--set-process (process)
-  "Set the pi RPC subprocess PROCESS for this session."
-  (setq pi-coding-agent--process process))
+  "Set the pi RPC subprocess PROCESS for this session.
+Resets cached process version and starts a delayed version probe for
+new live processes in interactive sessions."
+  (setq pi-coding-agent--process process
+        pi-coding-agent--process-version nil)
+  (when (and (processp process)
+             (process-live-p process)
+             (not noninteractive))
+    (pi-coding-agent--probe-process-version-async (current-buffer))))
 
 (defvar-local pi-coding-agent--chat-buffer nil
   "Reference to the chat buffer for this session.")
@@ -1159,16 +1169,75 @@ Displays warnings for missing dependencies."
 (defconst pi-coding-agent-version "1.3.4"
   "Version of pi-coding-agent.")
 
-(defun pi-coding-agent--get-pi-coding-agent-version ()
-  "Get pi CLI version by running `pi --version'."
-  (condition-case nil
-      (string-trim (shell-command-to-string "pi --version"))
-    (error "Unknown")))
+(defconst pi-coding-agent--version-probe-delay 0.1
+  "Seconds to wait before probing `pi --version' for a new process.")
+
+(defun pi-coding-agent--finish-pi-version-process (proc)
+  "Collect `pi --version' output from PROC and invoke its callback."
+  (let ((callback (process-get proc 'pi-coding-agent-version-callback))
+        (stdout-buf (process-get proc 'pi-coding-agent-version-stdout-buf))
+        (stderr-buf (process-get proc 'pi-coding-agent-version-stderr-buf)))
+    (unwind-protect
+        (let ((stdout (when (buffer-live-p stdout-buf)
+                        (string-trim
+                         (with-current-buffer stdout-buf
+                           (buffer-string))))))
+          (when callback
+            (funcall callback
+                     (and stdout
+                          (not (string-empty-p stdout))
+                          stdout))))
+      (when (buffer-live-p stdout-buf)
+        (kill-buffer stdout-buf))
+      (when (buffer-live-p stderr-buf)
+        (kill-buffer stderr-buf)))))
+
+(defun pi-coding-agent--run-pi-version-once-async (callback)
+  "Run `pi --version' asynchronously and call CALLBACK with version or nil."
+  (let ((stdout-buf (generate-new-buffer " *pi-coding-agent-version-stdout*"))
+        (stderr-buf (generate-new-buffer " *pi-coding-agent-version-stderr*")))
+    (condition-case nil
+        (let ((proc (make-process
+                     :name "pi-version"
+                     :command `(,@pi-coding-agent-executable "--version")
+                     :connection-type 'pipe
+                     :buffer stdout-buf
+                     :stderr stderr-buf
+                     :noquery t
+                     :sentinel
+                     (lambda (proc _event)
+                       (when (memq (process-status proc) '(exit signal))
+                         (pi-coding-agent--finish-pi-version-process proc))))))
+          (process-put proc 'pi-coding-agent-version-callback callback)
+          (process-put proc 'pi-coding-agent-version-stdout-buf stdout-buf)
+          (process-put proc 'pi-coding-agent-version-stderr-buf stderr-buf)
+          proc)
+      (error
+       (when (buffer-live-p stdout-buf)
+         (kill-buffer stdout-buf))
+       (when (buffer-live-p stderr-buf)
+         (kill-buffer stderr-buf))
+       (funcall callback nil)))))
+
+(defun pi-coding-agent--request-pi-version-async (callback)
+  "Resolve pi CLI version asynchronously and call CALLBACK with string or nil."
+  (run-at-time pi-coding-agent--version-probe-delay nil
+               #'pi-coding-agent--run-pi-version-once-async
+               callback))
+
+(defun pi-coding-agent--probe-process-version-async (chat-buf)
+  "Probe and cache CLI version for CHAT-BUF's process.
+Stores the result in CHAT-BUF and emits a minibuffer notice when available."
+  (pi-coding-agent--request-pi-version-async
+   (lambda (version)
+     (when (and version (buffer-live-p chat-buf))
+       (with-current-buffer chat-buf
+         (setq pi-coding-agent--process-version version)
+         (message "Pi: version %s" version))))))
 
 (defun pi-coding-agent--format-startup-header ()
   "Format the startup header string with styled separator."
-  (let* ((pi-coding-agent-cli-version (pi-coding-agent--get-pi-coding-agent-version))
-         (separator (pi-coding-agent--make-separator (format "Pi %s" pi-coding-agent-cli-version))))
+  (let ((separator (pi-coding-agent--make-separator "Pi Coding Agent for Emacs")))
     (concat
      separator "\n"
      "C-c C-c   send prompt\n"
