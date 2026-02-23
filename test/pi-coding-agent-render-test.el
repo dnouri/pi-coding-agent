@@ -1420,6 +1420,105 @@ Call inside `with-temp-buffer' after `pi-coding-agent-chat-mode'."
     (should (eq (get-text-property (match-beginning 0) 'font-lock-face)
                 'pi-coding-agent-tool-output))))
 
+(ert-deftest pi-coding-agent-test-generic-tool-details-marked-no-fontify ()
+  "Generic details text is marked as excluded from markdown fontification."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent-test--insert-generic-tool
+     "Done" '(:mode "single" :exitCode 0))
+    (goto-char (point-min))
+    (should (search-forward "Done" nil t))
+    (should-not (get-text-property (match-beginning 0)
+                                   'pi-coding-agent-no-fontify))
+    (should (search-forward "**Details**" nil t))
+    (should (get-text-property (match-beginning 0)
+                               'pi-coding-agent-no-fontify))
+    (should (search-forward "\"mode\"" nil t))
+    (should (get-text-property (match-beginning 0)
+                               'pi-coding-agent-no-fontify))))
+
+(ert-deftest pi-coding-agent-test-propertize-details-region-marks-entire-string ()
+  "Details helper should mark every character as no-fontify metadata."
+  (let* ((json "{\n  \"mode\": \"single\"\n}")
+         (details (pi-coding-agent--propertize-details-region json)))
+    (should (equal (substring-no-properties details)
+                   (concat "**Details**\n" json)))
+    (dotimes (idx (length details))
+      (should (get-text-property idx 'pi-coding-agent-no-fontify details))
+      (should (eq (get-text-property idx 'font-lock-face details)
+                  'pi-coding-agent-tool-output)))))
+
+(ert-deftest pi-coding-agent-test-generic-tool-toggle-skips-details-font-lock ()
+  "Toggle fontification excludes details metadata ranges."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((pi-coding-agent-tool-preview-lines 5)
+           (content (mapconcat (lambda (n) (format "line%d" n))
+                               (number-sequence 1 30)
+                               "\n"))
+           (details (list :summary (make-string 3000 ?x)))
+           (font-lock-calls nil))
+      (pi-coding-agent-test--insert-generic-tool content details)
+      (goto-char (point-min))
+      (should (re-search-forward "\\.\\.\\. ([0-9]+ more lines)" nil t))
+      (let ((btn (button-at (match-beginning 0))))
+        (should btn)
+        (cl-letf (((symbol-function 'font-lock-ensure)
+                   (lambda (start end)
+                     (push (cons start end) font-lock-calls)
+                     (save-excursion
+                       (goto-char start)
+                       (when (search-forward "**Details**" end t)
+                         (error "Stack overflow in regexp matcher"))))))
+          (pi-coding-agent--toggle-tool-output btn)))
+      (should font-lock-calls)
+      (dolist (range font-lock-calls)
+        (should-not
+         (save-excursion
+           (goto-char (car range))
+           (search-forward "**Details**" (cdr range) t)))))))
+
+(ert-deftest pi-coding-agent-test-generic-tool-with-path-toggle-skips-details-font-lock ()
+  "Generic tool with path keeps details excluded during toggle fontification."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((pi-coding-agent-tool-preview-lines 5)
+           (content (mapconcat (lambda (n) (format "line%d" n))
+                               (number-sequence 1 30)
+                               "\n"))
+           (details (list :summary (make-string 3000 ?x)))
+           (font-lock-calls nil))
+      (pi-coding-agent--display-tool-start "custom_tool" '(:path "/tmp/example.py"))
+      (pi-coding-agent--display-tool-end
+       "custom_tool" '(:path "/tmp/example.py")
+       (list (list :type "text" :text content))
+       details nil)
+      (goto-char (point-min))
+      (should (re-search-forward "\\.\\.\\. ([0-9]+ more lines)" nil t))
+      (let ((btn (button-at (match-beginning 0))))
+        (should btn)
+        (let ((full-content (button-get btn 'pi-coding-agent-full-content)))
+          (should (string-match-p "\\*\\*Details\\*\\*" full-content))
+          (should (let ((match-pos (string-match "\\*\\*Details\\*\\*" full-content)))
+                    (and match-pos
+                         (get-text-property match-pos
+                                            'pi-coding-agent-no-fontify
+                                            full-content)))))
+        (cl-letf (((symbol-function 'font-lock-ensure)
+                   (lambda (start end)
+                     (push (cons start end) font-lock-calls)
+                     (save-excursion
+                       (goto-char start)
+                       (when (search-forward "**Details**" end t)
+                         (error "Stack overflow in regexp matcher"))))))
+          (pi-coding-agent--toggle-tool-output btn)))
+      (should font-lock-calls)
+      (dolist (range font-lock-calls)
+        (should-not
+         (save-excursion
+           (goto-char (car range))
+           (search-forward "**Details**" (cdr range) t)))))))
+
 (ert-deftest pi-coding-agent-test-generic-tool-nil-details-unchanged ()
   "Generic tool with nil details shows only content text."
   (with-temp-buffer
@@ -3140,6 +3239,113 @@ moves over regions with varying numbers of blank lines."
     (kill-buffer buf)
     (should-not (buffer-live-p fb-py))
     (should-not (buffer-live-p fb-js))))
+
+;;; Fontify Exclusion Helpers
+
+(ert-deftest pi-coding-agent-test-font-lock-ensure-excluding-property-splits-ranges ()
+  "Font-lock helper should call only contiguous non-excluded ranges."
+  (with-temp-buffer
+    (insert "aaaBBBcccDDDeee")
+    (put-text-property 4 7 'pi-coding-agent-no-fontify t)
+    (put-text-property 10 13 'pi-coding-agent-no-fontify t)
+    (let ((calls nil))
+      (cl-letf (((symbol-function 'font-lock-ensure)
+                 (lambda (start end)
+                   (push (cons start end) calls))))
+        (pi-coding-agent--font-lock-ensure-excluding-property
+         (point-min) (point-max) 'pi-coding-agent-no-fontify))
+      (should (equal (nreverse calls)
+                     '((1 . 4) (7 . 10) (13 . 16)))))))
+
+(ert-deftest pi-coding-agent-test-font-lock-ensure-excluding-property-excludes-any-non-nil ()
+  "Font-lock helper should treat any non-nil PROP value as excluded."
+  (with-temp-buffer
+    (insert "aaaBBBccc")
+    (put-text-property 4 7 'pi-coding-agent-no-fontify :details)
+    (let ((calls nil))
+      (cl-letf (((symbol-function 'font-lock-ensure)
+                 (lambda (start end)
+                   (push (cons start end) calls))))
+        (pi-coding-agent--font-lock-ensure-excluding-property
+         (point-min) (point-max) 'pi-coding-agent-no-fontify))
+      (should (equal (nreverse calls)
+                     '((1 . 4) (7 . 10)))))))
+
+(ert-deftest pi-coding-agent-test-font-lock-ensure-excluding-property-fontifies-large-ranges ()
+  "Font-lock helper should still process large non-excluded regions."
+  (with-temp-buffer
+    (insert (make-string 70000 ?x))
+    (let ((called nil))
+      (cl-letf (((symbol-function 'font-lock-ensure)
+                 (lambda (&rest _args)
+                   (setq called t))))
+        (pi-coding-agent--font-lock-ensure-excluding-property
+         (point-min) (point-max) 'pi-coding-agent-no-fontify))
+      (should called))))
+
+(ert-deftest pi-coding-agent-test-font-lock-ensure-excluding-property-error-silent-without-debug ()
+  "Font-lock errors should not emit user-visible messages when debug is off."
+  (with-temp-buffer
+    (insert "abcdef")
+    (let ((debug-on-error nil)
+          (message-called nil))
+      (cl-letf (((symbol-function 'font-lock-ensure)
+                 (lambda (&rest _args)
+                   (error "Broken font-lock")))
+                ((symbol-function 'message)
+                 (lambda (&rest _args)
+                   (setq message-called t))))
+        (pi-coding-agent--font-lock-ensure-excluding-property
+         (point-min) (point-max) 'pi-coding-agent-no-fontify))
+      (should-not message-called))))
+
+(ert-deftest pi-coding-agent-test-font-lock-ensure-excluding-property-error-logs-in-debug ()
+  "Font-lock errors should log diagnostics when debug mode is enabled."
+  (with-temp-buffer
+    (insert "abcdef")
+    (let ((debug-on-error t)
+          (message-text nil))
+      (cl-letf (((symbol-function 'font-lock-ensure)
+                 (lambda (&rest _args)
+                   (error "Broken font-lock")))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq message-text (apply #'format fmt args)))))
+        (pi-coding-agent--font-lock-ensure-excluding-property
+         (point-min) (point-max) 'pi-coding-agent-no-fontify))
+      (should (string-match-p "toggle fontification failed"
+                              (or message-text ""))))))
+
+(ert-deftest pi-coding-agent-test-font-lock-ensure-excluding-property-stops-after-first-error ()
+  "Font-lock helper should stop processing ranges after the first error."
+  (with-temp-buffer
+    (insert "aaaBBBccc")
+    (put-text-property 4 7 'pi-coding-agent-no-fontify t)
+    (let ((debug-on-error t)
+          (font-lock-calls 0)
+          (message-count 0))
+      (cl-letf (((symbol-function 'font-lock-ensure)
+                 (lambda (&rest _args)
+                   (setq font-lock-calls (1+ font-lock-calls))
+                   (error "Broken font-lock")))
+                ((symbol-function 'message)
+                 (lambda (&rest _args)
+                   (setq message-count (1+ message-count)))))
+        (pi-coding-agent--font-lock-ensure-excluding-property
+         (point-min) (point-max) 'pi-coding-agent-no-fontify))
+      (should (= font-lock-calls 1))
+      (should (= message-count 1)))))
+
+(ert-deftest pi-coding-agent-test-font-lock-ensure-excluding-property-swallows-errors ()
+  "Font-lock helper should not propagate font-lock errors."
+  (with-temp-buffer
+    (insert "abcdef")
+    (cl-letf (((symbol-function 'font-lock-ensure)
+               (lambda (&rest _args)
+                 (error "Broken font-lock"))))
+      (pi-coding-agent--font-lock-ensure-excluding-property
+       (point-min) (point-max) 'pi-coding-agent-no-fontify)
+      (should t))))
 
 ;;; Fontify Error Handling
 
