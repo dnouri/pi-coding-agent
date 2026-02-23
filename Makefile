@@ -2,6 +2,8 @@
 
 EMACS ?= emacs
 BATCH = $(EMACS) --batch -Q -L .
+# Keep this checkout first in load-path even after package-initialize.
+LOCAL_LOAD_PATH = --eval "(setq load-path (cons (expand-file-name \".\") load-path))"
 
 # Pi CLI version — single source of truth (workflows extract this automatically)
 PI_VERSION ?= 0.52.9
@@ -12,6 +14,10 @@ PI_BIN_DIR = $(abspath $(dir $(PI_BIN)))
 # Example: make test SELECTOR=fontify-buffer-tail
 SELECTOR ?=
 
+# Verbose output for tests (show full ERT output, including passed lines)
+# Example: make test VERBOSE=1
+VERBOSE ?=
+
 .PHONY: test test-unit test-core test-ui test-render test-input test-menu
 .PHONY: test-integration test-integration-ci test-gui test-gui-ci test-all
 .PHONY: check check-parens compile lint lint-checkdoc lint-package clean clean-cache help
@@ -19,7 +25,7 @@ SELECTOR ?=
 
 help:
 	@echo "Targets:"
-	@echo "  make test             All unit tests (use SELECTOR=pattern to filter)"
+	@echo "  make test             All unit tests (SELECTOR=pattern, VERBOSE=1 for full output)"
 	@echo "  make test-core        Core/RPC tests only"
 	@echo "  make test-ui          UI foundation tests only"
 	@echo "  make test-render      Render tests only"
@@ -69,10 +75,13 @@ SHELL = /bin/bash
 
 test: .deps-stamp
 	@echo "=== Unit Tests ==="
-	@set -o pipefail; $(BATCH) -L test \
+	@set -o pipefail; \
+	OUTPUT=$$(mktemp); \
+	$(BATCH) -L test \
 		--eval "(setq load-prefer-newer t)" \
 		--eval "(require 'package)" \
 		--eval "(package-initialize)" \
+		$(LOCAL_LOAD_PATH) \
 		-l pi-coding-agent \
 		-l pi-coding-agent-core-test \
 		-l pi-coding-agent-ui-test \
@@ -80,13 +89,22 @@ test: .deps-stamp
 		-l pi-coding-agent-input-test \
 		-l pi-coding-agent-menu-test \
 		-l pi-coding-agent-test \
-		$(if $(SELECTOR),--eval '(ert-run-tests-batch-and-exit "$(SELECTOR)")',-f ert-run-tests-batch-and-exit) 2>&1 \
-		| grep -v "^   passed\|^Pi: \|^Running [0-9]\|^$$"
+		$(if $(SELECTOR),--eval '(ert-run-tests-batch-and-exit "$(SELECTOR)")',-f ert-run-tests-batch-and-exit) \
+		>$$OUTPUT 2>&1; \
+	STATUS=$$?; \
+	if [ "$(VERBOSE)" = "1" ] || [ $$STATUS -ne 0 ]; then \
+		cat $$OUTPUT; \
+	else \
+		grep -v "^   passed\|^Pi: \|^Running [0-9]\|^$$" $$OUTPUT; \
+	fi; \
+	rm -f $$OUTPUT; \
+	exit $$STATUS
 
 # Per-module test targets: run tests for a single module in isolation.
 # Usage: make test-render (much faster than `make test` during development)
 BATCH_TEST = $(BATCH) -L test --eval "(setq load-prefer-newer t)" \
 	--eval "(require 'package)" --eval "(package-initialize)" \
+	$(LOCAL_LOAD_PATH) \
 	-l pi-coding-agent
 
 test-core: .deps-stamp
@@ -149,6 +167,7 @@ test-integration: clean .deps-stamp setup-pi
 		$(BATCH) -L test \
 			--eval "(require 'package)" \
 			--eval "(package-initialize)" \
+			$(LOCAL_LOAD_PATH) \
 			-l pi-coding-agent -l pi-coding-agent-integration-test -f ert-run-tests-batch-and-exit; \
 		status=$$?; rm -rf "$$PI_CODING_AGENT_DIR"; exit $$status
 
@@ -161,6 +180,7 @@ test-integration-ci: clean .deps-stamp setup-pi
 	$(BATCH) -L test \
 		--eval "(require 'package)" \
 		--eval "(package-initialize)" \
+		$(LOCAL_LOAD_PATH) \
 		-l pi-coding-agent -l pi-coding-agent-integration-test -f ert-run-tests-batch-and-exit
 
 # ============================================================
@@ -219,6 +239,7 @@ compile: .deps-stamp
 	@$(BATCH) \
 		--eval "(require 'package)" \
 		--eval "(package-initialize)" \
+		$(LOCAL_LOAD_PATH) \
 		--eval "(setq byte-compile-error-on-warn t)" \
 		-f batch-byte-compile pi-coding-agent-core.el pi-coding-agent-ui.el pi-coding-agent-render.el pi-coding-agent-input.el pi-coding-agent-menu.el pi-coding-agent.el
 

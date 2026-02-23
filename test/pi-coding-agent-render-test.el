@@ -234,6 +234,57 @@ Models may send \\n\\n before thinking content too."
       (should (string-match-p "Reviewing docs\n\nread /tmp/AGENTS\\.md" text))
       (should-not (string-match-p "Reviewing docs\n\n\n" text)))))
 
+(ert-deftest pi-coding-agent-test-thinking-after-text-has-blank-line-separator ()
+  "Second thinking block after text delta is separated by blank line."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    ;; First thinking block
+    (pi-coding-agent--display-thinking-start)
+    (pi-coding-agent--display-thinking-delta "First thought.")
+    (pi-coding-agent--display-thinking-end "")
+    ;; Text between blocks
+    (pi-coding-agent--display-message-delta "Here is my answer.")
+    ;; Second thinking block
+    (pi-coding-agent--display-thinking-start)
+    (pi-coding-agent--display-thinking-delta "Second thought.")
+    (pi-coding-agent--display-thinking-end "")
+    (let ((text (buffer-string)))
+      ;; The > must start on its own line, separated by blank line from text
+      (should (string-match-p "my answer\\.\n\n> Second thought\\." text))
+      ;; The > must NOT be glued to the text
+      (should-not (string-match-p "my answer\\.>" text)))))
+
+(ert-deftest pi-coding-agent-test-thinking-delta-allows-syntax-propertize ()
+  "Thinking deltas must allow `syntax-propertize' cache to stay in sync.
+Each delta rewrites the entire blockquote.  If `before-change-functions'
+are suppressed (via `inhibit-modification-hooks'), `syntax-ppss-flush-cache'
+never fires and `syntax-propertize--done' stays stale.  Then when
+`font-lock-ensure' runs, `syntax-propertize' skips the rewritten region,
+markdown's syntax properties are missing, and blockquote font-lock
+keywords can't match — leaving `fontified' t but no faces.
+
+This test simulates the jit-lock scenario: fontify first, then stream
+more deltas, then verify syntax-propertize--done was properly reset."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-thinking-start)
+    ;; Send initial content
+    (pi-coding-agent--display-thinking-delta "First paragraph with text.")
+    ;; Fontify — this pushes syntax-propertize--done forward
+    (font-lock-ensure (point-min) (point-max))
+    (let ((done-before (bound-and-true-p syntax-propertize--done)))
+      ;; Now stream more content (triggers rewrite)
+      (pi-coding-agent--display-thinking-delta "\n\nSecond paragraph.")
+      ;; syntax-propertize--done must have been reset to before the
+      ;; rewritten region, so font-lock-ensure will re-propertize
+      (let ((done-after (bound-and-true-p syntax-propertize--done))
+            (thinking-start (marker-position
+                             pi-coding-agent--thinking-start-marker)))
+        (should (< done-after done-before))
+        (should (<= done-after thinking-start))))))
+
 (ert-deftest pi-coding-agent-test-spacing-blank-line-before-tool ()
   "Tool block is preceded by blank line when after text."
   (with-temp-buffer
@@ -574,8 +625,7 @@ since we don't display them locally. Let pi's message_start handle it."
             (insert "/fix-tests")
             (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
                       ((symbol-function 'process-live-p) (lambda (_) t))
-                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore)
-                      ((symbol-function 'pi-coding-agent--spinner-start) #'ignore))
+                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore))
               (pi-coding-agent-send)))
           
           ;; KEY ASSERTION: assistant-header-shown should still be t
@@ -909,7 +959,7 @@ since we don't display them locally. Let pi's message_start handle it."
   "extension_ui_request input method uses read-string and sends response."
   (let ((response-sent nil))
     (cl-letf (((symbol-function 'read-string)
-               (lambda (_prompt &optional _initial) "user input"))
+               (lambda (&rest _args) "user input"))
               ((symbol-function 'pi-coding-agent--send-extension-ui-response)
                (lambda (_proc msg)
                  (setq response-sent msg))))
@@ -986,18 +1036,54 @@ since we don't display them locally. Let pi's message_start handle it."
        :statusText nil))
     (should-not (assoc "my-ext" pi-coding-agent--extension-status))))
 
+(ert-deftest pi-coding-agent-test-extension-ui-set-working-message ()
+  "extension_ui_request setWorkingMessage stores working text."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--working-message nil)
+    (pi-coding-agent--handle-extension-ui-request
+     '(:type "extension_ui_request"
+       :id "req-working"
+       :method "setWorkingMessage"
+       :message "📖 Skimming…"))
+    (should (equal pi-coding-agent--working-message "📖 Skimming…"))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-set-working-message-strips-ansi ()
+  "extension_ui_request setWorkingMessage strips ANSI escape codes."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--working-message nil)
+    (pi-coding-agent--handle-extension-ui-request
+     '(:type "extension_ui_request"
+       :id "req-working-ansi"
+       :method "setWorkingMessage"
+       :message "\e[38;5;39m📖 Skimming…\e[39m"))
+    (should (equal pi-coding-agent--working-message "📖 Skimming…"))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-set-working-message-clear ()
+  "extension_ui_request setWorkingMessage with nil clears message."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--working-message "Old")
+    (pi-coding-agent--handle-extension-ui-request
+     '(:type "extension_ui_request"
+       :id "req-working-clear"
+       :method "setWorkingMessage"
+       :message nil))
+    (should (null pi-coding-agent--working-message))))
+
 (ert-deftest pi-coding-agent-test-header-format-extension-status ()
-  "Extension status formats correctly in header-line."
+  "Extension status formatter returns inline status text without pipe."
   ;; Empty status returns empty string
   (should (equal (pi-coding-agent--header-format-extension-status nil) ""))
   ;; Single status
   (let ((result (pi-coding-agent--header-format-extension-status '(("ext1" . "Processing...")))))
-    (should (string-match-p "│" result))
+    (should-not (string-match-p "│" result))
     (should (string-match-p "Processing" result)))
   ;; Multiple statuses joined with separator
   (let ((result (pi-coding-agent--header-format-extension-status
                  '(("ext1" . "Status 1") ("ext2" . "Status 2")))))
-    (should (string-match-p "│" result))
+    (should-not (string-match-p "│" result))
     (should (string-match-p "Status 1" result))
     (should (string-match-p "Status 2" result))
     (should (string-match-p "·" result))))
@@ -1334,6 +1420,105 @@ Call inside `with-temp-buffer' after `pi-coding-agent-chat-mode'."
     (should (eq (get-text-property (match-beginning 0) 'font-lock-face)
                 'pi-coding-agent-tool-output))))
 
+(ert-deftest pi-coding-agent-test-generic-tool-details-marked-no-fontify ()
+  "Generic details text is marked as excluded from markdown fontification."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent-test--insert-generic-tool
+     "Done" '(:mode "single" :exitCode 0))
+    (goto-char (point-min))
+    (should (search-forward "Done" nil t))
+    (should-not (get-text-property (match-beginning 0)
+                                   'pi-coding-agent-no-fontify))
+    (should (search-forward "**Details**" nil t))
+    (should (get-text-property (match-beginning 0)
+                               'pi-coding-agent-no-fontify))
+    (should (search-forward "\"mode\"" nil t))
+    (should (get-text-property (match-beginning 0)
+                               'pi-coding-agent-no-fontify))))
+
+(ert-deftest pi-coding-agent-test-propertize-details-region-marks-entire-string ()
+  "Details helper should mark every character as no-fontify metadata."
+  (let* ((json "{\n  \"mode\": \"single\"\n}")
+         (details (pi-coding-agent--propertize-details-region json)))
+    (should (equal (substring-no-properties details)
+                   (concat "**Details**\n" json)))
+    (dotimes (idx (length details))
+      (should (get-text-property idx 'pi-coding-agent-no-fontify details))
+      (should (eq (get-text-property idx 'font-lock-face details)
+                  'pi-coding-agent-tool-output)))))
+
+(ert-deftest pi-coding-agent-test-generic-tool-toggle-skips-details-font-lock ()
+  "Toggle fontification excludes details metadata ranges."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((pi-coding-agent-tool-preview-lines 5)
+           (content (mapconcat (lambda (n) (format "line%d" n))
+                               (number-sequence 1 30)
+                               "\n"))
+           (details (list :summary (make-string 3000 ?x)))
+           (font-lock-calls nil))
+      (pi-coding-agent-test--insert-generic-tool content details)
+      (goto-char (point-min))
+      (should (re-search-forward "\\.\\.\\. ([0-9]+ more lines)" nil t))
+      (let ((btn (button-at (match-beginning 0))))
+        (should btn)
+        (cl-letf (((symbol-function 'font-lock-ensure)
+                   (lambda (start end)
+                     (push (cons start end) font-lock-calls)
+                     (save-excursion
+                       (goto-char start)
+                       (when (search-forward "**Details**" end t)
+                         (error "Stack overflow in regexp matcher"))))))
+          (pi-coding-agent--toggle-tool-output btn)))
+      (should font-lock-calls)
+      (dolist (range font-lock-calls)
+        (should-not
+         (save-excursion
+           (goto-char (car range))
+           (search-forward "**Details**" (cdr range) t)))))))
+
+(ert-deftest pi-coding-agent-test-generic-tool-with-path-toggle-skips-details-font-lock ()
+  "Generic tool with path keeps details excluded during toggle fontification."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((pi-coding-agent-tool-preview-lines 5)
+           (content (mapconcat (lambda (n) (format "line%d" n))
+                               (number-sequence 1 30)
+                               "\n"))
+           (details (list :summary (make-string 3000 ?x)))
+           (font-lock-calls nil))
+      (pi-coding-agent--display-tool-start "custom_tool" '(:path "/tmp/example.py"))
+      (pi-coding-agent--display-tool-end
+       "custom_tool" '(:path "/tmp/example.py")
+       (list (list :type "text" :text content))
+       details nil)
+      (goto-char (point-min))
+      (should (re-search-forward "\\.\\.\\. ([0-9]+ more lines)" nil t))
+      (let ((btn (button-at (match-beginning 0))))
+        (should btn)
+        (let ((full-content (button-get btn 'pi-coding-agent-full-content)))
+          (should (string-match-p "\\*\\*Details\\*\\*" full-content))
+          (should (let ((match-pos (string-match "\\*\\*Details\\*\\*" full-content)))
+                    (and match-pos
+                         (get-text-property match-pos
+                                            'pi-coding-agent-no-fontify
+                                            full-content)))))
+        (cl-letf (((symbol-function 'font-lock-ensure)
+                   (lambda (start end)
+                     (push (cons start end) font-lock-calls)
+                     (save-excursion
+                       (goto-char start)
+                       (when (search-forward "**Details**" end t)
+                         (error "Stack overflow in regexp matcher"))))))
+          (pi-coding-agent--toggle-tool-output btn)))
+      (should font-lock-calls)
+      (dolist (range font-lock-calls)
+        (should-not
+         (save-excursion
+           (goto-char (car range))
+           (search-forward "**Details**" (cdr range) t)))))))
+
 (ert-deftest pi-coding-agent-test-generic-tool-nil-details-unchanged ()
   "Generic tool with nil details shows only content text."
   (with-temp-buffer
@@ -1478,6 +1663,41 @@ Call inside `with-temp-buffer' after `pi-coding-agent-chat-mode'."
 
 ;;; File Navigation (visit-file)
 
+(defun pi-coding-agent-test--open-target-buffer (line-count)
+  "Create and return a fake visited buffer with LINE-COUNT lines."
+  (set-buffer (get-buffer-create "*pi-coding-agent-test-target*"))
+  (erase-buffer)
+  (dotimes (_ line-count)
+    (insert "line\n"))
+  (goto-char (point-min))
+  (current-buffer))
+
+(defun pi-coding-agent-test--visit-file-line (&optional line-count toggle)
+  "Call `pi-coding-agent-visit-file' and return visit metadata.
+Returns plist `(:path PATH :line N :open-kind KIND)'.
+LINE-COUNT controls the size of the fake visited file.  TOGGLE is
+forwarded to `pi-coding-agent-visit-file'."
+  (let ((line-count (or line-count 100))
+        (opened-path nil)
+        (open-kind nil))
+    (unwind-protect
+        (progn
+          (cl-labels ((open-other (path)
+                        (setq opened-path path
+                              open-kind :other)
+                        (pi-coding-agent-test--open-target-buffer line-count))
+                      (open-same (path)
+                        (setq opened-path path
+                              open-kind :same)
+                        (pi-coding-agent-test--open-target-buffer line-count)))
+            (cl-letf (((symbol-function 'find-file-other-window) #'open-other)
+                      ((symbol-function 'find-file) #'open-same))
+              (pi-coding-agent-visit-file toggle)))
+          (list :path opened-path
+                :line (line-number-at-pos)
+                :open-kind open-kind))
+      (ignore-errors (kill-buffer "*pi-coding-agent-test-target*")))))
+
 (ert-deftest pi-coding-agent-test-diff-line-at-point-added ()
   "Should parse line number from added diff line."
   (with-temp-buffer
@@ -1493,11 +1713,12 @@ Call inside `with-temp-buffer' after `pi-coding-agent-chat-mode'."
     (should (= 12 (pi-coding-agent--diff-line-at-point)))))
 
 (ert-deftest pi-coding-agent-test-diff-line-at-point-context ()
-  "Should return nil for context lines (no +/-)."
+  "Should parse line number from context lines.
+Edit diffs include unchanged context rows with a leading space marker."
   (with-temp-buffer
     (insert "  7     context line")
     (goto-char (point-min))
-    (should-not (pi-coding-agent--diff-line-at-point))))
+    (should (= 7 (pi-coding-agent--diff-line-at-point)))))
 
 (ert-deftest pi-coding-agent-test-diff-line-at-point-mid-line ()
   "Should work when point is anywhere on the line."
@@ -1722,23 +1943,10 @@ authoritative args from tool_execution_start should populate it."
     ;; Move to the diff line
     (goto-char (point-min))
     (search-forward "+ 42")
-    ;; Mock find-file-other-window to create a buffer with enough lines
-    ;; Note: goto-char and forward-line are bytecode ops, can't be mocked
-    (let (opened-file)
-      (cl-letf (((symbol-function 'find-file-other-window)
-                 (lambda (path)
-                   (setq opened-file path)
-                   ;; Create a fake buffer with enough lines and switch to it
-                   (set-buffer (get-buffer-create "*test-target*"))
-                   (erase-buffer)
-                   (dotimes (_ 100) (insert "line\n"))
-                   (goto-char (point-min))
-                   (current-buffer))))
-        (pi-coding-agent-visit-file))
-      (should (equal "/tmp/test.el" opened-file))
-      ;; Check we're on line 42 (line-number-at-pos is 1-indexed)
-      (should (= 42 (line-number-at-pos)))
-      (ignore-errors (kill-buffer "*test-target*")))))
+    (let ((result (pi-coding-agent-test--visit-file-line 100)))
+      (should (equal "/tmp/test.el" (plist-get result :path)))
+      (should (eq :other (plist-get result :open-kind)))
+      (should (= 42 (plist-get result :line))))))
 
 (ert-deftest pi-coding-agent-test-visit-file-no-path-errors ()
   "visit-file should error when not on a tool block with path."
@@ -1761,19 +1969,39 @@ authoritative args from tool_execution_start should populate it."
     (goto-char (point-min))
     (search-forward "```")
     (forward-line 2)  ;; On "line 101"
-    ;; Note: goto-char and forward-line are bytecode ops, can't be mocked
-    (cl-letf (((symbol-function 'find-file-other-window)
-               (lambda (_path)
-                 ;; Create a fake buffer with enough lines and switch to it
-                 (set-buffer (get-buffer-create "*test-target*"))
-                 (erase-buffer)
-                 (dotimes (_ 200) (insert "line\n"))
-                 (goto-char (point-min))
-                 (current-buffer))))
-      (pi-coding-agent-visit-file))
-    ;; Line 2 in code block + offset 100 - 1 = 101
-    (should (= 101 (line-number-at-pos)))
-    (ignore-errors (kill-buffer "*test-target*"))))
+    (let ((result (pi-coding-agent-test--visit-file-line 200)))
+      ;; Line 2 in code block + offset 100 - 1 = 101
+      (should (= 101 (plist-get result :line))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-read-beginning-line ()
+  "visit-file should navigate to line 1 from first read content line."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "read" '(:path "/tmp/start.txt"))
+    (pi-coding-agent--display-tool-end "read" '(:path "/tmp/start.txt")
+                          '((:type "text" :text "line1\nline2\nline3"))
+                          nil nil)
+    (goto-char (point-min))
+    (search-forward "line1")
+    (beginning-of-line)
+    (let ((result (pi-coding-agent-test--visit-file-line 20)))
+      (should (= 1 (plist-get result :line))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-toggle-opens-same-window ()
+  "Prefix arg should invert `pi-coding-agent-visit-file-other-window'."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-visit-file-other-window t))
+      (pi-coding-agent--display-tool-start "read" '(:path "/tmp/start.txt"))
+      (pi-coding-agent--display-tool-end "read" '(:path "/tmp/start.txt")
+                            '((:type "text" :text "line1\nline2\nline3"))
+                            nil nil)
+      (goto-char (point-min))
+      (search-forward "line2")
+      (beginning-of-line)
+      (let ((result (pi-coding-agent-test--visit-file-line 20 t)))
+        (should (eq :same (plist-get result :open-kind)))
+        (should (= 2 (plist-get result :line)))))))
 
 (ert-deftest pi-coding-agent-test-visit-file-accounts-for-stripped-blank-lines ()
   "visit-file navigates to correct original line even when blank lines stripped.
@@ -1788,19 +2016,156 @@ File has blanks at lines 3,5. Pressing RET on 'line06' should go to line 6."
     (goto-char (point-min))
     (search-forward "line06")
     (beginning-of-line)
-    ;; Note: forward-line can't be mocked in byte-compiled code (inlined)
-    ;; Instead, check line-number-at-pos after visit-file completes
-    (cl-letf (((symbol-function 'find-file-other-window)
-               (lambda (_path)
-                 (set-buffer (get-buffer-create "*test-target*"))
-                 (erase-buffer)
-                 (dotimes (_ 20) (insert "line\n"))
-                 (goto-char (point-min))
-                 (current-buffer))))
-      (pi-coding-agent-visit-file))
-    ;; Should navigate to line 6, not line 4 (2 blank lines stripped)
-    (should (= 6 (line-number-at-pos)))
-    (ignore-errors (kill-buffer "*test-target*"))))
+    (let ((result (pi-coding-agent-test--visit-file-line 20)))
+      ;; Should navigate to line 6, not line 4 (2 blank lines stripped)
+      (should (= 6 (plist-get result :line))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-preserves-blank-lines-when-not-collapsed ()
+  "visit-file should respect blank lines in non-collapsed read output.
+When full output is visible, line numbers must follow rendered blank lines."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "read" '(:path "/tmp/test.txt"))
+    (pi-coding-agent--display-tool-end "read" '(:path "/tmp/test.txt")
+                          '((:type "text" :text "line1\n\nline3\nline4"))
+                          nil nil)
+    (goto-char (point-min))
+    (search-forward "line3")
+    (beginning-of-line)
+    (let ((result (pi-coding-agent-test--visit-file-line 20)))
+      (should (= 3 (plist-get result :line))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-preserves-blank-lines-when-expanded ()
+  "visit-file should ignore preview line-map when tool output is expanded."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-tool-preview-lines 10))
+      (pi-coding-agent--display-tool-start "read" '(:path "/tmp/test.txt"))
+      ;; 12 non-blank lines + one early blank -> collapsed preview, then expand.
+      (pi-coding-agent--display-tool-end
+       "read" '(:path "/tmp/test.txt")
+       '((:type "text" :text "line1\n\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\nline13"))
+       nil nil)
+      (goto-char (point-min))
+      (re-search-forward "\.\.\. ([0-9]+ more lines)" nil t)
+      (let ((btn (button-at (match-beginning 0))))
+        (should btn)
+        (pi-coding-agent--toggle-tool-output btn))
+      (goto-char (point-min))
+      (search-forward "line3")
+      (beginning-of-line)
+      (let ((result (pi-coding-agent-test--visit-file-line 30)))
+        (should (= 3 (plist-get result :line)))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-collapsed-closing-fence-errors ()
+  "RET on collapsed closing fence should not fall back to line 1."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-tool-preview-lines 2))
+      (pi-coding-agent--display-tool-start "read" '(:path "/tmp/test.txt"))
+      (pi-coding-agent--display-tool-end
+       "read" '(:path "/tmp/test.txt")
+       '((:type "text" :text "line01\nline02\nline03\nline04\nline05\nline06"))
+       nil nil)
+      (goto-char (point-min))
+      ;; Move to closing fence (second ``` line).
+      (re-search-forward "^```$" nil t)
+      (re-search-forward "^```$" nil t)
+      (should-error (pi-coding-agent-visit-file) :type 'user-error))))
+
+(ert-deftest pi-coding-agent-test-visit-file-collapsed-toggle-line-errors ()
+  "RET on collapsed toggle line should not fall back to line 1."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-tool-preview-lines 2))
+      (pi-coding-agent--display-tool-start "read" '(:path "/tmp/test.txt"))
+      (pi-coding-agent--display-tool-end
+       "read" '(:path "/tmp/test.txt")
+       '((:type "text" :text "line01\nline02\nline03\nline04\nline05\nline06"))
+       nil nil)
+      (goto-char (point-min))
+      (re-search-forward "\.\.\. ([0-9]+ more lines)" nil t)
+      (beginning-of-line)
+      (should-error (pi-coding-agent-visit-file) :type 'user-error))))
+
+(ert-deftest pi-coding-agent-test-visit-file-edit-context-line ()
+  "RET on edit diff context line should navigate to that source line."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "edit" '(:path "/tmp/test.el"))
+    (pi-coding-agent--display-tool-end
+     "edit" '(:path "/tmp/test.el")
+     '((:type "text" :text "done"))
+     '(:diff "+ 7     added line\n  9     context line\n-12     removed line")
+     nil)
+    (goto-char (point-min))
+    (re-search-forward "^  9     context line" nil t)
+    (beginning-of-line)
+    (let ((result (pi-coding-agent-test--visit-file-line 30)))
+      (should (= 9 (plist-get result :line))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-edit-context-first-line ()
+  "RET on first unchanged line in edit diff should jump to line 1."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "edit" '(:path "/tmp/greeting.py"))
+    (pi-coding-agent--display-tool-end
+     "edit" '(:path "/tmp/greeting.py")
+     '((:type "text" :text "done"))
+     '(:diff "  1 def make_greeting(name: str) -> str:\n  2     \"\"\"Return a friendly greeting with an uppercased name.\"\"\"\n- 3     return f\"Hello, {name.upperr()}!\"\n+ 3     return f\"Hello, {name.upper()}!\"\n  4 \n  5 \n  6 def main() -> None:\n    ...")
+     nil)
+    (goto-char (point-min))
+    (re-search-forward "^  1 def make_greeting" nil t)
+    (beginning-of-line)
+    (let ((result (pi-coding-agent-test--visit-file-line 30)))
+      (should (= 1 (plist-get result :line))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-generic-path-expanded-line ()
+  "Generic tool output with :path should map expanded lines correctly."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "custom_tool" '(:path "/tmp/custom.txt"))
+    (pi-coding-agent--display-tool-end
+     "custom_tool" '(:path "/tmp/custom.txt")
+     '((:type "text" :text "line01\nline02\nline03\nline04\nline05\nline06"))
+     nil nil)
+    (goto-char (point-min))
+    (search-forward "line06")
+    (beginning-of-line)
+    (let ((result (pi-coding-agent-test--visit-file-line 20)))
+      (should (= 6 (plist-get result :line))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-generic-path-collapsed-line ()
+  "Generic tool output with :path should map collapsed preview lines correctly."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-tool-preview-lines 3))
+      (pi-coding-agent--display-tool-start "custom_tool" '(:path "/tmp/custom.txt"))
+      (pi-coding-agent--display-tool-end
+       "custom_tool" '(:path "/tmp/custom.txt")
+       '((:type "text" :text "line01\nline02\nline03\nline04\nline05\nline06"))
+       nil nil)
+      (goto-char (point-min))
+      (search-forward "line03")
+      (beginning-of-line)
+      (let ((result (pi-coding-agent-test--visit-file-line 20)))
+        (should (= 3 (plist-get result :line)))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-write-ignores-offset ()
+  "write tool should ignore :offset for RET line navigation."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start
+     "write" '(:path "/tmp/out.txt" :offset 100 :content "line1\nline2\nline3"))
+    (pi-coding-agent--display-tool-end
+     "write" '(:path "/tmp/out.txt" :offset 100 :content "line1\nline2\nline3")
+     '((:type "text" :text "wrote file"))
+     nil nil)
+    (goto-char (point-min))
+    (search-forward "line2")
+    (beginning-of-line)
+    (let ((result (pi-coding-agent-test--visit-file-line 120)))
+      (should (= 2 (plist-get result :line))))))
 
 ;;; Visual Line Truncation Tests
 
@@ -1841,6 +2206,30 @@ File has blanks at lines 3,5. Pressing RET on 'line06' should go to line 6."
     (let ((result (pi-coding-agent--truncate-to-visual-lines content 100 80)))
       (should (equal (plist-get result :content) content))
       (should (= (plist-get result :hidden-lines) 0)))))
+
+(ert-deftest pi-coding-agent-test-truncate-visual-lines-empty-content ()
+  "Empty content has no hidden lines or visual lines."
+  (let ((result (pi-coding-agent--truncate-to-visual-lines "" 5 80)))
+    (should (equal (plist-get result :content) ""))
+    (should (= (plist-get result :hidden-lines) 0))
+    (should (= (plist-get result :visual-lines) 0))))
+
+(ert-deftest pi-coding-agent-test-truncate-visual-lines-zero-max-lines ()
+  "Zero max lines returns an empty preview without crashing."
+  (let* ((content "line1\nline2")
+         (result (pi-coding-agent--truncate-to-visual-lines content 0 80)))
+    (should (equal (plist-get result :content) ""))
+    (should (= (plist-get result :visual-lines) 0))
+    (should (= (plist-get result :hidden-lines) 2))
+    (should (equal (plist-get result :line-map) []))))
+
+(ert-deftest pi-coding-agent-test-truncate-visual-lines-zero-width-falls-back ()
+  "Zero width is treated as width 1 to avoid division errors."
+  (let* ((content "abcdef")
+         (result (pi-coding-agent--truncate-to-visual-lines content 2 0)))
+    (should (equal (plist-get result :content) "ab"))
+    (should (= (plist-get result :visual-lines) 2))
+    (should (= (plist-get result :hidden-lines) 1))))
 
 (ert-deftest pi-coding-agent-test-truncate-visual-lines-trailing-newline ()
   "Trailing newlines don't create phantom hidden lines."
@@ -2053,6 +2442,20 @@ Regression test: streaming output with no newlines should still be capped."
 
 ;; ── Toolcall streaming (during LLM generation) ─────────────────────
 
+(defun pi-coding-agent-test--pending-tool-stream-body ()
+  "Return pending tool overlay body as plain text."
+  (let* ((ov pi-coding-agent--pending-tool-overlay)
+         (header-end (overlay-get ov 'pi-coding-agent-header-end)))
+    (buffer-substring-no-properties header-end (overlay-end ov))))
+
+(defun pi-coding-agent-test--pending-tool-content-lines ()
+  "Return streamed content lines without the hidden-output indicator."
+  (let* ((stream (pi-coding-agent-test--pending-tool-stream-body))
+         (lines (split-string (string-trim-right stream "\n+") "\n")))
+    (if (and lines (string= (car lines) "... (earlier output)"))
+        (cdr lines)
+      lines)))
+
 (ert-deftest pi-coding-agent-test-toolcall-start-after-text-has-blank-line ()
   "toolcall_start after text delta without trailing newline has proper spacing."
   (with-temp-buffer
@@ -2228,6 +2631,84 @@ preview excludes.  The display should be a no-op for such deltas."
       ;; Buffer should NOT have been modified — skip-when-unchanged
       (should (= (buffer-modified-tick) modtick-after-complete)))))
 
+(ert-deftest pi-coding-agent-test-toolcall-delta-partial-line-skips-tail-extract ()
+  "Partial-line write deltas skip expensive tail extraction.
+Only complete-line boundaries can change the visible streaming preview."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "line1\n"))
+    (let ((tail-calls 0)
+          (orig (symbol-function 'pi-coding-agent--fontify-buffer-tail)))
+      (cl-letf (((symbol-function 'pi-coding-agent--fontify-buffer-tail)
+                 (lambda (&rest args)
+                   (setq tail-calls (1+ tail-calls))
+                   (apply orig args))))
+        (pi-coding-agent-test--send-delta
+         "write" '(:path "/tmp/foo.py" :content "line1\npartial"))
+        (should (= tail-calls 0))))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-same-size-partial-skips-tail-extract ()
+  "Same-size rewrites of trailing partial lines skip tail extraction."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "line1\nabc"))
+    (let ((tail-calls 0)
+          (orig (symbol-function 'pi-coding-agent--fontify-buffer-tail)))
+      (cl-letf (((symbol-function 'pi-coding-agent--fontify-buffer-tail)
+                 (lambda (&rest args)
+                   (setq tail-calls (1+ tail-calls))
+                   (apply orig args))))
+        (pi-coding-agent-test--send-delta
+         "write" '(:path "/tmp/foo.py" :content "line1\nabd"))
+        (should (= tail-calls 0))))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-fontify-tail-falls-back-to-raw ()
+  "Write preview falls back to raw tail when fontify tail is unavailable."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (cl-letf (((symbol-function 'pi-coding-agent--fontify-buffer-tail)
+               (lambda (&rest _) nil)))
+      (pi-coding-agent-test--send-delta
+       "write" '(:path "/tmp/foo.py" :content "line1\nline2\n")))
+    (let ((content (buffer-string)))
+      (should (string-match-p "line1" content))
+      (should (string-match-p "line2" content)))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-same-size-refreshes-preview ()
+  "Same-size content rewrites still refresh write preview.
+If a provider rewrites accumulated content at the same length,
+the visible tail must update to the new text."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "aa\n"))
+    (should (string-match-p "aa" (buffer-string)))
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "bb\n"))
+    (let ((content (buffer-string)))
+      (should (string-match-p "bb" content))
+      (should-not (string-match-p "aa" content)))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-same-size-unchanged-skips-redraw ()
+  "Same-size duplicate content does not redraw write preview."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "aa\n"))
+    (let ((modtick (buffer-modified-tick)))
+      (pi-coding-agent-test--send-delta
+       "write" '(:path "/tmp/foo.py" :content "aa\n"))
+      (should (= modtick (buffer-modified-tick))))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-empty-content-clears-preview ()
+  "Empty write content clears stale streaming preview text."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "line1\n"))
+    (should (string-match-p "line1" (buffer-string)))
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content ""))
+    (let ((body (pi-coding-agent-test--pending-tool-stream-body)))
+      (should-not (string-match-p "line1" body))
+      (should (string-empty-p (string-trim-right body "\n+"))))))
+
 (ert-deftest pi-coding-agent-test-toolcall-delta-updates-on-new-line ()
   "Completing a new line triggers a display update.
 After a partial line, adding a newline changes the visible tail
@@ -2263,6 +2744,62 @@ as the previous delta that ended at a newline boundary."
         ;; Line count should NOT increase from the partial line
         (should (= lines-after-complete lines-after-partial))))))
 
+(ert-deftest pi-coding-agent-test-toolcall-delta-lang-preview-obeys-visual-cap ()
+  "Language-aware write streaming enforces visual-line preview limits.
+Wrapped lines must stay within `pi-coding-agent-tool-preview-lines'
+during streaming updates."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (let ((pi-coding-agent-tool-preview-lines 3)
+          (content (concat (make-string 36 ?x) "\nline2\nline3\n")))
+      (cl-letf (((symbol-function 'window-width) (lambda (&rest _) 10)))
+        (pi-coding-agent-test--send-delta
+         "write" `(:path "/tmp/foo.py" :content ,content))
+        (let* ((content-lines (pi-coding-agent-test--pending-tool-content-lines))
+               (visual-lines
+                (apply #'+
+                       (mapcar (lambda (line)
+                                 (max 1
+                                      (ceiling (/ (float (length line)) 10))))
+                               content-lines))))
+          (should (<= visual-lines pi-coding-agent-tool-preview-lines)))))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-lang-cap-preserves-syntax-face ()
+  "Visual capping in language-aware streaming keeps syntax faces intact."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (let ((pi-coding-agent-tool-preview-lines 2)
+          (content "def very_long_function_name_that_wraps_many_times(arg):\nline2\n"))
+      (cl-letf (((symbol-function 'window-width) (lambda (&rest _) 10)))
+        (pi-coding-agent-test--send-delta
+         "write" `(:path "/tmp/foo.py" :content ,content)))
+      (goto-char (point-min))
+      (search-forward "def")
+      (let ((face (get-text-property (match-beginning 0) 'face)))
+        (should (or (eq face 'font-lock-keyword-face)
+                    (and (listp face)
+                         (memq 'font-lock-keyword-face face))))))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-rewrites-bounded-preview ()
+  "Write streaming rewrites in place, keeping preview size bounded.
+Multiple deltas should replace the preview instead of appending forever."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    (let ((pi-coding-agent-tool-preview-lines 3))
+      (pi-coding-agent-test--send-delta
+       "write" '(:path "/tmp/foo.py" :content "line1\nline2\nline3\n"))
+      (pi-coding-agent-test--send-delta
+       "write" '(:path "/tmp/foo.py" :content
+                "line1\nline2\nline3\nline4\n"))
+      (pi-coding-agent-test--send-delta
+       "write" '(:path "/tmp/foo.py" :content
+                "line1\nline2\nline3\nline4\nline5\n"))
+      (pi-coding-agent-test--send-delta
+       "write" '(:path "/tmp/foo.py" :content
+                "line1\nline2\nline3\nline4\nline5\nline6\n"))
+      (let ((body (pi-coding-agent-test--pending-tool-stream-body)))
+        (should-not (string-match-p "line1" body))
+        (should-not (string-match-p "line2" body))
+        (should (string-match-p "line6" body))
+        (should (= 1 (pi-coding-agent-test--count-matches "line6" body)))))))
+
 (ert-deftest pi-coding-agent-test-fontify-sync-complete-lines-only ()
   "Fontification runs only on complete lines, not partial lines.
 A delta ending mid-line should not fontify the partial part, avoiding
@@ -2290,6 +2827,55 @@ incorrect keyword matching on incomplete tokens."
             (should (or (eq face 'font-lock-keyword-face)
                         (and (listp face)
                              (memq 'font-lock-keyword-face face))))))))))
+
+(ert-deftest pi-coding-agent-test-fontify-sync-replace-keeps-partial-line-unfontified ()
+  "Full-resync path avoids fontifying trailing partial lines."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((lang "python"))
+      (pi-coding-agent--fontify-sync "def hello():\n" lang)
+      (pi-coding-agent--fontify-sync "def he" lang)
+      (let ((buf (pi-coding-agent--fontify-get-buffer lang)))
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (should-not (get-text-property (point) 'face)))))))
+
+(ert-deftest pi-coding-agent-test-fontify-sync-resolves-mode-once-per-buffer ()
+  "fontify-sync resolves markdown language mode only once per buffer.
+This avoids calling `markdown-get-lang-mode' on every tiny delta."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((calls 0))
+      (cl-letf (((symbol-function 'markdown-get-lang-mode)
+                 (lambda (_lang)
+                   (setq calls (1+ calls))
+                   'fundamental-mode)))
+        (pi-coding-agent--fontify-sync "x = 1\n" "python")
+        (pi-coding-agent--fontify-sync "x = 1\ny = 2\n" "python")
+        (pi-coding-agent--fontify-reset '(:path "/tmp/foo.py"))
+        (pi-coding-agent--fontify-sync "z = 3\n" "python")
+        (should (= calls 1))))))
+
+(ert-deftest pi-coding-agent-test-fontify-sync-mode-resolution-error-keeps-content ()
+  "fontify-sync keeps content even when markdown mode resolution fails.
+A mode lookup failure should degrade highlighting, not drop streamed text."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((logged-message nil))
+      (cl-letf (((symbol-function 'markdown-get-lang-mode)
+                 (lambda (_lang)
+                   (error "boom")))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq logged-message (apply #'format fmt args)))))
+        (pi-coding-agent--fontify-sync "x = 1\n" "python")
+        (let ((buf (pi-coding-agent--fontify-get-buffer "python")))
+          (should buf)
+          (with-current-buffer buf
+            (should (equal (buffer-string) "x = 1\n"))))
+        (should (string-match-p
+                 "fontify mode init error for python"
+                 logged-message))))))
 
 (ert-deftest pi-coding-agent-test-toolcall-dedup-on-tool-execution-start ()
   "tool_execution_start skips overlay creation when toolcall_start already created it."
@@ -2453,6 +3039,19 @@ a slot, so downstream consumers that skip blanks still get N content lines."
   (let ((result (pi-coding-agent--get-tail-lines "just one line" 5)))
     (should (equal (car result) "just one line"))
     (should (eq (cdr result) nil))))
+
+(ert-deftest pi-coding-agent-test-get-tail-lines-zero-lines ()
+  "Requesting zero lines returns empty tail without errors."
+  (let ((result (pi-coding-agent--get-tail-lines "line1\nline2" 0)))
+    (should (equal (car result) ""))
+    (should (eq (cdr result) t))))
+
+(ert-deftest pi-coding-agent-test-fontify-buffer-tail-zero-lines ()
+  "fontify-buffer-tail returns nil when N is zero."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--fontify-sync "x = 1\n" "python")
+    (should-not (pi-coding-agent--fontify-buffer-tail "python" 0))))
 
 (ert-deftest pi-coding-agent-test-fontify-buffer-tail-single-line ()
   "fontify-buffer-tail returns content for a single complete line.
@@ -2641,6 +3240,113 @@ moves over regions with varying numbers of blank lines."
     (should-not (buffer-live-p fb-py))
     (should-not (buffer-live-p fb-js))))
 
+;;; Fontify Exclusion Helpers
+
+(ert-deftest pi-coding-agent-test-font-lock-ensure-excluding-property-splits-ranges ()
+  "Font-lock helper should call only contiguous non-excluded ranges."
+  (with-temp-buffer
+    (insert "aaaBBBcccDDDeee")
+    (put-text-property 4 7 'pi-coding-agent-no-fontify t)
+    (put-text-property 10 13 'pi-coding-agent-no-fontify t)
+    (let ((calls nil))
+      (cl-letf (((symbol-function 'font-lock-ensure)
+                 (lambda (start end)
+                   (push (cons start end) calls))))
+        (pi-coding-agent--font-lock-ensure-excluding-property
+         (point-min) (point-max) 'pi-coding-agent-no-fontify))
+      (should (equal (nreverse calls)
+                     '((1 . 4) (7 . 10) (13 . 16)))))))
+
+(ert-deftest pi-coding-agent-test-font-lock-ensure-excluding-property-excludes-any-non-nil ()
+  "Font-lock helper should treat any non-nil PROP value as excluded."
+  (with-temp-buffer
+    (insert "aaaBBBccc")
+    (put-text-property 4 7 'pi-coding-agent-no-fontify :details)
+    (let ((calls nil))
+      (cl-letf (((symbol-function 'font-lock-ensure)
+                 (lambda (start end)
+                   (push (cons start end) calls))))
+        (pi-coding-agent--font-lock-ensure-excluding-property
+         (point-min) (point-max) 'pi-coding-agent-no-fontify))
+      (should (equal (nreverse calls)
+                     '((1 . 4) (7 . 10)))))))
+
+(ert-deftest pi-coding-agent-test-font-lock-ensure-excluding-property-fontifies-large-ranges ()
+  "Font-lock helper should still process large non-excluded regions."
+  (with-temp-buffer
+    (insert (make-string 70000 ?x))
+    (let ((called nil))
+      (cl-letf (((symbol-function 'font-lock-ensure)
+                 (lambda (&rest _args)
+                   (setq called t))))
+        (pi-coding-agent--font-lock-ensure-excluding-property
+         (point-min) (point-max) 'pi-coding-agent-no-fontify))
+      (should called))))
+
+(ert-deftest pi-coding-agent-test-font-lock-ensure-excluding-property-error-silent-without-debug ()
+  "Font-lock errors should not emit user-visible messages when debug is off."
+  (with-temp-buffer
+    (insert "abcdef")
+    (let ((debug-on-error nil)
+          (message-called nil))
+      (cl-letf (((symbol-function 'font-lock-ensure)
+                 (lambda (&rest _args)
+                   (error "Broken font-lock")))
+                ((symbol-function 'message)
+                 (lambda (&rest _args)
+                   (setq message-called t))))
+        (pi-coding-agent--font-lock-ensure-excluding-property
+         (point-min) (point-max) 'pi-coding-agent-no-fontify))
+      (should-not message-called))))
+
+(ert-deftest pi-coding-agent-test-font-lock-ensure-excluding-property-error-logs-in-debug ()
+  "Font-lock errors should log diagnostics when debug mode is enabled."
+  (with-temp-buffer
+    (insert "abcdef")
+    (let ((debug-on-error t)
+          (message-text nil))
+      (cl-letf (((symbol-function 'font-lock-ensure)
+                 (lambda (&rest _args)
+                   (error "Broken font-lock")))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq message-text (apply #'format fmt args)))))
+        (pi-coding-agent--font-lock-ensure-excluding-property
+         (point-min) (point-max) 'pi-coding-agent-no-fontify))
+      (should (string-match-p "toggle fontification failed"
+                              (or message-text ""))))))
+
+(ert-deftest pi-coding-agent-test-font-lock-ensure-excluding-property-stops-after-first-error ()
+  "Font-lock helper should stop processing ranges after the first error."
+  (with-temp-buffer
+    (insert "aaaBBBccc")
+    (put-text-property 4 7 'pi-coding-agent-no-fontify t)
+    (let ((debug-on-error t)
+          (font-lock-calls 0)
+          (message-count 0))
+      (cl-letf (((symbol-function 'font-lock-ensure)
+                 (lambda (&rest _args)
+                   (setq font-lock-calls (1+ font-lock-calls))
+                   (error "Broken font-lock")))
+                ((symbol-function 'message)
+                 (lambda (&rest _args)
+                   (setq message-count (1+ message-count)))))
+        (pi-coding-agent--font-lock-ensure-excluding-property
+         (point-min) (point-max) 'pi-coding-agent-no-fontify))
+      (should (= font-lock-calls 1))
+      (should (= message-count 1)))))
+
+(ert-deftest pi-coding-agent-test-font-lock-ensure-excluding-property-swallows-errors ()
+  "Font-lock helper should not propagate font-lock errors."
+  (with-temp-buffer
+    (insert "abcdef")
+    (cl-letf (((symbol-function 'font-lock-ensure)
+               (lambda (&rest _args)
+                 (error "Broken font-lock"))))
+      (pi-coding-agent--font-lock-ensure-excluding-property
+       (point-min) (point-max) 'pi-coding-agent-no-fontify)
+      (should t))))
+
 ;;; Fontify Error Handling
 
 (ert-deftest pi-coding-agent-test-fontify-sync-happy-path-no-errors ()
@@ -2796,6 +3502,96 @@ Commands with embedded newlines should not have any lines deleted."
      '(:type "message_update"
        :assistantMessageEvent (:type "thinking_delta" :delta "Analyzing...")))
     (should (string-match-p "Analyzing..." (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-thinking-on-agent-start ()
+  "Activity phase becomes thinking on agent_start."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "idle")
+    (pi-coding-agent--handle-display-event '(:type "agent_start"))
+    (should (equal pi-coding-agent--activity-phase "thinking"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-replying-on-text-delta ()
+  "Activity phase becomes replying on text_delta."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "idle")
+    (pi-coding-agent--handle-display-event '(:type "agent_start"))
+    (pi-coding-agent--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "text_delta" :delta "Hello")))
+    (should (equal pi-coding-agent--activity-phase "replying"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-running-on-toolcall-start ()
+  "Activity phase becomes running when tool call generation starts."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "thinking")
+    (pi-coding-agent--handle-display-event
+     '(:type "message_update"
+       :assistantMessageEvent (:type "toolcall_start" :contentIndex 0)
+       :message (:role "assistant"
+                 :content [(:type "toolCall"
+                            :id "call_1"
+                            :name "read"
+                            :arguments (:path "/tmp/file.txt"))])))
+    (should (equal pi-coding-agent--activity-phase "running"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-running-on-tool-start ()
+  "Activity phase becomes running on tool_execution_start."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "idle")
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolCallId "tool-1"
+       :toolName "bash"
+       :args (:command "ls")))
+    (should (equal pi-coding-agent--activity-phase "running"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-thinking-on-tool-end ()
+  "Activity phase returns to thinking on tool_execution_end."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "running")
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolCallId "tool-1"
+       :toolName "bash"
+       :args (:command "ls")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_end"
+       :toolCallId "tool-1"
+       :toolName "bash"
+       :result (:content nil)
+       :isError nil))
+    (should (equal pi-coding-agent--activity-phase "thinking"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-compact-on-compaction ()
+  "Activity phase becomes compact on auto_compaction_start."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "idle")
+    (pi-coding-agent--handle-display-event
+     '(:type "auto_compaction_start" :reason "threshold"))
+    (should (equal pi-coding-agent--activity-phase "compact"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-idle-on-agent-end ()
+  "Activity phase becomes idle on agent_end."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "thinking")
+    (pi-coding-agent--handle-display-event '(:type "agent_end"))
+    (should (equal pi-coding-agent--activity-phase "idle"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-idle-on-compaction-end ()
+  "Activity phase becomes idle on auto_compaction_end."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "compact")
+    (pi-coding-agent--handle-display-event
+     '(:type "auto_compaction_end" :aborted t :result nil))
+    (should (equal pi-coding-agent--activity-phase "idle"))))
 
 (ert-deftest pi-coding-agent-test-display-compaction-result-shows-header-tokens-summary ()
   "pi-coding-agent--display-compaction-result shows header, token count, and summary."
@@ -3015,6 +3811,17 @@ are only present in tool_execution_start, not tool_execution_end."
     ;; Should have python markdown code fence
     (should (string-match-p "```python" (buffer-string)))))
 
+(ert-deftest pi-coding-agent-test-generic-tool-with-path-uses-path-language ()
+  "Generic tools with :path should use extension-based syntax fences."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "custom_tool" '(:path "/tmp/example.py"))
+    (pi-coding-agent--display-tool-end
+     "custom_tool" '(:path "/tmp/example.py")
+     '((:type "text" :text "def hello():\n    return 1"))
+     nil nil)
+    (should (string-match-p "```python" (buffer-string)))))
+
 (ert-deftest pi-coding-agent-test-markdown-fence-delimiter-defaults-to-backticks ()
   "Fence delimiter should use backticks when content has no backtick fence."
   (should (equal "```"
@@ -3198,17 +4005,21 @@ which caused major performance issues with large buffers."
         (pi-coding-agent--display-message-delta "Test delta")
         (should-not hook-called)))))
 
-(ert-deftest pi-coding-agent-test-thinking-delta-inhibits-modification-hooks ()
-  "Thinking delta inhibits modification hooks for performance."
+(ert-deftest pi-coding-agent-test-thinking-delta-fires-modification-hooks ()
+  "Thinking delta must allow modification hooks for syntax propertization.
+Suppressing modification hooks via `inhibit-modification-hooks' prevents
+`syntax-ppss-flush-cache' from running, which leaves `syntax-propertize'
+stale and breaks blockquote fontification for large thinking blocks."
   (let ((hook-called nil))
     (cl-flet ((test-hook (beg end len) (setq hook-called t)))
       (with-temp-buffer
         (pi-coding-agent-chat-mode)
         (pi-coding-agent--display-agent-start)
+        (pi-coding-agent--display-thinking-start)
         (add-hook 'after-change-functions #'test-hook nil t)
         (setq hook-called nil)
         (pi-coding-agent--display-thinking-delta "Test thinking")
-        (should-not hook-called)))))
+        (should hook-called)))))
 
 (ert-deftest pi-coding-agent-test-tool-update-inhibits-modification-hooks ()
   "Tool update inhibits modification hooks for performance."

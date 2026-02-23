@@ -126,15 +126,19 @@
 ;;;; Process Cleanup Tests
 
 (ert-deftest pi-coding-agent-test-process-exit-clears-pending ()
-  "Process exit clears that process's pending requests."
+  "Process exit clears pending request state."
   (let ((pi-coding-agent--request-id-counter 0)
         (fake-proc (start-process "cat" nil "cat")))
     (unwind-protect
-        (let ((pending (pi-coding-agent--get-pending-requests fake-proc)))
+        (let ((pending (pi-coding-agent--get-pending-requests fake-proc))
+              (pending-types (pi-coding-agent--get-pending-command-types fake-proc)))
           (puthash "req_1" #'ignore pending)
           (puthash "req_2" #'ignore pending)
+          (puthash "req_1" "get_tree" pending-types)
+          (puthash "req_2" "get_state" pending-types)
           (pi-coding-agent--handle-process-exit fake-proc "finished\n")
-          (should (= (hash-table-count pending) 0)))
+          (should (= (hash-table-count pending) 0))
+          (should (= (hash-table-count pending-types) 0)))
       (ignore-errors (delete-process fake-proc)))))
 
 (ert-deftest pi-coding-agent-test-process-exit-calls-callbacks-with-error ()
@@ -175,13 +179,52 @@
           (should (null (gethash "req_1" pending))))
       (delete-process fake-proc))))
 
+(ert-deftest pi-coding-agent-test-dispatch-idless-response-to-sole-pending ()
+  "Id-less response routes to sole pending callback."
+  (let ((received nil)
+        (fake-proc (start-process "cat" nil "cat")))
+    (unwind-protect
+        (let ((pending (pi-coding-agent--get-pending-requests fake-proc)))
+          (puthash "req_1" (lambda (r) (setq received r)) pending)
+          (pi-coding-agent--dispatch-response
+           fake-proc
+           '(:type "response" :command "get_tree" :success nil :error "Unknown command: get_tree"))
+          (should (equal (plist-get received :error) "Unknown command: get_tree"))
+          (should (= (hash-table-count pending) 0)))
+      (delete-process fake-proc))))
+
+(ert-deftest pi-coding-agent-test-dispatch-idless-response-matches-command ()
+  "Id-less response with :command routes to matching request."
+  (let ((pi-coding-agent--request-id-counter 0)
+        (received-tree nil)
+        (received-state nil)
+        (fake-proc (start-process "cat" nil "cat")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'process-send-string) #'ignore))
+          (pi-coding-agent--rpc-async
+           fake-proc
+           '(:type "get_tree")
+           (lambda (response)
+             (setq received-tree response)))
+          (pi-coding-agent--rpc-async
+           fake-proc
+           '(:type "get_state")
+           (lambda (response)
+             (setq received-state response)))
+          (pi-coding-agent--dispatch-response
+           fake-proc
+           '(:type "response" :command "get_tree" :success nil :error "Unknown command: get_tree"))
+          (should (equal (plist-get received-tree :error) "Unknown command: get_tree"))
+          (should-not received-state)
+          (should (= (hash-table-count (pi-coding-agent--get-pending-requests fake-proc)) 1)))
+      (delete-process fake-proc))))
+
 (ert-deftest pi-coding-agent-test-dispatch-event-calls-handler ()
-  "Non-response messages call process's handler."
+  "Events call the process handler."
   (let ((event-received nil)
         (fake-proc (start-process "cat" nil "cat")))
     (unwind-protect
         (progn
-          ;; Register a handler on the process
           (process-put fake-proc 'pi-coding-agent-display-handler
                        (lambda (e) (setq event-received e)))
           (pi-coding-agent--dispatch-response fake-proc '(:type "agent_start"))
@@ -190,7 +233,7 @@
       (delete-process fake-proc))))
 
 (ert-deftest pi-coding-agent-test-dispatch-unknown-id-no-crash ()
-  "Response with unknown ID is handled gracefully."
+  "Unknown response IDs do not crash."
   (let ((fake-proc (start-process "cat" nil "cat")))
     (unwind-protect
         (should (null (pi-coding-agent--dispatch-response fake-proc '(:type "response" :id "unknown" :success t))))
@@ -550,6 +593,34 @@ Display is handled by the display handler, not by state updates."
 (ert-deftest pi-coding-agent-test-format-elapsed-rounds-to-millis ()
   "Elapsed formatter rounds to milliseconds with suffix."
   (should (equal (pi-coding-agent-test-format-elapsed 1.23456) "1.235s")))
+
+;;;; Executable Customization Tests
+
+(defun pi-coding-agent-test--capture-process-command (executable extra-args)
+  "Return the command list that `--start-process' would pass to make-process.
+Mocks `make-process' to capture :command, binding
+`pi-coding-agent-executable' to EXECUTABLE and
+`pi-coding-agent-extra-args' to EXTRA-ARGS."
+  (let ((pi-coding-agent-executable executable)
+        (pi-coding-agent-extra-args extra-args)
+        (captured nil))
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest args)
+                 (setq captured (plist-get args :command))
+                 nil)))
+      (ignore-errors (pi-coding-agent--start-process "/tmp/")))
+    captured))
+
+(ert-deftest pi-coding-agent-test-start-process-uses-custom-executable ()
+  "start-process builds command from `pi-coding-agent-executable'."
+  (should (equal (pi-coding-agent-test--capture-process-command '("npx" "pi") nil)
+                 '("npx" "pi" "--mode" "rpc"))))
+
+(ert-deftest pi-coding-agent-test-start-process-custom-executable-with-extra-args ()
+  "start-process combines custom executable and extra-args."
+  (should (equal (pi-coding-agent-test--capture-process-command
+                  '("npx" "pi") '("-e" "/path/to/ext.ts"))
+                 '("npx" "pi" "--mode" "rpc" "-e" "/path/to/ext.ts"))))
 
 (provide 'pi-coding-agent-core-test)
 ;;; pi-coding-agent-core-test.el ends here

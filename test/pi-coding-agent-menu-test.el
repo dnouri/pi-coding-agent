@@ -69,6 +69,7 @@
           pi-coding-agent--local-user-message "user text"
           pi-coding-agent--aborted t
           pi-coding-agent--extension-status '(("ext1" . "status"))
+          pi-coding-agent--working-message "Reading README..."
           pi-coding-agent--message-start-marker (point-marker)
           pi-coding-agent--streaming-marker (point-marker)
           pi-coding-agent--thinking-marker (point-marker)
@@ -77,7 +78,8 @@
           pi-coding-agent--in-code-block t
           pi-coding-agent--in-thinking-block t
           pi-coding-agent--line-parse-state 'code-fence
-          pi-coding-agent--pending-tool-overlay (make-overlay 1 1))
+          pi-coding-agent--pending-tool-overlay (make-overlay 1 1)
+          pi-coding-agent--activity-phase "running")
     ;; Add entry to tool-args-cache
     (puthash "tool-1" '(:path "/test") pi-coding-agent--tool-args-cache)
     ;; Clear the buffer
@@ -91,6 +93,7 @@
     (should (null pi-coding-agent--local-user-message))
     (should (null pi-coding-agent--aborted))
     (should (null pi-coding-agent--extension-status))
+    (should (null pi-coding-agent--working-message))
     (should (null pi-coding-agent--message-start-marker))
     (should (null pi-coding-agent--streaming-marker))
     (should (null pi-coding-agent--thinking-marker))
@@ -100,6 +103,7 @@
     (should (null pi-coding-agent--in-thinking-block))
     (should (eq pi-coding-agent--line-parse-state 'line-start))
     (should (null pi-coding-agent--pending-tool-overlay))
+    (should (equal pi-coding-agent--activity-phase "idle"))
     ;; Tool args cache should be empty
     (should (= 0 (hash-table-count pi-coding-agent--tool-args-cache)))))
 
@@ -424,15 +428,17 @@ Also verifies that the new session-file is stored in state for reload to work."
       (when (buffer-live-p chat-buf)
         (kill-buffer chat-buf)))))
 
-(ert-deftest pi-coding-agent-test-send-stops-spinner-when-process-dead ()
-  "Sending when process is dead stops spinner and resets status."
-  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-spinner-dead*"))
-        (input-buf (get-buffer-create "*pi-coding-agent-test-spinner-dead-input*")))
+(ert-deftest pi-coding-agent-test-send-resets-activity-when-process-dead ()
+  "Sending when process is dead resets activity phase and status."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-process-dead*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-process-dead-input*")))
     (unwind-protect
         (progn
           (with-current-buffer chat-buf
             (pi-coding-agent-chat-mode)
-            (setq pi-coding-agent--input-buffer input-buf)
+            (setq pi-coding-agent--input-buffer input-buf
+                  pi-coding-agent--activity-phase "running"
+                  pi-coding-agent--status 'idle)
             ;; Set up dead process
             (let ((dead-proc (start-process "test-dead" nil "true")))
               (should (pi-coding-agent-test-wait-for-process-exit dead-proc))
@@ -442,8 +448,9 @@ Also verifies that the new session-file is stored in state for reload to work."
             (setq pi-coding-agent--chat-buffer chat-buf)
             (insert "test message")
             (pi-coding-agent-send))
-          ;; Verify spinner stopped and status reset
+          ;; Verify activity phase and status reset
           (with-current-buffer chat-buf
+            (should (equal pi-coding-agent--activity-phase "idle"))
             (should (eq pi-coding-agent--status 'idle))))
       (when (buffer-live-p chat-buf) (kill-buffer chat-buf))
       (when (buffer-live-p input-buf) (kill-buffer input-buf)))))
@@ -529,7 +536,7 @@ Also verifies that the new session-file is stored in state for reload to work."
                        (lambda (_proc msg _cb)
                          (setq sent-message (plist-get msg :message))))
                       ((symbol-function 'read-string)
-                       (lambda (_prompt) "world")))
+                       (lambda (&rest _args) "world")))
               (pi-coding-agent--run-custom-command cmd)
               ;; Should send literal /greet world, NOT expanded prompt
               (should (equal sent-message "/greet world")))))
@@ -551,7 +558,7 @@ Also verifies that the new session-file is stored in state for reload to work."
                        (lambda (_proc msg _cb)
                          (setq sent-message (plist-get msg :message))))
                       ((symbol-function 'read-string)
-                       (lambda (_prompt) "")))
+                       (lambda (&rest _args) "")))
               (pi-coding-agent--run-custom-command cmd)
               ;; Should send just /mycommand without trailing space
               (should (equal sent-message "/mycommand")))))
@@ -634,19 +641,103 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
     (should (pi-coding-agent-test--suffix-key-bound-p "A"))
     (should (pi-coding-agent-test--suffix-key-bound-p "B"))))
 
+;;; Manual Compaction
+
+(ert-deftest pi-coding-agent-test-compact-sets-status-and-processes-queued-followup ()
+  "Manual compact marks session compacting and drains local follow-up queue on success."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-compact-status*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-compact-status-input*"))
+        (compact-callback nil)
+        (prepared-text nil)
+        (prompt-sent nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle)
+            (setq pi-coding-agent--process nil)
+            (setq pi-coding-agent--input-buffer input-buf)
+            (setq pi-coding-agent--followup-queue nil))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf))
+          (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                     (lambda () 'mock-proc))
+                    ((symbol-function 'process-live-p)
+                     (lambda (_proc) t))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc cmd cb)
+                       (if (equal (plist-get cmd :type) "compact")
+                           (setq compact-callback cb)
+                         (setq prompt-sent t))))
+                    ((symbol-function 'pi-coding-agent--handle-compaction-success) #'ignore)
+                    ((symbol-function 'pi-coding-agent--prepare-and-send)
+                     (lambda (text) (setq prepared-text text)))
+                    ((symbol-function 'message) #'ignore))
+            (with-current-buffer chat-buf
+              (pi-coding-agent-compact)
+              (should (eq pi-coding-agent--status 'compacting)))
+
+            (with-current-buffer input-buf
+              (insert "queued during compaction")
+              (pi-coding-agent-send)
+              (should (string-empty-p (buffer-string))))
+
+            (with-current-buffer chat-buf
+              (should-not prompt-sent)
+              (should (equal pi-coding-agent--followup-queue '("queued during compaction"))))
+
+            (should (functionp compact-callback))
+            (funcall compact-callback '(:success t :data (:tokensBefore 1234 :summary "Done")))
+
+            (with-current-buffer chat-buf
+              (should (eq pi-coding-agent--status 'idle))
+              (should (null pi-coding-agent--followup-queue)))
+            (should (equal prepared-text "queued during compaction"))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-compact-dead-process-keeps-idle ()
+  "Manual compact should not transition state when process is dead."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-compact-dead-proc*"))
+        (rpc-called nil)
+        (shown-message nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle)
+            (setq pi-coding-agent--followup-queue nil))
+          (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                     (lambda () 'dead-proc))
+                    ((symbol-function 'process-live-p)
+                     (lambda (_proc) nil))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (&rest _args)
+                       (setq rpc-called t)))
+                    ((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (setq shown-message (apply #'format fmt args)))))
+            (with-current-buffer chat-buf
+              (pi-coding-agent-compact)
+              (should (eq pi-coding-agent--status 'idle))))
+          (should-not rpc-called)
+          (should (equal shown-message
+                         "Pi: Process died - try M-x pi-coding-agent-reload or C-c C-p R")))
+      (kill-buffer chat-buf))))
+
 ;;; Fork at Point
 
 (ert-deftest pi-coding-agent-test-fork-at-point-correct-entry-id ()
-  "Fork-at-point on 2nd You heading forks with the correct entryId."
+  "Fork-at-point picks the right entry on second heading."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (let ((pi-coding-agent--status 'idle)
           (pi-coding-agent--process 'mock-proc)
           (forked-entry-id nil)
-          (tree-data (pi-coding-agent-test--make-3turn-tree)))
+          (fork-messages (pi-coding-agent-test--make-3turn-fork-messages)))
       (let ((inhibit-read-only t))
         (pi-coding-agent-test--insert-chat-turns))
-      ;; Navigate to 2nd You heading
       (goto-char (point-min))
       (pi-coding-agent-next-message)
       (pi-coding-agent-next-message)
@@ -654,8 +745,8 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
       (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
                  (lambda (_proc cmd cb)
                    (cond
-                    ((equal (plist-get cmd :type) "get_tree")
-                     (funcall cb (list :success t :data tree-data)))
+                    ((equal (plist-get cmd :type) "get_fork_messages")
+                     (funcall cb (list :success t :data (list :messages fork-messages))))
                     ((equal (plist-get cmd :type) "fork")
                      (setq forked-entry-id (plist-get cmd :entryId))
                      (funcall cb '(:success t :data (:text "Second question"))))
@@ -669,13 +760,13 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
       (should (equal forked-entry-id "u2")))))
 
 (ert-deftest pi-coding-agent-test-fork-at-point-confirmation-declined ()
-  "Fork-at-point does nothing when user declines confirmation."
+  "Fork-at-point does nothing when confirmation is declined."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (let ((pi-coding-agent--status 'idle)
           (pi-coding-agent--process 'mock-proc)
           (fork-called nil)
-          (tree-data (pi-coding-agent-test--make-3turn-tree)))
+          (fork-messages (pi-coding-agent-test--make-3turn-fork-messages)))
       (let ((inhibit-read-only t))
         (pi-coding-agent-test--insert-chat-turns))
       (goto-char (point-min))
@@ -684,8 +775,8 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
       (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
                  (lambda (_proc cmd cb)
                    (cond
-                    ((equal (plist-get cmd :type) "get_tree")
-                     (funcall cb (list :success t :data tree-data)))
+                    ((equal (plist-get cmd :type) "get_fork_messages")
+                     (funcall cb (list :success t :data (list :messages fork-messages))))
                     ((equal (plist-get cmd :type) "fork")
                      (setq fork-called t)))))
                 ((symbol-function 'y-or-n-p) (lambda (_prompt) nil)))
@@ -693,7 +784,7 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
       (should-not fork-called))))
 
 (ert-deftest pi-coding-agent-test-fork-at-point-no-user-turn ()
-  "Fork-at-point before first You heading shows message, no RPC calls."
+  "Before first You heading, fork-at-point skips RPC."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (let ((pi-coding-agent--status 'idle)
@@ -708,7 +799,7 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
       (should-not rpc-called))))
 
 (ert-deftest pi-coding-agent-test-fork-at-point-streaming-guard ()
-  "Fork-at-point during streaming shows message, no RPC calls."
+  "During streaming, fork-at-point skips RPC."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (let ((pi-coding-agent--status 'streaming)
@@ -723,23 +814,78 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
         (pi-coding-agent-fork-at-point))
       (should-not rpc-called))))
 
+(ert-deftest pi-coding-agent-test-fork-at-point-rpc-failure-shows-error ()
+  "Fork-at-point shows an explicit RPC failure message."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent--status 'idle)
+          (pi-coding-agent--process 'mock-proc)
+          (shown-message nil))
+      (let ((inhibit-read-only t))
+        (pi-coding-agent-test--insert-chat-turns))
+      (goto-char (point-min))
+      (pi-coding-agent-next-message)
+      (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (_proc cmd cb)
+                   (when (equal (plist-get cmd :type) "get_fork_messages")
+                     (funcall cb '(:success nil :error "Unknown command: get_fork_messages")))))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq shown-message (apply #'format fmt args)))))
+        (pi-coding-agent-fork-at-point))
+      (should (equal shown-message
+                     "Pi: Failed to get fork messages: Unknown command: get_fork_messages")))))
+
+(defconst pi-coding-agent-test--deep-tree-depth 1700
+  "Depth used for deep-tree fork and flatten regression tests.")
+
+(ert-deftest pi-coding-agent-test-fork-at-point-deep-tree ()
+  "Fork-at-point maps visible ordinals on deep histories."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((depth pi-coding-agent-test--deep-tree-depth)
+           (pi-coding-agent--status 'idle)
+           (pi-coding-agent--process 'mock-proc)
+           (forked-entry-id nil)
+           (fork-messages (pi-coding-agent-test--make-deep-fork-messages depth))
+           (expected-entry-id (format "n%d" (- depth 2))))
+      (let ((inhibit-read-only t))
+        (insert "Pi 1.0.0\n========\nWelcome\n\n"
+                "You · 10:00\n===========\nOlder visible turn\n\n"
+                "Assistant\n=========\nAnswer\n\n"
+                "You · 10:01\n===========\nLatest visible turn\n\n"
+                "Assistant\n=========\nAnswer\n"))
+      (goto-char (point-min))
+      (pi-coding-agent-next-message)
+      (should (looking-at "You · 10:00"))
+      (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (_proc cmd cb)
+                   (cond
+                    ((equal (plist-get cmd :type) "get_fork_messages")
+                     (funcall cb (list :success t :data (list :messages fork-messages))))
+                    ((equal (plist-get cmd :type) "fork")
+                     (setq forked-entry-id (plist-get cmd :entryId))
+                     (funcall cb '(:success t :data (:text "Older visible turn"))))
+                    ((equal (plist-get cmd :type) "get_state")
+                     (funcall cb '(:success t :data (:sessionFile "/tmp/forked.jsonl"))))
+                    ((equal (plist-get cmd :type) "get_messages")
+                     (funcall cb '(:success t :data (:messages [])))))))
+                ((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+                ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
+        (pi-coding-agent-fork-at-point))
+      (should (equal forked-entry-id expected-entry-id)))))
+
 (ert-deftest pi-coding-agent-test-fork-at-point-compaction ()
-  "Fork-at-point with compaction uses last-N to pick correct entry ID."
+  "Fork-at-point uses last-N mapping in compacted sessions."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (let ((pi-coding-agent--status 'idle)
           (pi-coding-agent--process 'mock-proc)
           (forked-entry-id nil)
-          (tree-data
-           (pi-coding-agent-test--build-tree
-            '("u1" nil "message" :role "user" :preview "Compacted away")
-            '("a1" nil "message" :role "assistant" :preview "Old answer")
-            '("c1" nil "compaction" :tokensBefore 5000)
-            '("u2" nil "message" :role "user" :preview "After compaction")
-            '("a2" nil "message" :role "assistant" :preview "Response")
-            '("u3" nil "message" :role "user" :preview "Latest")
-            '("a3" nil "message" :role "assistant" :preview "Final"))))
-      ;; Buffer has compaction summary + 2 visible user turns (not 3)
+          (fork-messages
+           [(:entryId "u1" :text "Compacted away")
+            (:entryId "u2" :text "After compaction")
+            (:entryId "u3" :text "Latest")]))
       (let ((inhibit-read-only t))
         (insert "Pi 1.0.0\n========\nWelcome\n\n"
                 "Compaction\n==========\nSummary of earlier conversation\n\n"
@@ -747,15 +893,14 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
                 "Assistant\n=========\nResponse\n\n"
                 "You · 10:10\n===========\nLatest\n\n"
                 "Assistant\n=========\nFinal\n"))
-      ;; Navigate to first visible You heading (ordinal 0)
       (goto-char (point-min))
       (pi-coding-agent-next-message)
       (should (looking-at "You · 10:05"))
       (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
                  (lambda (_proc cmd cb)
                    (cond
-                    ((equal (plist-get cmd :type) "get_tree")
-                     (funcall cb (list :success t :data tree-data)))
+                    ((equal (plist-get cmd :type) "get_fork_messages")
+                     (funcall cb (list :success t :data (list :messages fork-messages))))
                     ((equal (plist-get cmd :type) "fork")
                      (setq forked-entry-id (plist-get cmd :entryId))
                      (funcall cb '(:success t :data (:text "After compaction"))))
@@ -766,32 +911,64 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
                 ((symbol-function 'y-or-n-p) (lambda (_prompt) t))
                 ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
         (pi-coding-agent-fork-at-point))
-      ;; Should fork from u2 (not u1 which was compacted away)
       (should (equal forked-entry-id "u2")))))
 
 ;;; Fork Entry Resolution
 
 (ert-deftest pi-coding-agent-test-resolve-fork-entry-maps-ordinal ()
-  "resolve-fork-entry maps ordinal to correct entry ID and preview."
-  (let* ((tree-data (pi-coding-agent-test--make-3turn-tree))
-         (response (list :success t :data tree-data))
+  "resolve-fork-entry maps ordinal to entry ID and preview."
+  (let* ((fork-messages (pi-coding-agent-test--make-3turn-fork-messages))
+         (response (list :success t :data (list :messages fork-messages)))
          (result (pi-coding-agent--resolve-fork-entry response 1 3)))
     (should (equal (car result) "u2"))
     (should (equal (cdr result) "Second question"))))
 
 (ert-deftest pi-coding-agent-test-resolve-fork-entry-compaction ()
-  "resolve-fork-entry with compaction uses last-N to skip compacted entries."
-  (let* ((tree-data (pi-coding-agent-test--make-3turn-tree))
-         (response (list :success t :data tree-data))
-         ;; 3 user IDs on path, but only 2 visible headings
+  "resolve-fork-entry uses last-N mapping in compacted sessions."
+  (let* ((fork-messages (pi-coding-agent-test--make-3turn-fork-messages))
+         (response (list :success t :data (list :messages fork-messages)))
          (result (pi-coding-agent--resolve-fork-entry response 0 2)))
-    ;; Should pick u2 (skipping u1 which would be compacted away)
     (should (equal (car result) "u2"))))
 
 (ert-deftest pi-coding-agent-test-resolve-fork-entry-failure ()
-  "resolve-fork-entry returns nil on RPC failure."
+  "resolve-fork-entry returns nil on failure."
   (let ((response '(:success nil :error "Network error")))
     (should-not (pi-coding-agent--resolve-fork-entry response 0 3))))
+
+(defun pi-coding-agent-test--make-deep-linear-tree (depth)
+  "Return a single-branch tree vector with DEPTH nested nodes.
+The tree is built iteratively to avoid recursion in test setup."
+  (let* ((leaf-id (1- depth))
+         (node (list :id (format "n%d" leaf-id)
+                     :type "message"
+                     :role "user"
+                     :preview (format "node %d" leaf-id)
+                     :parentId (and (> leaf-id 0) (format "n%d" (1- leaf-id)))
+                     :children [])))
+    (dotimes (i (1- depth))
+      (let ((id (- depth i 2)))
+        (setq node (list :id (format "n%d" id)
+                         :type "message"
+                         :role "user"
+                         :preview (format "node %d" id)
+                         :parentId (and (> id 0) (format "n%d" (1- id)))
+                         :children (vector node)))))
+    (vector node)))
+
+(defun pi-coding-agent-test--make-deep-fork-messages (depth)
+  "Return DEPTH chronological fork messages."
+  (let ((messages (make-vector depth nil)))
+    (dotimes (i depth)
+      (aset messages i (list :entryId (format "n%d" i)
+                             :text (format "node %d" i))))
+    messages))
+
+(ert-deftest pi-coding-agent-test-flatten-tree-deep-linear-tree ()
+  "flatten-tree handles deep linear trees without eval-depth overflow."
+  (let* ((depth pi-coding-agent-test--deep-tree-depth)
+         (tree (pi-coding-agent-test--make-deep-linear-tree depth))
+         (index (pi-coding-agent--flatten-tree tree)))
+    (should (= (hash-table-count index) depth))))
 
 ;;; Active Branch Tree Walk
 

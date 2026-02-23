@@ -34,7 +34,7 @@
 ;; - Buffer-local session variables (the shared mutable state)
 ;; - Buffer creation, naming, and navigation
 ;; - Display primitives (append-to-chat, scroll preservation, separators)
-;; - Header-line formatting and spinner
+;; - Header-line formatting and activity phases
 ;; - Sending infrastructure (send-prompt, abort-send)
 ;; - Major mode definitions (chat-mode, input-mode)
 
@@ -93,6 +93,16 @@ prompt once on first session start.  Set to nil to suppress."
 
 ;;;; Customization
 
+(defcustom pi-coding-agent-executable '("pi")
+  "Command to invoke the pi binary, as a list of strings.
+The first element is the program; remaining elements are passed
+before \"--mode rpc\" and `pi-coding-agent-extra-args'.
+
+For npx users:
+  (setq pi-coding-agent-executable \\='(\"npx\" \"pi\"))"
+  :type '(repeat string)
+  :group 'pi-coding-agent)
+
 (defcustom pi-coding-agent-rpc-timeout 30
   "Default timeout in seconds for synchronous RPC calls.
 Some operations like model loading may need more time."
@@ -110,12 +120,12 @@ Some operations like model loading may need more time."
   :group 'pi-coding-agent)
 
 (defcustom pi-coding-agent-tool-preview-lines 10
-  "Number of lines to show before collapsing tool output."
+  "Maximum visual lines to show before collapsing tool output."
   :type 'natnum
   :group 'pi-coding-agent)
 
 (defcustom pi-coding-agent-bash-preview-lines 5
-  "Number of lines to show for bash output before collapsing.
+  "Maximum visual lines to show for bash output before collapsing.
 Bash output is typically more verbose, so fewer lines are shown."
   :type 'natnum
   :group 'pi-coding-agent)
@@ -223,6 +233,11 @@ Subtle blue-tinted background derived from the current theme."
 (defface pi-coding-agent-model-name
   '((t :inherit font-lock-type-face))
   "Face for model name in header line."
+  :group 'pi-coding-agent)
+
+(defface pi-coding-agent-activity-phase
+  '((t :inherit shadow))
+  "Face for activity phase label in header line."
   :group 'pi-coding-agent)
 
 (defface pi-coding-agent-retry-notice
@@ -583,6 +598,8 @@ TYPE is :chat or :input.  Returns the buffer."
         existing
       (let ((buf (generate-new-buffer name)))
         (with-current-buffer buf
+          ;; Keep canonical session directory for exact matching.
+          (setq default-directory dir)
           (pcase type
             (:chat (pi-coding-agent-chat-mode))
             (:input (pi-coding-agent-input-mode))))
@@ -590,35 +607,45 @@ TYPE is :chat or :input.  Returns the buffer."
 
 ;;;; Project Buffer Discovery
 
+(defun pi-coding-agent--normalize-directory (dir)
+  "Normalize DIR for exact path comparisons.
+Returns an expanded absolute path with a trailing slash."
+  (file-name-as-directory (expand-file-name dir)))
+
 (defun pi-coding-agent-project-buffers ()
-  "Return all pi chat buffers for the current project directory.
-Matches buffer names by prefix against the abbreviated project dir.
+  "Return pi chat buffers for the current project directory.
+Matches buffers by exact `default-directory', not by `buffer-name' prefix.
 Returns a list ordered by `buffer-list' recency (most recent first)."
-  (let ((prefix (format "*pi-coding-agent-chat:%s"
-                        (abbreviate-file-name
-                         (pi-coding-agent--session-directory)))))
+  (let ((target-dir (pi-coding-agent--normalize-directory
+                     (pi-coding-agent--session-directory))))
     (cl-remove-if-not
      (lambda (buf)
-       (string-prefix-p prefix (buffer-name buf)))
+       (and (buffer-live-p buf)
+            (with-current-buffer buf
+              (and (derived-mode-p 'pi-coding-agent-chat-mode)
+                   (stringp default-directory)
+                   (string=
+                    (pi-coding-agent--normalize-directory default-directory)
+                    target-dir)))))
      (buffer-list))))
 
 ;;;; Window Hiding
 
 (defun pi-coding-agent--hide-session-windows ()
-  "Hide the current pi session, preserving the frame's window layout.
-Deletes input windows (the child splits created by
-`pi-coding-agent--display-buffers') and replaces the chat buffer in
-its window with the previous buffer via `bury-buffer'.
+  "Hide the current pi session in the selected frame.
+Preserves this frame's window layout by deleting input windows (the
+child splits created by `pi-coding-agent--display-buffers') and
+replacing chat windows with their previous buffers via `bury-buffer'.
 
 Must be called from a pi chat or input buffer.  Only affects windows
-of the current session — other sessions' windows are untouched."
+of the current session in the selected frame."
   (let ((chat-buf (pi-coding-agent--get-chat-buffer))
         (input-buf (pi-coding-agent--get-input-buffer)))
     (when (buffer-live-p input-buf)
-      (dolist (win (get-buffer-window-list input-buf nil t))
+      (dolist (win (get-buffer-window-list input-buf nil))
         (ignore-errors (delete-window win))))
     (when (buffer-live-p chat-buf)
-      (dolist (win (get-buffer-window-list chat-buf nil t))
+      (dolist (win (get-buffer-window-list chat-buf nil))
         (with-selected-window win
           (bury-buffer))))))
 
@@ -686,6 +713,22 @@ Starts as `line-start' because content begins after separator newline.")
 
 ;; pi-coding-agent--status is defined in pi-coding-agent-core.el as the single source of truth
 ;; for session activity state (idle, sending, streaming, compacting)
+
+(defvar-local pi-coding-agent--activity-phase "idle"
+  "Fine-grained activity phase for header-line display.
+One of \"thinking\", \"replying\", \"running\",
+\"compact\", or \"idle\".
+Always populated and rendered in a fixed-width slot.")
+
+(defun pi-coding-agent--set-activity-phase (phase)
+  "Set activity PHASE for header-line display in current chat buffer.
+PHASE should be one of \"thinking\", \"replying\",
+\"running\", \"compact\", \"idle\".
+Returns non-nil when the phase changed."
+  (unless (equal pi-coding-agent--activity-phase phase)
+    (setq pi-coding-agent--activity-phase phase)
+    (force-mode-line-update t)
+    t))
 
 (defvar-local pi-coding-agent--cached-stats nil
   "Cached session statistics for header-line display.
@@ -790,8 +833,10 @@ When set but different from pi's message, we display pi's version
 
 (defvar-local pi-coding-agent--extension-status nil
   "Alist of extension status messages for header-line display.
-Keys are extension identifiers (strings), values are status text.
-Displayed in header-line after model/thinking info with | separator.")
+Keys are extension identifiers (strings), values are status text.")
+
+(defvar-local pi-coding-agent--working-message nil
+  "Transient extension working message for header-line display.")
 
 (defvar-local pi-coding-agent--session-name nil
   "Cached session name for header-line display.
@@ -846,16 +891,122 @@ Works from either chat or input buffer."
 
 ;;;; Display
 
+(defun pi-coding-agent--window-can-split-for-input-p (window)
+  "Return non-nil if WINDOW can be split into chat and input windows."
+  (>= (window-total-height window)
+      (* 2 window-min-height)))
+
+(defun pi-coding-agent--input-height-for-window (window)
+  "Return input pane height to use when splitting WINDOW.
+Clamps `pi-coding-agent-input-window-height' to the maximum that still
+leaves at least `window-min-height' lines for chat."
+  (let* ((window-height (window-total-height window))
+         (max-input-height (- window-height window-min-height)))
+    (max window-min-height
+         (min pi-coding-agent-input-window-height
+              max-input-height))))
+
+(defun pi-coding-agent--windows-by-height (&optional windows)
+  "Return live WINDOWS sorted by descending height.
+If WINDOWS is nil, use all non-minibuffer windows in the selected frame."
+  (sort (cl-remove-if-not #'window-live-p
+                          (copy-sequence (or windows (window-list nil 'no-mini))))
+        (lambda (a b)
+          (> (window-total-height a)
+             (window-total-height b)))))
+
+(defun pi-coding-agent--window-with-most-height (&optional windows)
+  "Return the tallest window from WINDOWS.
+If WINDOWS is nil, use all non-minibuffer windows in the selected frame."
+  (car (pi-coding-agent--windows-by-height windows)))
+
+(defun pi-coding-agent--best-display-window (&optional preferred)
+  "Return best window for displaying chat+input.
+Use PREFERRED when it can be split, else pick the tallest splittable
+window in the frame.  Falls back to PREFERRED or selected window."
+  (or (and preferred
+           (window-live-p preferred)
+           (pi-coding-agent--window-can-split-for-input-p preferred)
+           preferred)
+      (cl-find-if #'pi-coding-agent--window-can-split-for-input-p
+                  (pi-coding-agent--windows-by-height))
+      preferred
+      (selected-window)))
+
+(defun pi-coding-agent--preferred-display-window (chat-wins input-wins selected)
+  "Return preferred base window for displaying chat+input.
+CHAT-WINS and INPUT-WINS are existing session windows.  SELECTED is the
+currently selected window."
+  (cond
+   ;; Input-only visible: prefer selected non-input window so we can
+   ;; replace it cleanly and avoid duplicate input windows.
+   ((and input-wins (not chat-wins)
+         (not (memq selected input-wins))
+         (pi-coding-agent--window-can-split-for-input-p selected))
+    selected)
+   (chat-wins (pi-coding-agent--window-with-most-height chat-wins))
+   (input-wins (pi-coding-agent--window-with-most-height input-wins))
+   (t selected)))
+
+(defun pi-coding-agent--delete-extra-input-windows (input-wins target)
+  "Delete windows in INPUT-WINS except TARGET."
+  (dolist (win input-wins)
+    (unless (eq win target)
+      (ignore-errors (delete-window win)))))
+
+(defun pi-coding-agent--paired-input-window (chat-win input-buf)
+  "Return input window below CHAT-WIN showing INPUT-BUF, or nil."
+  (when (window-live-p chat-win)
+    (let ((below (window-in-direction 'below chat-win)))
+      (and below
+           (eq (window-buffer below) input-buf)
+           below))))
+
+(defun pi-coding-agent--best-input-window (chat-buf input-buf)
+  "Return best visible window for INPUT-BUF in current frame.
+Prefer the input window below the selected CHAT-BUF window, then the
+selected input window, then the tallest input window."
+  (let* ((input-wins (get-buffer-window-list input-buf nil))
+         (selected (selected-window))
+         (selected-chat-win (and (eq (window-buffer selected) chat-buf)
+                                 selected)))
+    (or (pi-coding-agent--paired-input-window selected-chat-win input-buf)
+        (and (memq selected input-wins)
+             selected)
+        (pi-coding-agent--window-with-most-height input-wins))))
+
+(defun pi-coding-agent--focus-input-window (chat-buf input-buf)
+  "Select a visible INPUT-BUF window for the CHAT-BUF session."
+  (when-let ((win (pi-coding-agent--best-input-window chat-buf input-buf)))
+    (select-window win)))
+
 (defun pi-coding-agent--display-buffers (chat-buf input-buf)
-  "Display CHAT-BUF and INPUT-BUF in current window, split vertically.
-Does not affect other windows in the frame."
-  ;; Use current window for chat, split for input
-  (switch-to-buffer chat-buf)
-  (with-current-buffer chat-buf
-    (goto-char (point-max)))
-  (let ((input-win (split-window nil (- pi-coding-agent-input-window-height) 'below)))
-    (set-window-buffer input-win input-buf)
-    (select-window input-win)))
+  "Ensure CHAT-BUF and INPUT-BUF are visible.
+Uses a split window with chat above and input below.  Falls back to a
+larger window when the selected one cannot be split."
+  (let* ((chat-wins (get-buffer-window-list chat-buf nil))
+         (input-wins (get-buffer-window-list input-buf nil))
+         (selected (selected-window))
+         (preferred (pi-coding-agent--preferred-display-window
+                     chat-wins input-wins selected))
+         (target (pi-coding-agent--best-display-window preferred))
+         (input-win nil))
+    ;; Remove stale input windows when restoring from an input-only view.
+    (when (and input-wins (not chat-wins))
+      (pi-coding-agent--delete-extra-input-windows input-wins target))
+    (with-selected-window target
+      (unless (pi-coding-agent--window-can-split-for-input-p target)
+        (delete-other-windows target))
+      (unless (pi-coding-agent--window-can-split-for-input-p target)
+        (user-error "Window too small for chat + input layout"))
+      (switch-to-buffer chat-buf)
+      (with-current-buffer chat-buf
+        (goto-char (point-max)))
+      (let ((input-height (pi-coding-agent--input-height-for-window target)))
+        (setq input-win (split-window nil (- input-height) 'below))
+        (set-window-buffer input-win input-buf)))
+    (when (window-live-p input-win)
+      (select-window input-win))))
 
 ;;; Scroll Behavior
 ;;
@@ -997,18 +1148,19 @@ https://github.com/misohena/phscroll")
 (defun pi-coding-agent--check-pi ()
   "Check if pi binary is available.
 Returns t if available, nil otherwise."
-  (and (executable-find "pi") t))
+  (and (executable-find (car pi-coding-agent-executable)) t))
 
 (defun pi-coding-agent--check-dependencies ()
   "Check all required dependencies.
 Displays warnings for missing dependencies."
   (unless (pi-coding-agent--check-pi)
-    (display-warning 'pi "pi binary not found. Install with: npm install -g @mariozechner/pi-coding-agent"
+    (display-warning 'pi (format "%s not found in PATH. Install with: npm install -g @mariozechner/pi-coding-agent"
+                                 (car pi-coding-agent-executable))
                      :error)))
 
 ;;;; Startup Header
 
-(defconst pi-coding-agent-version "1.3.2"
+(defconst pi-coding-agent-version "1.3.4"
   "Version of pi-coding-agent.")
 
 (defconst pi-coding-agent--startup-header-placeholder-version "…"
@@ -1199,63 +1351,6 @@ Removes common prefixes like \"Claude \" and suffixes like \" (latest)\"."
     (replace-regexp-in-string " (latest)$" "")
     (replace-regexp-in-string "^claude-" "")))
 
-(defvar pi-coding-agent--spinner-frames ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
-  "Frames for the busy spinner animation.")
-
-(defvar pi-coding-agent--spinner-index 0
-  "Current frame index in the spinner animation (shared for sync).")
-
-(defvar pi-coding-agent--spinner-timer nil
-  "Timer for animating spinners (shared across sessions).")
-
-(defvar pi-coding-agent--spinning-sessions nil
-  "List of chat buffers currently spinning.")
-
-(defun pi-coding-agent--spinner-start ()
-  "Start the spinner for current session."
-  (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
-    (when (and chat-buf (not (memq chat-buf pi-coding-agent--spinning-sessions)))
-      (push chat-buf pi-coding-agent--spinning-sessions)
-      ;; Start global timer if not running
-      (unless pi-coding-agent--spinner-timer
-        (setq pi-coding-agent--spinner-index 0)
-        (setq pi-coding-agent--spinner-timer
-              (run-with-timer 0 0.1 #'pi-coding-agent--spinner-tick))))))
-
-(defun pi-coding-agent--spinner-stop (&optional chat-buf)
-  "Stop the spinner for current session.
-CHAT-BUF is the buffer to stop spinning; if nil, uses current context.
-Note: When called from async callbacks, pass CHAT-BUF explicitly."
-  (let ((chat-buf (or chat-buf (pi-coding-agent--get-chat-buffer))))
-    (setq pi-coding-agent--spinning-sessions (delq chat-buf pi-coding-agent--spinning-sessions))
-    ;; Stop global timer if no sessions spinning
-    (when (and pi-coding-agent--spinner-timer (null pi-coding-agent--spinning-sessions))
-      (cancel-timer pi-coding-agent--spinner-timer)
-      (setq pi-coding-agent--spinner-timer nil))))
-
-(defun pi-coding-agent--spinner-tick ()
-  "Advance spinner to next frame and update spinning sessions."
-  (setq pi-coding-agent--spinner-index
-        (mod (1+ pi-coding-agent--spinner-index) (length pi-coding-agent--spinner-frames)))
-  ;; Only update windows showing spinning sessions
-  (dolist (buf pi-coding-agent--spinning-sessions)
-    (when (buffer-live-p buf)
-      (let ((input-buf (buffer-local-value 'pi-coding-agent--input-buffer buf)))
-        ;; Update input buffer's header line (where spinner shows)
-        (when (and input-buf (buffer-live-p input-buf))
-          (dolist (win (get-buffer-window-list input-buf nil t))
-            (with-selected-window win
-              (force-mode-line-update))))))))
-
-(defun pi-coding-agent--spinner-current ()
-  "Return current spinner frame if this session is spinning."
-  (let ((chat-buf (cond
-                   ((derived-mode-p 'pi-coding-agent-chat-mode) (current-buffer))
-                   ((derived-mode-p 'pi-coding-agent-input-mode) pi-coding-agent--chat-buffer)
-                   (t nil))))
-    (when (and chat-buf (memq chat-buf pi-coding-agent--spinning-sessions))
-      (aref pi-coding-agent--spinner-frames pi-coding-agent--spinner-index))))
-
 ;;; Header-Line Formatting
 
 (defvar pi-coding-agent--header-model-map
@@ -1275,55 +1370,93 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
 (defun pi-coding-agent--header-format-context (context-tokens context-window)
   "Format context usage as percentage with color coding.
 CONTEXT-TOKENS is the tokens used, CONTEXT-WINDOW is the max.
+When CONTEXT-TOKENS is nil, usage is unknown and rendered as \"?\".
 Returns nil if CONTEXT-WINDOW is 0."
   (when (> context-window 0)
-    (let* ((pct (* (/ (float context-tokens) context-window) 100))
-           ;; Note: %% needed because % has special meaning in header-line-format
-           (pct-str (format " %.1f%%%%/%s" pct
-                            (pi-coding-agent--format-tokens-compact context-window))))
-      (propertize pct-str
-                  'face (cond
-                         ((> pct pi-coding-agent-context-error-threshold) 'error)
-                         ((> pct pi-coding-agent-context-warning-threshold) 'warning)
-                         (t nil))))))
+    (if (null context-tokens)
+        (format " ?/%s" (pi-coding-agent--format-tokens-compact context-window))
+      (let* ((pct (* (/ (float context-tokens) context-window) 100))
+             ;; Note: %% needed because % has special meaning in header-line-format
+             (pct-str (format " %.1f%%%%/%s" pct
+                              (pi-coding-agent--format-tokens-compact context-window))))
+        (propertize pct-str
+                    'face (cond
+                           ((> pct pi-coding-agent-context-error-threshold) 'error)
+                           ((> pct pi-coding-agent-context-warning-threshold) 'warning)
+                           (t nil)))))))
 
 (defun pi-coding-agent--header-format-stats (stats last-usage model-obj)
-  "Format session STATS for header line.
+  "Format compact header stats from STATS.
+Shows only cumulative session cost and last-turn context usage.
 LAST-USAGE is the most recent message's token usage.
 MODEL-OBJ contains model info including context window.
 Returns nil if STATS is nil."
   (when stats
-    (let* ((tokens (plist-get stats :tokens))
-           (input (or (plist-get tokens :input) 0))
-           (output (or (plist-get tokens :output) 0))
-           (cache-read (or (plist-get tokens :cacheRead) 0))
-           (cache-write (or (plist-get tokens :cacheWrite) 0))
-           (cost (or (plist-get stats :cost) 0))
+    (let* ((cost (or (plist-get stats :cost) 0))
            ;; Context percentage from LAST message usage, not cumulative totals.
-           (last-input (or (plist-get last-usage :input) 0))
-           (last-output (or (plist-get last-usage :output) 0))
-           (last-cache-read (or (plist-get last-usage :cacheRead) 0))
-           (last-cache-write (or (plist-get last-usage :cacheWrite) 0))
-           (context-tokens (+ last-input last-output last-cache-read last-cache-write))
+           ;; After compaction, usage is unknown until the next assistant message.
+           (context-tokens (when last-usage
+                             (+ (or (plist-get last-usage :input) 0)
+                                (or (plist-get last-usage :output) 0)
+                                (or (plist-get last-usage :cacheRead) 0)
+                                (or (plist-get last-usage :cacheWrite) 0))))
            (context-window (or (plist-get model-obj :contextWindow) 0)))
       (concat
-       " │ ↑" (pi-coding-agent--format-tokens-compact input)
-       " ↓" (pi-coding-agent--format-tokens-compact output)
-       " R" (pi-coding-agent--format-tokens-compact cache-read)
-       " W" (pi-coding-agent--format-tokens-compact cache-write)
+       " │"
        (format " $%.2f" cost)
        (pi-coding-agent--header-format-context context-tokens context-window)))))
 
 (defun pi-coding-agent--header-format-extension-status (ext-status)
   "Format EXT-STATUS alist for header-line display.
-Returns string with | separator and all extension statuses, or empty string."
+Returns extension statuses joined with \" · \", or empty string."
   (if (null ext-status)
       ""
-    (concat " │ "
-            (mapconcat (lambda (pair)
-                         (propertize (cdr pair) 'face 'pi-coding-agent-retry-notice))
-                       ext-status
-                       " · "))))
+    (mapconcat (lambda (pair)
+                 (propertize (cdr pair) 'face 'pi-coding-agent-retry-notice))
+               ext-status
+               " · ")))
+
+(defun pi-coding-agent--header-format-identity (model-short thinking activity-phase-str)
+  "Format identity group from MODEL-SHORT, THINKING, and ACTIVITY-PHASE-STR."
+  (concat
+   (propertize model-short
+               'face 'pi-coding-agent-model-name
+               'mouse-face 'highlight
+               'help-echo "mouse-1: Select model"
+               'local-map pi-coding-agent--header-model-map)
+   (if (string-empty-p thinking)
+       ""
+     (concat " • "
+             (propertize thinking
+                         'mouse-face 'highlight
+                         'help-echo "mouse-1: Cycle thinking level"
+                         'local-map pi-coding-agent--header-thinking-map)))
+   " " activity-phase-str))
+
+(defun pi-coding-agent--header-format-context-group (session-name)
+  "Format context group from SESSION-NAME.
+Returns a leading-pipe group string or empty string
+when no session name exists."
+  (if (and session-name (not (string-empty-p session-name)))
+      (concat " │ " (pi-coding-agent--truncate-string session-name 30))
+    ""))
+
+(defun pi-coding-agent--header-format-extension-group (ext-status working-message)
+  "Format extension group from EXT-STATUS and WORKING-MESSAGE.
+Returns a leading-pipe group string or empty string
+when no extension info exists."
+  (let* ((status-str (pi-coding-agent--header-format-extension-status ext-status))
+         (working-str (if (and working-message (not (string-empty-p working-message)))
+                          (propertize working-message 'face 'shadow)
+                        ""))
+         (parts nil))
+    (unless (string-empty-p status-str)
+      (push status-str parts))
+    (unless (string-empty-p working-str)
+      (push working-str parts))
+    (if parts
+        (concat " │ " (mapconcat #'identity (nreverse parts) " · "))
+      "")))
 
 (defun pi-coding-agent--header-line-string ()
   "Return formatted header-line string for input buffer.
@@ -1341,6 +1474,7 @@ Accesses state from the linked chat buffer."
          (stats (and chat-buf (buffer-local-value 'pi-coding-agent--cached-stats chat-buf)))
          (last-usage (and chat-buf (buffer-local-value 'pi-coding-agent--last-usage chat-buf)))
          (ext-status (and chat-buf (buffer-local-value 'pi-coding-agent--extension-status chat-buf)))
+         (working-message (and chat-buf (buffer-local-value 'pi-coding-agent--working-message chat-buf)))
          (session-name (and chat-buf (buffer-local-value 'pi-coding-agent--session-name chat-buf)))
          (model-obj (plist-get state :model))
          (model-name (cond
@@ -1350,32 +1484,17 @@ Accesses state from the linked chat buffer."
          (model-short (if (string-empty-p model-name) "..."
                         (pi-coding-agent--shorten-model-name model-name)))
          (thinking (or (plist-get state :thinking-level) ""))
-         (status-str (if-let ((spinner (pi-coding-agent--spinner-current)))
-                         (concat " " spinner)
-                       "  ")))  ; Same width as " ⠋" to prevent jumping
+         (activity-phase (or (and chat-buf
+                                  (buffer-local-value 'pi-coding-agent--activity-phase chat-buf))
+                             "idle"))
+         (activity-phase-str
+          (propertize (format "%-8s" activity-phase)
+                      'face 'pi-coding-agent-activity-phase)))
     (concat
-     ;; Model (clickable)
-     (propertize model-short
-                 'face 'pi-coding-agent-model-name
-                 'mouse-face 'highlight
-                 'help-echo "mouse-1: Select model"
-                 'local-map pi-coding-agent--header-model-map)
-     ;; Thinking level (clickable)
-     (unless (string-empty-p thinking)
-       (concat " • "
-               (propertize thinking
-                           'mouse-face 'highlight
-                           'help-echo "mouse-1: Cycle thinking level"
-                           'local-map pi-coding-agent--header-thinking-map)))
-     ;; Spinner/status (right after model/thinking)
-     status-str
-     ;; Stats (if available)
+     (pi-coding-agent--header-format-identity model-short thinking activity-phase-str)
      (pi-coding-agent--header-format-stats stats last-usage model-obj)
-     ;; Extension status (if any)
-     (pi-coding-agent--header-format-extension-status ext-status)
-     ;; Session name at end (truncated) - like a title
-     (when session-name
-       (concat " │ " (pi-coding-agent--truncate-string session-name 30))))))
+     (pi-coding-agent--header-format-context-group session-name)
+     (pi-coding-agent--header-format-extension-group ext-status working-message))))
 
 ;;; State Management
 
@@ -1430,12 +1549,11 @@ Shows an error message if process is unavailable."
 
 (defun pi-coding-agent--abort-send (chat-buf)
   "Clean up after a failed send attempt in CHAT-BUF.
-Stops spinner and resets status to idle."
+Resets activity phase and status to idle."
   (when (buffer-live-p chat-buf)
     (with-current-buffer chat-buf
-      (pi-coding-agent--spinner-stop)
       (setq pi-coding-agent--status 'idle)
-      (force-mode-line-update))))
+      (pi-coding-agent--set-activity-phase "idle"))))
 
 
 (provide 'pi-coding-agent-ui)

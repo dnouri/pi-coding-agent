@@ -119,8 +119,20 @@ Automatically cleans up chat and input buffers."
                ((symbol-function 'pi-coding-agent--display-buffers) #'ignore))
        (unwind-protect
            (progn (pi-coding-agent) ,@body)
-         (ignore-errors (kill-buffer (pi-coding-agent--buffer-name :chat ,dir nil)))
-         (ignore-errors (kill-buffer (pi-coding-agent--buffer-name :input ,dir nil)))))))
+         (pi-coding-agent-test--kill-session-buffers ,dir)))))
+
+(defun pi-coding-agent-test--chat-buffer-name (dir &optional session)
+  "Return the chat buffer name for DIR and optional SESSION."
+  (pi-coding-agent--buffer-name :chat dir session))
+
+(defun pi-coding-agent-test--input-buffer-name (dir &optional session)
+  "Return the input buffer name for DIR and optional SESSION."
+  (pi-coding-agent--buffer-name :input dir session))
+
+(defun pi-coding-agent-test--kill-session-buffers (dir &optional session)
+  "Kill chat and input buffers for DIR and optional SESSION."
+  (ignore-errors (kill-buffer (pi-coding-agent-test--chat-buffer-name dir session)))
+  (ignore-errors (kill-buffer (pi-coding-agent-test--input-buffer-name dir session))))
 
 ;;;; Two-Session Fixture
 
@@ -192,6 +204,12 @@ Returns (:tree VECTOR :leafId LAST-ID)."
    '("a2" nil "message" :role "assistant" :preview "Second answer")
    '("u3" nil "message" :role "user" :preview "Third question")
    '("a3" nil "message" :role "assistant" :preview "Third answer")))
+
+(defun pi-coding-agent-test--make-3turn-fork-messages ()
+  "Return get_fork_messages payload for three user turns."
+  [(:entryId "u1" :text "First question")
+   (:entryId "u2" :text "Second question")
+   (:entryId "u3" :text "Third question")])
 
 ;;;; Chat Buffer Fixtures
 

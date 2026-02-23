@@ -81,9 +81,8 @@ visual spacing when `markdown-hide-markup' is enabled."
   (setq pi-coding-agent--line-parse-state 'line-start)
   (setq pi-coding-agent--in-code-block nil)
   (setq pi-coding-agent--in-thinking-block nil)
-  (pi-coding-agent--spinner-start)
-  (pi-coding-agent--fontify-timer-start)
-  (force-mode-line-update))
+  (pi-coding-agent--set-activity-phase "thinking")
+  (pi-coding-agent--fontify-timer-start))
 
 (defun pi-coding-agent--process-streaming-char (char state in-block)
   "Process CHAR with current STATE and IN-BLOCK flag.
@@ -237,7 +236,7 @@ Returns non-nil when meaningful content remains after normalization."
       (and (<= start end)
            (not (string-empty-p normalized))))))
 
-(defun pi-coding-agent--ensure-thinking-separator ()
+(defun pi-coding-agent--ensure-blank-line-separator ()
   "Ensure exactly one blank line separator at point.
 Normalizes any existing newline run to two newlines."
   (let ((start (point))
@@ -251,6 +250,17 @@ Normalizes any existing newline run to two newlines."
       (insert (make-string (- 2 newline-count) ?\n)))
      ((> newline-count 2)
       (delete-region (+ start 2) (+ start newline-count))))))
+
+(defun pi-coding-agent--ensure-blank-line-before-block ()
+  "Ensure point is on a fresh line with a blank line above.
+Used before inserting a new block (thinking, tool) so it is visually
+separated from preceding content."
+  (unless (bolp)
+    (insert "\n"))
+  (unless (save-excursion
+            (forward-line -1)
+            (looking-at-p "^$"))
+    (insert "\n")))
 
 (defun pi-coding-agent--reset-thinking-state ()
   "Detach and clear all thinking-stream state for the current turn."
@@ -270,6 +280,11 @@ Normalizes any existing newline run to two newlines."
       (pi-coding-agent--with-scroll-preservation
         (save-excursion
           (goto-char (marker-position pi-coding-agent--streaming-marker))
+          ;; No separator needed when this is the first content in the message.
+          (when (and pi-coding-agent--message-start-marker
+                     (> (point)
+                        (marker-position pi-coding-agent--message-start-marker)))
+            (pi-coding-agent--ensure-blank-line-before-block))
           ;; Track thinking insertion separately so it stays anchored even if
           ;; other block types (tool headers) interleave in the same message.
           ;; Keep insertion-type nil so inserts at this exact point happen
@@ -285,12 +300,9 @@ Normalizes any existing newline run to two newlines."
 
 (defun pi-coding-agent--display-thinking-delta (delta)
   "Display streaming thinking DELTA in the current thinking block.
-Normalizes boundary and paragraph whitespace while streaming.
-Inhibits modification hooks to prevent expensive jit-lock fontification
-on each delta - fontification happens at message end instead."
+Normalizes boundary and paragraph whitespace while streaming."
   (when (and delta pi-coding-agent--streaming-marker)
-    (let ((inhibit-read-only t)
-          (inhibit-modification-hooks t))
+    (let ((inhibit-read-only t))
       (if (and pi-coding-agent--thinking-start-marker
                pi-coding-agent--thinking-marker)
           (progn
@@ -320,10 +332,10 @@ CONTENT is ignored - we use what was already streamed."
                    pi-coding-agent--thinking-marker)
               (when (pi-coding-agent--render-thinking-content)
                 (goto-char (pi-coding-agent--thinking-insert-position))
-                (pi-coding-agent--ensure-thinking-separator))
+                (pi-coding-agent--ensure-blank-line-separator))
             ;; Fallback for malformed event streams that skip thinking_start.
             (goto-char (pi-coding-agent--thinking-insert-position))
-            (pi-coding-agent--ensure-thinking-separator))
+            (pi-coding-agent--ensure-blank-line-separator))
           (pi-coding-agent--reset-thinking-state))))))
 
 (defun pi-coding-agent--display-agent-end ()
@@ -354,7 +366,7 @@ Note: status is set to `idle' by the event handler."
           (skip-chars-backward "\n")
           (delete-region (point) (point-max))
           (insert "\n"))))
-    (pi-coding-agent--spinner-stop)
+    (pi-coding-agent--set-activity-phase "idle")
     (pi-coding-agent--fontify-timer-stop)
     (pi-coding-agent--refresh-header)
     ;; Check follow-up queue and send next message if any (unless aborted)
@@ -522,6 +534,14 @@ Shows success or final failure with raw error."
             (assoc-delete-all key pi-coding-agent--extension-status)))
     (force-mode-line-update t)))
 
+(defun pi-coding-agent--extension-ui-set-working-message (event)
+  "Handle setWorkingMessage method from EVENT."
+  (let ((msg (plist-get event :message)))
+    (when msg
+      (setq msg (ansi-color-filter-apply msg)))
+    (setq pi-coding-agent--working-message msg)
+    (force-mode-line-update t)))
+
 (defun pi-coding-agent--extension-ui-unsupported (event proc)
   "Handle unsupported method from EVENT by sending cancelled via PROC."
   (when proc
@@ -543,6 +563,7 @@ Dispatches to appropriate handler based on method."
       ("input"          (pi-coding-agent--extension-ui-input event proc))
       ("set_editor_text" (pi-coding-agent--extension-ui-set-editor-text event))
       ("setStatus"      (pi-coding-agent--extension-ui-set-status event))
+      ("setWorkingMessage" (pi-coding-agent--extension-ui-set-working-message event))
       (_                (pi-coding-agent--extension-ui-unsupported event proc)))))
 
 (defun pi-coding-agent--display-no-model-warning ()
@@ -673,6 +694,7 @@ Updates buffer-local state and renders display updates."
                  (event-type (plist-get msg-event :type)))
        (pcase event-type
          ("text_delta"
+          (pi-coding-agent--set-activity-phase "replying")
           (pi-coding-agent--display-message-delta (plist-get msg-event :delta)))
          ("thinking_start"
           (pi-coding-agent--display-thinking-start))
@@ -686,6 +708,7 @@ Updates buffer-local state and renders display updates."
           (unless pi-coding-agent--streaming-tool-id
             (when-let* ((tool-call (pi-coding-agent--extract-tool-call
                                     event msg-event)))
+              (pi-coding-agent--set-activity-phase "running")
               ;; Clear fontification buffer so incremental sync starts
               ;; fresh for each tool call
               (pi-coding-agent--fontify-reset
@@ -720,20 +743,26 @@ Updates buffer-local state and renders display updates."
           ;; Error during streaming (e.g., API error)
           (pi-coding-agent--display-error (plist-get msg-event :reason))))))
     ("message_end"
-     (let ((message (plist-get event :message)))
+     (let* ((message (plist-get event :message))
+            (assistant-p (equal (plist-get message :role) "assistant")))
        ;; Display error if message ended with error (e.g., API error)
        (when (equal (plist-get message :stopReason) "error")
          (pi-coding-agent--display-error (plist-get message :errorMessage)))
        ;; Capture usage from assistant messages for context % calculation.
        ;; Skip aborted messages - they may have incomplete usage data and
-       ;; would reset context percentage to 0%.  Matches TUI footer.ts behavior.
+       ;; would reset context percentage.  Matches TUI footer.ts behavior.
        ;; Note: error messages DO have valid usage data (tokens were consumed).
-       (when (and (equal (plist-get message :role) "assistant")
+       (when (and assistant-p
                   (not (equal (plist-get message :stopReason) "aborted"))
                   (plist-get message :usage))
-         (pi-coding-agent--set-last-usage (plist-get message :usage))))
+         (pi-coding-agent--set-last-usage (plist-get message :usage)))
+       ;; Refresh cumulative stats after each assistant message_end so
+       ;; cost and totals update without waiting for agent_end.
+       (when assistant-p
+         (pi-coding-agent--refresh-header)))
      (pi-coding-agent--render-complete-message))
     ("tool_execution_start"
+     (pi-coding-agent--set-activity-phase "running")
      (let ((tool-call-id (plist-get event :toolCallId))
            (args (plist-get event :args)))
        ;; Cache args for tool_execution_end (which doesn't include args)
@@ -754,6 +783,7 @@ Updates buffer-local state and renders display updates."
                (overlay-put ov 'pi-coding-agent-tool-path path)))
          (pi-coding-agent--display-tool-start (plist-get event :toolName) args))))
     ("tool_execution_end"
+     (pi-coding-agent--set-activity-phase "thinking")
      (let* ((tool-call-id (plist-get event :toolCallId))
             (result (plist-get event :result))
             ;; Retrieve cached args since tool_execution_end doesn't include them
@@ -769,13 +799,13 @@ Updates buffer-local state and renders display updates."
      (pi-coding-agent--display-tool-update (plist-get event :partialResult)))
     ("auto_compaction_start"
      (setq pi-coding-agent--status 'compacting)
-     (pi-coding-agent--spinner-start)
+     (pi-coding-agent--set-activity-phase "compact")
      (let ((reason (plist-get event :reason)))
        (message "Pi: %sAuto-compacting... (C-c C-k to cancel)"
                 (if (equal reason "overflow") "Context overflow, " ""))))
     ("auto_compaction_end"
-     (pi-coding-agent--spinner-stop)
      (setq pi-coding-agent--status 'idle)
+     (pi-coding-agent--set-activity-phase "idle")
      (if (pi-coding-agent--normalize-boolean (plist-get event :aborted))
          (progn
            (message "Pi: Auto-compaction cancelled")
@@ -812,7 +842,12 @@ Returns a plist with:
   :visual-lines - number of visual lines in result
   :hidden-lines - raw lines hidden (including stripped blanks)
   :line-map     - vector mapping displayed line to original line number"
-  (let* ((all-lines (split-string (string-trim-right content "\n+") "\n"))
+  (let* ((safe-max-lines (max 0 (or max-lines 0)))
+         (safe-width (max 1 (or width 1)))
+         (trimmed (string-trim-right content "\n+"))
+         (all-lines (if (string-empty-p trimmed)
+                        nil
+                      (split-string trimmed "\n")))
          (total-raw-lines (length all-lines))
          (visual-count 0)
          (byte-count 0)
@@ -821,52 +856,57 @@ Returns a plist with:
          (line-map nil)  ; list of original line numbers for kept lines
          (truncated-first-line nil)
          (original-line-num 0))
-    ;; Accumulate non-blank lines until we'd exceed limits
-    (catch 'done
-      (dolist (line all-lines)
-        (setq original-line-num (1+ original-line-num))
-        ;; Skip blank lines (they don't count toward visual limit)
-        (unless (string-empty-p line)
-          (let* ((line-len (length line))
-                 ;; Visual lines: ceiling(length / width), minimum 1
-                 (line-visual-lines (max 1 (ceiling (float line-len) width)))
-                 (new-visual-count (+ visual-count line-visual-lines))
-                 ;; +1 for newline between lines
-                 (new-byte-count (+ byte-count line-len (if result-lines 1 0))))
-            ;; Check if adding this line would exceed limits
-            (cond
-             ;; Not first line and exceeds limits: stop
-             ((and result-lines
-                   (or (> new-visual-count max-lines)
-                       (> new-byte-count max-bytes)))
-              (throw 'done nil))
-             ;; First line exceeds limits: truncate it to fit
-             ((and (null result-lines)
-                   (or (> new-visual-count max-lines)
-                       (> new-byte-count max-bytes)))
-              (let* ((max-chars-by-visual (* max-lines width))
-                     (max-chars (min max-chars-by-visual max-bytes)))
-                (setq line (substring line 0 (min line-len max-chars)))
-                (setq line-len (length line))
-                (setq line-visual-lines (max 1 (ceiling (float line-len) width)))
-                (setq new-visual-count line-visual-lines)
-                (setq new-byte-count line-len)
-                (setq truncated-first-line t))))
-            (setq visual-count new-visual-count)
-            (setq byte-count new-byte-count)
-            (push line result-lines)
-            (push original-line-num line-map)))))
-    (let* ((kept-lines (nreverse result-lines))
-           (line-map-vec (vconcat (nreverse line-map)))
-           (last-displayed (if (> (length line-map-vec) 0)
-                               (aref line-map-vec (1- (length line-map-vec)))
-                             0))
-           (hidden (- total-raw-lines last-displayed)))
-      (list :content (string-join kept-lines "\n")
-            :visual-lines visual-count
-            ;; Report hidden lines; truncated first line means there's hidden content even with 1 line
-            :hidden-lines (if (and truncated-first-line (= hidden 0)) 1 hidden)
-            :line-map line-map-vec))))
+    (if (= safe-max-lines 0)
+        (list :content ""
+              :visual-lines 0
+              :hidden-lines total-raw-lines
+              :line-map [])
+      ;; Accumulate non-blank lines until we'd exceed limits
+      (catch 'done
+        (dolist (line all-lines)
+          (setq original-line-num (1+ original-line-num))
+          ;; Skip blank lines (they don't count toward visual limit)
+          (unless (string-empty-p line)
+            (let* ((line-len (length line))
+                   ;; Visual lines: ceiling(length / width), minimum 1
+                   (line-visual-lines (max 1 (ceiling (float line-len) safe-width)))
+                   (new-visual-count (+ visual-count line-visual-lines))
+                   ;; +1 for newline between lines
+                   (new-byte-count (+ byte-count line-len (if result-lines 1 0))))
+              ;; Check if adding this line would exceed limits
+              (cond
+               ;; Not first line and exceeds limits: stop
+               ((and result-lines
+                     (or (> new-visual-count safe-max-lines)
+                         (> new-byte-count max-bytes)))
+                (throw 'done nil))
+               ;; First line exceeds limits: truncate it to fit
+               ((and (null result-lines)
+                     (or (> new-visual-count safe-max-lines)
+                         (> new-byte-count max-bytes)))
+                (let* ((max-chars-by-visual (* safe-max-lines safe-width))
+                       (max-chars (min max-chars-by-visual max-bytes)))
+                  (setq line (substring line 0 (min line-len max-chars)))
+                  (setq line-len (length line))
+                  (setq line-visual-lines (max 1 (ceiling (float line-len) safe-width)))
+                  (setq new-visual-count line-visual-lines)
+                  (setq new-byte-count line-len)
+                  (setq truncated-first-line t))))
+              (setq visual-count new-visual-count)
+              (setq byte-count new-byte-count)
+              (push line result-lines)
+              (push original-line-num line-map)))))
+      (let* ((kept-lines (nreverse result-lines))
+             (line-map-vec (vconcat (nreverse line-map)))
+             (last-displayed (if (> (length line-map-vec) 0)
+                                 (aref line-map-vec (1- (length line-map-vec)))
+                               0))
+             (hidden (- total-raw-lines last-displayed)))
+        (list :content (string-join kept-lines "\n")
+              :visual-lines visual-count
+              ;; Report hidden lines; truncated first line means there's hidden content even with 1 line
+              :hidden-lines (if (and truncated-first-line (= hidden 0)) 1 hidden)
+              :line-map line-map-vec)))))
 
 (defun pi-coding-agent--tool-overlay-create (tool-name &optional path)
   "Create overlay for tool block TOOL-NAME at point.
@@ -926,6 +966,15 @@ with `:object-type \\='plist'.  Returns nil when PLIST-DATA is nil."
            (json-encoding-default-indentation "  "))
       (json-encode parsed))))
 
+(defun pi-coding-agent--propertize-details-region (details-json)
+  "Return DETAILS-JSON as a details section marked as metadata.
+The details payload keeps tool-output styling while setting
+`pi-coding-agent-no-fontify' so explicit markdown fontification
+can safely skip this region."
+  (propertize (concat "**Details**\n" details-json)
+              'font-lock-face 'pi-coding-agent-tool-output
+              'pi-coding-agent-no-fontify t))
+
 (defun pi-coding-agent--tool-header (tool-name args)
   "Return propertized header for tool TOOL-NAME with ARGS.
 The tool name prefix uses `pi-coding-agent-tool-name' face and
@@ -968,15 +1017,7 @@ Records the header-end position for later content insertion."
     (pi-coding-agent--with-scroll-preservation
       (save-excursion
         (goto-char (point-max))
-        ;; Terminate current line if mid-line (e.g., text delta without
-        ;; trailing newline before toolcall_start)
-        (unless (bolp)
-          (insert "\n"))
-        ;; Add blank line before tool if previous line has content
-        (unless (save-excursion
-                  (forward-line -1)
-                  (looking-at-p "^$"))
-          (insert "\n"))
+        (pi-coding-agent--ensure-blank-line-before-block)
         ;; Create overlay at start of tool block, storing path for navigation
         (setq pi-coding-agent--pending-tool-overlay
               (pi-coding-agent--tool-overlay-create tool-name path))
@@ -1054,8 +1095,12 @@ This is O(k) where k is the size of the tail, not O(n) like `split-string'."
   (let* ((len (length content))
          (pos len)
          (newlines-found 0))
-    (if (= len 0)
-        (cons "" nil)
+    (cond
+     ((= len 0)
+      (cons "" nil))
+     ((<= n 0)
+      (cons "" (not (string-empty-p (string-trim-right content "\n+")))))
+     (t
       ;; Skip trailing newlines
       (while (and (> pos 0) (eq (aref content (1- pos)) ?\n))
         (setq pos (1- pos)))
@@ -1071,7 +1116,44 @@ This is O(k) where k is the size of the tail, not O(n) like `split-string'."
       (when (and (> pos 0) (eq (aref content pos) ?\n))
         (setq pos (1+ pos)))
       ;; Return tail and whether there's hidden content
-      (cons (substring content pos) (> pos 0)))))
+      (cons (substring content pos) (> pos 0))))))
+
+(defun pi-coding-agent--tool-streaming-replace-overlay-body
+    (display-content show-hidden-indicator use-fontified-tail)
+  "Replace pending tool overlay body with DISPLAY-CONTENT.
+SHOW-HIDDEN-INDICATOR adds the collapsed-output hint line.
+USE-FONTIFIED-TAIL preserves syntax properties from a fontified tail."
+  (let ((inhibit-read-only t)
+        (inhibit-modification-hooks t))
+    (pi-coding-agent--with-scroll-preservation
+      (save-excursion
+        (let* ((ov-end (overlay-end pi-coding-agent--pending-tool-overlay))
+               (header-end (overlay-get pi-coding-agent--pending-tool-overlay
+                                        'pi-coding-agent-header-end)))
+          ;; Delete previous streaming content (everything after header)
+          (when (and header-end (< header-end ov-end))
+            (delete-region header-end ov-end))
+          ;; Insert new streaming content
+          (goto-char (overlay-end pi-coding-agent--pending-tool-overlay))
+          (when show-hidden-indicator
+            (insert (propertize "... (earlier output)\n"
+                                'face 'pi-coding-agent-collapsed-indicator)))
+          (unless (string-empty-p display-content)
+            (let ((content-start (point)))
+              (insert (if use-fontified-tail
+                          display-content
+                        (pi-coding-agent--render-tool-content
+                         display-content nil)))
+              (insert "\n")
+              ;; Mark pre-fontified content so jit-lock won't override
+              ;; our syntax faces with gfm-mode faces on redisplay.
+              ;; Also layer markdown-code-face underneath so the text
+              ;; uses fixed-pitch font, matching completed code blocks.
+              (when use-fontified-tail
+                (put-text-property content-start (point)
+                                   'fontified t)
+                (add-face-text-property content-start (point)
+                                        'markdown-code-face t)))))))))
 
 (defun pi-coding-agent--display-tool-streaming-text (raw-text max-lines &optional lang)
   "Display RAW-TEXT as streaming content in pending tool overlay.
@@ -1083,83 +1165,68 @@ content is synced into a cached buffer where the language's major
 mode provides syntax context.  The visible tail is then extracted
 with text properties preserved, giving correct highlighting even
 when multi-line constructs (docstrings, block comments) start
-above the visible window.
+above the visible window.  That tail is then visually capped to
+MAX-LINES while preserving text properties.
 
 Inhibits modification hooks to prevent jit-lock from scanning the
-full buffer on each delta.  Skips the delete+reinsert cycle when the
-visible tail content is unchanged from the previous delta."
+full buffer on each delta.  In language-aware mode (LANG non-nil),
+skips tail extraction and redraw when a delta only extends the
+trailing partial line, because the preview renders complete lines
+only."
   (when (and pi-coding-agent--pending-tool-overlay
-             raw-text
-             (not (string-empty-p raw-text)))
+             (stringp raw-text))
     ;; Always sync fontify buffer (incremental, cheap) regardless of
     ;; whether the display will update — the buffer must stay current.
-    (when lang
-      (pi-coding-agent--fontify-sync raw-text lang))
-    (let* ((tail-result
-            (if lang
-                (pi-coding-agent--fontify-buffer-tail lang max-lines)
-              (pi-coding-agent--get-tail-lines raw-text max-lines)))
-           (tail-content (car tail-result))
-           (has-hidden (cdr tail-result))
-           (truncation (unless lang
-                         (pi-coding-agent--truncate-to-visual-lines
-                          tail-content max-lines (or (window-width) 80))))
-           ;; Normalize: fontify-buffer-tail returns content without
-           ;; trailing newline, get-tail-lines/truncate may include one.
-           (display-content
-            (string-trim-right
-             (or (if lang tail-content (plist-get truncation :content)) "")
-             "\n+"))
-           (show-hidden-indicator
-            (or has-hidden
-                (and truncation
-                     (> (plist-get truncation :hidden-lines) 0))))
-           ;; Compare plain text to cached value — skip if unchanged.
-           ;; Property-stripped comparison is correct: the text determines
-           ;; whether the preview changed.  Font-lock properties may shift
-           ;; cosmetically but that's not worth a full redraw.
-           (display-text (substring-no-properties display-content))
-           (cache-key (if show-hidden-indicator
-                         (concat "H:" display-text)
-                       display-text))
-           (last-tail (overlay-get pi-coding-agent--pending-tool-overlay
-                                   'pi-coding-agent-last-tail)))
-      ;; Skip display when the visible tail is unchanged
-      (unless (or (string-empty-p display-content)
-                  (equal cache-key last-tail))
-        (let ((inhibit-read-only t)
-              (inhibit-modification-hooks t))
-          (pi-coding-agent--with-scroll-preservation
-            (save-excursion
-              (let* ((ov-end (overlay-end pi-coding-agent--pending-tool-overlay))
-                     (header-end (overlay-get pi-coding-agent--pending-tool-overlay
-                                              'pi-coding-agent-header-end)))
-                ;; Delete previous streaming content (everything after header)
-                (when (and header-end (< header-end ov-end))
-                  (delete-region header-end ov-end))
-                ;; Insert new streaming content
-                (goto-char (overlay-end pi-coding-agent--pending-tool-overlay))
-                (when show-hidden-indicator
-                  (insert (propertize "... (earlier output)\n"
-                                      'face 'pi-coding-agent-collapsed-indicator)))
-                (let ((content-start (point)))
-                  (insert (if lang
-                              display-content
-                            (pi-coding-agent--render-tool-content
-                             display-content nil)))
-                  (insert "\n")
-                  ;; Mark pre-fontified content so jit-lock won't override
-                  ;; our syntax faces with gfm-mode faces on redisplay.
-                  ;; Also layer markdown-code-face underneath so the text
-                  ;; uses fixed-pitch font, matching completed code blocks.
-                  (when lang
-                    (put-text-property content-start (point)
-                                       'fontified t)
-                    (add-face-text-property content-start (point)
-                                            'markdown-code-face t))))))
-          ;; Cache the displayed content for next comparison
-          (overlay-put pi-coding-agent--pending-tool-overlay
-                       'pi-coding-agent-last-tail cache-key))))))
+    (let ((complete-lines-changed t))
+      (when lang
+        (setq complete-lines-changed
+              (pi-coding-agent--fontify-sync raw-text lang)))
+      ;; Most tiny toolcall deltas only extend the trailing partial line.
+      ;; In that case, the visible complete-line tail cannot change.
+      (unless (and lang (not complete-lines-changed))
+        (let* ((fontified-tail (and lang
+                                    (pi-coding-agent--fontify-buffer-tail
+                                     lang max-lines)))
+               (use-fontified-tail (not (null fontified-tail)))
+               ;; If fontified extraction fails, degrade to raw tail so the
+               ;; streaming preview keeps updating instead of going blank.
+               (tail-result (or fontified-tail
+                                (pi-coding-agent--get-tail-lines
+                                 raw-text max-lines)))
+               (tail-content (or (car tail-result) ""))
+               (has-hidden (cdr tail-result))
+               ;; Apply the same visual-line/byte cap for both raw and
+               ;; language-aware tails.  For fontified tails this keeps text
+               ;; properties (syntax faces) intact.
+               (truncation (pi-coding-agent--truncate-to-visual-lines
+                            tail-content max-lines (or (window-width) 80)))
+               ;; Normalize: extracted tails may include a trailing newline.
+               (display-content
+                (string-trim-right
+                 (or (plist-get truncation :content) "")
+                 "\n+"))
+               (show-hidden-indicator
+                (or has-hidden
+                    (> (plist-get truncation :hidden-lines) 0)))
+               ;; Compare plain text to cached value — skip if unchanged.
+               ;; Property-stripped comparison is correct: the text determines
+               ;; whether the preview changed.  Font-lock properties may shift
+               ;; cosmetically but that's not worth a full redraw.
+               (display-text (substring-no-properties display-content))
+               (cache-key (if show-hidden-indicator
+                             (concat "H:" display-text)
+                           display-text))
+               (last-tail (overlay-get pi-coding-agent--pending-tool-overlay
+                                       'pi-coding-agent-last-tail)))
+          ;; Skip display when the visible tail is unchanged.
+          ;; Includes transitions to empty content: if cache key changed,
+          ;; clear stale preview text by redrawing the overlay body.
+          (unless (equal cache-key last-tail)
+            (pi-coding-agent--tool-streaming-replace-overlay-body
+             display-content show-hidden-indicator use-fontified-tail)
+              ;; Cache the displayed content for next comparison
+              (overlay-put pi-coding-agent--pending-tool-overlay
+                           'pi-coding-agent-last-tail cache-key)))))))
 
 (defun pi-coding-agent--display-tool-update (partial-result)
   "Display PARTIAL-RESULT as streaming output in pending tool overlay.
@@ -1223,7 +1290,25 @@ Returns nil if called outside a chat buffer (no hash table)."
         (let ((buf (generate-new-buffer
                     (format " *pi-fontify:%s:%s*" lang (buffer-name)))))
           (puthash lang buf pi-coding-agent--fontify-buffers)
+          (pi-coding-agent--fontify-initialize-buffer-mode buf lang)
           buf))))
+
+(defun pi-coding-agent--fontify-initialize-buffer-mode (buf lang)
+  "Best-effort initialize BUF major mode for LANG.
+Resolves the markdown language mode once when the buffer is created,
+so hot-path deltas avoid repeated `markdown-get-lang-mode' calls.
+Any initialization error is logged and ignored so content sync still works."
+  (with-current-buffer buf
+    (condition-case err
+        (let ((mode (and lang (markdown-get-lang-mode lang))))
+          (when (and mode (fboundp mode) (not (eq major-mode mode)))
+            (let ((inhibit-message t))
+              (ignore-errors
+                (delay-mode-hooks (funcall mode))))
+            (font-lock-set-defaults)))
+      (error
+       (message "pi-coding-agent: fontify mode init error for %s: %S"
+                lang err)))))
 
 (defun pi-coding-agent--fontify-reset (args)
   "Clear the fontification buffer for the language implied by ARGS.
@@ -1236,6 +1321,38 @@ treated as a matching prefix during incremental sync."
     (with-current-buffer buf
       (erase-buffer))))
 
+(defun pi-coding-agent--fontify-replace-content (content)
+  "Replace current fontify buffer content with CONTENT.
+Fontifies only complete lines to preserve the same partial-line
+semantics as incremental append sync."
+  (erase-buffer)
+  (insert content)
+  (let ((fontify-end (save-excursion
+                       (goto-char (point-max))
+                       (line-beginning-position))))
+    (when (> fontify-end (point-min))
+      (ignore-errors
+        (font-lock-default-fontify-region
+         (point-min) fontify-end nil)))))
+
+(defun pi-coding-agent--complete-line-prefix-length (content)
+  "Return prefix length of CONTENT ending at the last complete line.
+A complete line is one terminated by a newline character."
+  (let ((pos (length content)))
+    (while (and (> pos 0)
+                (not (eq (aref content (1- pos)) ?\n)))
+      (setq pos (1- pos)))
+    pos))
+
+(defun pi-coding-agent--same-complete-line-prefix-p (left right)
+  "Return non-nil when LEFT and RIGHT share identical complete lines.
+Trailing unterminated line text is ignored for the comparison."
+  (let ((left-end (pi-coding-agent--complete-line-prefix-length left))
+        (right-end (pi-coding-agent--complete-line-prefix-length right)))
+    (and (= left-end right-end)
+         (string= (substring left 0 left-end)
+                  (substring right 0 right-end)))))
+
 (defun pi-coding-agent--fontify-sync (content lang)
   "Sync CONTENT into the fontification buffer for LANG.
 Appends only the new text into a persistent buffer.  Fontification
@@ -1244,44 +1361,52 @@ incorrect keyword matching on partial tokens.
 
 The buffer always accumulates content regardless of whether the
 language mode is available, so `pi-coding-agent--fontify-buffer-tail'
-can extract the tail even for languages without an installed mode."
-  (condition-case err
-      (when-let* ((buf (pi-coding-agent--fontify-get-or-create-buffer lang)))
-        (with-current-buffer buf
-          ;; Activate language mode once (best-effort for fontification).
-          (let ((mode (and lang (markdown-get-lang-mode lang))))
-            (when (and mode (fboundp mode) (not (eq major-mode mode)))
-              (let ((inhibit-message t))
-                (ignore-errors
-                  (delay-mode-hooks (funcall mode))))
-              (font-lock-set-defaults)))
-          (let ((buf-size (buffer-size))
-                (new-size (length content)))
-            (cond
-             ((> new-size buf-size)
-              ;; Common case: content grew — append delta.
-              (goto-char (point-max))
-              (let ((start (point)))
-                (insert (substring content buf-size))
-                ;; Fontify only up to the last complete line so partial
-                ;; tokens don't confuse font-lock keyword regexps.
-                (let ((fontify-end (save-excursion
-                                     (goto-char (point-max))
-                                     (line-beginning-position))))
-                  (when (> fontify-end start)
-                    (ignore-errors
-                      (font-lock-default-fontify-region
-                       start fontify-end nil))))))
-             ;; (= new-size buf-size): content unchanged — nothing to do.
-             ((< new-size buf-size)
-              ;; Content shrank (shouldn't happen) — full reset.
-              (erase-buffer)
-              (insert content)
-              (ignore-errors
-                (font-lock-default-fontify-region
-                 (point-min) (point-max) nil)))))))
-    (error
-     (message "pi-coding-agent: fontify-sync error for %s: %S" lang err))))
+can extract the tail even for languages without an installed mode.
+
+Returns non-nil when complete-line content may have changed, requiring
+a new tail extraction for display.  Returns nil when the delta only
+extends an unterminated trailing line (or content is unchanged)."
+  (let ((complete-lines-changed t))
+    (condition-case err
+        (when-let* ((buf (pi-coding-agent--fontify-get-or-create-buffer lang)))
+          (with-current-buffer buf
+            (let ((buf-size (buffer-size))
+                  (new-size (length content)))
+              (cond
+               ((> new-size buf-size)
+                ;; Common case: content grew — append delta.
+                (goto-char (point-max))
+                (let ((start (point)))
+                  (insert (substring content buf-size))
+                  ;; Fontify only up to the last complete line so partial
+                  ;; tokens don't confuse font-lock keyword regexps.
+                  (let ((fontify-end (save-excursion
+                                       (goto-char (point-max))
+                                       (line-beginning-position))))
+                    (setq complete-lines-changed (> fontify-end start))
+                    (when complete-lines-changed
+                      (ignore-errors
+                        (font-lock-default-fontify-region
+                         start fontify-end nil))))))
+               ;; Same size usually means unchanged content (duplicate event).
+               ;; Defensive: if content changed at the same length, refresh
+               ;; the buffer so the visible tail remains correct.
+               ((= new-size buf-size)
+                (let ((existing (buffer-substring-no-properties
+                                 (point-min) (point-max))))
+                  (if (string= content existing)
+                      (setq complete-lines-changed nil)
+                    (setq complete-lines-changed
+                          (not (pi-coding-agent--same-complete-line-prefix-p
+                                existing content)))
+                    (pi-coding-agent--fontify-replace-content content))))
+               ((< new-size buf-size)
+                ;; Content shrank (shouldn't happen) — full reset.
+                (pi-coding-agent--fontify-replace-content content))))))
+      (error
+       (setq complete-lines-changed t)
+       (message "pi-coding-agent: fontify-sync error for %s: %S" lang err)))
+    complete-lines-changed))
 
 (defun pi-coding-agent--fontify-buffer-tail (lang n)
   "Extract last N non-blank complete lines from the LANG fontification buffer.
@@ -1298,9 +1423,10 @@ with varying numbers of blank lines.
 Returns (CONTENT . HAS-HIDDEN) where CONTENT is a string with text
 properties preserved.  HAS-HIDDEN is non-nil when earlier lines
 exist above the returned tail.
-Returns nil if the buffer doesn't exist or has no complete lines."
+Returns nil if N is zero, the buffer doesn't exist, or there are no
+complete lines."
   (let ((buf (pi-coding-agent--fontify-get-buffer lang)))
-    (when (and buf (> (buffer-size buf) 0))
+    (when (and (> n 0) buf (> (buffer-size buf) 0))
       (with-current-buffer buf
         ;; Find end of last complete line (just before the trailing
         ;; partial line, if any).  This is the last newline position.
@@ -1354,7 +1480,8 @@ Shows preview lines with expandable toggle for long output."
                  ((or "edit" "read" "write")
                   (pi-coding-agent--path-to-language (pi-coding-agent--tool-path args)))
                  ("bash" "text")  ; wrap in fence for visual consistency
-                 (_ nil)))
+                 (_ (when-let ((path (pi-coding-agent--tool-path args)))
+                      (pi-coding-agent--path-to-language path)))))
          ;; For edit tool with diff, we'll apply diff overlays after insertion
          (is-edit-diff (and (equal tool-name "edit")
                             (not is-error)
@@ -1368,9 +1495,8 @@ Shows preview lines with expandable toggle for long output."
              (_ (if-let ((details-json
                           (pi-coding-agent--pretty-print-json details)))
                     (concat raw-output "\n\n"
-                            (propertize (concat "**Details**\n" details-json)
-                                        'font-lock-face
-                                        'pi-coding-agent-tool-output))
+                            (pi-coding-agent--propertize-details-region
+                             details-json))
                   raw-output)))))
          (preview-limit (pcase tool-name
                           ("bash" pi-coding-agent-bash-preview-lines)
@@ -1398,20 +1524,19 @@ Shows preview lines with expandable toggle for long output."
             (pi-coding-agent--insert-tool-content-with-toggle
              preview-content display-content lang is-edit-diff hidden-count nil))
         ;; Short output: show all without toggle
-        (let* ((rendered (pi-coding-agent--render-tool-content
-                          (string-trim-right display-content "\n+") lang))
-               (content-start (point)))
-          (insert rendered "\n")
-          (when is-edit-diff
-            (pi-coding-agent--apply-diff-overlays content-start (point)))))
+        (pi-coding-agent--insert-rendered-tool-content
+         (string-trim-right display-content "\n+")
+         lang
+         is-edit-diff))
       ;; Error indicator
       (when is-error
         (insert (propertize "[error]" 'face 'pi-coding-agent-tool-error) "\n"))
       ;; Store offset for read tool (used for line number calculation)
-      (when-let ((offset (plist-get args :offset)))
-        (when pi-coding-agent--pending-tool-overlay
-          (overlay-put pi-coding-agent--pending-tool-overlay
-                       'pi-coding-agent-tool-offset offset)))
+      (when (and (equal tool-name "read")
+                 (plist-get args :offset)
+                 pi-coding-agent--pending-tool-overlay)
+        (overlay-put pi-coding-agent--pending-tool-overlay
+                     'pi-coding-agent-tool-offset (plist-get args :offset)))
       ;; Store line map for navigation (maps displayed line to original line)
       (when-let ((line-map (plist-get truncation :line-map)))
         (when pi-coding-agent--pending-tool-overlay
@@ -1422,6 +1547,31 @@ Shows preview lines with expandable toggle for long output."
        (if is-error 'pi-coding-agent-tool-block-error 'pi-coding-agent-tool-block))
       ;; Add trailing newline for spacing after tool block
       (insert "\n"))))
+
+(defun pi-coding-agent--ranges-excluding-property (start end prop)
+  "Return contiguous ranges in START..END where PROP is nil."
+  (let ((pos start)
+        (ranges nil))
+    (while (< pos end)
+      (let* ((excluded (get-text-property pos prop))
+             (next (or (next-single-property-change pos prop nil end)
+                       end)))
+        (unless excluded
+          (push (cons pos next) ranges))
+        (setq pos next)))
+    (nreverse ranges)))
+
+(defun pi-coding-agent--font-lock-ensure-excluding-property (start end prop)
+  "Fontify START..END while skipping regions where PROP is non-nil.
+Stops after the first font-lock error to avoid repeated failures."
+  (catch 'pi-coding-agent--font-lock-failed
+    (dolist (range (pi-coding-agent--ranges-excluding-property start end prop))
+      (condition-case err
+          (font-lock-ensure (car range) (cdr range))
+        (error
+         (when debug-on-error
+           (message "pi-coding-agent: toggle fontification failed: %S" err))
+         (throw 'pi-coding-agent--font-lock-failed nil))))))
 
 (defun pi-coding-agent--toggle-tool-output (button)
   "Toggle between preview and full content for BUTTON.
@@ -1461,7 +1611,9 @@ Preserves window scroll position during the toggle."
           (pi-coding-agent--insert-tool-content-with-toggle
            preview-content full-content lang is-edit-diff hidden-count (not expanded))
           ;; Ensure fontification of inserted content (JIT font-lock is lazy)
-          (font-lock-ensure content-start (point))
+          ;; while excluding metadata-like details payload.
+          (pi-coding-agent--font-lock-ensure-excluding-property
+           content-start (point) 'pi-coding-agent-no-fontify)
           ;; Update overlay to include new content
           (move-overlay ov block-start (point))
           ;; Restore window positions
@@ -1480,6 +1632,14 @@ Preserves window scroll position during the toggle."
                   (set-window-start win block-start t)
                   (set-window-point win block-start))))))))))
 
+(defun pi-coding-agent--insert-rendered-tool-content (content lang is-edit-diff)
+  "Insert CONTENT rendered for LANG with a trailing newline.
+When IS-EDIT-DIFF is non-nil, apply diff overlays to the inserted block."
+  (let ((content-start (point)))
+    (insert (pi-coding-agent--render-tool-content content lang) "\n")
+    (when is-edit-diff
+      (pi-coding-agent--apply-diff-overlays content-start (point)))))
+
 (defun pi-coding-agent--insert-tool-content-with-toggle
     (preview-content full-content lang is-edit-diff hidden-count expanded)
   "Insert tool content with a toggle button.
@@ -1490,14 +1650,13 @@ HIDDEN-COUNT is stored for the button label."
   (let* ((display-content (if expanded
                               (string-trim-right full-content "\n+")
                             preview-content))
-         (rendered (pi-coding-agent--render-tool-content display-content lang))
-         (content-start (point))
          (button-label (if expanded
                            "[-]"
                          (format "... (%d more lines)" hidden-count))))
-    (insert rendered "\n")
-    (when is-edit-diff
-      (pi-coding-agent--apply-diff-overlays content-start (point)))
+    (pi-coding-agent--insert-rendered-tool-content
+     display-content
+     lang
+     is-edit-diff)
     (insert-text-button
      (propertize button-label 'face 'pi-coding-agent-collapsed-indicator)
      'action #'pi-coding-agent--toggle-tool-output
@@ -1550,11 +1709,13 @@ Works anywhere inside a tool block overlay."
 
 (defun pi-coding-agent--diff-line-at-point ()
   "Extract line number from diff line at point.
-Returns the line number if point is on a +/- diff line, nil otherwise.
-Diff format: [+-] LINENUM content (e.g., '+ 7     code' or '-12     code')."
+Returns the line number if point is on an added, removed, or context
+line, nil otherwise.
+Diff format: [+- ] LINENUM content.
+For example: '+ 7     code', '-12     code', or '  9     context'."
   (save-excursion
     (beginning-of-line)
-    (when (looking-at "^[+-] *\\([0-9]+\\)")
+    (when (looking-at "^[ +-] *\\([0-9]+\\)\\(?:[ \t]+\\|$\\)")
       (string-to-number (match-string 1)))))
 
 (defun pi-coding-agent--fence-line-info-at-point ()
@@ -1620,31 +1781,46 @@ When START-POS is non-nil, parse fences starting from that position."
         (setq line-no (1+ line-no)))
       result)))
 
+(defun pi-coding-agent--tool-overlay-collapsed-p (overlay)
+  "Return non-nil when OVERLAY is currently collapsed.
+Collapsed tool blocks contain a toggle button whose
+`pi-coding-agent-expanded' property is nil.  Expanded blocks and
+non-collapsible blocks return nil."
+  (when-let ((btn (pi-coding-agent--find-toggle-button-in-region
+                   (overlay-start overlay)
+                   (overlay-end overlay))))
+    (not (button-get btn 'pi-coding-agent-expanded))))
+
 (defun pi-coding-agent--tool-line-at-point (overlay)
   "Calculate file line number at point for tool OVERLAY.
-For edit diffs: parse line from +/- format.
-For read/write: count lines from header + apply line-map for stripped blanks."
-  (let ((tool-name (overlay-get overlay 'pi-coding-agent-tool-name))
-        (offset (or (overlay-get overlay 'pi-coding-agent-tool-offset) 1))
-        (line-map (overlay-get overlay 'pi-coding-agent-line-map))
-        (header-end (overlay-get overlay 'pi-coding-agent-header-end)))
-    (or
-     ;; Edit diff format: explicit line number
-     (and (equal tool-name "edit") (pi-coding-agent--diff-line-at-point))
-     ;; Use line-map if available (handles stripped blank lines)
-     (when (and line-map header-end)
-       (save-excursion
-         (let* ((current-line (line-number-at-pos))
-                (header-line (line-number-at-pos header-end))
-                (lines-from-header (- current-line header-line))
-                (map-index (1- lines-from-header)))
-           (when (and (>= map-index 0) (< map-index (length line-map)))
-             (+ (aref line-map map-index) (1- offset))))))
-     ;; Fallback: code block position + offset (for expanded view or no line-map)
-     (when-let ((block-line (pi-coding-agent--code-block-line-at-point header-end)))
-       (+ block-line (1- offset)))
-     ;; Last fallback to line 1
-     1)))
+For edit diffs: parse line number from added, removed, or context rows.
+For read/write: use line-map only in collapsed preview mode; otherwise
+count directly from the rendered code block."
+  (let* ((tool-name (overlay-get overlay 'pi-coding-agent-tool-name))
+         (offset (if (equal tool-name "read")
+                     (or (overlay-get overlay 'pi-coding-agent-tool-offset) 1)
+                   1))
+         (line-map (overlay-get overlay 'pi-coding-agent-line-map))
+         (header-end (overlay-get overlay 'pi-coding-agent-header-end))
+         (use-line-map (and line-map
+                            header-end
+                            (pi-coding-agent--tool-overlay-collapsed-p overlay))))
+    (if (equal tool-name "edit")
+        ;; Edit navigation uses the explicit line number in diff rows.
+        (pi-coding-agent--diff-line-at-point)
+      (or
+       ;; Collapsed preview strips blank lines, so use line-map there.
+       (when use-line-map
+         (save-excursion
+           (let* ((current-line (line-number-at-pos))
+                  (header-line (line-number-at-pos header-end))
+                  (lines-from-header (- current-line header-line))
+                  (map-index (1- lines-from-header)))
+             (when (and (>= map-index 0) (< map-index (length line-map)))
+               (+ (aref line-map map-index) (1- offset))))))
+       ;; Expanded/full output preserves blank lines: derive from code block.
+       (when-let ((block-line (pi-coding-agent--code-block-line-at-point header-end)))
+         (+ block-line (1- offset)))))))
 
 (defun pi-coding-agent-visit-file (&optional toggle)
   "Visit the file associated with the tool block at point.
@@ -1657,13 +1833,14 @@ that behavior."
   (if-let* ((ov (seq-find (lambda (o) (overlay-get o 'pi-coding-agent-tool-block))
                           (overlays-at (point))))
             (path (overlay-get ov 'pi-coding-agent-tool-path)))
-      (let* ((line (pi-coding-agent--tool-line-at-point ov))
-             (use-other-window (if toggle
-                                   (not pi-coding-agent-visit-file-other-window)
-                                 pi-coding-agent-visit-file-other-window)))
-        (funcall (if use-other-window #'find-file-other-window #'find-file) path)
-        (goto-char (point-min))
-        (forward-line (1- line)))
+      (if-let ((line (pi-coding-agent--tool-line-at-point ov)))
+          (let ((use-other-window (if toggle
+                                      (not pi-coding-agent-visit-file-other-window)
+                                    pi-coding-agent-visit-file-other-window)))
+            (funcall (if use-other-window #'find-file-other-window #'find-file) path)
+            (goto-char (point-min))
+            (forward-line (1- line)))
+        (user-error "No file line at point"))
     (user-error "No file at point")))
 
 ;;;; Diff Overlay Highlighting
