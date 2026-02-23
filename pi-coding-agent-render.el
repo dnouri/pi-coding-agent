@@ -966,6 +966,15 @@ with `:object-type \\='plist'.  Returns nil when PLIST-DATA is nil."
            (json-encoding-default-indentation "  "))
       (json-encode parsed))))
 
+(defun pi-coding-agent--propertize-details-region (details-json)
+  "Return DETAILS-JSON as a details section marked as metadata.
+The details payload keeps tool-output styling while setting
+`pi-coding-agent-no-fontify' so explicit markdown fontification
+can safely skip this region."
+  (propertize (concat "**Details**\n" details-json)
+              'font-lock-face 'pi-coding-agent-tool-output
+              'pi-coding-agent-no-fontify t))
+
 (defun pi-coding-agent--tool-header (tool-name args)
   "Return propertized header for tool TOOL-NAME with ARGS.
 The tool name prefix uses `pi-coding-agent-tool-name' face and
@@ -1486,9 +1495,8 @@ Shows preview lines with expandable toggle for long output."
              (_ (if-let ((details-json
                           (pi-coding-agent--pretty-print-json details)))
                     (concat raw-output "\n\n"
-                            (propertize (concat "**Details**\n" details-json)
-                                        'font-lock-face
-                                        'pi-coding-agent-tool-output))
+                            (pi-coding-agent--propertize-details-region
+                             details-json))
                   raw-output)))))
          (preview-limit (pcase tool-name
                           ("bash" pi-coding-agent-bash-preview-lines)
@@ -1516,12 +1524,10 @@ Shows preview lines with expandable toggle for long output."
             (pi-coding-agent--insert-tool-content-with-toggle
              preview-content display-content lang is-edit-diff hidden-count nil))
         ;; Short output: show all without toggle
-        (let* ((rendered (pi-coding-agent--render-tool-content
-                          (string-trim-right display-content "\n+") lang))
-               (content-start (point)))
-          (insert rendered "\n")
-          (when is-edit-diff
-            (pi-coding-agent--apply-diff-overlays content-start (point)))))
+        (pi-coding-agent--insert-rendered-tool-content
+         (string-trim-right display-content "\n+")
+         lang
+         is-edit-diff))
       ;; Error indicator
       (when is-error
         (insert (propertize "[error]" 'face 'pi-coding-agent-tool-error) "\n"))
@@ -1541,6 +1547,31 @@ Shows preview lines with expandable toggle for long output."
        (if is-error 'pi-coding-agent-tool-block-error 'pi-coding-agent-tool-block))
       ;; Add trailing newline for spacing after tool block
       (insert "\n"))))
+
+(defun pi-coding-agent--ranges-excluding-property (start end prop)
+  "Return contiguous ranges in START..END where PROP is nil."
+  (let ((pos start)
+        (ranges nil))
+    (while (< pos end)
+      (let* ((excluded (get-text-property pos prop))
+             (next (or (next-single-property-change pos prop nil end)
+                       end)))
+        (unless excluded
+          (push (cons pos next) ranges))
+        (setq pos next)))
+    (nreverse ranges)))
+
+(defun pi-coding-agent--font-lock-ensure-excluding-property (start end prop)
+  "Fontify START..END while skipping regions where PROP is non-nil.
+Stops after the first font-lock error to avoid repeated failures."
+  (catch 'pi-coding-agent--font-lock-failed
+    (dolist (range (pi-coding-agent--ranges-excluding-property start end prop))
+      (condition-case err
+          (font-lock-ensure (car range) (cdr range))
+        (error
+         (when debug-on-error
+           (message "pi-coding-agent: toggle fontification failed: %S" err))
+         (throw 'pi-coding-agent--font-lock-failed nil))))))
 
 (defun pi-coding-agent--toggle-tool-output (button)
   "Toggle between preview and full content for BUTTON.
@@ -1580,7 +1611,9 @@ Preserves window scroll position during the toggle."
           (pi-coding-agent--insert-tool-content-with-toggle
            preview-content full-content lang is-edit-diff hidden-count (not expanded))
           ;; Ensure fontification of inserted content (JIT font-lock is lazy)
-          (font-lock-ensure content-start (point))
+          ;; while excluding metadata-like details payload.
+          (pi-coding-agent--font-lock-ensure-excluding-property
+           content-start (point) 'pi-coding-agent-no-fontify)
           ;; Update overlay to include new content
           (move-overlay ov block-start (point))
           ;; Restore window positions
@@ -1599,6 +1632,14 @@ Preserves window scroll position during the toggle."
                   (set-window-start win block-start t)
                   (set-window-point win block-start))))))))))
 
+(defun pi-coding-agent--insert-rendered-tool-content (content lang is-edit-diff)
+  "Insert CONTENT rendered for LANG with a trailing newline.
+When IS-EDIT-DIFF is non-nil, apply diff overlays to the inserted block."
+  (let ((content-start (point)))
+    (insert (pi-coding-agent--render-tool-content content lang) "\n")
+    (when is-edit-diff
+      (pi-coding-agent--apply-diff-overlays content-start (point)))))
+
 (defun pi-coding-agent--insert-tool-content-with-toggle
     (preview-content full-content lang is-edit-diff hidden-count expanded)
   "Insert tool content with a toggle button.
@@ -1609,14 +1650,13 @@ HIDDEN-COUNT is stored for the button label."
   (let* ((display-content (if expanded
                               (string-trim-right full-content "\n+")
                             preview-content))
-         (rendered (pi-coding-agent--render-tool-content display-content lang))
-         (content-start (point))
          (button-label (if expanded
                            "[-]"
                          (format "... (%d more lines)" hidden-count))))
-    (insert rendered "\n")
-    (when is-edit-diff
-      (pi-coding-agent--apply-diff-overlays content-start (point)))
+    (pi-coding-agent--insert-rendered-tool-content
+     display-content
+     lang
+     is-edit-diff)
     (insert-text-button
      (propertize button-label 'face 'pi-coding-agent-collapsed-indicator)
      'action #'pi-coding-agent--toggle-tool-output
