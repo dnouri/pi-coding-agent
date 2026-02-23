@@ -84,14 +84,24 @@ Each process has its own table stored as a process property."
         (process-put process 'pi-coding-agent-pending-requests table)
         table)))
 
+(defun pi-coding-agent--get-pending-command-types (process)
+  "Get or create pending command type table for PROCESS.
+Maps request IDs to command type strings."
+  (or (process-get process 'pi-coding-agent-pending-command-types)
+      (let ((table (make-hash-table :test 'equal)))
+        (process-put process 'pi-coding-agent-pending-command-types table)
+        table)))
+
 (defun pi-coding-agent--rpc-async (process command callback)
   "Send COMMAND to pi PROCESS asynchronously.
 COMMAND is a plist that will be augmented with a unique ID.
 CALLBACK is called with the response plist when received."
   (let* ((id (pi-coding-agent--next-request-id))
          (full-command (plist-put (copy-sequence command) :id id))
-         (pending (pi-coding-agent--get-pending-requests process)))
+         (pending (pi-coding-agent--get-pending-requests process))
+         (pending-types (pi-coding-agent--get-pending-command-types process)))
     (puthash id callback pending)
+    (puthash id (plist-get command :type) pending-types)
     (process-send-string process (pi-coding-agent--encode-command full-command))))
 
 (defun pi-coding-agent--send-extension-ui-response (process response)
@@ -138,15 +148,45 @@ Uses process property for per-process partial output storage."
 
 (defun pi-coding-agent--dispatch-response (proc json)
   "Dispatch JSON response from PROC to callback or event handler.
-If JSON is a response with a known ID, call the stored callback.
-Otherwise, treat it as an event and call the process's handler."
+Response routing order: explicit ID, id-less `:command' match, then
+id-less sole pending request. Non-response JSON is treated as an event."
   (let ((type (plist-get json :type))
         (id (plist-get json :id)))
-    (if (and (equal type "response") id)
-        (let ((pending (pi-coding-agent--get-pending-requests proc)))
-          (when-let ((callback (gethash id pending)))
-            (remhash id pending)
-            (funcall callback json)))
+    (if (equal type "response")
+        (let* ((pending (pi-coding-agent--get-pending-requests proc))
+               (pending-types (pi-coding-agent--get-pending-command-types proc))
+               (dispatch-response
+                (lambda (request-id callback)
+                  (remhash request-id pending)
+                  (remhash request-id pending-types)
+                  (funcall callback json))))
+          (cond
+           ((and id (gethash id pending))
+            (funcall dispatch-response id (gethash id pending)))
+           ((null id)
+            (let ((matched-id nil)
+                  (matched-callback nil)
+                  (matched-count 0)
+                  (command (plist-get json :command)))
+              (when command
+                (maphash (lambda (request-id command-type)
+                           (when (equal command-type command)
+                             (setq matched-count (1+ matched-count))
+                             (when (= matched-count 1)
+                               (setq matched-id request-id
+                                     matched-callback (gethash request-id pending)))))
+                         pending-types))
+              (cond
+               ((and (= matched-count 1) matched-callback)
+                (funcall dispatch-response matched-id matched-callback))
+               ((= (hash-table-count pending) 1)
+                (let (only-id only-callback)
+                  (maphash (lambda (request-id callback)
+                             (setq only-id request-id
+                                   only-callback callback))
+                           pending)
+                  (when only-callback
+                    (funcall dispatch-response only-id only-callback)))))))))
       ;; Call only this process's handler, not all handlers
       (pi-coding-agent--handle-event proc json))))
 
@@ -160,8 +200,9 @@ Calls only the handler registered for this specific process."
 (defun pi-coding-agent--handle-process-exit (proc event)
   "Clean up when pi process PROC exits with EVENT.
 Calls pending request callbacks for this process with an error response
-containing EVENT, then clears this process's pending requests table."
+containing EVENT, then clears this process's pending request tables."
   (let ((pending (process-get proc 'pi-coding-agent-pending-requests))
+        (pending-types (process-get proc 'pi-coding-agent-pending-command-types))
         (error-response (list :type "response"
                               :success :false
                               :error (format "Process exited: %s" (string-trim event)))))
@@ -169,7 +210,9 @@ containing EVENT, then clears this process's pending requests table."
       (maphash (lambda (_id callback)
                  (funcall callback error-response))
                pending)
-      (clrhash pending))))
+      (clrhash pending))
+    (when pending-types
+      (clrhash pending-types))))
 
 (defvar pi-coding-agent-executable)  ; forward decl — core.el cannot require ui.el
 

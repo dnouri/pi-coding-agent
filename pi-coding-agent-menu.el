@@ -594,15 +594,25 @@ Optional CUSTOM-INSTRUCTIONS provide guidance for the compaction summary."
 (defun pi-coding-agent--flatten-tree (nodes)
   "Flatten tree NODES into a hash table mapping id to node plist.
 NODES is a vector of tree node plists, each with `:children' vector.
-Returns a hash table for O(1) lookup by id."
-  (let ((index (make-hash-table :test 'equal)))
-    (cl-labels ((walk (ns)
-                  (seq-doseq (node ns)
-                    (puthash (plist-get node :id) node index)
-                    (let ((children (plist-get node :children)))
-                      (when (and children (> (length children) 0))
-                        (walk children))))))
-      (walk nodes))
+Returns a hash table for O(1) lookup by id.
+
+Uses iterative traversal to avoid `max-lisp-eval-depth' errors on deep
+session trees."
+  (let ((index (make-hash-table :test 'equal))
+        (stack nil))
+    ;; Push roots in reverse so popping preserves original order.
+    (let ((i (1- (length nodes))))
+      (while (>= i 0)
+        (push (aref nodes i) stack)
+        (setq i (1- i))))
+    (while stack
+      (let* ((node (pop stack))
+             (children (plist-get node :children)))
+        (puthash (plist-get node :id) node index)
+        (let ((i (1- (length children))))
+          (while (>= i 0)
+            (push (aref children i) stack)
+            (setq i (1- i))))))
     index))
 
 (defun pi-coding-agent--active-branch-user-ids (index leaf-id)
@@ -650,23 +660,20 @@ Shows a selector of user messages and creates a fork from the selected one."
                        (message "Pi: Failed to get fork messages"))))))
 
 (defun pi-coding-agent--resolve-fork-entry (response ordinal heading-count)
-  "Resolve a fork entry ID from get_tree RESPONSE.
+  "Resolve a fork entry ID from get_fork_messages RESPONSE.
 ORDINAL is the 0-based user turn index.  HEADING-COUNT is the number
 of visible You headings in the buffer.  Returns (ENTRY-ID . PREVIEW)
 or nil if the ordinal could not be mapped."
   (when (plist-get response :success)
     (let* ((data (plist-get response :data))
-           (tree (plist-get data :tree))
-           (leaf-id (plist-get data :leafId))
-           (index (pi-coding-agent--flatten-tree tree))
-           (all-user-ids (pi-coding-agent--active-branch-user-ids index leaf-id))
-           ;; Take last N to handle compaction (compacted-away
-           ;; user messages at start of path aren't rendered)
-           (visible-ids (last all-user-ids heading-count))
-           (entry-id (nth ordinal visible-ids))
-           (node (and entry-id (gethash entry-id index))))
+           (messages (append (plist-get data :messages) nil))
+           ;; Use last N messages to align with visible headings in
+           ;; compacted sessions.
+           (visible-messages (last messages heading-count))
+           (selected (nth ordinal visible-messages))
+           (entry-id (plist-get selected :entryId)))
       (when entry-id
-        (cons entry-id (plist-get node :preview))))))
+        (cons entry-id (pi-coding-agent--format-fork-message selected))))))
 
 (defun pi-coding-agent-fork-at-point ()
   "Fork conversation from the user turn at point.
@@ -689,17 +696,21 @@ a preview, then forks.  Only works when the session is idle."
                 (proc (pi-coding-agent--get-process)))
             (unless proc
               (user-error "Pi: No active process"))
-            (pi-coding-agent--rpc-async proc '(:type "get_tree")
+            (pi-coding-agent--rpc-async proc '(:type "get_fork_messages")
               (lambda (response)
-                (let ((result (pi-coding-agent--resolve-fork-entry
-                               response ordinal heading-count)))
-                  (cond
-                   ((not result)
-                    (message "Pi: Could not map turn to entry ID"))
-                   ((with-current-buffer chat-buf
-                      (y-or-n-p (format "Fork from: %s? " (or (cdr result) "?"))))
-                    (with-current-buffer chat-buf
-                      (pi-coding-agent--execute-fork proc (car result)))))))))))))))
+                (if (not (plist-get response :success))
+                    (if-let ((error-text (plist-get response :error)))
+                        (message "Pi: Failed to get fork messages: %s" error-text)
+                      (message "Pi: Failed to get fork messages"))
+                  (let ((result (pi-coding-agent--resolve-fork-entry
+                                 response ordinal heading-count)))
+                    (cond
+                     ((not result)
+                      (message "Pi: Could not map turn to entry ID"))
+                     ((with-current-buffer chat-buf
+                        (y-or-n-p (format "Fork from: %s? " (or (cdr result) "?"))))
+                      (with-current-buffer chat-buf
+                        (pi-coding-agent--execute-fork proc (car result))))))))))))))))
 
 (defun pi-coding-agent--execute-fork (proc entry-id)
   "Execute fork to ENTRY-ID via PROC.

@@ -205,6 +205,12 @@ Returns (:tree VECTOR :leafId LAST-ID)."
    '("u3" nil "message" :role "user" :preview "Third question")
    '("a3" nil "message" :role "assistant" :preview "Third answer")))
 
+(defun pi-coding-agent-test--make-3turn-fork-messages ()
+  "Return get_fork_messages payload for three user turns."
+  [(:entryId "u1" :text "First question")
+   (:entryId "u2" :text "Second question")
+   (:entryId "u3" :text "Third question")])
+
 ;;;; Chat Buffer Fixtures
 
 (defun pi-coding-agent-test--insert-chat-turns ()
