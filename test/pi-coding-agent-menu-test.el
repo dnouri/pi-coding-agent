@@ -729,16 +729,15 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
 ;;; Fork at Point
 
 (ert-deftest pi-coding-agent-test-fork-at-point-correct-entry-id ()
-  "Fork-at-point on 2nd You heading forks with the correct entryId."
+  "Fork-at-point picks the right entry on second heading."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (let ((pi-coding-agent--status 'idle)
           (pi-coding-agent--process 'mock-proc)
           (forked-entry-id nil)
-          (tree-data (pi-coding-agent-test--make-3turn-tree)))
+          (fork-messages (pi-coding-agent-test--make-3turn-fork-messages)))
       (let ((inhibit-read-only t))
         (pi-coding-agent-test--insert-chat-turns))
-      ;; Navigate to 2nd You heading
       (goto-char (point-min))
       (pi-coding-agent-next-message)
       (pi-coding-agent-next-message)
@@ -746,8 +745,8 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
       (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
                  (lambda (_proc cmd cb)
                    (cond
-                    ((equal (plist-get cmd :type) "get_tree")
-                     (funcall cb (list :success t :data tree-data)))
+                    ((equal (plist-get cmd :type) "get_fork_messages")
+                     (funcall cb (list :success t :data (list :messages fork-messages))))
                     ((equal (plist-get cmd :type) "fork")
                      (setq forked-entry-id (plist-get cmd :entryId))
                      (funcall cb '(:success t :data (:text "Second question"))))
@@ -761,13 +760,13 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
       (should (equal forked-entry-id "u2")))))
 
 (ert-deftest pi-coding-agent-test-fork-at-point-confirmation-declined ()
-  "Fork-at-point does nothing when user declines confirmation."
+  "Fork-at-point does nothing when confirmation is declined."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (let ((pi-coding-agent--status 'idle)
           (pi-coding-agent--process 'mock-proc)
           (fork-called nil)
-          (tree-data (pi-coding-agent-test--make-3turn-tree)))
+          (fork-messages (pi-coding-agent-test--make-3turn-fork-messages)))
       (let ((inhibit-read-only t))
         (pi-coding-agent-test--insert-chat-turns))
       (goto-char (point-min))
@@ -776,8 +775,8 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
       (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
                  (lambda (_proc cmd cb)
                    (cond
-                    ((equal (plist-get cmd :type) "get_tree")
-                     (funcall cb (list :success t :data tree-data)))
+                    ((equal (plist-get cmd :type) "get_fork_messages")
+                     (funcall cb (list :success t :data (list :messages fork-messages))))
                     ((equal (plist-get cmd :type) "fork")
                      (setq fork-called t)))))
                 ((symbol-function 'y-or-n-p) (lambda (_prompt) nil)))
@@ -785,7 +784,7 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
       (should-not fork-called))))
 
 (ert-deftest pi-coding-agent-test-fork-at-point-no-user-turn ()
-  "Fork-at-point before first You heading shows message, no RPC calls."
+  "Before first You heading, fork-at-point skips RPC."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (let ((pi-coding-agent--status 'idle)
@@ -800,7 +799,7 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
       (should-not rpc-called))))
 
 (ert-deftest pi-coding-agent-test-fork-at-point-streaming-guard ()
-  "Fork-at-point during streaming shows message, no RPC calls."
+  "During streaming, fork-at-point skips RPC."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (let ((pi-coding-agent--status 'streaming)
@@ -815,23 +814,78 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
         (pi-coding-agent-fork-at-point))
       (should-not rpc-called))))
 
+(ert-deftest pi-coding-agent-test-fork-at-point-rpc-failure-shows-error ()
+  "Fork-at-point shows an explicit RPC failure message."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent--status 'idle)
+          (pi-coding-agent--process 'mock-proc)
+          (shown-message nil))
+      (let ((inhibit-read-only t))
+        (pi-coding-agent-test--insert-chat-turns))
+      (goto-char (point-min))
+      (pi-coding-agent-next-message)
+      (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (_proc cmd cb)
+                   (when (equal (plist-get cmd :type) "get_fork_messages")
+                     (funcall cb '(:success nil :error "Unknown command: get_fork_messages")))))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq shown-message (apply #'format fmt args)))))
+        (pi-coding-agent-fork-at-point))
+      (should (equal shown-message
+                     "Pi: Failed to get fork messages: Unknown command: get_fork_messages")))))
+
+(defconst pi-coding-agent-test--deep-tree-depth 1700
+  "Depth used for deep-tree fork and flatten regression tests.")
+
+(ert-deftest pi-coding-agent-test-fork-at-point-deep-tree ()
+  "Fork-at-point maps visible ordinals on deep histories."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((depth pi-coding-agent-test--deep-tree-depth)
+           (pi-coding-agent--status 'idle)
+           (pi-coding-agent--process 'mock-proc)
+           (forked-entry-id nil)
+           (fork-messages (pi-coding-agent-test--make-deep-fork-messages depth))
+           (expected-entry-id (format "n%d" (- depth 2))))
+      (let ((inhibit-read-only t))
+        (insert "Pi 1.0.0\n========\nWelcome\n\n"
+                "You · 10:00\n===========\nOlder visible turn\n\n"
+                "Assistant\n=========\nAnswer\n\n"
+                "You · 10:01\n===========\nLatest visible turn\n\n"
+                "Assistant\n=========\nAnswer\n"))
+      (goto-char (point-min))
+      (pi-coding-agent-next-message)
+      (should (looking-at "You · 10:00"))
+      (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (_proc cmd cb)
+                   (cond
+                    ((equal (plist-get cmd :type) "get_fork_messages")
+                     (funcall cb (list :success t :data (list :messages fork-messages))))
+                    ((equal (plist-get cmd :type) "fork")
+                     (setq forked-entry-id (plist-get cmd :entryId))
+                     (funcall cb '(:success t :data (:text "Older visible turn"))))
+                    ((equal (plist-get cmd :type) "get_state")
+                     (funcall cb '(:success t :data (:sessionFile "/tmp/forked.jsonl"))))
+                    ((equal (plist-get cmd :type) "get_messages")
+                     (funcall cb '(:success t :data (:messages [])))))))
+                ((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+                ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
+        (pi-coding-agent-fork-at-point))
+      (should (equal forked-entry-id expected-entry-id)))))
+
 (ert-deftest pi-coding-agent-test-fork-at-point-compaction ()
-  "Fork-at-point with compaction uses last-N to pick correct entry ID."
+  "Fork-at-point uses last-N mapping in compacted sessions."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (let ((pi-coding-agent--status 'idle)
           (pi-coding-agent--process 'mock-proc)
           (forked-entry-id nil)
-          (tree-data
-           (pi-coding-agent-test--build-tree
-            '("u1" nil "message" :role "user" :preview "Compacted away")
-            '("a1" nil "message" :role "assistant" :preview "Old answer")
-            '("c1" nil "compaction" :tokensBefore 5000)
-            '("u2" nil "message" :role "user" :preview "After compaction")
-            '("a2" nil "message" :role "assistant" :preview "Response")
-            '("u3" nil "message" :role "user" :preview "Latest")
-            '("a3" nil "message" :role "assistant" :preview "Final"))))
-      ;; Buffer has compaction summary + 2 visible user turns (not 3)
+          (fork-messages
+           [(:entryId "u1" :text "Compacted away")
+            (:entryId "u2" :text "After compaction")
+            (:entryId "u3" :text "Latest")]))
       (let ((inhibit-read-only t))
         (insert "Pi 1.0.0\n========\nWelcome\n\n"
                 "Compaction\n==========\nSummary of earlier conversation\n\n"
@@ -839,15 +893,14 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
                 "Assistant\n=========\nResponse\n\n"
                 "You · 10:10\n===========\nLatest\n\n"
                 "Assistant\n=========\nFinal\n"))
-      ;; Navigate to first visible You heading (ordinal 0)
       (goto-char (point-min))
       (pi-coding-agent-next-message)
       (should (looking-at "You · 10:05"))
       (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
                  (lambda (_proc cmd cb)
                    (cond
-                    ((equal (plist-get cmd :type) "get_tree")
-                     (funcall cb (list :success t :data tree-data)))
+                    ((equal (plist-get cmd :type) "get_fork_messages")
+                     (funcall cb (list :success t :data (list :messages fork-messages))))
                     ((equal (plist-get cmd :type) "fork")
                      (setq forked-entry-id (plist-get cmd :entryId))
                      (funcall cb '(:success t :data (:text "After compaction"))))
@@ -858,32 +911,64 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
                 ((symbol-function 'y-or-n-p) (lambda (_prompt) t))
                 ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
         (pi-coding-agent-fork-at-point))
-      ;; Should fork from u2 (not u1 which was compacted away)
       (should (equal forked-entry-id "u2")))))
 
 ;;; Fork Entry Resolution
 
 (ert-deftest pi-coding-agent-test-resolve-fork-entry-maps-ordinal ()
-  "resolve-fork-entry maps ordinal to correct entry ID and preview."
-  (let* ((tree-data (pi-coding-agent-test--make-3turn-tree))
-         (response (list :success t :data tree-data))
+  "resolve-fork-entry maps ordinal to entry ID and preview."
+  (let* ((fork-messages (pi-coding-agent-test--make-3turn-fork-messages))
+         (response (list :success t :data (list :messages fork-messages)))
          (result (pi-coding-agent--resolve-fork-entry response 1 3)))
     (should (equal (car result) "u2"))
     (should (equal (cdr result) "Second question"))))
 
 (ert-deftest pi-coding-agent-test-resolve-fork-entry-compaction ()
-  "resolve-fork-entry with compaction uses last-N to skip compacted entries."
-  (let* ((tree-data (pi-coding-agent-test--make-3turn-tree))
-         (response (list :success t :data tree-data))
-         ;; 3 user IDs on path, but only 2 visible headings
+  "resolve-fork-entry uses last-N mapping in compacted sessions."
+  (let* ((fork-messages (pi-coding-agent-test--make-3turn-fork-messages))
+         (response (list :success t :data (list :messages fork-messages)))
          (result (pi-coding-agent--resolve-fork-entry response 0 2)))
-    ;; Should pick u2 (skipping u1 which would be compacted away)
     (should (equal (car result) "u2"))))
 
 (ert-deftest pi-coding-agent-test-resolve-fork-entry-failure ()
-  "resolve-fork-entry returns nil on RPC failure."
+  "resolve-fork-entry returns nil on failure."
   (let ((response '(:success nil :error "Network error")))
     (should-not (pi-coding-agent--resolve-fork-entry response 0 3))))
+
+(defun pi-coding-agent-test--make-deep-linear-tree (depth)
+  "Return a single-branch tree vector with DEPTH nested nodes.
+The tree is built iteratively to avoid recursion in test setup."
+  (let* ((leaf-id (1- depth))
+         (node (list :id (format "n%d" leaf-id)
+                     :type "message"
+                     :role "user"
+                     :preview (format "node %d" leaf-id)
+                     :parentId (and (> leaf-id 0) (format "n%d" (1- leaf-id)))
+                     :children [])))
+    (dotimes (i (1- depth))
+      (let ((id (- depth i 2)))
+        (setq node (list :id (format "n%d" id)
+                         :type "message"
+                         :role "user"
+                         :preview (format "node %d" id)
+                         :parentId (and (> id 0) (format "n%d" (1- id)))
+                         :children (vector node)))))
+    (vector node)))
+
+(defun pi-coding-agent-test--make-deep-fork-messages (depth)
+  "Return DEPTH chronological fork messages."
+  (let ((messages (make-vector depth nil)))
+    (dotimes (i depth)
+      (aset messages i (list :entryId (format "n%d" i)
+                             :text (format "node %d" i))))
+    messages))
+
+(ert-deftest pi-coding-agent-test-flatten-tree-deep-linear-tree ()
+  "flatten-tree handles deep linear trees without eval-depth overflow."
+  (let* ((depth pi-coding-agent-test--deep-tree-depth)
+         (tree (pi-coding-agent-test--make-deep-linear-tree depth))
+         (index (pi-coding-agent--flatten-tree tree)))
+    (should (= (hash-table-count index) depth))))
 
 ;;; Active Branch Tree Walk
 
