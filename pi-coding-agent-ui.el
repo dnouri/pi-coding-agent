@@ -1126,9 +1126,12 @@ Shows HH:MM if today, otherwise YYYY-MM-DD HH:MM."
 ;;;; Phscroll Availability
 
 (defun pi-coding-agent--phscroll-available-p ()
-  "Return non-nil if phscroll is available and enabled."
+  "Return non-nil if phscroll is available and enabled.
+Uses `require' rather than `featurep' so that packages installed
+by lazy package managers (straight.el, elpaca) are found even when
+not yet loaded at the time `pi-coding-agent-ui' was first required."
   (and pi-coding-agent-table-horizontal-scroll
-       (featurep 'phscroll)))
+       (require 'phscroll nil t)))
 
 (defun pi-coding-agent--maybe-install-phscroll ()
   "Offer to install phscroll when horizontal scroll is wanted but missing.
@@ -1137,7 +1140,7 @@ On Emacs 28, show the URL.  If declined, suppress future prompts
 by saving `pi-coding-agent-phscroll-offer-install' to nil."
   (when (and pi-coding-agent-table-horizontal-scroll
              pi-coding-agent-phscroll-offer-install
-             (not (featurep 'phscroll))
+             (not (require 'phscroll nil t))
              (not noninteractive))
     (if (fboundp 'package-vc-install)
         (if (y-or-n-p "Install `phscroll' for horizontal table scrolling? ")

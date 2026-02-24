@@ -4138,6 +4138,23 @@ The advice limits this scan to `pi-coding-agent-markdown-search-limit' bytes."
       (should-not (and result (= (car result) 10000))))))
 
 ;;; Optional phscroll install
+;;
+;; NOTE on test isolation: `featurep' is a C primitive that ignores
+;; `let'-bound `features'.  Tests that need phscroll truly absent must
+;; use `setq'/`delq' on the global `features' list with
+;; `unwind-protect' to restore.  Tests that only need phscroll present
+;; can use `provide' (also global, cleaned up via unwind-protect).
+;;
+;; Load-path handling: use `pi-coding-agent-test--load-path-sans-phscroll'
+;; instead of setting load-path to nil, which breaks cl-letf cleanup of
+;; native-compiled built-ins (comp-subr-trampoline-install).
+
+(defun pi-coding-agent-test--load-path-sans-phscroll ()
+  "Return `load-path' with directories containing phscroll removed."
+  (seq-remove (lambda (dir)
+                (or (file-exists-p (expand-file-name "phscroll.el" dir))
+                    (file-exists-p (expand-file-name "phscroll.elc" dir))))
+              load-path))
 
 (ert-deftest pi-coding-agent-test-phscroll-offer-install-when-missing ()
   "Offer to install phscroll when wanted but not available (Emacs 29+)."
@@ -4167,14 +4184,15 @@ The advice limits this scan to `pi-coding-agent-markdown-search-limit' bytes."
     (unwind-protect
         (progn
           (setq features (delq 'phscroll features))
-          (cl-letf (((symbol-function 'y-or-n-p)
-                     (lambda (_prompt) nil))
-                    ((symbol-function 'customize-save-variable)
-                     (lambda (var val) (setq saved-var var)
-                             (set var val))))
-            (pi-coding-agent--maybe-install-phscroll)
-            (should (eq saved-var 'pi-coding-agent-phscroll-offer-install))
-            (should-not pi-coding-agent-phscroll-offer-install)))
+          (let ((load-path (pi-coding-agent-test--load-path-sans-phscroll)))
+            (cl-letf (((symbol-function 'y-or-n-p)
+                       (lambda (_prompt) nil))
+                      ((symbol-function 'customize-save-variable)
+                       (lambda (var val) (setq saved-var var)
+                               (set var val))))
+              (pi-coding-agent--maybe-install-phscroll)
+              (should (eq saved-var 'pi-coding-agent-phscroll-offer-install))
+              (should-not pi-coding-agent-phscroll-offer-install))))
       (require 'phscroll nil t))))
 
 (ert-deftest pi-coding-agent-test-phscroll-no-prompt-when-already-loaded ()
@@ -4190,7 +4208,31 @@ The advice limits this scan to `pi-coding-agent-markdown-search-limit' bytes."
                      (lambda (_prompt) (setq prompted t))))
             (pi-coding-agent--maybe-install-phscroll)
             (should-not prompted)))
-      (setq features (delq 'phscroll features)))))
+      (setq features (delq 'phscroll features))
+      (require 'phscroll nil t))))
+
+(ert-deftest pi-coding-agent-test-phscroll-no-prompt-when-on-load-path ()
+  "No install prompt when phscroll is on load-path but not yet loaded.
+Covers lazy package managers (straight.el, elpaca) that install packages
+to load-path without eagerly requiring them."
+  (let ((tmp-dir (make-temp-file "phscroll-test" t))
+        (pi-coding-agent-table-horizontal-scroll t)
+        (pi-coding-agent-phscroll-offer-install t)
+        (noninteractive nil)
+        (prompted nil))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "phscroll.el" tmp-dir)
+            (insert "(provide 'phscroll)\n"))
+          (setq features (delq 'phscroll features))
+          (let ((load-path (list tmp-dir)))
+            (cl-letf (((symbol-function 'y-or-n-p)
+                       (lambda (_prompt) (setq prompted t))))
+              (pi-coding-agent--maybe-install-phscroll)
+              (should-not prompted))))
+      (setq features (delq 'phscroll features))
+      (require 'phscroll nil t)
+      (delete-directory tmp-dir t))))
 
 (ert-deftest pi-coding-agent-test-phscroll-no-prompt-when-scroll-disabled ()
   "No prompt when horizontal scroll is disabled."
@@ -4234,17 +4276,18 @@ The advice limits this scan to `pi-coding-agent-markdown-search-limit' bytes."
     (unwind-protect
         (progn
           (setq features (delq 'phscroll features))
-          (cl-letf (((symbol-function 'package-vc-install)
-                     nil)
-                    ((symbol-function 'message)
-                     (lambda (fmt &rest args)
-                       (setq shown-message (apply #'format fmt args))))
-                    ((symbol-function 'customize-save-variable)
-                     (lambda (var val) (setq saved-var var)
-                             (set var val))))
-            (pi-coding-agent--maybe-install-phscroll)
-            (should (string-match-p "phscroll" shown-message))
-            (should (eq saved-var 'pi-coding-agent-phscroll-offer-install))))
+          (let ((load-path (pi-coding-agent-test--load-path-sans-phscroll)))
+            (cl-letf (((symbol-function 'package-vc-install)
+                       nil)
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (setq shown-message (apply #'format fmt args))))
+                      ((symbol-function 'customize-save-variable)
+                       (lambda (var val) (setq saved-var var)
+                               (set var val))))
+              (pi-coding-agent--maybe-install-phscroll)
+              (should (string-match-p "phscroll" shown-message))
+              (should (eq saved-var 'pi-coding-agent-phscroll-offer-install)))))
       (require 'phscroll nil t))))
 
 ;;; Table Alignment with Hidden Markup
@@ -4439,14 +4482,35 @@ Tests real-world scenario with links, code, bold in same table."
       (should (apply #'= widths)))))
 
 (ert-deftest pi-coding-agent-test-phscroll-available-p-requires-both ()
-  "Phscroll requires both the feature and customization enabled."
-  ;; When phscroll is not loaded, should return nil
+  "Phscroll requires both the package findable and customization enabled."
+  ;; When phscroll is not findable at all, should return nil
   (let ((pi-coding-agent-table-horizontal-scroll t))
-    (unless (featurep 'phscroll)
-      (should-not (pi-coding-agent--phscroll-available-p))))
+    (unwind-protect
+        (progn
+          (setq features (delq 'phscroll features))
+          (let ((load-path (pi-coding-agent-test--load-path-sans-phscroll)))
+            (should-not (pi-coding-agent--phscroll-available-p))))
+      (require 'phscroll nil t)))
   ;; When disabled via customization, should return nil
   (let ((pi-coding-agent-table-horizontal-scroll nil))
     (should-not (pi-coding-agent--phscroll-available-p))))
+
+(ert-deftest pi-coding-agent-test-phscroll-available-when-on-load-path ()
+  "Phscroll is detected when on load-path but not yet loaded.
+Covers lazy package managers (straight.el, elpaca) that add to
+load-path without eagerly requiring packages."
+  (let ((tmp-dir (make-temp-file "phscroll-test" t))
+        (pi-coding-agent-table-horizontal-scroll t))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "phscroll.el" tmp-dir)
+            (insert "(provide 'phscroll)\n"))
+          (setq features (delq 'phscroll features))
+          (let ((load-path (list tmp-dir)))
+            (should (pi-coding-agent--phscroll-available-p))))
+      (setq features (delq 'phscroll features))
+      (require 'phscroll nil t)
+      (delete-directory tmp-dir t))))
 
 (ert-deftest pi-coding-agent-test-apply-phscroll-graceful-fallback ()
   "Applying phscroll to tables does nothing when phscroll unavailable."
