@@ -1961,6 +1961,30 @@ Regression test for #27: history was shared across all sessions."
     (should (equal (buffer-string) ""))
     (should (null pi-coding-agent--history-isearch-index))))
 
+;;; Input Buffer Completion
+
+(ert-deftest pi-coding-agent-test-input-mode-has-only-own-capfs ()
+  "Input mode should only include our own completion functions.
+`text-mode' adds `ispell-completion-at-point' by default, which pollutes
+the completion candidates with dictionary words.  Our input buffer should
+only offer our own capfs (slash commands, file references, paths)."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (should (equal completion-at-point-functions
+                   '(pi-coding-agent--path-capf
+                     pi-coding-agent--file-reference-capf
+                     pi-coding-agent--command-capf)))))
+
+(ert-deftest pi-coding-agent-test-input-mode-has-only-own-capfs-with-markdown ()
+  "Only our capfs present even with markdown highlighting enabled."
+  (let ((pi-coding-agent-input-markdown-highlighting t))
+    (with-temp-buffer
+      (pi-coding-agent-input-mode)
+      (should (equal completion-at-point-functions
+                     '(pi-coding-agent--path-capf
+                       pi-coding-agent--file-reference-capf
+                       pi-coding-agent--command-capf))))))
+
 ;;; Input Buffer Slash Completion
 
 (ert-deftest pi-coding-agent-test-command-capf-returns-nil-without-slash ()
