@@ -254,6 +254,9 @@ syntax highlighting while preserving mode identity and keybindings."
     (setq-local markdown-hide-markup nil)
     (pi-coding-agent--input-mode-strip-metadata-keywords))
   (setq-local header-line-format '(:eval (pi-coding-agent--header-line-string)))
+  ;; Reset inherited completions (text-mode adds ispell, etc.) — our
+  ;; input buffer should only offer slash commands, file refs, and paths.
+  (setq-local completion-at-point-functions nil)
   (add-hook 'completion-at-point-functions #'pi-coding-agent--command-capf nil t)
   (add-hook 'completion-at-point-functions #'pi-coding-agent--file-reference-capf nil t)
   (add-hook 'completion-at-point-functions #'pi-coding-agent--path-capf nil t)
