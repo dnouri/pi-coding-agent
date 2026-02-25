@@ -27,7 +27,7 @@ An Emacs frontend for the [[https://shittycodingagent.ai/][pi coding agent]].
 * Requirements
 
 - Emacs 28.1 or later
-- [[https://shittycodingagent.ai/][pi coding agent]] 0.51.3 or later, installed and in PATH
+- [[https://pi.dev][pi coding agent]] 0.52.9 or later, installed and in PATH
 
 ** Installing pi coding agent
 
@@ -52,7 +52,7 @@ M-x package-vc-install RET https://github.com/misohena/phscroll RET
 
 ** MELPA
 
-Once available on [[https://melpa.org/#/pi-coding-agent][MELPA]], you can install directly:
+Install from [[https://melpa.org/#/pi-coding-agent][MELPA]]:
 
 #+begin_src
 M-x package-install RET pi-coding-agent RET
@@ -149,7 +149,7 @@ paste from other buffers, use registers or kill-ring history. Your prompt
 stays put while the AI responds above.
 
 Slash commands (=/command=) work with completion: type =/= then =TAB= to
-see available commands, including your custom ones from =~/.pi/commands/=.
+see available commands, including prompt templates from =~/.pi/agent/prompts/=.
 
 ** 📎 Editor Features
 
@@ -248,7 +248,7 @@ highlighting (bold, code spans, fenced blocks) in new sessions.
 Requires Docker for integration and GUI tests (Ollama runs in a container).
 
 #+begin_src bash
-# Unit tests only (fast, no Docker)
+# Byte-compile, lint, and unit tests (fast, no Docker)
 make check
 
 # Integration tests (requires Docker)
@@ -276,7 +276,7 @@ By default, GUI tests auto-detect whether to show a window or run headless.
 ** CI setup
 
 GitHub Actions runs on every push:
-- =test-unit.yml= - Unit tests across Emacs 28.2 and 29.4
+- =test-unit.yml= - Unit tests across Emacs 28.2, 29.4, and 30.1
 - =test-integration.yml= - Integration tests with Docker Ollama
 - =test-gui.yml= - GUI tests with xvfb virtual framebuffer
 
