@@ -524,6 +524,73 @@ then proper highlighting once block is closed."
         (should (or (eq face 'font-lock-keyword-face)
                     (and (listp face) (memq 'font-lock-keyword-face face))))))))
 
+;;; Markdown Escape Restriction
+
+(ert-deftest pi-coding-agent-test-backslash-n-visible-in-chat ()
+  "Backslash before non-punctuation chars stays visible in chat.
+Regression test: markdown-mode hides backslash in \\n, \\t, etc.
+because `markdown-match-escape' matches backslash + any char.
+We override `markdown-regex-escape' buffer-locally to restrict
+matching to CommonMark-valid escapes only."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "Use \\n for a newline\n")
+      (font-lock-ensure)
+      (goto-char (point-min))
+      (search-forward "\\" nil t)
+      (let ((inv (get-text-property (1- (point)) 'invisible)))
+        (should-not inv)))))
+
+(ert-deftest pi-coding-agent-test-backslash-t-visible-in-chat ()
+  "Backslash before t stays visible in chat."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "Use \\t for a tab\n")
+      (font-lock-ensure)
+      (goto-char (point-min))
+      (search-forward "\\" nil t)
+      (let ((inv (get-text-property (1- (point)) 'invisible)))
+        (should-not inv)))))
+
+(ert-deftest pi-coding-agent-test-backslash-star-hidden-in-chat ()
+  "Backslash before * (valid markdown escape) IS hidden.
+Ensures the restricted regex preserves intended escape behavior.
+Requires preceding text so gfm-mode doesn't classify content as
+YAML metadata (which would skip escape matching entirely)."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "Some preceding text\n\nEscaped: \\* not bold\n")
+      (font-lock-ensure)
+      (goto-char (point-min))
+      (search-forward "\\" nil t)
+      (let ((inv (get-text-property (1- (point)) 'invisible)))
+        (should (eq inv 'markdown-markup))))))
+
+(ert-deftest pi-coding-agent-test-backslash-in-code-block-unaffected ()
+  "Backslash in fenced code block is never hidden (existing behavior)."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "```\nprint(\"hello\\nworld\")\n```\n")
+      (font-lock-ensure)
+      (goto-char (point-min))
+      (search-forward "\\" nil t)
+      (let ((inv (get-text-property (1- (point)) 'invisible)))
+        (should-not inv)))))
+
+(ert-deftest pi-coding-agent-test-escape-regex-is-buffer-local ()
+  "Chat mode sets `markdown-regex-escape' buffer-locally.
+Verifies the fix is scoped to our buffer and does not affect
+other markdown-mode buffers."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (should (local-variable-p 'markdown-regex-escape))
+    (should (equal markdown-regex-escape
+                   pi-coding-agent--markdown-regex-escape))))
+
 ;;; User Message Display
 
 (ert-deftest pi-coding-agent-test-display-user-message-inserts-text ()

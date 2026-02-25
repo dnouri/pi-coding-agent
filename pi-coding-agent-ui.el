@@ -341,6 +341,18 @@ Returns \"text\" for unrecognized extensions to ensure consistent fencing."
       (or (cdr (assoc ext pi-coding-agent--extension-language-alist))
           "text"))))
 
+;;;; Markdown Escape Fix
+
+(defconst pi-coding-agent--markdown-regex-escape
+  "\\(\\\\\\)[]!\"#$%&'()*+,./:;<=>?@[\\\\^_`{|}~-]"
+  "Restricted version of `markdown-regex-escape' for CommonMark §2.4.
+Markdown-mode's regex matches backslash + ANY character and hides
+the backslash when `markdown-hide-markup' is enabled.  This turns
+\"\\n\" into just \"n\", \"\\t\" into just the letter, etc.  CommonMark
+only defines escapes for ASCII punctuation, so we override the regex
+buffer-locally in `pi-coding-agent-chat-mode' to match only valid
+escape targets.")
+
 ;;;; Major Modes
 
 (defvar pi-coding-agent-chat-mode-map
@@ -505,6 +517,9 @@ This is a read-only buffer showing the conversation history."
   ;; Hide markdown markup (**, `, ```) for cleaner display
   (setq-local markdown-hide-markup t)
   (add-to-invisibility-spec 'markdown-markup)
+  ;; Restrict backslash escapes to CommonMark punctuation only.
+  ;; Without this, \n \t \r etc. lose their backslash in the display.
+  (setq-local markdown-regex-escape pi-coding-agent--markdown-regex-escape)
   ;; Strip hidden markup from copy operations (M-w, C-w)
   (setq-local filter-buffer-substring-function
               #'pi-coding-agent--filter-buffer-substring)
