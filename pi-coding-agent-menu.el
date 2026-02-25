@@ -31,7 +31,6 @@
 ;; Key entry points:
 ;;   `pi-coding-agent-menu'            Transient menu (C-c C-p)
 ;;   `pi-coding-agent-new-session'     Start fresh session
-;;   `pi-coding-agent-resume-session'  Resume previous session
 ;;   `pi-coding-agent-reload'          Restart pi process
 ;;   `pi-coding-agent-select-model'    Choose model interactively
 ;;   `pi-coding-agent-cycle-thinking'  Cycle thinking levels
@@ -114,15 +113,6 @@ from either chat or input buffer."
                              (message "Pi: New session started"))
                          (message "Pi: New session cancelled")))))))
 
-(defun pi-coding-agent--session-dir-name (dir)
-  "Convert DIR to session directory name.
-Matches pi's encoding: --path-with-dashes--.
-Note: Handles both Unix and Windows path separators."
-  (let* ((clean-dir (directory-file-name dir))  ; Remove trailing slash
-         (safe-path (replace-regexp-in-string "[/\\\\:]" "-"
-                                              (replace-regexp-in-string "^[/\\\\]" "" clean-dir))))
-    (concat "--" safe-path "--")))
-
 (defun pi-coding-agent--session-metadata (path)
   "Extract metadata from session file PATH.
 Returns plist with :modified-time, :first-message, :message-count, and
@@ -175,44 +165,6 @@ Call this from the chat buffer after switching or loading a session."
   (when session-file
     (let ((metadata (pi-coding-agent--session-metadata session-file)))
       (setq pi-coding-agent--session-name (plist-get metadata :session-name)))))
-
-(defun pi-coding-agent--list-sessions (dir)
-  "List available session files for project DIR.
-Returns list of absolute paths to .jsonl files, sorted by modification
-time with most recently used first."
-  (let* ((sessions-base (expand-file-name "~/.pi/agent/sessions/"))
-         (session-dir (expand-file-name (pi-coding-agent--session-dir-name dir) sessions-base)))
-    (when (file-directory-p session-dir)
-      ;; Sort by modification time descending (most recently used first)
-      (sort (directory-files session-dir t "\\.jsonl$")
-            (lambda (a b)
-              (time-less-p (file-attribute-modification-time (file-attributes b))
-                           (file-attribute-modification-time (file-attributes a))))))))
-
-(defun pi-coding-agent--format-session-choice (path)
-  "Format session PATH for display in selector.
-Returns (display-string . path) for `completing-read'.
-Prefers session name over first message when available."
-  (let ((metadata (pi-coding-agent--session-metadata path)))
-    (if metadata
-        (let* ((modified-time (plist-get metadata :modified-time))
-               (session-name (plist-get metadata :session-name))
-               (first-msg (plist-get metadata :first-message))
-               (msg-count (plist-get metadata :message-count))
-               (relative-time (pi-coding-agent--format-relative-time modified-time))
-               ;; Prefer session name, fall back to first message preview
-               (label (cond
-                       (session-name (pi-coding-agent--truncate-string session-name 50))
-                       (first-msg (pi-coding-agent--truncate-string first-msg 50))
-                       (t nil)))
-               (display (if label
-                            (format "%s · %s (%d msgs)"
-                                    label relative-time msg-count)
-                          (format "[empty session] · %s" relative-time))))
-          (cons display path))
-      ;; Fallback to filename if metadata extraction fails
-      (let ((filename (file-name-nondirectory path)))
-        (cons filename path)))))
 
 (defun pi-coding-agent--reset-session-state ()
   "Reset all session-specific state for a new session.
@@ -343,56 +295,11 @@ using the cached session file."
                                (message "Pi: Failed to reload - %s"
                                         (or (plist-get response :error) "unknown error"))))))))))))
 
-(defun pi-coding-agent-resume-session ()
-  "Resume a previous pi session from the current project."
-  (interactive)
-  (when-let ((proc (pi-coding-agent--get-process))
-             (dir (pi-coding-agent--session-directory)))
-    (let ((sessions (pi-coding-agent--list-sessions dir)))
-      (if (null sessions)
-          (message "Pi: No previous sessions found")
-        (let* ((choices (mapcar #'pi-coding-agent--format-session-choice sessions))
-               (choice-strings (mapcar #'car choices))
-               ;; Use completion table with metadata to preserve our sort order
-               ;; (completing-read normally re-sorts alphabetically)
-               (choice (completing-read "Resume session: "
-                                        (lambda (string pred action)
-                                          (if (eq action 'metadata)
-                                              '(metadata (display-sort-function . identity))
-                                            (complete-with-action action choice-strings string pred)))
-                                        nil t))
-               (selected-path (cdr (assoc choice choices)))
-               ;; Capture chat buffer before async call
-               (chat-buf (pi-coding-agent--get-chat-buffer)))
-          (when selected-path
-            (pi-coding-agent--rpc-async proc (list :type "switch_session"
-                                      :sessionPath selected-path)
-                           (lambda (response)
-                             (let* ((data (plist-get response :data))
-                                    (cancelled (plist-get data :cancelled)))
-                               (if (and (plist-get response :success)
-                                        (pi-coding-agent--json-false-p cancelled))
-                                   (progn
-                                     ;; Update session name cache
-                                     (when (buffer-live-p chat-buf)
-                                       (with-current-buffer chat-buf
-                                         (pi-coding-agent--update-session-name-from-file selected-path)))
-                                     ;; Refresh state to get new session-file
-                                     (pi-coding-agent--rpc-async proc '(:type "get_state")
-                                       (lambda (resp)
-                                         (pi-coding-agent--apply-state-response chat-buf resp)))
-                                     (pi-coding-agent--load-session-history
-                                      proc
-                                      (lambda (count)
-                                        (message "Pi: Resumed session (%d messages)" count))
-                                      chat-buf))
-                                 (message "Pi: Failed to resume session")))))))))))
-
 ;;;; Model and Thinking
 
 (defun pi-coding-agent-set-session-name (name)
   "Set the session NAME for the current session.
-The name is displayed in the resume picker and header-line."
+The name is displayed in the session browser and header-line."
   (interactive
    (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
      (list (read-string "Session name: "
@@ -633,48 +540,6 @@ Optional OUTPUT-PATH specifies where to save; nil uses pi's default."
 
 ;;;; Fork
 
-(defun pi-coding-agent--flatten-tree (nodes)
-  "Flatten tree NODES into a hash table mapping id to node plist.
-NODES is a vector of tree node plists, each with `:children' vector.
-Returns a hash table for O(1) lookup by id.
-
-Uses iterative traversal to avoid `max-lisp-eval-depth' errors on deep
-session trees."
-  (let ((index (make-hash-table :test 'equal))
-        (stack nil))
-    ;; Push roots in reverse so popping preserves original order.
-    (let ((i (1- (length nodes))))
-      (while (>= i 0)
-        (push (aref nodes i) stack)
-        (setq i (1- i))))
-    (while stack
-      (let* ((node (pop stack))
-             (children (plist-get node :children)))
-        (puthash (plist-get node :id) node index)
-        (let ((i (1- (length children))))
-          (while (>= i 0)
-            (push (aref children i) stack)
-            (setq i (1- i))))))
-    index))
-
-(defun pi-coding-agent--active-branch-user-ids (index leaf-id)
-  "Return chronological list of user message IDs on the active branch.
-INDEX is a hash table from `pi-coding-agent--flatten-tree'.
-LEAF-ID is the current leaf node ID.  Walk from leaf to root via
-`:parentId', collecting IDs of nodes with type \"message\" and role
-\"user\".  Returns list in root-to-leaf (chronological) order."
-  (when leaf-id
-    (let ((user-ids nil)
-          (current-id leaf-id))
-      (while current-id
-        (let ((node (gethash current-id index)))
-          (when (and node
-                     (equal (plist-get node :type) "message")
-                     (equal (plist-get node :role) "user"))
-            (push (plist-get node :id) user-ids))
-          (setq current-id (and node (plist-get node :parentId)))))
-      user-ids)))
-
 (defun pi-coding-agent--format-fork-message (msg &optional index)
   "Format MSG for display in fork selector.
 MSG is a plist with :entryId and :text.
@@ -849,14 +714,15 @@ Uses commands from pi's `get_commands' RPC."
    :class transient-row]
   [["Session"
     ("n" "new" pi-coding-agent-new-session)
-    ("r" "resume" pi-coding-agent-resume-session)
+    ("r" "sessions" pi-coding-agent-session-browser)
     ("R" "reload" pi-coding-agent-reload)
     ("N" "name" pi-coding-agent-set-session-name)
     ("e" "export" pi-coding-agent-export-html)
     ("Q" "quit" pi-coding-agent-quit)]
    ["Context"
     ("c" "compact" pi-coding-agent-compact)
-    ("f" "fork" pi-coding-agent-fork)]]
+    ("f" "fork" pi-coding-agent-fork)
+    ("w" "tree" pi-coding-agent-tree-browser)]]
   [["Model"
     ("m" "select" pi-coding-agent-select-model)
     ("t" "thinking" pi-coding-agent-cycle-thinking)]

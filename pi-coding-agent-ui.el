@@ -68,10 +68,13 @@
 
 ;; pi-coding-agent-menu.el (menu and session commands)
 (declare-function pi-coding-agent-menu "pi-coding-agent-menu")
-(declare-function pi-coding-agent-resume-session "pi-coding-agent-menu")
 (declare-function pi-coding-agent-select-model "pi-coding-agent-menu")
 (declare-function pi-coding-agent-cycle-thinking "pi-coding-agent-menu")
 (declare-function pi-coding-agent-fork-at-point "pi-coding-agent-menu")
+
+;; pi-coding-agent-browse.el (browse buffers)
+(declare-function pi-coding-agent-session-browser "pi-coding-agent-browse")
+(declare-function pi-coding-agent-tree-browser "pi-coding-agent-browse")
 
 ;; Optional: phscroll for horizontal table scrolling
 (require 'phscroll nil t)
@@ -563,7 +566,7 @@ removing the instructional header that would otherwise appear."
     (define-key map (kbd "TAB") #'pi-coding-agent-complete)
     (define-key map (kbd "C-c C-k") #'pi-coding-agent-abort)
     (define-key map (kbd "C-c C-p") #'pi-coding-agent-menu)
-    (define-key map (kbd "C-c C-r") #'pi-coding-agent-resume-session)
+    (define-key map (kbd "C-c C-r") #'pi-coding-agent-session-browser)
     (define-key map (kbd "M-p") #'pi-coding-agent-previous-input)
     (define-key map (kbd "M-n") #'pi-coding-agent-next-input)
     (define-key map (kbd "<C-up>") #'pi-coding-agent-previous-input)
@@ -1135,22 +1138,6 @@ turn markers as H1 while LLM ATX headings are leveled down to H2+."
 Returns nil if MS is nil."
   (and ms (seconds-to-time (/ ms 1000.0))))
 
-(defun pi-coding-agent--format-relative-time (time)
-  "Format TIME (Emacs time value) as relative time string."
-  (condition-case nil
-      (let* ((now (current-time))
-             (diff (float-time (time-subtract now time)))
-             (minutes (/ diff 60))
-             (hours (/ diff 3600))
-             (days (/ diff 86400)))
-        (cond
-         ((< minutes 1) "just now")
-         ((< minutes 60) (format "%d min ago" (floor minutes)))
-         ((< hours 24) (format "%d hr ago" (floor hours)))
-         ((< days 7) (format "%d days ago" (floor days)))
-         (t (format-time-string "%b %d" time))))
-    (error "Unknown time format")))
-
 (defun pi-coding-agent--format-message-timestamp (time)
   "Format TIME for message headers.
 Shows HH:MM if today, otherwise YYYY-MM-DD HH:MM."
@@ -1282,7 +1269,7 @@ Stores the result in CHAT-BUF and emits a minibuffer notice when available."
      separator "\n"
      "C-c C-c   send prompt\n"
      "C-c C-k   abort\n"
-     "C-c C-r   resume session\n"
+     "C-c C-r   sessions\n"
      "C-c C-p   menu\n")))
 
 (defun pi-coding-agent--display-startup-header ()

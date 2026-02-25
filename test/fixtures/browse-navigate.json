@@ -1,0 +1,15 @@
+{
+  "type": "response",
+  "id": "req_3",
+  "command": "navigate_tree",
+  "success": true,
+  "data": {
+    "cancelled": false,
+    "editorText": "Actually, let's try a different approach",
+    "summaryEntry": {
+      "id": "summary-1",
+      "summary": "Branch explored SQLAlchemy-based connection pooling with tests.",
+      "fromExtension": false
+    }
+  }
+}

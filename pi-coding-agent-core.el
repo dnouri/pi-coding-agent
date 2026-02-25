@@ -285,10 +285,10 @@ JSON true (t) stays t, JSON false (:false) becomes nil."
   (if (pi-coding-agent--json-false-p value) nil value))
 
 (defun pi-coding-agent--normalize-string-or-null (value)
-  "Return VALUE if it's a string, nil otherwise.
+  "Return VALUE if it's a non-empty string, nil otherwise.
 Use when reading JSON fields that may be null or string.
-JSON null (:null) and non-strings become nil."
-  (and (stringp value) value))
+JSON null (:null), non-strings, and empty strings become nil."
+  (and (stringp value) (not (string-empty-p value)) value))
 
 (defun pi-coding-agent--update-state-from-event (event)
   "Update status and state based on EVENT.
