@@ -1413,48 +1413,6 @@ Aborted messages may have incomplete usage data."
       (when (buffer-live-p chat-buf)
         (kill-buffer chat-buf)))))
 
-(ert-deftest pi-coding-agent-test-session-dir-name ()
-  "Session directory name derived from project path."
-  (should (equal (pi-coding-agent--session-dir-name "/home/daniel/co/pi-coding-agent")
-                 "--home-daniel-co-pi-coding-agent--"))
-  (should (equal (pi-coding-agent--session-dir-name "/tmp/test")
-                 "--tmp-test--")))
-
-(ert-deftest pi-coding-agent-test-list-sessions-sorted-by-mtime ()
-  "Sessions are sorted by modification time, most recent first.
-Regression test for #25: sessions were sorted by filename (creation time)
-and then re-sorted alphabetically by completing-read."
-  (let* ((temp-base (make-temp-file "pi-coding-agent-sessions-" t))
-         (session-dir (expand-file-name "--test-project--" temp-base))
-         ;; Create files with names that would sort differently alphabetically
-         (old-file (expand-file-name "2024-01-01_10-00-00.jsonl" session-dir))
-         (new-file (expand-file-name "2024-01-01_09-00-00.jsonl" session-dir)))
-    (unwind-protect
-        (progn
-          (make-directory session-dir t)
-          (let* ((now (current-time))
-                 (old-time (time-subtract now (seconds-to-time 10)))
-                 (new-time (time-subtract now (seconds-to-time 5))))
-            ;; Create "old" file first
-            (with-temp-file old-file (insert "{}"))
-            (set-file-times old-file old-time)
-            ;; Create "new" file second (more recent mtime despite earlier filename)
-            (with-temp-file new-file (insert "{}"))
-            (set-file-times new-file new-time))
-          ;; Directly call directory-files and sort logic to test sorting
-          (let* ((files (directory-files session-dir t "\\.jsonl$"))
-                 (sorted (sort files
-                               (lambda (a b)
-                                 (time-less-p
-                                  (file-attribute-modification-time (file-attributes b))
-                                  (file-attribute-modification-time (file-attributes a)))))))
-            ;; new-file should be first (most recent mtime)
-            ;; even though "09-00-00" < "10-00-00" alphabetically
-            (should (equal (length sorted) 2))
-            (should (string-suffix-p "09-00-00.jsonl" (car sorted)))))
-      ;; Cleanup
-      (delete-directory temp-base t))))
-
 (ert-deftest pi-coding-agent-test-session-metadata-extracts-first-message ()
   "pi-coding-agent--session-metadata extracts first user message text."
   (let ((temp-file (make-temp-file "pi-coding-agent-test-session" nil ".jsonl")))
@@ -1536,38 +1494,6 @@ and then re-sorted alphabetically by completing-read."
             (should metadata)
             ;; Should be nil, not :null
             (should (null (plist-get metadata :session-name)))))
-      (delete-file temp-file))))
-
-(ert-deftest pi-coding-agent-test-format-session-choice-fallback-on-cleared-name ()
-  "pi-coding-agent--format-session-choice falls back to message when name cleared."
-  (let ((temp-file (make-temp-file "pi-coding-agent-test-session" nil ".jsonl")))
-    (unwind-protect
-        (progn
-          (with-temp-file temp-file
-            (insert "{\"type\":\"session\",\"id\":\"test\"}\n")
-            (insert "{\"type\":\"message\",\"id\":\"m1\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello world\"}]}}\n")
-            (insert "{\"type\":\"session_info\",\"id\":\"si1\",\"name\":\"My Project\"}\n")
-            ;; Name was cleared
-            (insert "{\"type\":\"session_info\",\"id\":\"si2\",\"name\":null}\n"))
-          (let ((choice (pi-coding-agent--format-session-choice temp-file)))
-            ;; Should fall back to first message, not crash
-            (should (string-match-p "Hello world" (car choice)))
-            (should-not (string-match-p "My Project" (car choice)))))
-      (delete-file temp-file))))
-
-(ert-deftest pi-coding-agent-test-format-session-choice-prefers-name ()
-  "pi-coding-agent--format-session-choice uses session name when available."
-  (let ((temp-file (make-temp-file "pi-coding-agent-test-session" nil ".jsonl")))
-    (unwind-protect
-        (progn
-          (with-temp-file temp-file
-            (insert "{\"type\":\"session\",\"id\":\"test\"}\n")
-            (insert "{\"type\":\"message\",\"id\":\"m1\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello world\"}]}}\n")
-            (insert "{\"type\":\"session_info\",\"id\":\"si1\",\"name\":\"My Project\"}\n"))
-          (let ((choice (pi-coding-agent--format-session-choice temp-file)))
-            ;; Should show session name, not first message
-            (should (string-match-p "My Project" (car choice)))
-            (should-not (string-match-p "Hello world" (car choice)))))
       (delete-file temp-file))))
 
 (ert-deftest pi-coding-agent-test-header-line-includes-session-name ()

@@ -368,6 +368,54 @@ agent_end + next section's leading newline must not create triple newlines."
     ;; Should show summary text
     (should (string-match-p "Key points" (buffer-string)))))
 
+(ert-deftest pi-coding-agent-test-history-displays-branch-summary ()
+  "Branch summary messages display with header and full summary text."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((messages [(:role "branchSummary"
+                      :summary "## Goal\nThe user was exploring TDD.\n\n## Progress\n- Learned basics"
+                      :fromId "abc123"
+                      :timestamp 1704067200000)]))
+      (pi-coding-agent--display-history-messages messages))
+    ;; Should have Branch Summary header
+    (should (string-match-p "Branch Summary" (buffer-string)))
+    ;; Should show the full summary text
+    (should (string-match-p "Goal" (buffer-string)))
+    (should (string-match-p "exploring TDD" (buffer-string)))
+    (should (string-match-p "Learned basics" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-history-branch-summary-among-messages ()
+  "Branch summary renders correctly between user and assistant messages."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((messages [(:role "user"
+                      :content [(:type "text" :text "Hello")]
+                      :timestamp 1704067100000)
+                     (:role "assistant"
+                      :content [(:type "text" :text "Hi there")]
+                      :timestamp 1704067150000)
+                     (:role "branchSummary"
+                      :summary "Summarized an abandoned branch."
+                      :fromId "xyz"
+                      :timestamp 1704067200000)
+                     (:role "user"
+                      :content [(:type "text" :text "Continue")]
+                      :timestamp 1704067300000)]))
+      (pi-coding-agent--display-history-messages messages))
+    (let ((text (buffer-string)))
+      ;; All four messages should appear in order
+      (should (string-match-p "Hello" text))
+      (should (string-match-p "Hi there" text))
+      (should (string-match-p "Branch Summary" text))
+      (should (string-match-p "Summarized an abandoned branch" text))
+      (should (string-match-p "Continue" text))
+      ;; Branch Summary should come after Hi there and before Continue
+      (let ((summary-pos (string-match "Branch Summary" text))
+            (hi-pos (string-match "Hi there" text))
+            (continue-pos (string-match "Continue" text)))
+        (should (< hi-pos summary-pos))
+        (should (< summary-pos continue-pos))))))
+
 ;;; Streaming Marker
 
 (ert-deftest pi-coding-agent-test-streaming-marker-created-on-agent-start ()

@@ -53,7 +53,7 @@
 ;;     C-c C-s        Queue steering (interrupts after current tool; busy only)
 ;;     C-c C-k        Abort streaming
 ;;     C-c C-p        Open menu
-;;     C-c C-r        Resume session
+;;     C-c C-r        Browse sessions
 ;;     M-p / M-n      History navigation
 ;;     C-r            Incremental history search (like readline)
 ;;     TAB            Path/file completion
@@ -81,6 +81,7 @@
 
 (require 'pi-coding-agent-menu)
 (require 'pi-coding-agent-input)
+(require 'pi-coding-agent-browse)
 
 ;;;; Main Entry Point
 

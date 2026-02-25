@@ -1883,6 +1883,16 @@ For example: '+ 7     code' or '-12     code'"
         (overlay-put line-ov 'priority pi-coding-agent--diff-line-priority)
         (overlay-put line-ov 'pi-coding-agent-diff-overlay t)))))
 
+;;;; Branch Summary Display
+
+(defun pi-coding-agent--display-branch-summary (summary &optional timestamp)
+  "Display a branch summary block in the chat buffer.
+SUMMARY is the branch summary text (markdown).
+TIMESTAMP is optional time when the summary was created."
+  (pi-coding-agent--append-to-chat
+   (concat "\n" (pi-coding-agent--make-separator "Branch Summary" timestamp) "\n"
+           (or summary "") "\n")))
+
 ;;;; Compaction Display
 
 (defun pi-coding-agent--display-compaction-result (tokens-before summary &optional timestamp)
@@ -2249,6 +2259,13 @@ Each text block is rendered independently for proper formatting."
                     (timestamp (pi-coding-agent--ms-to-time (plist-get message :timestamp))))
                (pi-coding-agent--display-compaction-result tokens-before summary timestamp))
              (setq prev-role "compactionSummary"))
+            ("branchSummary"
+             (flush-tools)
+             (let* ((summary (plist-get message :summary))
+                    (timestamp (pi-coding-agent--ms-to-time
+                                (plist-get message :timestamp))))
+               (pi-coding-agent--display-branch-summary summary timestamp))
+             (setq prev-role "branchSummary"))
             ("toolResult"
              nil))))
       (flush-tools))))
@@ -2270,7 +2287,12 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
         (unless (bolp) (insert "\n"))
         (pi-coding-agent--set-message-start-marker nil)
         (pi-coding-agent--set-streaming-marker nil)
-        (goto-char (point-max))))))
+        (goto-char (point-max))
+        ;; Update all windows showing this buffer so the latest content
+        ;; is visible — with-current-buffer only moves the buffer's own
+        ;; point, not window-point of non-selected windows.
+        (dolist (win (get-buffer-window-list chat-buf nil t))
+          (set-window-point win (point-max)))))))
 
 (provide 'pi-coding-agent-render)
 

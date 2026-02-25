@@ -935,26 +935,6 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
   (let ((response '(:success nil :error "Network error")))
     (should-not (pi-coding-agent--resolve-fork-entry response 0 3))))
 
-(defun pi-coding-agent-test--make-deep-linear-tree (depth)
-  "Return a single-branch tree vector with DEPTH nested nodes.
-The tree is built iteratively to avoid recursion in test setup."
-  (let* ((leaf-id (1- depth))
-         (node (list :id (format "n%d" leaf-id)
-                     :type "message"
-                     :role "user"
-                     :preview (format "node %d" leaf-id)
-                     :parentId (and (> leaf-id 0) (format "n%d" (1- leaf-id)))
-                     :children [])))
-    (dotimes (i (1- depth))
-      (let ((id (- depth i 2)))
-        (setq node (list :id (format "n%d" id)
-                         :type "message"
-                         :role "user"
-                         :preview (format "node %d" id)
-                         :parentId (and (> id 0) (format "n%d" (1- id)))
-                         :children (vector node)))))
-    (vector node)))
-
 (defun pi-coding-agent-test--make-deep-fork-messages (depth)
   "Return DEPTH chronological fork messages."
   (let ((messages (make-vector depth nil)))
@@ -962,78 +942,6 @@ The tree is built iteratively to avoid recursion in test setup."
       (aset messages i (list :entryId (format "n%d" i)
                              :text (format "node %d" i))))
     messages))
-
-(ert-deftest pi-coding-agent-test-flatten-tree-deep-linear-tree ()
-  "flatten-tree handles deep linear trees without eval-depth overflow."
-  (let* ((depth pi-coding-agent-test--deep-tree-depth)
-         (tree (pi-coding-agent-test--make-deep-linear-tree depth))
-         (index (pi-coding-agent--flatten-tree tree)))
-    (should (= (hash-table-count index) depth))))
-
-;;; Active Branch Tree Walk
-
-(ert-deftest pi-coding-agent-test-active-branch-linear ()
-  "Linear tree: u1 → a1 → u2 → a2 (leaf) returns both user IDs."
-  (let* ((data (pi-coding-agent-test--build-tree
-                '("u1" nil "message" :role "user" :preview "Hello")
-                '("a1" nil "message" :role "assistant" :preview "Hi")
-                '("u2" nil "message" :role "user" :preview "More")
-                '("a2" nil "message" :role "assistant" :preview "Sure")))
-         (index (pi-coding-agent--flatten-tree (plist-get data :tree)))
-         (ids (pi-coding-agent--active-branch-user-ids index "a2")))
-    (should (equal ids '("u1" "u2")))))
-
-(ert-deftest pi-coding-agent-test-active-branch-branched ()
-  "Branched tree: active branch u1 → a1 → u2 → a2, ignores u3 → a3."
-  (let* ((data (pi-coding-agent-test--build-tree
-                '("u1" nil "message" :role "user" :preview "Hello")
-                '("a1" nil "message" :role "assistant" :preview "Hi")
-                '("u2" nil "message" :role "user" :preview "Path A")
-                '("a2" nil "message" :role "assistant" :preview "Sure A")
-                '("u3" "a1" "message" :role "user" :preview "Path B")
-                '("a3" nil "message" :role "assistant" :preview "Sure B")))
-         (index (pi-coding-agent--flatten-tree (plist-get data :tree)))
-         (ids (pi-coding-agent--active-branch-user-ids index "a2")))
-    (should (equal ids '("u1" "u2")))))
-
-(ert-deftest pi-coding-agent-test-active-branch-with-compaction ()
-  "Tree with compaction node: u1 → a1 → compaction → u2 → a2."
-  (let* ((data (pi-coding-agent-test--build-tree
-                '("u1" nil "message" :role "user" :preview "First")
-                '("a1" nil "message" :role "assistant" :preview "Response")
-                '("c1" nil "compaction" :tokensBefore 5000)
-                '("u2" nil "message" :role "user" :preview "After compaction")
-                '("a2" nil "message" :role "assistant" :preview "Still here")))
-         (index (pi-coding-agent--flatten-tree (plist-get data :tree)))
-         (ids (pi-coding-agent--active-branch-user-ids index "a2")))
-    (should (equal ids '("u1" "u2")))))
-
-(ert-deftest pi-coding-agent-test-active-branch-with-metadata ()
-  "Tree with model_change and thinking nodes: only user IDs returned."
-  (let* ((data (pi-coding-agent-test--build-tree
-                '("u1" nil "message" :role "user" :preview "Hello")
-                '("a1" nil "message" :role "assistant" :preview "Hi")
-                '("m1" nil "model_change" :provider "anthropic" :modelId "claude-4")
-                '("t1" nil "thinking_level_change" :thinkingLevel "high")
-                '("u2" nil "message" :role "user" :preview "More")
-                '("a2" nil "message" :role "assistant" :preview "Sure")))
-         (index (pi-coding-agent--flatten-tree (plist-get data :tree)))
-         (ids (pi-coding-agent--active-branch-user-ids index "a2")))
-    (should (equal ids '("u1" "u2")))))
-
-(ert-deftest pi-coding-agent-test-active-branch-empty-tree ()
-  "Empty tree returns empty list."
-  (let* ((index (pi-coding-agent--flatten-tree []))
-         (ids (pi-coding-agent--active-branch-user-ids index nil)))
-    (should (equal ids nil))))
-
-(ert-deftest pi-coding-agent-test-active-branch-nil-leaf ()
-  "Nil leafId returns empty list."
-  (let* ((data (pi-coding-agent-test--build-tree
-                '("u1" nil "message" :role "user" :preview "Hello")))
-         (index (pi-coding-agent--flatten-tree (plist-get data :tree)))
-         (ids (pi-coding-agent--active-branch-user-ids index nil)))
-    (should (equal ids nil))))
 
 (provide 'pi-coding-agent-menu-test)
 ;;; pi-coding-agent-menu-test.el ends here
