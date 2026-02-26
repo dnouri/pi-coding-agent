@@ -71,14 +71,24 @@ PROC is the pi process.  CALLBACK receives the command list on success."
 
 ;;;; Session Management
 
+(defun pi-coding-agent--menu-state ()
+  "Return session state from the chat buffer.
+State is buffer-local in the chat buffer; this accessor works
+from either chat or input buffer."
+  (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+    (and chat-buf (buffer-local-value 'pi-coding-agent--state chat-buf))))
+
 (defun pi-coding-agent--menu-model-description ()
   "Return model description for transient menu."
-  (let ((model (plist-get (plist-get pi-coding-agent--state :model) :name)))
-    (format "Model: %s" (or model "unknown"))))
+  (let* ((state (pi-coding-agent--menu-state))
+         (model (plist-get (plist-get state :model) :name))
+         (short (and model (pi-coding-agent--shorten-model-name model))))
+    (format "Model: %s" (or short "unknown"))))
 
 (defun pi-coding-agent--menu-thinking-description ()
   "Return thinking level description for transient menu."
-  (let ((level (plist-get pi-coding-agent--state :thinking-level)))
+  (let* ((state (pi-coding-agent--menu-state))
+         (level (plist-get state :thinking-level)))
     (format "Thinking: %s" (or level "off"))))
 
 ;;;###autoload
@@ -414,26 +424,51 @@ The name is displayed in the resume picker and header-line."
                 (message "Pi: Failed to set session name: %s"
                          (or (plist-get response :error) "unknown error")))))))))
 
-(defun pi-coding-agent-select-model ()
-  "Select a model interactively."
+(defun pi-coding-agent-select-model (&optional initial-input)
+  "Select a model interactively.
+Optional INITIAL-INPUT pre-fills the completion prompt for filtering."
   (interactive)
   (let ((proc (pi-coding-agent--get-process))
         (chat-buf (pi-coding-agent--get-chat-buffer)))
     (unless proc
       (user-error "No pi process running"))
-    (let* ((response (pi-coding-agent--rpc-sync proc '(:type "get_available_models") 5))
+    (let* ((state (pi-coding-agent--menu-state))
+           (response (pi-coding-agent--rpc-sync proc '(:type "get_available_models") 5))
            (data (plist-get response :data))
            (models (plist-get data :models))
-           (current-name (plist-get (plist-get pi-coding-agent--state :model) :name))
-           ;; Build alist of (display-name . model-plist) for selection
+           (current-name (plist-get (plist-get state :model) :name))
+           (current-short (and current-name
+                               (pi-coding-agent--shorten-model-name current-name)))
+           ;; Build alist of (short-name . model-plist) for selection
            (model-alist (mapcar (lambda (m)
-                                  (cons (plist-get m :name) m))
+                                  (cons (pi-coding-agent--shorten-model-name
+                                         (plist-get m :name))
+                                        m))
                                 models))
            (names (mapcar #'car model-alist))
-           (choice (completing-read
-                    (format "Model (current: %s): " (or current-name "unknown"))
-                    names nil t)))
-      (when (and choice (not (equal choice current-name)))
+           (choice (let ((completion-ignore-case t)
+                         (completion-styles '(basic flex)))
+                     (if initial-input
+                         ;; Try auto-selecting on unique match
+                         (let ((matches (completion-all-completions
+                                         initial-input names nil
+                                         (length initial-input))))
+                           (when (consp matches)
+                             (setcdr (last matches) nil))
+                           (cond
+                            ((= (length matches) 1) (car matches))
+                            ((null matches)
+                             (message "Pi: No model matching \"%s\"" initial-input)
+                             nil)
+                            (t (completing-read
+                                (format "Model (current: %s): "
+                                        (or current-short "unknown"))
+                                names nil t initial-input))))
+                       (completing-read
+                        (format "Model (current: %s): "
+                                (or current-short "unknown"))
+                        names nil t)))))
+      (when (and choice (not (equal choice current-short)))
         (let* ((selected-model (cdr (assoc choice model-alist)))
                (model-id (plist-get selected-model :id))
                (provider (plist-get selected-model :provider)))
@@ -561,11 +596,18 @@ Optional CUSTOM-INSTRUCTIONS provide guidance for the compaction summary."
          (lambda (response)
            (pi-coding-agent--handle-manual-compaction-response chat-buf response))))))))
 
-(defun pi-coding-agent-export-html ()
-  "Export session to HTML file."
-  (interactive)
+(defun pi-coding-agent-export-html (&optional output-path)
+  "Export session to HTML file.
+Optional OUTPUT-PATH specifies where to save; nil uses pi's default."
+  (interactive
+   (list (let ((path (read-string "Export path (RET for default): ")))
+           (and (not (string-empty-p path)) path))))
   (when-let ((proc (pi-coding-agent--get-process)))
-    (pi-coding-agent--rpc-async proc '(:type "export_html")
+    (pi-coding-agent--rpc-async proc
+                   (if output-path
+                       (list :type "export_html" :outputPath
+                             (expand-file-name output-path))
+                     '(:type "export_html"))
                    (lambda (response)
                      (if (plist-get response :success)
                          (let* ((data (plist-get response :data))

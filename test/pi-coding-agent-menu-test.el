@@ -1035,5 +1035,165 @@ The tree is built iteratively to avoid recursion in test setup."
          (ids (pi-coding-agent--active-branch-user-ids index nil)))
     (should (equal ids nil))))
 
+;;;; State Reading from Input Buffer
+
+(ert-deftest pi-coding-agent-test-menu-model-description-from-input-buffer ()
+  "Menu model description reads state from chat buffer, not current buffer.
+Regression: when called from input buffer, state is nil → \"unknown\"."
+  (pi-coding-agent-test-with-mock-session "/tmp/pi-coding-agent-test-state/"
+    (let ((chat-buf (get-buffer (pi-coding-agent-test--chat-buffer-name
+                                 "/tmp/pi-coding-agent-test-state/")))
+          (input-buf (get-buffer (pi-coding-agent-test--input-buffer-name
+                                  "/tmp/pi-coding-agent-test-state/"))))
+      ;; Set state in chat buffer (where it lives)
+      (with-current-buffer chat-buf
+        (setq pi-coding-agent--state
+              '(:model (:name "Claude Opus 4.6" :id "claude-opus-4-6"
+                        :provider "anthropic")
+                :thinking-level "high")))
+      ;; Call from input buffer (where cursor normally is)
+      (with-current-buffer input-buf
+        (should (string-match-p "Opus 4.6"
+                                (pi-coding-agent--menu-model-description)))
+        (should (string-match-p "high"
+                                (pi-coding-agent--menu-thinking-description)))))))
+
+(ert-deftest pi-coding-agent-test-menu-model-description-uses-short-name ()
+  "Menu model description shows shortened name, not full \"Claude Opus 4.6\"."
+  (pi-coding-agent-test-with-mock-session "/tmp/pi-coding-agent-test-short/"
+    (let ((chat-buf (get-buffer (pi-coding-agent-test--chat-buffer-name
+                                 "/tmp/pi-coding-agent-test-short/"))))
+      (with-current-buffer chat-buf
+        (setq pi-coding-agent--state
+              '(:model (:name "Claude Opus 4.6")))
+        (should (string-match-p "Opus 4.6"
+                                (pi-coding-agent--menu-model-description)))
+        (should-not (string-match-p "Claude"
+                                    (pi-coding-agent--menu-model-description)))))))
+
+;;;; Model Selector Completion Styles
+
+(ert-deftest pi-coding-agent-test-select-model-case-insensitive ()
+  "Model selector matches case-insensitively: \"opus\" finds \"Opus 4.6\"."
+  (let ((models '((:name "Claude Opus 4.6" :id "opus-4-6" :provider "anthropic")
+                  (:name "Claude Sonnet 4.5" :id "sonnet-4-5" :provider "anthropic")))
+        captured-case captured-styles)
+    (let ((buf (generate-new-buffer "*pi-coding-agent-chat:flex-test*")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'pi-coding-agent--rpc-sync)
+                     (lambda (&rest _) (list :data (list :models models))))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc _cmd _cb)))
+                    ((symbol-function 'completing-read)
+                     (lambda (&rest _)
+                       (setq captured-case completion-ignore-case
+                             captured-styles completion-styles)
+                       "Opus 4.6")))
+            (with-current-buffer buf
+              (pi-coding-agent-chat-mode)
+              (setq pi-coding-agent--process :fake-proc
+                    pi-coding-agent--state '(:model (:name "Claude Sonnet 4.5")))
+              (pi-coding-agent-select-model)))
+        (with-current-buffer buf (setq pi-coding-agent--process nil))
+        (kill-buffer buf)))
+    (should captured-case)
+    (should (memq 'flex captured-styles))))
+
+(ert-deftest pi-coding-agent-test-select-model-flex-matches-substring ()
+  "Flex completion: \"code\" matches \"GPT-5.1 Codex Max\"."
+  (let* ((names '("Opus 4.6" "GPT-5.1 Codex Max"))
+         (completion-ignore-case t)
+         (completion-styles '(basic flex))
+         (result (completion-all-completions "code" names nil (length "code"))))
+    (when (consp result) (setcdr (last result) nil))
+    (should (= 1 (length result)))
+    (should (string-match-p "Codex" (car result)))))
+
+(ert-deftest pi-coding-agent-test-select-model-flex-matches-noncontiguous ()
+  "Flex completion: \"o46\" matches \"Opus 4.6\" (non-contiguous)."
+  (let* ((names '("Opus 4.6" "Sonnet 4.5" "GPT-5.1 Codex Max"))
+         (completion-ignore-case t)
+         (completion-styles '(basic flex))
+         (result (completion-all-completions "o46" names nil (length "o46"))))
+    (when (consp result) (setcdr (last result) nil))
+    (should (= 1 (length result)))
+    (should (string-match-p "Opus 4.6" (car result)))))
+
+(ert-deftest pi-coding-agent-test-select-model-unique-match-auto-selects ()
+  "When initial-input uniquely matches one model, skip completing-read."
+  (let ((models '((:name "Claude Opus 4.6" :id "opus-4-6" :provider "anthropic")
+                  (:name "Claude Sonnet 4.5" :id "sonnet-4-5" :provider "anthropic")))
+        completing-read-called set-model-id)
+    (let ((buf (generate-new-buffer "*pi-coding-agent-chat:auto-select*")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'pi-coding-agent--rpc-sync)
+                     (lambda (&rest _) (list :data (list :models models))))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc cmd _cb)
+                       (setq set-model-id (plist-get cmd :modelId))))
+                    ((symbol-function 'completing-read)
+                     (lambda (&rest _)
+                       (setq completing-read-called t)
+                       "Opus 4.6")))
+            (with-current-buffer buf
+              (pi-coding-agent-chat-mode)
+              (setq pi-coding-agent--process :fake-proc
+                    pi-coding-agent--state '(:model (:name "Claude Sonnet 4.5")))
+              (pi-coding-agent-select-model "op46")))
+        (with-current-buffer buf (setq pi-coding-agent--process nil))
+        (kill-buffer buf)))
+    (should-not completing-read-called)
+    (should (equal set-model-id "opus-4-6"))))
+
+(ert-deftest pi-coding-agent-test-select-model-no-match-shows-message ()
+  "When initial-input matches nothing, show message and don't set model."
+  (let ((models '((:name "Claude Opus 4.6" :id "opus-4-6" :provider "anthropic")))
+        set-model-called last-message)
+    (let ((buf (generate-new-buffer "*pi-coding-agent-chat:no-match*")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'pi-coding-agent--rpc-sync)
+                     (lambda (&rest _) (list :data (list :models models))))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (&rest _) (setq set-model-called t)))
+                    ((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (setq last-message (apply #'format fmt args)))))
+            (with-current-buffer buf
+              (pi-coding-agent-chat-mode)
+              (setq pi-coding-agent--process :fake-proc
+                    pi-coding-agent--state '(:model (:name "Claude Opus 4.6")))
+              (pi-coding-agent-select-model "zzzzz")))
+        (with-current-buffer buf (setq pi-coding-agent--process nil))
+        (kill-buffer buf)))
+    (should-not set-model-called)
+    (should (string-match-p "No model matching" last-message))))
+
+(ert-deftest pi-coding-agent-test-select-model-multiple-matches-opens-selector ()
+  "When initial-input matches multiple models, fall through to completing-read."
+  (let ((models '((:name "Claude Opus 4" :id "opus-4" :provider "anthropic")
+                  (:name "Claude Opus 4.5" :id "opus-4-5" :provider "anthropic")
+                  (:name "Claude Sonnet 4.5" :id "sonnet-4-5" :provider "anthropic")))
+        completing-read-called captured-initial)
+    (let ((buf (generate-new-buffer "*pi-coding-agent-chat:multi-match*")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'pi-coding-agent--rpc-sync)
+                     (lambda (&rest _) (list :data (list :models models))))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc _cmd _cb)))
+                    ((symbol-function 'completing-read)
+                     (lambda (_prompt _coll _pred _req initial &rest _)
+                       (setq completing-read-called t
+                             captured-initial initial)
+                       "Opus 4")))
+            (with-current-buffer buf
+              (pi-coding-agent-chat-mode)
+              (setq pi-coding-agent--process :fake-proc
+                    pi-coding-agent--state '(:model (:name "Claude Sonnet 4.5")))
+              (pi-coding-agent-select-model "opus")))
+        (with-current-buffer buf (setq pi-coding-agent--process nil))
+        (kill-buffer buf)))
+    (should completing-read-called)
+    (should (equal captured-initial "opus"))))
+
 (provide 'pi-coding-agent-menu-test)
 ;;; pi-coding-agent-menu-test.el ends here
