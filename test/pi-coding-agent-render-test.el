@@ -4645,5 +4645,111 @@ causing column misalignment when horizontally scrolling."
         ;; At the time phscroll-region was called, invisible should be set
         (should (eq phscroll-call-invisible-state 'markdown-markup))))))
 
+;;;; Built-in Slash Command Dispatch
+
+(ert-deftest pi-coding-agent-test-dispatch-builtin-compact ()
+  "Dispatching /compact calls pi-coding-agent-compact with no args."
+  (let (called-with)
+    (cl-letf (((symbol-function 'pi-coding-agent-compact)
+               (lambda (&optional args) (setq called-with (list 'compact args)))))
+      (should (pi-coding-agent--dispatch-builtin-command "/compact"))
+      (should (equal called-with '(compact nil))))))
+
+(ert-deftest pi-coding-agent-test-dispatch-builtin-compact-with-args ()
+  "Dispatching /compact with args passes them through."
+  (let (called-with)
+    (cl-letf (((symbol-function 'pi-coding-agent-compact)
+               (lambda (&optional args) (setq called-with (list 'compact args)))))
+      (should (pi-coding-agent--dispatch-builtin-command "/compact keep API details"))
+      (should (equal called-with '(compact "keep API details"))))))
+
+(ert-deftest pi-coding-agent-test-dispatch-builtin-new ()
+  "Dispatching /new calls pi-coding-agent-new-session."
+  (let (called)
+    (cl-letf (((symbol-function 'pi-coding-agent-new-session)
+               (lambda () (setq called t))))
+      (should (pi-coding-agent--dispatch-builtin-command "/new"))
+      (should called))))
+
+(ert-deftest pi-coding-agent-test-dispatch-builtin-model ()
+  "Dispatching /model calls pi-coding-agent-select-model with no args."
+  (let (called-with)
+    (cl-letf (((symbol-function 'pi-coding-agent-select-model)
+               (lambda (&optional input) (setq called-with (list 'model input)))))
+      (should (pi-coding-agent--dispatch-builtin-command "/model"))
+      (should (equal called-with '(model nil))))))
+
+(ert-deftest pi-coding-agent-test-dispatch-builtin-model-with-search ()
+  "Dispatching /model opus passes search term as initial-input."
+  (let (called-with)
+    (cl-letf (((symbol-function 'pi-coding-agent-select-model)
+               (lambda (&optional input) (setq called-with (list 'model input)))))
+      (should (pi-coding-agent--dispatch-builtin-command "/model opus"))
+      (should (equal called-with '(model "opus"))))))
+
+(ert-deftest pi-coding-agent-test-dispatch-builtin-name-with-arg ()
+  "Dispatching /name foo calls pi-coding-agent-set-session-name with arg."
+  (let (called-with)
+    (cl-letf (((symbol-function 'pi-coding-agent-set-session-name)
+               (lambda (name) (setq called-with name))))
+      (should (pi-coding-agent--dispatch-builtin-command "/name my-session"))
+      (should (equal called-with "my-session")))))
+
+(ert-deftest pi-coding-agent-test-dispatch-builtin-name-no-arg-prompts ()
+  "Dispatching /name without arg calls handler interactively."
+  (let (interactive-called)
+    (cl-letf (((symbol-function 'call-interactively)
+               (lambda (fn) (setq interactive-called fn))))
+      (should (pi-coding-agent--dispatch-builtin-command "/name"))
+      (should (eq interactive-called 'pi-coding-agent-set-session-name)))))
+
+(ert-deftest pi-coding-agent-test-dispatch-builtin-export-with-path ()
+  "Dispatching /export /tmp/out.html passes path to handler."
+  (let (called-with)
+    (cl-letf (((symbol-function 'pi-coding-agent-export-html)
+               (lambda (&optional path) (setq called-with path))))
+      (should (pi-coding-agent--dispatch-builtin-command "/export /tmp/out.html"))
+      (should (equal called-with "/tmp/out.html")))))
+
+(ert-deftest pi-coding-agent-test-dispatch-builtin-export-no-path ()
+  "Dispatching /export with no path passes nil."
+  (let (called-with)
+    (cl-letf (((symbol-function 'pi-coding-agent-export-html)
+               (lambda (&optional path) (setq called-with (list 'called path)))))
+      (should (pi-coding-agent--dispatch-builtin-command "/export"))
+      (should (equal called-with '(called nil))))))
+
+(ert-deftest pi-coding-agent-test-dispatch-returns-nil-for-unknown ()
+  "Dispatching unknown /command returns nil (falls through to RPC)."
+  (should-not (pi-coding-agent--dispatch-builtin-command "/greet"))
+  (should-not (pi-coding-agent--dispatch-builtin-command "/skill:test")))
+
+(ert-deftest pi-coding-agent-test-dispatch-returns-nil-for-non-slash ()
+  "Dispatching non-slash text returns nil."
+  (should-not (pi-coding-agent--dispatch-builtin-command "hello")))
+
+(ert-deftest pi-coding-agent-test-prepare-and-send-dispatches-builtin ()
+  "prepare-and-send dispatches /new locally instead of sending to pi."
+  (let (new-called prompt-sent)
+    (cl-letf (((symbol-function 'pi-coding-agent-new-session)
+               (lambda () (setq new-called t)))
+              ((symbol-function 'pi-coding-agent--send-prompt)
+               (lambda (text) (setq prompt-sent text))))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (pi-coding-agent--prepare-and-send "/new")))
+    (should new-called)
+    (should-not prompt-sent)))
+
+(ert-deftest pi-coding-agent-test-prepare-and-send-passes-through-extension ()
+  "prepare-and-send sends unknown slash commands to pi via prompt."
+  (let (prompt-sent)
+    (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
+               (lambda (text) (setq prompt-sent text))))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (pi-coding-agent--prepare-and-send "/my-extension arg")))
+    (should (equal prompt-sent "/my-extension arg"))))
+
 (provide 'pi-coding-agent-render-test)
 ;;; pi-coding-agent-render-test.el ends here

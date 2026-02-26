@@ -352,13 +352,15 @@ cancels, the session remains intact."
 (defun pi-coding-agent--command-capf ()
   "Completion-at-point function for /commands in input buffer.
 Returns completion data when point is after / at start of buffer.
-Uses commands from pi's `get_commands' RPC."
+Includes both built-in commands and commands from pi's `get_commands' RPC."
   (when (and (eq (char-after (point-min)) ?/)
              (> (point) (point-min)))
     (let* ((start (1+ (point-min)))
            (end (point))
-           (commands (mapcar (lambda (cmd) (plist-get cmd :name))
-                             pi-coding-agent--commands)))
+           (builtin-names (mapcar #'car pi-coding-agent--builtin-commands))
+           (rpc-names (mapcar (lambda (cmd) (plist-get cmd :name))
+                              pi-coding-agent--commands))
+           (commands (delete-dups (append builtin-names rpc-names))))
       (list start end commands :exclusive 'no))))
 
 ;;;; Editor Features: File Reference (@)

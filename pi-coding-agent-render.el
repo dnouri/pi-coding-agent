@@ -373,20 +373,38 @@ Note: status is set to `idle' by the event handler."
     (unless was-aborted
       (pi-coding-agent--process-followup-queue))))
 
+(defun pi-coding-agent--dispatch-builtin-command (text)
+  "Try to dispatch TEXT as a built-in slash command.
+Returns non-nil if TEXT matched a built-in command and was handled."
+  (when (string-prefix-p "/" text)
+    (let* ((without-slash (substring text 1))
+           (words (split-string without-slash))
+           (cmd-name (car words))
+           (entry (assoc cmd-name pi-coding-agent--builtin-commands)))
+      (when entry
+        (let ((handler (plist-get (cdr entry) :handler))
+              (args-spec (plist-get (cdr entry) :args))
+              (arg-str (let ((rest (string-trim
+                                    (substring without-slash (length cmd-name)))))
+                         (and (not (string-empty-p rest)) rest))))
+          (pcase args-spec
+            ('optional (funcall handler arg-str))
+            ('required (if arg-str
+                          (funcall handler arg-str)
+                        (call-interactively handler)))
+            (_ (funcall handler)))
+          t)))))
+
 (defun pi-coding-agent--prepare-and-send (text)
   "Prepare chat buffer state and send TEXT to pi.
-For slash commands: don't display locally, let pi send expanded content.
-For regular text: display locally for responsiveness.
-The /compact command is handled specially by calling `pi-coding-agent-compact'.
+Built-in slash commands are dispatched locally via the dispatch table.
+Other slash commands (extensions, skills, prompts) are sent to pi.
+Regular text is displayed locally for responsiveness, then sent.
 Must be called with chat buffer current.
 Status transitions are handled by pi events (agent_start, agent_end)."
   (cond
-   ;; /compact is handled locally, invoking `pi-coding-agent-compact' directly
-   ((or (string= text "/compact")
-        (string-prefix-p "/compact " text))
-    (let ((args (when (string-prefix-p "/compact " text)
-                  (string-trim (substring text (length "/compact "))))))
-      (pi-coding-agent-compact (and args (not (string-empty-p args)) args))))
+   ;; Built-in slash commands: dispatch locally
+   ((pi-coding-agent--dispatch-builtin-command text))
    ;; Other slash commands: don't display locally, send to pi
    ((string-prefix-p "/" text)
     (pi-coding-agent--send-prompt text))

@@ -872,6 +872,28 @@ Extracted from session_info entries when session is loaded or switched.")
 Each entry is a plist with :name, :description, :source.
 Source is \"prompt\", \"extension\", or \"skill\".")
 
+(defvar pi-coding-agent--builtin-commands
+  '(("compact" :handler pi-coding-agent-compact       :args optional)
+    ("new"     :handler pi-coding-agent-new-session)
+    ("model"   :handler pi-coding-agent-select-model  :args optional)
+    ("session" :handler pi-coding-agent-session-stats)
+    ("name"    :handler pi-coding-agent-set-session-name :args required)
+    ("fork"    :handler pi-coding-agent-fork)
+    ("resume"  :handler pi-coding-agent-resume-session)
+    ("reload"  :handler pi-coding-agent-reload)
+    ("export"  :handler pi-coding-agent-export-html  :args optional)
+    ("copy"    :handler pi-coding-agent-copy-last-message)
+    ("quit"    :handler pi-coding-agent-quit))
+  "Built-in slash commands dispatched client-side.
+Each entry is (NAME . PLIST) where PLIST has:
+  :handler  Function to call (symbol)
+  :args     nil (no args), `optional', or `required'
+
+Commands with :args `optional' pass the trailing text (or nil) to the
+handler.  Commands with :args `required' prompt interactively when no
+argument is given (the handler's `interactive' spec handles this).
+Descriptions come from the handler's docstring.")
+
 (defun pi-coding-agent--set-commands (commands)
   "Set COMMANDS in current buffer and propagate to sibling session buffers.
 COMMANDS is a list of plists with :name, :description, :source.

@@ -2022,7 +2022,32 @@ only offer our own capfs (slash commands, file references, paths)."
     (insert "Some context:\n/te")
     (should-not (pi-coding-agent--command-capf))))
 
+(ert-deftest pi-coding-agent-test-command-capf-includes-builtins ()
+  "Completion includes built-in commands even when RPC returns nothing."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (setq pi-coding-agent--commands nil)
+    (insert "/co")
+    (let ((result (pi-coding-agent--command-capf)))
+      (should result)
+      (should (member "compact" (nth 2 result)))
+      (should (member "new" (nth 2 result)))
+      (should (member "model" (nth 2 result))))))
 
+(ert-deftest pi-coding-agent-test-command-capf-merges-builtins-and-rpc ()
+  "Completion merges built-in and RPC commands without duplicates."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (setq pi-coding-agent--commands '((:name "my-ext" :description "Extension")))
+    (insert "/")
+    (let* ((result (pi-coding-agent--command-capf))
+           (names (nth 2 result)))
+      ;; Has built-in
+      (should (member "compact" names))
+      ;; Has RPC command
+      (should (member "my-ext" names))
+      ;; No duplicates
+      (should (= (length (seq-filter (lambda (n) (equal n "compact")) names)) 1)))))
 
 (ert-deftest pi-coding-agent-test-send-prompt-sends-literal ()
   "pi-coding-agent--send-prompt sends text literally (no expansion).
