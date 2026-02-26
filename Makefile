@@ -18,7 +18,7 @@ SELECTOR ?=
 # Example: make test VERBOSE=1
 VERBOSE ?=
 
-.PHONY: test test-unit test-core test-ui test-render test-input test-menu
+.PHONY: test test-unit test-core test-ui test-render test-input test-menu test-browse
 .PHONY: test-integration test-integration-ci test-gui test-gui-ci test-all
 .PHONY: check check-parens compile lint lint-checkdoc lint-package clean clean-cache help
 .PHONY: ollama-start ollama-stop ollama-status setup-pi setup-models install-hooks
@@ -61,6 +61,8 @@ help:
 		--eval "(unless (package-installed-p 'markdown-mode) \
 		          (package-install 'markdown-mode))" \
 		--eval "(package-install (cadr (assq 'transient package-archive-contents)))" \
+		--eval "(unless (package-installed-p 'magit-section) \
+		          (package-install 'magit-section))" \
 		--eval "(message \"Dependencies installed\")" 2>&1 \
 		| grep -E "^Dependencies installed$$|^Error:" || true
 	@touch $@
@@ -88,6 +90,7 @@ test: .deps-stamp
 		-l pi-coding-agent-render-test \
 		-l pi-coding-agent-input-test \
 		-l pi-coding-agent-menu-test \
+		-l pi-coding-agent-browse-test \
 		-l pi-coding-agent-test \
 		$(if $(SELECTOR),--eval '(ert-run-tests-batch-and-exit "$(SELECTOR)")',-f ert-run-tests-batch-and-exit) \
 		>$$OUTPUT 2>&1; \
@@ -117,6 +120,8 @@ test-input: .deps-stamp
 	@$(BATCH_TEST) -l pi-coding-agent-input-test -f ert-run-tests-batch-and-exit
 test-menu: .deps-stamp
 	@$(BATCH_TEST) -l pi-coding-agent-menu-test -f ert-run-tests-batch-and-exit
+test-browse: .deps-stamp
+	@$(BATCH_TEST) -l pi-coding-agent-browse-test -f ert-run-tests-batch-and-exit
 
 test-unit: compile test
 
@@ -229,7 +234,7 @@ ollama-status:
 
 check-parens:
 	@echo "=== Check Parens ==="
-	@OUTPUT=$$($(BATCH) --eval '(condition-case err (dolist (f (list "pi-coding-agent-core.el" "pi-coding-agent-ui.el" "pi-coding-agent-render.el" "pi-coding-agent-input.el" "pi-coding-agent-menu.el" "pi-coding-agent.el")) (with-current-buffer (find-file-noselect f) (check-parens) (message "%s OK" f))) (user-error (message "FAIL: %s" (error-message-string err)) (kill-emacs 1)))' 2>&1); \
+	@OUTPUT=$$($(BATCH) --eval '(condition-case err (dolist (f (list "pi-coding-agent-core.el" "pi-coding-agent-ui.el" "pi-coding-agent-render.el" "pi-coding-agent-input.el" "pi-coding-agent-menu.el" "pi-coding-agent-browse.el" "pi-coding-agent.el")) (with-current-buffer (find-file-noselect f) (check-parens) (message "%s OK" f))) (user-error (message "FAIL: %s" (error-message-string err)) (kill-emacs 1)))' 2>&1); \
 	echo "$$OUTPUT" | grep -E "OK$$|FAIL:"; \
 	echo "$$OUTPUT" | grep -q "FAIL:" && exit 1 || true
 
@@ -241,7 +246,7 @@ compile: .deps-stamp
 		--eval "(package-initialize)" \
 		$(LOCAL_LOAD_PATH) \
 		--eval "(setq byte-compile-error-on-warn t)" \
-		-f batch-byte-compile pi-coding-agent-core.el pi-coding-agent-ui.el pi-coding-agent-render.el pi-coding-agent-input.el pi-coding-agent-menu.el pi-coding-agent.el
+		-f batch-byte-compile pi-coding-agent-core.el pi-coding-agent-ui.el pi-coding-agent-render.el pi-coding-agent-input.el pi-coding-agent-menu.el pi-coding-agent-browse.el pi-coding-agent.el
 
 lint: lint-checkdoc lint-package
 
@@ -255,6 +260,7 @@ lint-checkdoc:
 		--eval "(checkdoc-file \"pi-coding-agent-render.el\")" \
 		--eval "(checkdoc-file \"pi-coding-agent-input.el\")" \
 		--eval "(checkdoc-file \"pi-coding-agent-menu.el\")" \
+		--eval "(checkdoc-file \"pi-coding-agent-browse.el\")" \
 		--eval "(checkdoc-file \"pi-coding-agent.el\")" 2>&1); \
 	WARNINGS=$$(echo "$$OUTPUT" | grep -A1 "^Warning" | grep -v "^Warning\|^--$$"); \
 	if [ -n "$$WARNINGS" ]; then echo "$$WARNINGS"; exit 1; else echo "OK"; fi
@@ -270,7 +276,7 @@ lint-package:
 		          (package-install 'package-lint))" \
 		--eval "(require 'package-lint)" \
 		--eval "(setq package-lint-main-file \"pi-coding-agent.el\")" \
-		-f package-lint-batch-and-exit pi-coding-agent.el pi-coding-agent-ui.el pi-coding-agent-render.el pi-coding-agent-input.el pi-coding-agent-menu.el pi-coding-agent-core.el
+		-f package-lint-batch-and-exit pi-coding-agent.el pi-coding-agent-ui.el pi-coding-agent-render.el pi-coding-agent-input.el pi-coding-agent-menu.el pi-coding-agent-browse.el pi-coding-agent-core.el
 
 check: compile lint test
 

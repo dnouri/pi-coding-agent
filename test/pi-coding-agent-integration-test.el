@@ -352,13 +352,12 @@ Verifies:
 ;;; Session Name Tests
 
 (ert-deftest pi-coding-agent-integration-session-name-persists-across-resume ()
-  "Session name set via set-session-name persists and appears in resume picker.
+  "Session name set via set-session-name persists in session file.
 Verifies the full flow:
 1. Start session, send a prompt to materialize the session file
 2. Set a session name
 3. Read file and verify session_info entry was written
-4. Call session-metadata and verify name is extracted
-5. Call format-session-choice and verify name appears in display"
+4. Call session-metadata and verify name is extracted"
   (pi-coding-agent-integration-with-process
     ;; Send a prompt to create the session file (it's created lazily)
     (let ((got-agent-end nil))
@@ -404,10 +403,7 @@ Verifies the full flow:
               ;; Verify metadata extraction works
               (let ((metadata (pi-coding-agent--session-metadata session-file)))
                 (should metadata)
-                (should (equal (plist-get metadata :session-name) "Integration Test Session")))
-              ;; Verify format-session-choice uses the name
-              (let ((choice (pi-coding-agent--format-session-choice session-file)))
-                (should (string-match-p "Integration Test Session" (car choice)))))
+                (should (equal (plist-get metadata :session-name) "Integration Test Session"))))
           (kill-buffer chat-buf))))))
 
 ;; Note: "clear session name" test removed - empty string now shows current name

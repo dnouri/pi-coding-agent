@@ -51,6 +51,24 @@
   (let ((result (pi-coding-agent--parse-json-line "{\"msg\":\"Hello 世界 🌍\"}")))
     (should (equal (plist-get result :msg) "Hello 世界 🌍"))))
 
+;;;; Normalize String-or-Null
+
+(ert-deftest pi-coding-agent-test-normalize-string-or-null-string ()
+  "Non-empty string is returned as-is."
+  (should (equal (pi-coding-agent--normalize-string-or-null "hello") "hello")))
+
+(ert-deftest pi-coding-agent-test-normalize-string-or-null-empty ()
+  "Empty string returns nil."
+  (should (null (pi-coding-agent--normalize-string-or-null ""))))
+
+(ert-deftest pi-coding-agent-test-normalize-string-or-null-nil ()
+  "Nil returns nil."
+  (should (null (pi-coding-agent--normalize-string-or-null nil))))
+
+(ert-deftest pi-coding-agent-test-normalize-string-or-null-keyword ()
+  "JSON null keyword returns nil."
+  (should (null (pi-coding-agent--normalize-string-or-null :null))))
+
 ;;;; Line Accumulation Tests
 
 (ert-deftest pi-coding-agent-test-accumulate-complete-line ()
