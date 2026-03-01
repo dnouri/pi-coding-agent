@@ -17,7 +17,7 @@ An Emacs frontend for the [[https://shittycodingagent.ai/][pi coding agent]].
 - Chat history as a markdown buffer: copy, save, search, navigate
 - Fork the conversation at any point in the chat buffer (f)
 - Live streaming output as bash commands and tool operations run
-- Syntax-highlighted code blocks and diffs
+- Tree-sitter-powered markdown rendering and syntax-highlighted code blocks
 - Collapsible tool output with smart preview (expand with TAB)
 - Click the model name or thinking level to change them
 - Rich header line: activity phase, session name, extension status
@@ -26,8 +26,9 @@ An Emacs frontend for the [[https://shittycodingagent.ai/][pi coding agent]].
 
 * Requirements
 
-- Emacs 28.1 or later
+- Emacs 29.1 or later (with tree-sitter support)
 - [[https://pi.dev][pi coding agent]] 0.52.9 or later, installed and in PATH
+- A C compiler (=gcc= or =cc=) for installing tree-sitter grammars
 
 ** Installing pi coding agent
 
@@ -39,13 +40,24 @@ npm install -g @mariozechner/pi-coding-agent
 mise use -g npm:@mariozechner/pi-coding-agent
 #+end_src
 
-** Optional: phscroll for wide tables
+** Tree-sitter grammars
 
-Markdown tables in the chat buffer that exceed the window width normally wrap awkwardly.
-[[https://github.com/misohena/phscroll][phscroll]] enables horizontal scrolling so tables stay readable.
+The chat buffer uses tree-sitter for markdown rendering and syntax
+highlighting of code blocks.  Two *essential* grammars (=markdown=,
+=markdown-inline=) are installed automatically on first session start.
+An additional ~20 grammars for code block languages (Python, JavaScript,
+Rust, etc.) are offered for installation via a one-time prompt.
+
+To install or check grammar status later:
 
 #+begin_src
-M-x package-vc-install RET https://github.com/misohena/phscroll RET
+M-x pi-coding-agent-install-grammars
+#+end_src
+
+Individual grammars can also be installed with the built-in:
+
+#+begin_src
+M-x treesit-install-language-grammar
 #+end_src
 
 * Installation
@@ -228,7 +240,7 @@ Example configuration with =use-package=:
   (pi-coding-agent-context-error-threshold 90)    ; Critical when context exceeds this %
   (pi-coding-agent-visit-file-other-window t)     ; RET opens file in other window (nil for same)
   ;; (pi-coding-agent-copy-raw-markdown t)            ; Keep raw markdown on copy (default: strip hidden markup)
-  ;; (pi-coding-agent-input-markdown-highlighting t)  ; GFM syntax highlighting in input buffer
+  ;; (pi-coding-agent-input-markdown-highlighting t)  ; tree-sitter markdown highlighting in input buffer
   )
 #+end_src
 
@@ -238,8 +250,8 @@ Copying from the chat buffer strips hidden markdown markup by default —
 when pasting into docs, Slack, or other markdown-aware contexts.
 
 The input buffer uses plain =text-mode= by default.  Set
-=pi-coding-agent-input-markdown-highlighting= to =t= for GFM syntax
-highlighting (bold, code spans, fenced blocks) in new sessions.
+=pi-coding-agent-input-markdown-highlighting= to =t= for tree-sitter
+markdown highlighting (bold, code spans, fenced blocks) in new sessions.
 
 * Testing
 
@@ -276,7 +288,8 @@ By default, GUI tests auto-detect whether to show a window or run headless.
 ** CI setup
 
 GitHub Actions runs on every push:
-- =test-unit.yml= - Unit tests across Emacs 28.2, 29.4, and 30.1
+- =test-unit.yml= - Unit tests across Emacs 29.4, 30.1, and snapshot (31)
+- =lint.yml= - Byte-compile, checkdoc, package-lint across Emacs 29.4, 30.1, and snapshot
 - =test-integration.yml= - Integration tests with Docker Ollama
 - =test-gui.yml= - GUI tests with xvfb virtual framebuffer
 

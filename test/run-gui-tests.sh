@@ -61,7 +61,7 @@ cat >> /tmp/run-gui-tests.el << EOF
 (add-to-list 'load-path "$PROJECT_DIR")
 (add-to-list 'load-path "$PROJECT_DIR/test")
 
-;; Initialize packages to find markdown-mode
+;; Initialize packages to find transient
 (require 'package)
 (push '("melpa" . "https://melpa.org/packages/") package-archives)
 (package-initialize)

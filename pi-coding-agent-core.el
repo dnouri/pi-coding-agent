@@ -138,7 +138,7 @@ Uses process property for per-process partial output storage."
          (lines (car result)))
     (process-put proc 'pi-coding-agent-partial-output (cdr result))
     (dolist (line lines)
-      (when-let ((json (pi-coding-agent--parse-json-line line)))
+      (when-let* ((json (pi-coding-agent--parse-json-line line)))
         (pi-coding-agent--dispatch-response proc json)))))
 
 (defun pi-coding-agent--process-sentinel (proc event)
@@ -194,7 +194,7 @@ id-less sole pending request. Non-response JSON is treated as an event."
   "Handle an EVENT from pi PROC.
 Calls only the handler registered for this specific process."
   ;; Call only this process's handler
-  (when-let ((handler (process-get proc 'pi-coding-agent-display-handler)))
+  (when-let* ((handler (process-get proc 'pi-coding-agent-display-handler)))
     (funcall handler event)))
 
 (defun pi-coding-agent--handle-process-exit (proc event)
@@ -388,7 +388,7 @@ Only processes successful responses for state-modifying commands."
   "Extract state plist from a get_state RESPONSE.
 Converts camelCase keys to kebab-case and normalizes booleans.
 Returns plist with :status key for setting `pi-coding-agent--status'."
-  (when-let ((data (plist-get response :data)))
+  (when-let* ((data (plist-get response :data)))
     (let ((is-streaming (pi-coding-agent--normalize-boolean (plist-get data :isStreaming)))
           (is-compacting (pi-coding-agent--normalize-boolean (plist-get data :isCompacting))))
       (list :status (cond (is-streaming 'streaming)

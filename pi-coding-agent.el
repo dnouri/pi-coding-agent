@@ -7,7 +7,7 @@
 ;; URL: https://github.com/dnouri/pi-coding-agent
 ;; Keywords: ai llm ai-pair-programming tools
 ;; Version: 1.3.6
-;; Package-Requires: ((emacs "28.1") (markdown-mode "2.6") (transient "0.9.0"))
+;; Package-Requires: ((emacs "29.1") (transient "0.9.0"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -33,12 +33,9 @@
 ;; with rendered markdown, and a separate prompt composition buffer.
 ;;
 ;; Requirements:
+;;   - Emacs 29.1 or later (tree-sitter support required)
 ;;   - pi coding agent 0.52.9 or later, installed and in PATH
-;;
-;; Optional Dependencies:
-;;   - phscroll: Markdown tables that exceed the window width wrap awkwardly.
-;;     phscroll enables horizontal scrolling so tables stay readable.
-;;     Install from: https://github.com/misohena/phscroll
+;;   - tree-sitter grammars for markdown and markdown-inline
 ;;
 ;; Usage:
 ;;   M-x pi-coding-agent         Start or focus session in current project
@@ -184,19 +181,6 @@ If no session exists, signal an error."
      ;; Session hidden: show it
      (t
       (pi-coding-agent--display-buffers chat-buf input-buf)))))
-
-;;;; Performance Optimizations
-
-;; Limit markdown backward search to prevent O(n) scanning in large buffers.
-;; See `pi-coding-agent-markdown-search-limit' for details.
-(advice-add 'markdown-find-previous-prop :around
-            #'pi-coding-agent--limit-markdown-backward-search)
-
-(defun pi-coding-agent-unload-function ()
-  "Clean up when `pi-coding-agent' is unloaded."
-  (advice-remove 'markdown-find-previous-prop
-                 #'pi-coding-agent--limit-markdown-backward-search)
-  nil)  ;; Return nil to continue standard unloading
 
 (provide 'pi-coding-agent)
 ;;; pi-coding-agent.el ends here

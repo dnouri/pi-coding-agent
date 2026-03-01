@@ -95,7 +95,7 @@ from either chat or input buffer."
 (defun pi-coding-agent-new-session ()
   "Start a new pi session (reset)."
   (interactive)
-  (when-let ((proc (pi-coding-agent--get-process))
+  (when-let* ((proc (pi-coding-agent--get-process))
              (chat-buf (pi-coding-agent--get-chat-buffer)))
     (pi-coding-agent--rpc-async proc '(:type "new_session")
                    (lambda (response)
@@ -249,7 +249,7 @@ Call this when starting a new session to ensure no stale state persists."
 (defun pi-coding-agent--clear-chat-buffer ()
   "Clear the chat buffer and display fresh startup header.
 Used when starting a new session."
-  (when-let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+  (when-let* ((chat-buf (pi-coding-agent--get-chat-buffer)))
     (with-current-buffer chat-buf
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -346,7 +346,7 @@ using the cached session file."
 (defun pi-coding-agent-resume-session ()
   "Resume a previous pi session from the current project."
   (interactive)
-  (when-let ((proc (pi-coding-agent--get-process))
+  (when-let* ((proc (pi-coding-agent--get-process))
              (dir (pi-coding-agent--session-directory)))
     (let ((sessions (pi-coding-agent--list-sessions dir)))
       (if (null sessions)
@@ -486,7 +486,7 @@ Optional INITIAL-INPUT pre-fills the completion prompt for filtering."
 (defun pi-coding-agent-cycle-thinking ()
   "Cycle through thinking levels."
   (interactive)
-  (when-let ((proc (pi-coding-agent--get-process))
+  (when-let* ((proc (pi-coding-agent--get-process))
              (chat-buf (pi-coding-agent--get-chat-buffer)))
     (pi-coding-agent--rpc-async proc '(:type "cycle_thinking_level")
                    (lambda (response)
@@ -522,7 +522,7 @@ Optional INITIAL-INPUT pre-fills the completion prompt for filtering."
 (defun pi-coding-agent-session-stats ()
   "Display session statistics in the echo area."
   (interactive)
-  (when-let ((proc (pi-coding-agent--get-process)))
+  (when-let* ((proc (pi-coding-agent--get-process)))
     (pi-coding-agent--rpc-async proc '(:type "get_session_stats")
                    (lambda (response)
                      (if (plist-get response :success)
@@ -567,7 +567,7 @@ Restores idle state, renders success details, and drains queued follow-ups."
              (plist-get data :summary)
              (current-time)))
         (message "Pi: Compact failed%s"
-                 (if-let ((error-text (plist-get response :error)))
+                 (if-let* ((error-text (plist-get response :error)))
                      (format ": %s" error-text)
                    "")))
       (pi-coding-agent--process-followup-queue))))
@@ -576,7 +576,7 @@ Restores idle state, renders success details, and drains queued follow-ups."
   "Compact conversation context to reduce token usage.
 Optional CUSTOM-INSTRUCTIONS provide guidance for the compaction summary."
   (interactive)
-  (when-let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+  (when-let* ((chat-buf (pi-coding-agent--get-chat-buffer)))
     (let ((proc (pi-coding-agent--get-process)))
       (cond
        ((null proc)
@@ -602,7 +602,7 @@ Optional OUTPUT-PATH specifies where to save; nil uses pi's default."
   (interactive
    (list (let ((path (read-string "Export path (RET for default): ")))
            (and (not (string-empty-p path)) path))))
-  (when-let ((proc (pi-coding-agent--get-process)))
+  (when-let* ((proc (pi-coding-agent--get-process)))
     (pi-coding-agent--rpc-async proc
                    (if output-path
                        (list :type "export_html" :outputPath
@@ -618,7 +618,7 @@ Optional OUTPUT-PATH specifies where to save; nil uses pi's default."
 (defun pi-coding-agent-copy-last-message ()
   "Copy last assistant message to kill ring."
   (interactive)
-  (when-let ((proc (pi-coding-agent--get-process)))
+  (when-let* ((proc (pi-coding-agent--get-process)))
     (pi-coding-agent--rpc-async proc '(:type "get_last_assistant_text")
                    (lambda (response)
                      (if (plist-get response :success)
@@ -689,7 +689,7 @@ INDEX is the display index (1-based) for the message."
   "Fork conversation from a previous user message.
 Shows a selector of user messages and creates a fork from the selected one."
   (interactive)
-  (when-let ((proc (pi-coding-agent--get-process)))
+  (when-let* ((proc (pi-coding-agent--get-process)))
     (pi-coding-agent--rpc-async proc '(:type "get_fork_messages")
                    (lambda (response)
                      (if (plist-get response :success)
@@ -741,7 +741,7 @@ a preview, then forks.  Only works when the session is idle."
             (pi-coding-agent--rpc-async proc '(:type "get_fork_messages")
               (lambda (response)
                 (if (not (plist-get response :success))
-                    (if-let ((error-text (plist-get response :error)))
+                    (if-let* ((error-text (plist-get response :error)))
                         (message "Pi: Failed to get fork messages: %s" error-text)
                       (message "Pi: Failed to get fork messages"))
                   (let ((result (pi-coding-agent--resolve-fork-entry
@@ -813,7 +813,7 @@ MESSAGES is a vector of plists from get_fork_messages."
   "Execute custom command CMD.
 Always prompts for arguments - user can press Enter if none needed.
 Sends the literal /command text to pi, which handles expansion."
-  (when-let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+  (when-let* ((chat-buf (pi-coding-agent--get-chat-buffer)))
     (let* ((name (plist-get cmd :name))
            (args-string (read-string (format "/%s: " name)))
            (full-command (if (string-empty-p args-string)
@@ -871,7 +871,7 @@ Uses commands from pi's `get_commands' RPC."
 (defun pi-coding-agent-refresh-commands ()
   "Refresh commands from pi via RPC."
   (interactive)
-  (if-let ((proc (pi-coding-agent--get-process)))
+  (if-let* ((proc (pi-coding-agent--get-process)))
       (pi-coding-agent--fetch-commands proc
         (lambda (commands)
           (pi-coding-agent--set-commands commands)
@@ -1006,7 +1006,7 @@ Press letter to run, Shift+letter to edit source file."
   [:class transient-column
    :setup-children
    (lambda (_)
-     (when-let ((items (pi-coding-agent--make-submenu-children "prompt")))
+     (when-let* ((items (pi-coding-agent--make-submenu-children "prompt")))
        (transient-parse-suffixes 'pi-coding-agent-templates-menu items)))]
   [:class transient-columns
    :description "Edit"
@@ -1021,7 +1021,7 @@ Press letter to run, Shift+letter to edit source file."
   [:class transient-column
    :setup-children
    (lambda (_)
-     (when-let ((items (pi-coding-agent--make-submenu-children "extension")))
+     (when-let* ((items (pi-coding-agent--make-submenu-children "extension")))
        (transient-parse-suffixes 'pi-coding-agent-extensions-menu items)))]
   [:class transient-columns
    :description "Edit"
@@ -1036,7 +1036,7 @@ Press letter to run, Shift+letter to edit source file."
   [:class transient-column
    :setup-children
    (lambda (_)
-     (when-let ((items (pi-coding-agent--make-submenu-children "skill")))
+     (when-let* ((items (pi-coding-agent--make-submenu-children "skill")))
        (transient-parse-suffixes 'pi-coding-agent-skills-menu items)))]
   [:class transient-columns
    :description "Edit"

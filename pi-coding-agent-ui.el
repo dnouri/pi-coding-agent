@@ -43,7 +43,8 @@
 (require 'pi-coding-agent-core)
 (require 'cl-lib)
 (require 'project)
-(require 'markdown-mode)
+(require 'md-ts-mode)
+(require 'pi-coding-agent-grammars)
 (require 'color)
 
 
@@ -72,17 +73,6 @@
 (declare-function pi-coding-agent-select-model "pi-coding-agent-menu")
 (declare-function pi-coding-agent-cycle-thinking "pi-coding-agent-menu")
 (declare-function pi-coding-agent-fork-at-point "pi-coding-agent-menu")
-
-;; Optional: phscroll for horizontal table scrolling
-(require 'phscroll nil t)
-(declare-function phscroll-mode "phscroll" (&optional arg))
-
-(defcustom pi-coding-agent-phscroll-offer-install t
-  "Whether to offer installing `phscroll' for horizontal table scrolling.
-When non-nil and phscroll is not installed, pi-coding-agent will
-prompt once on first session start.  Set to nil to suppress."
-  :type 'boolean
-  :group 'pi-coding-agent)
 
 ;;;; Customization Group
 
@@ -154,23 +144,11 @@ Prefix arg toggles the behavior."
   :type 'boolean
   :group 'pi-coding-agent)
 
-(defcustom pi-coding-agent-table-horizontal-scroll t
-  "Whether to enable horizontal scrolling for wide tables.
-When non-nil and `phscroll' is available, wide tables scroll
-horizontally instead of wrapping awkwardly.
-
-Requires the `phscroll' package (not on MELPA).
-See URL `https://github.com/misohena/phscroll' for installation.
-
-When phscroll is not available, tables wrap like other content."
-  :type 'boolean
-  :group 'pi-coding-agent)
-
 (defcustom pi-coding-agent-input-markdown-highlighting nil
-  "Whether to enable GFM syntax highlighting in the input buffer.
-When non-nil, the input buffer gets GitHub Flavored Markdown
-highlighting (bold, italic, code spans, fenced blocks).  When nil,
-the input buffer uses plain `text-mode'.
+  "Whether to enable markdown syntax highlighting in the input buffer.
+When non-nil, the input buffer gets tree-sitter markdown highlighting
+\(bold, italic, code spans, fenced blocks).  When nil, the input buffer
+uses plain `text-mode'.
 
 Takes effect for new sessions; existing input buffers keep their mode."
   :type 'boolean
@@ -180,8 +158,8 @@ Takes effect for new sessions; existing input buffers keep their mode."
   "Whether to copy raw markdown from the chat buffer.
 When non-nil, copy commands (`kill-ring-save', `kill-region') preserve
 raw markdown — bold markers (**), backticks, code fences, and setext
-underlines are kept.  Useful for pasting into docs, Slack, or other
-markdown-aware contexts.
+underlines are kept.  Useful for pasting into docs or other markdown-aware
+contexts.
 
 When nil (the default), only the visible text is copied."
   :type 'boolean
@@ -341,18 +319,6 @@ Returns \"text\" for unrecognized extensions to ensure consistent fencing."
       (or (cdr (assoc ext pi-coding-agent--extension-language-alist))
           "text"))))
 
-;;;; Markdown Escape Fix
-
-(defconst pi-coding-agent--markdown-regex-escape
-  "\\(\\\\\\)[]!\"#$%&'()*+,./:;<=>?@[\\\\^_`{|}~-]"
-  "Restricted version of `markdown-regex-escape' for CommonMark §2.4.
-Markdown-mode's regex matches backslash + ANY character and hides
-the backslash when `markdown-hide-markup' is enabled.  This turns
-\"\\n\" into just \"n\", \"\\t\" into just the letter, etc.  CommonMark
-only defines escapes for ASCII punctuation, so we override the regex
-buffer-locally in `pi-coding-agent-chat-mode' to match only valid
-escape targets.")
-
 ;;;; Major Modes
 
 (defvar pi-coding-agent-chat-mode-map
@@ -462,15 +428,20 @@ Returns the position of the heading line start, or nil if not found."
           (when (get-buffer-window) (recenter 0)))
       (message "No previous message"))))
 
+(defconst pi-coding-agent--blockquote-regex
+  "^[ \t]*\\(?1:[A-Z]?>\\)\\(?2:[ \t]*\\)\\(?3:.*\\)$"
+  "Regex matching blockquote lines.
+Group 1: the `>' marker, group 2: whitespace, group 3: content.")
+
 (defconst pi-coding-agent--blockquote-wrap-prefix
-  (propertize "▌ " 'face 'markdown-blockquote-face)
+  (propertize "▌ " 'face 'md-ts-block-quote)
   "String for continuation lines in blockquotes.
-Matches `markdown-blockquote-display-char' with same face.")
+Uses the same face as tree-sitter blockquote highlighting.")
 
 (defun pi-coding-agent--fontify-blockquote-wrap-prefix (last)
   "Add `wrap-prefix' to blockquotes from point to LAST.
 This makes wrapped lines show the blockquote indicator."
-  (when (re-search-forward markdown-regex-blockquote last t)
+  (when (re-search-forward pi-coding-agent--blockquote-regex last t)
     (put-text-property (match-beginning 0) (match-end 0)
                        'wrap-prefix pi-coding-agent--blockquote-wrap-prefix)
     t))
@@ -505,26 +476,21 @@ Otherwise delegates to the default filter."
     (prog1 (pi-coding-agent--visible-text beg end)
       (when delete (delete-region beg end)))))
 
-(define-derived-mode pi-coding-agent-chat-mode gfm-mode "Pi-Chat"
+(define-derived-mode pi-coding-agent-chat-mode md-ts-mode "Pi-Chat"
   "Major mode for displaying pi conversation.
-Derives from `gfm-mode' for syntax highlighting of code blocks.
+Derives from `md-ts-mode' for tree-sitter syntax highlighting.
 This is a read-only buffer showing the conversation history."
   :group 'pi-coding-agent
   (setq-local buffer-read-only t)
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
-  (setq-local markdown-fontify-code-blocks-natively t)
   ;; Hide markdown markup (**, `, ```) for cleaner display
-  (setq-local markdown-hide-markup t)
-  (add-to-invisibility-spec 'markdown-markup)
-  ;; Restrict backslash escapes to CommonMark punctuation only.
-  ;; Without this, \n \t \r etc. lose their backslash in the display.
-  (setq-local markdown-regex-escape pi-coding-agent--markdown-regex-escape)
+  (setq-local md-ts-hide-markup t)
+  (md-ts--set-hide-markup t)
   ;; Strip hidden markup from copy operations (M-w, C-w)
   (setq-local filter-buffer-substring-function
               #'pi-coding-agent--filter-buffer-substring)
   (setq-local pi-coding-agent--tool-args-cache (make-hash-table :test 'equal))
-  (setq-local pi-coding-agent--fontify-buffers (make-hash-table :test 'equal))
   ;; Disable hl-line-mode: its post-command-hook overlay update causes
   ;; scroll oscillation in buffers with invisible text + variable heights.
   (setq-local global-hl-line-mode nil)
@@ -538,11 +504,6 @@ This is a read-only buffer showing the conversation history."
 
   ;; Run after font-lock to undo markdown damage in tool overlays.
   (jit-lock-register #'pi-coding-agent--restore-tool-properties)
-
-  ;; Enable phscroll for horizontal table scrolling, offer install if missing
-  (pi-coding-agent--maybe-install-phscroll)
-  (when (pi-coding-agent--phscroll-available-p)
-    (phscroll-mode 1))
 
   ;; Compute tool-block face from current theme
   (pi-coding-agent--update-tool-block-face)
@@ -581,7 +542,7 @@ removing the instructional header that would otherwise appear."
 Uses project root if available, otherwise `default-directory'.
 Always returns an expanded absolute path (no ~ abbreviation)."
   (expand-file-name
-   (or (when-let ((proj (project-current)))
+   (or (when-let* ((proj (project-current)))
          (project-root proj))
        default-directory)))
 
@@ -814,13 +775,6 @@ Enables dedup guard in tool_execution_start to skip overlay creation
 when the overlay was already created by the streaming event path.
 Set at toolcall_start, consumed and cleared at tool_execution_start.")
 
-(defvar-local pi-coding-agent--fontify-buffers nil
-  "Hash table mapping language strings to fontification cache buffers.
-Each chat buffer tracks its own fontify buffers so parallel sessions
-writing the same language don't corrupt each other's syntax state.
-Initialized in `pi-coding-agent-chat-mode'; cleaned up by
-`pi-coding-agent--kill-fontify-buffers' when the session ends.")
-
 (defvar-local pi-coding-agent--assistant-header-shown nil
   "Non-nil if Assistant header has been shown for current prompt.
 Used to avoid duplicate headers during retry sequences.")
@@ -1020,7 +974,7 @@ selected input window, then the tallest input window."
 
 (defun pi-coding-agent--focus-input-window (chat-buf input-buf)
   "Select a visible INPUT-BUF window for the CHAT-BUF session."
-  (when-let ((win (pi-coding-agent--best-input-window chat-buf input-buf)))
+  (when-let* ((win (pi-coding-agent--best-input-window chat-buf input-buf)))
     (select-window win)))
 
 (defun pi-coding-agent--display-buffers (chat-buf input-buf)
@@ -1098,7 +1052,7 @@ Windows where user scrolled up (point earlier) stay in place."
   "Create a setext-style H1 heading separator with LABEL.
 If TIMESTAMP (Emacs time value) is provided, append it after \" · \".
 Returns a markdown setext heading: label line followed by === underline.
-Fontification is handled by `gfm-mode' (inherits `markdown-header-face-1').
+Fontification is handled by `md-ts-mode'.
 
 Using setext headings enables outline/imenu navigation and keeps our
 turn markers as H1 while LLM ATX headings are leveled down to H2+."
@@ -1160,35 +1114,6 @@ Shows HH:MM if today, otherwise YYYY-MM-DD HH:MM."
         (format-time-string "%H:%M" time)
       (format-time-string "%Y-%m-%d %H:%M" time))))
 
-;;;; Phscroll Availability
-
-(defun pi-coding-agent--phscroll-available-p ()
-  "Return non-nil if phscroll is available and enabled.
-Uses `require' rather than `featurep' so that packages installed
-by lazy package managers (straight.el, elpaca) are found even when
-not yet loaded at the time `pi-coding-agent-ui' was first required."
-  (and pi-coding-agent-table-horizontal-scroll
-       (require 'phscroll nil t)))
-
-(defun pi-coding-agent--maybe-install-phscroll ()
-  "Offer to install phscroll when horizontal scroll is wanted but missing.
-On Emacs 29+, offer to install via `package-vc-install'.
-On Emacs 28, show the URL.  If declined, suppress future prompts
-by saving `pi-coding-agent-phscroll-offer-install' to nil."
-  (when (and pi-coding-agent-table-horizontal-scroll
-             pi-coding-agent-phscroll-offer-install
-             (not (require 'phscroll nil t))
-             (not noninteractive))
-    (if (fboundp 'package-vc-install)
-        (if (y-or-n-p "Install `phscroll' for horizontal table scrolling? ")
-            (progn
-              (package-vc-install "https://github.com/misohena/phscroll")
-              (require 'phscroll))
-          (customize-save-variable 'pi-coding-agent-phscroll-offer-install nil))
-      (message "pi-coding-agent: horizontal table scrolling requires `phscroll': \
-https://github.com/misohena/phscroll")
-      (customize-save-variable 'pi-coding-agent-phscroll-offer-install nil))))
-
 ;;;; Dependency Checking
 
 (defun pi-coding-agent--check-pi ()
@@ -1202,7 +1127,9 @@ Displays warnings for missing dependencies."
   (unless (pi-coding-agent--check-pi)
     (display-warning 'pi (format "%s not found in PATH. Install with: npm install -g @mariozechner/pi-coding-agent"
                                  (car pi-coding-agent-executable))
-                     :error)))
+                     :error))
+  (pi-coding-agent--maybe-install-essential-grammars)
+  (pi-coding-agent--maybe-install-optional-grammars))
 
 ;;;; Startup Header
 
@@ -1455,7 +1382,7 @@ Accesses state from the linked chat buffer."
 
 (defun pi-coding-agent--refresh-header ()
   "Refresh header-line by fetching and caching session stats."
-  (when-let ((proc (pi-coding-agent--get-process))
+  (when-let* ((proc (pi-coding-agent--get-process))
              (chat-buf (pi-coding-agent--get-chat-buffer)))
     (let ((input-buf (buffer-local-value 'pi-coding-agent--input-buffer chat-buf)))
       (pi-coding-agent--rpc-async proc '(:type "get_session_stats")

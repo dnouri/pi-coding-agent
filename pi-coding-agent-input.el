@@ -228,31 +228,19 @@ For backward search: go to current input (nil index)."
 
 ;;;; Input Mode
 
-(defun pi-coding-agent--input-mode-strip-metadata-keywords ()
-  "Remove markdown metadata font-lock keywords from the current buffer.
-Strips YAML, declarative, and pandoc metadata matchers that would
-otherwise highlight lines ending with `:' as metadata keys."
-  (font-lock-remove-keywords nil
-    (cl-remove-if-not
-     (lambda (kw)
-       (and (listp kw) (symbolp (car kw))
-            (string-match-p "metadata" (symbol-name (car kw)))))
-     markdown-mode-font-lock-keywords)))
-
 (define-derived-mode pi-coding-agent-input-mode text-mode "Pi-Input"
   "Major mode for composing pi prompts.
 Defaults to plain `text-mode'.  Set
-`pi-coding-agent-input-markdown-highlighting' to non-nil for GFM
-syntax highlighting while preserving mode identity and keybindings."
+`pi-coding-agent-input-markdown-highlighting' to non-nil for tree-sitter
+markdown highlighting while preserving mode identity and keybindings."
   :group 'pi-coding-agent
   (when pi-coding-agent-input-markdown-highlighting
-    (gfm-mode)
+    (md-ts-mode)
     (setq major-mode 'pi-coding-agent-input-mode)
     (setq mode-name "Pi-Input")
     (use-local-map pi-coding-agent-input-mode-map)
     ;; Users see exactly what they type — never hide markup in input.
-    (setq-local markdown-hide-markup nil)
-    (pi-coding-agent--input-mode-strip-metadata-keywords))
+    (setq-local md-ts-hide-markup nil))
   (setq-local header-line-format '(:eval (pi-coding-agent--header-line-string)))
   ;; Reset inherited completions (text-mode adds ispell, etc.) — our
   ;; input buffer should only offer slash commands, file refs, and paths.
@@ -304,11 +292,11 @@ The /compact command is handled locally; other slash commands sent to pi."
   "Abort the current pi operation.
 Only works when streaming is in progress."
   (interactive)
-  (when-let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+  (when-let* ((chat-buf (pi-coding-agent--get-chat-buffer)))
     (when (eq (buffer-local-value 'pi-coding-agent--status chat-buf) 'streaming)
       (with-current-buffer chat-buf
         (pi-coding-agent--set-aborted t))
-      (when-let ((proc (pi-coding-agent--get-process)))
+      (when-let* ((proc (pi-coding-agent--get-process)))
         (pi-coding-agent--rpc-async proc
                        (list :type "abort")
                        (lambda (_response)
