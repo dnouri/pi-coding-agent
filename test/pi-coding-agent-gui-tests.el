@@ -232,10 +232,10 @@ is properly displayed in the chat buffer."
 ;;;; Streaming Fontification Tests
 
 (ert-deftest pi-coding-agent-gui-test-streaming-no-fences ()
-  "Streaming write content has no fence markers in a GUI buffer.
-Pre-fontification in a temp buffer means no ``` markers to hide.
-Uses a displayed buffer (jit-lock active) to verify the approach
-works in real GUI conditions."
+  "Streaming write content shows no fence markers to the user.
+Fences exist in the buffer for tree-sitter parsing, but
+`md-ts-hide-markup' makes them invisible.  Uses a displayed
+buffer (jit-lock active) to verify under real GUI conditions."
   (let ((buf (get-buffer-create "*pi-gui-fontify-test*")))
     (unwind-protect
         (progn
@@ -254,8 +254,11 @@ works in real GUI conditions."
           (pi-coding-agent-test--send-delta
            "write" '(:path "/tmp/test.py"
                      :content "def hello():\n    return 42\n"))
-          ;; No fence markers in buffer
-          (should-not (string-match-p "```" (buffer-string)))
+          (font-lock-ensure)
+          ;; Fences are in the buffer (for tree-sitter) but invisible
+          (let ((visible (pi-coding-agent--visible-text
+                          (point-min) (point-max))))
+            (should-not (string-match-p "```" visible)))
           ;; Content is present with syntax faces
           (goto-char (point-min))
           (should (search-forward "def" nil t))

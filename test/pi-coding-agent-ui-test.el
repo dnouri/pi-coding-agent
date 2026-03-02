@@ -12,6 +12,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'warnings)  ; ensure display-warning is loaded (not autoloaded)
 (require 'pi-coding-agent)
 (require 'pi-coding-agent-test-common)
 
@@ -93,11 +94,11 @@ This ensures all files get code fences for consistent display."
     (should-not (buffer-local-value 'global-hl-line-mode (current-buffer)))))
 
 (ert-deftest pi-coding-agent-test-input-mode-derives-from-text ()
-  "pi-coding-agent-input-mode derives from text-mode, not gfm-mode by default."
+  "pi-coding-agent-input-mode derives from text-mode, not md-ts-mode by default."
   (with-temp-buffer
     (pi-coding-agent-input-mode)
     (should (derived-mode-p 'text-mode))
-    (should-not (derived-mode-p 'gfm-mode))))
+    (should-not (derived-mode-p 'md-ts-mode))))
 
 (ert-deftest pi-coding-agent-test-input-mode-not-read-only ()
   "pi-coding-agent-input-mode allows editing."
@@ -256,7 +257,6 @@ This ensures all files get code fences for consistent display."
   (let ((callback nil)
         (messages nil)
         (noninteractive nil)
-        (pi-coding-agent-phscroll-offer-install nil)
         (proc (start-process "pi-coding-agent-test-proc" nil "cat")))
     (unwind-protect
         (with-temp-buffer
@@ -281,7 +281,6 @@ This ensures all files get code fences for consistent display."
   (let ((callback nil)
         (messages nil)
         (noninteractive nil)
-        (pi-coding-agent-phscroll-offer-install nil)
         (proc (start-process "pi-coding-agent-test-proc-a" nil "cat")))
     (unwind-protect
         (with-temp-buffer
@@ -338,7 +337,7 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
       (should-not (string-match-p "python" result)))))
 
 (ert-deftest pi-coding-agent-test-visible-text-strips-setext-underline ()
-  "visible-text strips display=\"\" setext underline."
+  "visible-text strips setext underlines (hidden by md-ts-hide-markup)."
   (pi-coding-agent-test--with-chat-markup "Assistant\n=========\n\nHello\n"
     (let ((result (pi-coding-agent--visible-text (point-min) (point-max))))
       (should (string-match-p "Assistant" result))
@@ -346,7 +345,7 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
       (should (string-match-p "Hello" result)))))
 
 (ert-deftest pi-coding-agent-test-visible-text-strips-atx-heading-prefix ()
-  "visible-text strips display=\"\" ATX heading prefix characters."
+  "visible-text strips invisible ATX heading prefix characters."
   (pi-coding-agent-test--with-chat-markup "## Code Example\n\nSome text\n"
     (let ((result (pi-coding-agent--visible-text (point-min) (point-max))))
       (should (string-match-p "Code Example" result))
@@ -608,6 +607,441 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
                (lambda (_type msg &rest _) (setq warning-text msg))))
       (pi-coding-agent--check-dependencies)
       (should (string-match-p "my-custom-pi" warning-text)))))
+
+;;; Essential Grammar Install Prompt (markdown + markdown-inline)
+
+(ert-deftest pi-coding-agent-test-missing-essential-grammars-detected ()
+  "Detect when markdown or markdown-inline grammars are missing."
+  (cl-letf (((symbol-function 'treesit-language-available-p)
+             (lambda (lang &rest _)
+               (not (memq lang '(markdown markdown-inline))))))
+    (should (equal '(markdown markdown-inline)
+                   (pi-coding-agent--missing-essential-grammars)))))
+
+(ert-deftest pi-coding-agent-test-no-missing-essential-grammars ()
+  "Return nil when both essential grammars are installed."
+  (cl-letf (((symbol-function 'treesit-language-available-p)
+             (lambda (_lang &rest _) t)))
+    (should-not (pi-coding-agent--missing-essential-grammars))))
+
+(ert-deftest pi-coding-agent-test-essential-grammars-auto-install ()
+  "Auto-install essential grammars without prompting."
+  (let ((installed-langs nil)
+        (noninteractive nil))
+    (cl-letf (((symbol-function 'treesit-language-available-p)
+               (lambda (lang &rest _)
+                 (not (memq lang '(markdown markdown-inline)))))
+              ((symbol-function 'treesit-install-language-grammar)
+               (lambda (lang &optional _out-dir)
+                 (push lang installed-langs)))
+              ((symbol-function 'message) #'ignore))
+      (pi-coding-agent--maybe-install-essential-grammars)
+      (should (memq 'markdown installed-langs))
+      (should (memq 'markdown-inline installed-langs)))))
+
+(ert-deftest pi-coding-agent-test-essential-grammars-error-without-cc ()
+  "Show clear error when C compiler is not available."
+  (let ((noninteractive nil)
+        (error-message nil))
+    (cl-letf (((symbol-function 'treesit-language-available-p)
+               (lambda (lang &rest _)
+                 (not (memq lang '(markdown markdown-inline)))))
+              ((symbol-function 'treesit-install-language-grammar)
+               (lambda (_lang &optional _out-dir)
+                 (error "Cannot find suitable compiler")))
+              ((symbol-function 'display-warning)
+               (lambda (_type msg &rest _) (setq error-message msg)))
+              ((symbol-function 'message) #'ignore))
+      (pi-coding-agent--maybe-install-essential-grammars)
+      (should (stringp error-message))
+      (should (string-match-p "C compiler" error-message)))))
+
+(ert-deftest pi-coding-agent-test-essential-grammars-no-install-in-batch ()
+  "Never install essential grammars in batch mode."
+  (let ((noninteractive t)
+        (installed nil))
+    (cl-letf (((symbol-function 'treesit-language-available-p)
+               (lambda (lang &rest _)
+                 (not (memq lang '(markdown markdown-inline)))))
+              ((symbol-function 'treesit-install-language-grammar)
+               (lambda (_lang &optional _out-dir)
+                 (setq installed t))))
+      (pi-coding-agent--maybe-install-essential-grammars)
+      (should-not installed))))
+
+;;; Grammar Recipe Validation
+
+(ert-deftest pi-coding-agent-test-grammar-recipes-all-registered ()
+  "All grammar recipes are registered in `treesit-language-source-alist'.
+Catches accidentally dropped or malformed entries."
+  (dolist (recipe pi-coding-agent-grammar-recipes)
+    (let ((lang (car recipe)))
+      (should (assq lang treesit-language-source-alist)))))
+
+(ert-deftest pi-coding-agent-test-grammar-recipes-have-required-fields ()
+  "Every recipe has LANG, URL, and REVISION.  SOURCE-DIR is optional."
+  (dolist (recipe pi-coding-agent-grammar-recipes)
+    (should (symbolp (nth 0 recipe)))      ; LANG
+    (should (stringp (nth 1 recipe)))      ; URL
+    (should (string-prefix-p "https://" (nth 1 recipe)))
+    (should (stringp (nth 2 recipe)))))    ; REVISION
+
+(ert-deftest pi-coding-agent-test-grammar-recipes-source-dir-entries ()
+  "Recipes needing SOURCE-DIR have it set (monorepos with subdirectories)."
+  (let ((ts-recipe (assq 'typescript treesit-language-source-alist))
+        (tsx-recipe (assq 'tsx treesit-language-source-alist))
+        (php-recipe (assq 'php treesit-language-source-alist)))
+    ;; These share repos with other parsers — SOURCE-DIR is required
+    (should (equal (nth 3 ts-recipe) "typescript/src"))
+    (should (equal (nth 3 tsx-recipe) "tsx/src"))
+    (should (equal (nth 3 php-recipe) "php/src"))))
+
+;;; Optional Grammar Install Prompt (embedded languages)
+
+(ert-deftest pi-coding-agent-test-missing-optional-grammars-detected ()
+  "Detect missing optional grammars from recipe list."
+  (cl-letf (((symbol-function 'treesit-language-available-p)
+             (lambda (lang &rest _)
+               (memq lang '(python bash)))))
+    (let ((missing (pi-coding-agent--missing-optional-grammars)))
+      ;; python and bash are installed, rest should be missing
+      (should-not (memq 'python missing))
+      (should-not (memq 'bash missing))
+      (should (memq 'javascript missing))
+      (should (memq 'rust missing)))))
+
+(ert-deftest pi-coding-agent-test-optional-grammars-offer-install ()
+  "Offer to install optional grammars when missing."
+  (let ((pi-coding-agent--grammar-prompt-done nil)
+        (pi-coding-agent-grammar-declined-set nil)
+        (noninteractive nil)
+        (installed-langs nil))
+    (cl-letf (((symbol-function 'treesit-language-available-p)
+               (lambda (lang &rest _)
+                 (memq lang '(markdown markdown-inline python))))
+              ((symbol-function 'y-or-n-p)
+               (lambda (_prompt) t))
+              ((symbol-function 'treesit-install-language-grammar)
+               (lambda (lang &optional _out-dir)
+                 (push lang installed-langs)))
+              ((symbol-function 'message) #'ignore))
+      (pi-coding-agent--maybe-install-optional-grammars)
+      ;; Should have installed some grammars (not python, already present)
+      (should installed-langs)
+      (should-not (memq 'python installed-langs))
+      (should (memq 'javascript installed-langs)))))
+
+(ert-deftest pi-coding-agent-test-optional-grammars-decline-persists ()
+  "Declining optional grammars saves the missing set via customize."
+  (let ((pi-coding-agent--grammar-prompt-done nil)
+        (pi-coding-agent-grammar-declined-set nil)
+        (noninteractive nil)
+        (saved-var nil)
+        (saved-val nil))
+    (cl-letf (((symbol-function 'treesit-language-available-p)
+               (lambda (lang &rest _)
+                 (memq lang '(markdown markdown-inline))))
+              ((symbol-function 'y-or-n-p)
+               (lambda (_prompt) nil))
+              ((symbol-function 'customize-save-variable)
+               (lambda (var val)
+                 (setq saved-var var saved-val val)
+                 (set var val)))
+              ((symbol-function 'message) #'ignore))
+      (pi-coding-agent--maybe-install-optional-grammars)
+      (should (eq saved-var 'pi-coding-agent-grammar-declined-set))
+      ;; Saved the full set of missing grammars
+      (should (memq 'javascript saved-val))
+      (should (memq 'rust saved-val)))))
+
+(ert-deftest pi-coding-agent-test-optional-grammars-no-repeat-in-session ()
+  "No re-prompt after already prompted this session."
+  (let ((pi-coding-agent--grammar-prompt-done t)
+        (pi-coding-agent-grammar-declined-set nil)
+        (noninteractive nil)
+        (prompted nil))
+    (cl-letf (((symbol-function 'treesit-language-available-p)
+               (lambda (lang &rest _)
+                 (memq lang '(markdown markdown-inline))))
+              ((symbol-function 'y-or-n-p)
+               (lambda (_prompt) (setq prompted t))))
+      (pi-coding-agent--maybe-install-optional-grammars)
+      (should-not prompted))))
+
+(ert-deftest pi-coding-agent-test-optional-grammars-no-prompt-when-all-installed ()
+  "No prompt when all optional grammars are already installed."
+  (let ((pi-coding-agent--grammar-prompt-done nil)
+        (pi-coding-agent-grammar-declined-set nil)
+        (noninteractive nil)
+        (prompted nil))
+    (cl-letf (((symbol-function 'treesit-language-available-p)
+               (lambda (_lang &rest _) t))
+              ((symbol-function 'y-or-n-p)
+               (lambda (_prompt) (setq prompted t))))
+      (pi-coding-agent--maybe-install-optional-grammars)
+      (should-not prompted))))
+
+(ert-deftest pi-coding-agent-test-optional-grammars-no-prompt-in-batch ()
+  "Never prompt for optional grammars in batch mode."
+  (let ((pi-coding-agent--grammar-prompt-done nil)
+        (pi-coding-agent-grammar-declined-set nil)
+        (noninteractive t)
+        (prompted nil))
+    (cl-letf (((symbol-function 'treesit-language-available-p)
+               (lambda (lang &rest _)
+                 (memq lang '(markdown markdown-inline))))
+              ((symbol-function 'y-or-n-p)
+               (lambda (_prompt) (setq prompted t))))
+      (pi-coding-agent--maybe-install-optional-grammars)
+      (should-not prompted))))
+
+(ert-deftest pi-coding-agent-test-optional-grammars-cc-failure-reports ()
+  "Report failure with actionable error when compiler is missing."
+  (let ((pi-coding-agent--grammar-prompt-done nil)
+        (pi-coding-agent-grammar-declined-set nil)
+        (noninteractive nil)
+        (install-attempts 0)
+        (warning-text nil))
+    (cl-letf (((symbol-function 'treesit-language-available-p)
+               (lambda (lang &rest _)
+                 (memq lang '(markdown markdown-inline))))
+              ((symbol-function 'y-or-n-p)
+               (lambda (_prompt) t))
+              ((symbol-function 'treesit-install-language-grammar)
+               (lambda (_lang &optional _out-dir)
+                 (cl-incf install-attempts)
+                 (error "Cannot find suitable compiler")))
+              ((symbol-function 'display-warning)
+               (lambda (_type msg &rest _) (setq warning-text msg)))
+              ((symbol-function 'message) #'ignore))
+      (pi-coding-agent--maybe-install-optional-grammars)
+      (should (= install-attempts 1))
+      (should (stringp warning-text))
+      (should (string-match-p "C compiler" warning-text)))))
+
+(ert-deftest pi-coding-agent-test-optional-grammars-prompt-mentions-command ()
+  "The prompt mentions M-x pi-coding-agent-install-grammars."
+  (let ((pi-coding-agent--grammar-prompt-done nil)
+        (pi-coding-agent-grammar-declined-set nil)
+        (noninteractive nil)
+        (prompt-text nil))
+    (cl-letf (((symbol-function 'treesit-language-available-p)
+               (lambda (lang &rest _)
+                 (memq lang '(markdown markdown-inline python))))
+              ((symbol-function 'y-or-n-p)
+               (lambda (prompt) (setq prompt-text prompt) nil))
+              ((symbol-function 'customize-save-variable) #'ignore)
+              ((symbol-function 'message) #'ignore))
+      (pi-coding-agent--maybe-install-optional-grammars)
+      (should (stringp prompt-text))
+      (should (string-match-p "pi-coding-agent-install-grammars" prompt-text)))))
+
+;;; Stickiness: Decline persists, new grammars re-prompt
+
+(ert-deftest pi-coding-agent-test-optional-grammars-decline-suppresses-permanently ()
+  "After declining, same missing set on next startup does NOT re-prompt."
+  (let ((pi-coding-agent--grammar-prompt-done nil)
+        (pi-coding-agent-grammar-declined-set nil)
+        (noninteractive nil)
+        (prompt-count 0))
+    (cl-letf (((symbol-function 'treesit-language-available-p)
+               (lambda (lang &rest _)
+                 (memq lang '(markdown markdown-inline))))
+              ((symbol-function 'y-or-n-p)
+               (lambda (_prompt)
+                 (cl-incf prompt-count)
+                 nil))
+              ((symbol-function 'customize-save-variable)
+               (lambda (var val) (set var val)))
+              ((symbol-function 'message) #'ignore))
+      ;; First session: user declines
+      (pi-coding-agent--maybe-install-optional-grammars)
+      (should (= prompt-count 1))
+      (should pi-coding-agent-grammar-declined-set)
+      ;; Simulate Emacs restart: reset session flag, keep persisted set
+      (setq pi-coding-agent--grammar-prompt-done nil)
+      ;; Second session: same missing grammars — no prompt
+      (pi-coding-agent--maybe-install-optional-grammars)
+      (should (= prompt-count 1)))))
+
+(ert-deftest pi-coding-agent-test-optional-grammars-new-grammar-reprompts ()
+  "Adding a new grammar to recipes re-prompts even after a prior decline.
+Simulates: user declined when javascript/rust were missing, then
+a new grammar (e.g., `zig') appears in the missing set."
+  (let ((pi-coding-agent--grammar-prompt-done nil)
+        ;; Prior decline covered javascript and rust only
+        (pi-coding-agent-grammar-declined-set '(javascript rust))
+        (noninteractive nil)
+        (prompted nil))
+    (cl-letf (((symbol-function 'treesit-language-available-p)
+               (lambda (lang &rest _)
+                 ;; javascript, rust, AND go are all missing
+                 (memq lang '(markdown markdown-inline))))
+              ((symbol-function 'y-or-n-p)
+               (lambda (_prompt) (setq prompted t) nil))
+              ((symbol-function 'customize-save-variable)
+               (lambda (var val) (set var val)))
+              ((symbol-function 'message) #'ignore))
+      ;; `go' is missing but not in declined-set → re-prompt
+      (pi-coding-agent--maybe-install-optional-grammars)
+      (should prompted))))
+
+(ert-deftest pi-coding-agent-test-optional-grammars-accept-does-not-persist ()
+  "Accepting the install offer does not persist a declined set."
+  (let ((pi-coding-agent--grammar-prompt-done nil)
+        (pi-coding-agent-grammar-declined-set nil)
+        (noninteractive nil)
+        (customize-called nil))
+    (cl-letf (((symbol-function 'treesit-language-available-p)
+               (lambda (lang &rest _)
+                 (memq lang '(markdown markdown-inline))))
+              ((symbol-function 'y-or-n-p)
+               (lambda (_prompt) t))
+              ((symbol-function 'treesit-install-language-grammar)
+               (lambda (_lang &optional _out-dir) nil))
+              ((symbol-function 'customize-save-variable)
+               (lambda (&rest _) (setq customize-called t)))
+              ((symbol-function 'message) #'ignore))
+      (pi-coding-agent--maybe-install-optional-grammars)
+      (should-not customize-called)
+      (should-not pi-coding-agent-grammar-declined-set))))
+
+;;; Install Helper: pi-coding-agent--install-grammars
+
+(ert-deftest pi-coding-agent-test-install-grammars-returns-count ()
+  "install-grammars returns number of successfully installed grammars."
+  (cl-letf (((symbol-function 'treesit-install-language-grammar)
+             (lambda (_lang &optional _out-dir) nil))
+            ((symbol-function 'message) #'ignore))
+    (should (= (pi-coding-agent--install-grammars '(python rust go)) 3))))
+
+(ert-deftest pi-coding-agent-test-install-grammars-empty-list ()
+  "install-grammars with empty list returns 0."
+  (should (= (pi-coding-agent--install-grammars '()) 0)))
+
+(ert-deftest pi-coding-agent-test-install-grammars-failure-returns-partial-count ()
+  "install-grammars returns count of grammars installed before failure."
+  (let ((warning-text nil))
+    (cl-letf (((symbol-function 'treesit-install-language-grammar)
+               (lambda (lang &optional _out-dir)
+                 (when (eq lang 'rust)
+                   (error "cc: not found"))))
+              ((symbol-function 'display-warning)
+               (lambda (_type msg &rest _) (setq warning-text msg)))
+              ((symbol-function 'message) #'ignore))
+      ;; python succeeds (idx=1), rust fails (idx=2, returned as 1)
+      (should (= (pi-coding-agent--install-grammars '(python rust go)) 1))
+      (should (string-match-p "rust" warning-text))
+      (should (string-match-p "1/3" warning-text)))))
+
+(ert-deftest pi-coding-agent-test-install-grammars-names-failing-grammar ()
+  "install-grammars warning identifies which grammar failed."
+  (let ((warning-text nil))
+    (cl-letf (((symbol-function 'treesit-install-language-grammar)
+               (lambda (lang &optional _out-dir)
+                 (when (eq lang 'go)
+                   (error "compilation failed"))))
+              ((symbol-function 'display-warning)
+               (lambda (_type msg &rest _) (setq warning-text msg)))
+              ((symbol-function 'message) #'ignore))
+      (pi-coding-agent--install-grammars '(python rust go))
+      (should (string-match-p "`go'" warning-text)))))
+
+;;; Installed Optional Grammars
+
+(ert-deftest pi-coding-agent-test-installed-optional-grammars ()
+  "installed-optional-grammars returns only grammars that are available."
+  (cl-letf (((symbol-function 'treesit-language-available-p)
+             (lambda (lang &rest _)
+               (memq lang '(python rust)))))
+    (let ((installed (pi-coding-agent--installed-optional-grammars)))
+      (should (memq 'python installed))
+      (should (memq 'rust installed))
+      (should-not (memq 'javascript installed)))))
+
+;;; Interactive Command: M-x pi-coding-agent-install-grammars
+
+(ert-deftest pi-coding-agent-test-install-grammars-command-all-installed ()
+  "Interactive command shows message when all grammars are installed."
+  (let ((msg nil))
+    (cl-letf (((symbol-function 'treesit-language-available-p)
+               (lambda (_lang &rest _) t))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args) (setq msg (apply #'format fmt args)))))
+      (pi-coding-agent-install-grammars)
+      (should (string-match-p "installed" msg))
+      (should (string-match-p "✓" msg)))))
+
+(ert-deftest pi-coding-agent-test-install-grammars-command-shows-status-buffer ()
+  "Interactive command creates status buffer listing missing grammars."
+  (cl-letf (((symbol-function 'treesit-language-available-p)
+             (lambda (lang &rest _)
+               (memq lang '(markdown markdown-inline python))))
+            ((symbol-function 'pop-to-buffer)
+             #'ignore))
+    (unwind-protect
+        (progn
+          (pi-coding-agent-install-grammars)
+          (let ((buf (get-buffer "*pi-coding-agent-grammars*")))
+            (should buf)
+            (with-current-buffer buf
+              ;; Has missing grammars listed
+              (should (string-match-p "Missing" (buffer-string)))
+              (should (string-match-p "javascript" (buffer-string)))
+              ;; Has installed grammars listed
+              (should (string-match-p "Installed" (buffer-string)))
+              (should (string-match-p "python" (buffer-string)))
+              ;; Has keybinding hint
+              (should (string-match-p "Press.*i.*to install" (buffer-string)))
+              ;; Is in special-mode (read-only)
+              (should (derived-mode-p 'special-mode)))))
+      (when-let* ((buf (get-buffer "*pi-coding-agent-grammars*")))
+        (kill-buffer buf)))))
+
+(ert-deftest pi-coding-agent-test-install-grammars-command-shows-essential-missing ()
+  "Interactive command highlights missing essential grammars prominently."
+  (cl-letf (((symbol-function 'treesit-language-available-p)
+             (lambda (_lang &rest _) nil))
+            ((symbol-function 'pop-to-buffer)
+             #'ignore))
+    (unwind-protect
+        (progn
+          (pi-coding-agent-install-grammars)
+          (let ((buf (get-buffer "*pi-coding-agent-grammars*")))
+            (should buf)
+            (with-current-buffer buf
+              (should (string-match-p "ESSENTIAL" (buffer-string)))
+              (should (string-match-p "markdown" (buffer-string))))))
+      (when-let* ((buf (get-buffer "*pi-coding-agent-grammars*")))
+        (kill-buffer buf)))))
+
+;;; CI Install Script Smoke Test
+
+(ert-deftest pi-coding-agent-test-ci-install-script-loads ()
+  "The CI grammar install script loads without error.
+Catches wiring bugs like requiring deleted modules."
+  ;; Just load it — if the requires are broken, this errors.
+  ;; We mock the install loop to avoid actually compiling grammars.
+  (cl-letf (((symbol-function 'treesit-language-available-p)
+             (lambda (_lang &rest _) t))
+            ((symbol-function 'message) #'ignore))
+    ;; Tests run from the project root (Makefile sets load-path to ".")
+    (load (expand-file-name "scripts/install-ts-grammars.el") nil t t)))
+
+;;; check-dependencies
+
+(ert-deftest pi-coding-agent-test-check-dependencies-calls-grammar-checks ()
+  "check-dependencies invokes both grammar check functions."
+  (let ((essential-called nil)
+        (optional-called nil))
+    (cl-letf (((symbol-function 'pi-coding-agent--check-pi) (lambda () t))
+              ((symbol-function 'pi-coding-agent--maybe-install-essential-grammars)
+               (lambda () (setq essential-called t)))
+              ((symbol-function 'pi-coding-agent--maybe-install-optional-grammars)
+               (lambda () (setq optional-called t))))
+      (pi-coding-agent--check-dependencies)
+      (should essential-called)
+      (should optional-called))))
 
 (provide 'pi-coding-agent-ui-test)
 ;;; pi-coding-agent-ui-test.el ends here

@@ -1,7 +1,8 @@
 # pi-coding-agent Makefile
 
 EMACS ?= emacs
-BATCH = $(EMACS) --batch -Q -L .
+BATCH = $(EMACS) --batch -Q -L . \
+	--eval "(add-to-list 'treesit-extra-load-path (expand-file-name \"~/.emacs.d/tree-sitter\"))"
 # Keep this checkout first in load-path even after package-initialize.
 LOCAL_LOAD_PATH = --eval "(setq load-path (cons (expand-file-name \".\") load-path))"
 
@@ -58,8 +59,6 @@ help:
 		--eval "(push '(\"melpa\" . \"https://melpa.org/packages/\") package-archives)" \
 		--eval "(package-initialize)" \
 		--eval "(package-refresh-contents)" \
-		--eval "(unless (package-installed-p 'markdown-mode) \
-		          (package-install 'markdown-mode))" \
 		--eval "(package-install (cadr (assq 'transient package-archive-contents)))" \
 		--eval "(message \"Dependencies installed\")" 2>&1 \
 		| grep -E "^Dependencies installed$$|^Error:" || true
