@@ -134,22 +134,6 @@ Automatically cleans up chat and input buffers."
   (ignore-errors (kill-buffer (pi-coding-agent-test--chat-buffer-name dir session)))
   (ignore-errors (kill-buffer (pi-coding-agent-test--input-buffer-name dir session))))
 
-;;;; Two-Session Fixture
-
-(defmacro pi-coding-agent-test--with-two-sessions (buf-a buf-b &rest body)
-  "Execute BODY with two independent chat-mode buffers BUF-A and BUF-B.
-Both buffers are created with `pi-coding-agent-chat-mode' activated.
-Buffers are killed after BODY completes, even on error."
-  (declare (indent 2) (debug (symbolp symbolp body)))
-  `(let ((,buf-a (generate-new-buffer "*test-chat-A*"))
-         (,buf-b (generate-new-buffer "*test-chat-B*")))
-     (with-current-buffer ,buf-a (pi-coding-agent-chat-mode))
-     (with-current-buffer ,buf-b (pi-coding-agent-chat-mode))
-     (unwind-protect
-         (progn ,@body)
-       (ignore-errors (kill-buffer ,buf-a))
-       (ignore-errors (kill-buffer ,buf-b)))))
-
 ;;;; Tree Fixtures
 
 (defun pi-coding-agent-test--build-tree (&rest specs)
@@ -194,16 +178,6 @@ Returns (:tree VECTOR :leafId LAST-ID)."
                     (append node (list :children child-vec)))))
       (list :tree (apply #'vector (mapcar #'build (nreverse roots)))
             :leafId last-id))))
-
-(defun pi-coding-agent-test--make-3turn-tree ()
-  "Return tree data for a 3-turn conversation: u1→a1→u2→a2→u3→a3."
-  (pi-coding-agent-test--build-tree
-   '("u1" nil "message" :role "user" :preview "First question")
-   '("a1" nil "message" :role "assistant" :preview "First answer")
-   '("u2" nil "message" :role "user" :preview "Second question")
-   '("a2" nil "message" :role "assistant" :preview "Second answer")
-   '("u3" nil "message" :role "user" :preview "Third question")
-   '("a3" nil "message" :role "assistant" :preview "Third answer")))
 
 (defun pi-coding-agent-test--make-3turn-fork-messages ()
   "Return get_fork_messages payload for three user turns."

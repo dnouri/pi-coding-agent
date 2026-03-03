@@ -6,7 +6,7 @@ Communicates with the pi CLI via JSON-over-stdio (RPC).
 
 ## Module Architecture
 
-Six source modules with a strict dependency chain (no cycles):
+Eight source modules with a strict dependency chain (no cycles):
 
 ```
 pi-coding-agent.el              ← entry point, autoloads
@@ -14,7 +14,9 @@ pi-coding-agent.el              ← entry point, autoloads
   ├── pi-coding-agent-input.el  ← input buffer, history, completion
   └── pi-coding-agent-render.el ← chat rendering, tool output
         └── pi-coding-agent-ui.el ← shared state, faces, modes
-              └── pi-coding-agent-core.el ← JSON/RPC protocol
+              ├── pi-coding-agent-core.el ← JSON/RPC protocol
+              ├── pi-coding-agent-grammars.el ← tree-sitter grammar recipes
+              └── md-ts-mode.el ← tree-sitter markdown major mode
 ```
 
 `menu.el` and `input.el` are siblings — neither requires the other.
@@ -28,20 +30,22 @@ module, direct `setq` is fine.
 
 | File | Purpose |
 |------|---------|
-| `pi-coding-agent.el` | Entry point, autoloads, `--setup-session`, performance advice |
+| `pi-coding-agent.el` | Entry point, autoloads, `--setup-session` |
 | `pi-coding-agent-core.el` | JSON parsing, line buffering, RPC protocol |
 | `pi-coding-agent-ui.el` | Shared state, faces, customization, modes, display primitives, header-line |
-| `pi-coding-agent-render.el` | Streaming chat rendering, tool output, fontification, diffs, tables |
+| `pi-coding-agent-render.el` | Streaming chat rendering, tool output, fontification, diffs |
 | `pi-coding-agent-input.el` | Input history, isearch, send/abort, file/path/slash completion, queuing |
 | `pi-coding-agent-menu.el` | Transient menu, session management, model selection, commands |
+| `pi-coding-agent-grammars.el` | Tree-sitter grammar recipes, install prompts, `M-x pi-coding-agent-install-grammars` |
+| `md-ts-mode.el` | Tree-sitter markdown major mode (Emacs 29/30/31 compat) |
 
 ## Test Files
 
 | File | Covers |
 |------|--------|
 | `test/pi-coding-agent-core-test.el` | Core/RPC protocol |
-| `test/pi-coding-agent-ui-test.el` | Buffer naming, modes, session dir, startup header |
-| `test/pi-coding-agent-render-test.el` | Response display, tools, diffs, tables, phscroll |
+| `test/pi-coding-agent-ui-test.el` | Buffer naming, modes, session dir, startup header, grammar install |
+| `test/pi-coding-agent-render-test.el` | Response display, tools, diffs |
 | `test/pi-coding-agent-input-test.el` | History, send/abort, queuing, completion |
 | `test/pi-coding-agent-menu-test.el` | Session management, transient menu, reconnect |
 | `test/pi-coding-agent-test.el` | Entry point / cross-module integration |
@@ -55,6 +59,7 @@ module, direct `setq` is fine.
 |------|---------|
 | `Makefile` | Build, test, lint targets |
 | `scripts/check.sh` | Pre-commit hook: byte-compile + lint + tests |
+| `scripts/install-ts-grammars.el` | CI script: install tree-sitter grammars |
 
 ## Running Tests
 
@@ -105,7 +110,7 @@ make check             # byte-compile + lint + all tests (= pre-commit hook)
 
 ## Dependencies
 
-`make test` auto-installs Emacs package deps (markdown-mode, transient) on first
+`make test` auto-installs Emacs package deps (transient) on first
 run and caches via `.deps-stamp`. To force reinstall: `make clean` then `make test`.
 
 ## Pre-commit Hook

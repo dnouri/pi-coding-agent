@@ -20,6 +20,8 @@ jobs:
       # apt emacs has X11 support (purcell/setup-emacs doesn't)
       - name: Install Emacs
         run: sudo apt-get update && sudo apt-get install -y emacs xvfb
+      - name: Install tree-sitter grammars
+        run: emacs --batch -Q -L . -l scripts/install-ts-grammars.el
       
       - uses: actions/setup-node@v4
         with:
