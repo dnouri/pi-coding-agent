@@ -69,6 +69,14 @@
 (declare-function treesit-range-rules "treesit")
 (declare-function treesit-update-ranges "treesit")
 
+;; Emacs 30 widened the signatures of these C functions (added TAG and
+;; LANGUAGE arguments).  Declare the Emacs 30+ arglists so the Emacs
+;; 29 byte-compiler accepts multi-version calls without warnings.
+(declare-function treesit-parser-create "treesit.c"
+  (language &optional buffer no-reuse tag))
+(declare-function treesit-parser-list "treesit.c"
+  (&optional buffer language))
+
 ;; Emacs 29 shims — C-level functions and variables missing before
 ;; Emacs 30.  Defined with md-ts-- prefix; aliased to the real name
 ;; when the native version is absent.
@@ -173,16 +181,14 @@ This is nil on Emacs 31+ where the native versions are used.")
 BUFFER, NO-REUSE, and TAG are passed through.
 On Emacs 29, TAG is silently ignored."
   (if (>= emacs-major-version 30)
-      (with-no-warnings ;; Emacs 29 byte-compiler: 4-arg arity unknown
-        (treesit-parser-create lang buffer no-reuse tag))
+      (treesit-parser-create lang buffer no-reuse tag)
     (treesit-parser-create lang buffer no-reuse)))
 
 (defun md-ts--parser-list (&optional buffer language)
   "Return parsers for BUFFER, optionally filtered by LANGUAGE.
 On Emacs 29, applies the LANGUAGE filter in Lisp."
   (if (>= emacs-major-version 30)
-      (with-no-warnings ;; Emacs 29 byte-compiler: 2-arg arity unknown
-        (treesit-parser-list buffer language))
+      (treesit-parser-list buffer language)
     (let ((all (treesit-parser-list buffer)))
       (if language
           (seq-filter (lambda (p)
@@ -890,8 +896,8 @@ font-lock rule to avoid interfering with embedded language faces."
    :override 'prepend
    '((block_quote) @md-ts-block-quote
      (block_quote_marker) @md-ts--fontify-delimiter
-     (block_quote (block_continuation) @md-ts--fontify-delimiter)
-     (block_quote (paragraph (block_continuation) @md-ts--fontify-delimiter))
+     ((block_continuation) @md-ts--fontify-delimiter
+      (:match "^>" @md-ts--fontify-delimiter))
      (fenced_code_block) @md-ts--fontify-fenced-code-block)
 
    :language 'markdown-inline
