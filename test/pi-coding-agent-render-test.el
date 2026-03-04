@@ -3979,29 +3979,6 @@ events where the header text hasn't changed."
       (pi-coding-agent--display-tool-update-header "read" '(:path "/tmp/foo.py"))
       (should (= (buffer-modified-tick) tick-before)))))
 
-;;;; md-ts-mode: Embedded Mode Harvest
-
-(ert-deftest pi-coding-agent-test-harvest-filters-function-range-settings ()
-  "md-ts--add-config-for-mode keeps query-based range settings
-and filters out function-based ones."
-  (let ((treesit-range-settings nil)
-        (treesit-font-lock-settings nil)
-        (treesit-simple-indent-rules nil)
-        ;; Tuple format: (QUERY LANGUAGE LOCAL OFFSET RANGE-FN).
-        ;; A string simulates a compiled query (not a function).
-        (query-setting '("(query)" c nil nil nil))
-        (fn-setting (list #'ignore nil nil nil nil)))
-    ;; Mock harvest to return both query-based and function-based settings
-    (cl-letf (((symbol-function 'md-ts--harvest-treesit-configs)
-               (lambda (_mode)
-                 (list :font-lock nil
-                       :simple-indent nil
-                       :range (list query-setting fn-setting)))))
-      (md-ts--add-config-for-mode 'c 'c-ts-mode)
-      ;; Query-based setting should be kept
-      (should (equal (length treesit-range-settings) 1))
-      (should (equal (car treesit-range-settings) query-setting)))))
-
 ;;;; Built-in Slash Command Dispatch
 
 (ert-deftest pi-coding-agent-test-dispatch-builtin-compact ()

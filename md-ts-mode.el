@@ -342,6 +342,38 @@ BEG, END, OFFSET, and RANGE-FN are passed through."
                 (md-ts--treesit-query-range
                  parser query beg end offset range-fn)))))
 
+;; WORKAROUND: tree-sitter < 0.25.0 integer underflow in
+;; `length_sub'/`point_sub'.  After an edit outside a local parser's
+;; included range, unsigned subtraction underflows, corrupting point
+;; fields and making incremental reparse silently produce zero query
+;; matches.  Fixed upstream by commit f3d50f27 (ts 0.25.0, 2025-01-31).
+;;
+;; Workaround: replace the parser with a fresh one so
+;; `ts_parser_parse' does a full (non-incremental) reparse.
+;;
+;; REMOVAL: once tree-sitter >= 0.25.0 can be assumed, delete this
+;; function and its two call-sites (in
+;; `md-ts--treesit--update-ranges-local' and
+;; `md-ts--refresh-local-parsers').
+(defun md-ts--recreate-local-parser (ov old-parser)
+  "Delete OLD-PARSER on OV and create a fresh replacement.
+Return the new parser, or nil if creation fails."
+  (let ((lang (treesit-parser-language old-parser))
+        (embed-level
+         (when (fboundp 'treesit-parser-embed-level)
+           (funcall (intern "treesit-parser-embed-level") old-parser))))
+    (treesit-parser-delete old-parser)
+    (let ((new-parser
+           (condition-case nil
+               (md-ts--parser-create lang nil t 'embedded)
+             (treesit-load-language-error nil))))
+      (when new-parser
+        (when embed-level
+          (funcall (intern "treesit-parser-set-embed-level")
+                   new-parser embed-level))
+        (overlay-put ov 'treesit-parser new-parser))
+      new-parser)))
+
 (defun md-ts--treesit--update-ranges-local
     (query embedded-lang modified-tick &optional beg end offset range-fn)
   "Update ranges for local parsers between BEG and END.
@@ -365,11 +397,19 @@ OFFSET, and RANGE-FN control overlay timestamps and range computation."
                                  (parser-lang (treesit-parser-language
                                                embedded-parser)))
                        (when (eq parser-lang lang)
-                         (treesit-parser-set-included-ranges
-                          embedded-parser `((,beg . ,end)))
-                         (move-overlay ov beg end)
-                         (overlay-put ov 'treesit-parser-ov-timestamp
-                                      modified-tick)
+                         (let ((ov-tick (overlay-get
+                                         ov
+                                         'treesit-parser-ov-timestamp)))
+                           (when (not (eql ov-tick modified-tick))
+                             (setq embedded-parser
+                                   (md-ts--recreate-local-parser
+                                    ov embedded-parser))))
+                         (when embedded-parser
+                           (treesit-parser-set-included-ranges
+                            embedded-parser `((,beg . ,end)))
+                           (move-overlay ov beg end)
+                           (overlay-put ov 'treesit-parser-ov-timestamp
+                                        modified-tick))
                          (throw 'done t)))))))
             (when (not has-parser)
               (let ((embedded-parser
@@ -446,6 +486,32 @@ If BEG and END are non-nil, only update ranges in that region."
                    . md-ts--treesit-update-ranges)))
     (fset (car pair) (symbol-function (cdr pair))))
   (setq md-ts--range-shims-installed t))
+
+;; On Emacs 31+ the native `treesit--update-ranges-local' is used
+;; (our shims are not installed), so the workaround from
+;; `md-ts--recreate-local-parser' must be applied via :before advice
+;; on `treesit-update-ranges'.  It must be :before because the native
+;; function stamps overlays with the current tick.
+(unless md-ts--range-shims-installed
+  (defun md-ts--refresh-local-parsers (&optional beg end)
+    "Replace local parsers whose buffer was modified since last update.
+Workaround for tree-sitter < 0.25.0 integer underflow — see
+`md-ts--recreate-local-parser' for details.
+Must run as :before advice on `treesit-update-ranges'."
+    (let ((tick (buffer-chars-modified-tick))
+          (beg (or beg (point-min)))
+          (end (or end (point-max))))
+      (dolist (ov (overlays-in beg end))
+        (when-let* ((old-parser (overlay-get ov 'treesit-parser))
+                    ((treesit-parser-language old-parser))
+                    (ov-tick (overlay-get ov 'treesit-parser-ov-timestamp)))
+          (when (not (eql ov-tick tick))
+            (when-let* ((new-parser
+                         (md-ts--recreate-local-parser ov old-parser)))
+              (treesit-parser-set-included-ranges
+               new-parser `((,(overlay-start ov) . ,(overlay-end ov))))))))))
+  (advice-add 'treesit-update-ranges :before
+              'md-ts--refresh-local-parsers))
 
 ;; Emacs 29 font-lock polyfill — local parser support.
 ;;
