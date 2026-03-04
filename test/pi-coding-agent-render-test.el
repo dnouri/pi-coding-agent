@@ -192,6 +192,29 @@ Models may send \\n\\n before thinking content too."
       (should (equal before (buffer-string)))
       (should (= before-tick (buffer-chars-modified-tick))))))
 
+(ert-deftest pi-coding-agent-test-thinking-incremental-appends-suffix-only ()
+  "Consecutive thinking deltas use the fast path: insert suffix, not full rewrite.
+After the first delta stabilizes, subsequent deltas that extend the
+rendered text should only insert the new suffix.  We verify by placing
+a text property in the existing content — the fast path preserves it
+because it inserts at the end, while a full rewrite would lose it."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-thinking-start)
+    (pi-coding-agent--display-thinking-delta "First thought.")
+    (should pi-coding-agent--thinking-prev-rendered)
+    ;; Place a marker property inside the rendered thinking region
+    (let ((think-start (marker-position pi-coding-agent--thinking-start-marker))
+          (inhibit-read-only t))
+      (put-text-property think-start (1+ think-start) 'test-marker t)
+      ;; Second delta extends the text — fast path should preserve the property
+      (pi-coding-agent--display-thinking-delta " Second thought.")
+      ;; Property should survive (fast path doesn't delete existing region)
+      (should (get-text-property think-start 'test-marker))
+      ;; And the new content appears
+      (should (string-match-p "Second thought" (buffer-string))))))
+
 (ert-deftest pi-coding-agent-test-thinking-paragraph-spacing-no-runaway-blank-lines ()
   "Thinking paragraphs keep a single readable separator, not multiple blanks."
   (with-temp-buffer
@@ -3943,6 +3966,41 @@ This validates that our hook-based tests are meaningful."
         (should hook-called)))))
 
 
+
+;;;; Tool Header Short-Circuit
+
+(ert-deftest pi-coding-agent-test-tool-update-header-skips-when-unchanged ()
+  "display-tool-update-header does not modify buffer when header is unchanged.
+Avoids unnecessary delete+insert cycles on repeated toolcall_delta
+events where the header text hasn't changed."
+  (pi-coding-agent-test--with-toolcall "read" '(:path "/tmp/foo.py")
+    (let ((tick-before (buffer-modified-tick)))
+      ;; Send delta with same args — header should be identical
+      (pi-coding-agent--display-tool-update-header "read" '(:path "/tmp/foo.py"))
+      (should (= (buffer-modified-tick) tick-before)))))
+
+;;;; md-ts-mode: Embedded Mode Harvest
+
+(ert-deftest pi-coding-agent-test-harvest-filters-function-range-settings ()
+  "md-ts--add-config-for-mode keeps query-based range settings
+and filters out function-based ones."
+  (let ((treesit-range-settings nil)
+        (treesit-font-lock-settings nil)
+        (treesit-simple-indent-rules nil)
+        ;; Tuple format: (QUERY LANGUAGE LOCAL OFFSET RANGE-FN).
+        ;; A string simulates a compiled query (not a function).
+        (query-setting '("(query)" c nil nil nil))
+        (fn-setting (list #'ignore nil nil nil nil)))
+    ;; Mock harvest to return both query-based and function-based settings
+    (cl-letf (((symbol-function 'md-ts--harvest-treesit-configs)
+               (lambda (_mode)
+                 (list :font-lock nil
+                       :simple-indent nil
+                       :range (list query-setting fn-setting)))))
+      (md-ts--add-config-for-mode 'c 'c-ts-mode)
+      ;; Query-based setting should be kept
+      (should (equal (length treesit-range-settings) 1))
+      (should (equal (car treesit-range-settings) query-setting)))))
 
 ;;;; Built-in Slash Command Dispatch
 

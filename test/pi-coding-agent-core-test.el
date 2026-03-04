@@ -622,5 +622,22 @@ Mocks `make-process' to capture :command, binding
                   '("npx" "pi") '("-e" "/path/to/ext.ts"))
                  '("npx" "pi" "--mode" "rpc" "-e" "/path/to/ext.ts"))))
 
+;;;; Process Filter Tests
+
+(ert-deftest pi-coding-agent-test-process-filter-inhibits-redisplay ()
+  "Process filter binds `inhibit-redisplay' to t during dispatch.
+This batches N JSON lines delivered in one read() into a single
+redisplay cycle instead of triggering N separate redraws."
+  (let ((captured-inhibit nil)
+        (fake-proc (start-process "cat" nil "cat")))
+    (unwind-protect
+        (progn
+          (process-put fake-proc 'pi-coding-agent-display-handler
+                       (lambda (_e) (setq captured-inhibit inhibit-redisplay)))
+          (pi-coding-agent--process-filter
+           fake-proc "{\"type\":\"agent_start\"}\n")
+          (should (eq captured-inhibit t)))
+      (delete-process fake-proc))))
+
 (provide 'pi-coding-agent-core-test)
 ;;; pi-coding-agent-core-test.el ends here

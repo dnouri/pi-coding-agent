@@ -131,9 +131,9 @@ Returns nil on timeout."
 
 (defun pi-coding-agent--process-filter (proc output)
   "Handle OUTPUT from pi PROC.
-Accumulates output and processes complete JSON lines.
-Uses process property for per-process partial output storage."
-  (let* ((partial (or (process-get proc 'pi-coding-agent-partial-output) ""))
+Accumulates output and dispatches complete JSON lines."
+  (let* ((inhibit-redisplay t)
+         (partial (or (process-get proc 'pi-coding-agent-partial-output) ""))
          (result (pi-coding-agent--accumulate-lines partial output))
          (lines (car result)))
     (process-put proc 'pi-coding-agent-partial-output (cdr result))

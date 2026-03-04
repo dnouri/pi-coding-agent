@@ -217,14 +217,28 @@ Returns non-nil when meaningful content remains after normalization."
            (end (marker-position pi-coding-agent--thinking-marker))
            (normalized (pi-coding-agent--thinking-normalize-text
                         pi-coding-agent--thinking-raw))
-           (rendered (pi-coding-agent--thinking-blockquote-text normalized)))
+           (rendered (pi-coding-agent--thinking-blockquote-text normalized))
+           (prev pi-coding-agent--thinking-prev-rendered))
       (when (<= start end)
-        (let ((existing (buffer-substring-no-properties start end)))
-          (unless (equal existing rendered)
-            (goto-char start)
-            (delete-region start end)
-            (insert rendered)
-            (set-marker pi-coding-agent--thinking-marker (point)))))
+        (cond
+         ;; Fast path: new rendered text extends previous — just append suffix.
+         ((and prev
+               (not (string-empty-p prev))
+               (string-prefix-p prev rendered))
+          (let ((suffix (substring rendered (length prev))))
+            (unless (string-empty-p suffix)
+              (goto-char end)
+              (insert suffix)
+              (set-marker pi-coding-agent--thinking-marker (point)))))
+         ;; Slow path: full rewrite; skip if buffer already matches.
+         (t
+          (let ((existing (buffer-substring-no-properties start end)))
+            (unless (equal existing rendered)
+              (goto-char start)
+              (delete-region start end)
+              (insert rendered)
+              (set-marker pi-coding-agent--thinking-marker (point))))))
+        (setq pi-coding-agent--thinking-prev-rendered rendered))
       (and (<= start end)
            (not (string-empty-p normalized))))))
 
@@ -262,7 +276,8 @@ separated from preceding content."
     (set-marker pi-coding-agent--thinking-start-marker nil))
   (setq pi-coding-agent--thinking-marker nil
         pi-coding-agent--thinking-start-marker nil
-        pi-coding-agent--thinking-raw nil))
+        pi-coding-agent--thinking-raw nil
+        pi-coding-agent--thinking-prev-rendered nil))
 
 (defun pi-coding-agent--display-thinking-start ()
   "Insert opening marker for thinking block (blockquote)."

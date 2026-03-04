@@ -662,6 +662,12 @@ Used to rewrite thinking content in place after whitespace normalization.")
   "Accumulated raw thinking deltas for the current thinking block.
 Normalized and re-rendered incrementally to avoid excess whitespace.")
 
+(defvar-local pi-coding-agent--thinking-prev-rendered nil
+  "Previously rendered blockquote text for the current thinking block.
+Used for incremental rendering: when the new rendered text extends the
+previous text, only the suffix is inserted instead of replacing the
+entire region.  Reset by `pi-coding-agent--reset-thinking-state'.")
+
 (defvar-local pi-coding-agent--line-parse-state 'line-start
   "Parsing state for current line during streaming.
 Values:

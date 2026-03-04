@@ -986,9 +986,13 @@ Return non-nil on success, nil if MODE could not be harvested."
       (setq treesit-simple-indent-rules
             (append treesit-simple-indent-rules
                     (plist-get configs :simple-indent)))
-      (setq treesit-range-settings
-            (append treesit-range-settings
-                    (plist-get configs :range)))
+      ;; Only keep query-based range settings; function-based entries
+      ;; create host-level parsers that re-parse the whole buffer.
+      (let ((safe-ranges (seq-filter
+                          (lambda (s) (not (functionp (nth 0 s))))
+                          (plist-get configs :range))))
+        (setq treesit-range-settings
+              (append treesit-range-settings safe-ranges)))
       (setq-local indent-line-function #'treesit-indent)
       (setq-local indent-region-function #'treesit-indent-region)
       t)))
