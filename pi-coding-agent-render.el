@@ -1726,17 +1726,15 @@ Returns concatenated text from all text blocks."
             (push (plist-get block :text) texts)))))
     (string-join (nreverse texts) "")))
 
-(defun pi-coding-agent--count-tool-calls (message)
-  "Count the number of tool call blocks in assistant MESSAGE."
-  (let* ((content (plist-get message :content))
-         (count 0))
-    (when (vectorp content)
-      (dotimes (i (length content))
-        (let* ((block (aref content i))
-               (block-type (plist-get block :type)))
-          (when (equal block-type "toolCall")
-            (setq count (1+ count))))))
-    count))
+(defun pi-coding-agent--build-tool-result-index (messages)
+  "Build hash-table mapping toolCallId to toolResult message from MESSAGES."
+  (let ((index (make-hash-table :test 'equal)))
+    (when (vectorp messages)
+      (dotimes (i (length messages))
+        (let ((msg (aref messages i)))
+          (when (equal (plist-get msg :role) "toolResult")
+            (puthash (plist-get msg :toolCallId) msg index)))))
+    index))
 
 (defun pi-coding-agent--render-history-text (text)
   "Render TEXT as markdown content with proper isolation.
@@ -1749,56 +1747,65 @@ Ensures markdown structures don't leak to subsequent content."
       ;; Two trailing newlines reset any open markdown list/paragraph context
       (pi-coding-agent--append-to-chat "\n\n"))))
 
+(defun pi-coding-agent--render-history-tool (tool-call result)
+  "Render a single tool from history: TOOL-CALL block with its RESULT.
+TOOL-CALL is a content block plist with :type \"toolCall\", :id, :name,
+and :arguments.  RESULT is the matching toolResult message, or nil."
+  (let ((tool-name (plist-get tool-call :name))
+        (args (plist-get tool-call :arguments)))
+    (pi-coding-agent--display-tool-start tool-name args)
+    (if result
+        (pi-coding-agent--display-tool-end
+         tool-name args
+         (plist-get result :content)
+         (plist-get result :details)
+         (plist-get result :isError))
+      (pi-coding-agent--tool-overlay-finalize 'pi-coding-agent-tool-block)
+      (let ((inhibit-read-only t))
+        (save-excursion (goto-char (point-max)) (insert "\n"))))))
+
 (defun pi-coding-agent--display-history-messages (messages)
-  "Display MESSAGES from session history with smart grouping.
+  "Display MESSAGES from session history with full tool rendering.
 Consecutive assistant messages are grouped under one header.
-Tool calls are accumulated and shown as a single summary per group.
-Each text block is rendered independently for proper formatting."
+Tool calls are rendered with headers, output, overlays, and toggles."
   (let ((prev-role nil)
-        (pending-tool-count 0))
-    (cl-flet ((flush-tools ()
-                (when (> pending-tool-count 0)
-                  (pi-coding-agent--append-to-chat
-                   (concat (propertize (format "[%d tool call%s]"
-                                               pending-tool-count
-                                               (if (= pending-tool-count 1) "" "s"))
-                                       'face 'pi-coding-agent-tool-name)
-                           "\n\n"))
-                  (setq pending-tool-count 0))))
-      (dotimes (i (length messages))
-        (let* ((message (aref messages i))
-               (role (plist-get message :role)))
-          (pcase role
-            ("user"
-             (flush-tools)
-             (let* ((text (pi-coding-agent--extract-message-text message))
-                    (timestamp (pi-coding-agent--ms-to-time (plist-get message :timestamp))))
-               (when (and text (not (string-empty-p text)))
-                 (pi-coding-agent--append-to-chat
-                  (concat "\n" (pi-coding-agent--make-separator "You" timestamp) "\n"
-                          text "\n"))))
-             (setq prev-role "user"))
-            ("assistant"
-             (when (not (equal prev-role "assistant"))
-               (flush-tools)
+        (results (pi-coding-agent--build-tool-result-index messages)))
+    (dotimes (i (length messages))
+      (let* ((message (aref messages i))
+             (role (plist-get message :role)))
+        (pcase role
+          ("user"
+           (let* ((text (pi-coding-agent--extract-message-text message))
+                  (timestamp (pi-coding-agent--ms-to-time (plist-get message :timestamp))))
+             (when (and text (not (string-empty-p text)))
                (pi-coding-agent--append-to-chat
-                (concat "\n" (pi-coding-agent--make-separator "Assistant") "\n")))
-             (let ((text (pi-coding-agent--extract-message-text message))
-                   (tool-count (pi-coding-agent--count-tool-calls message)))
-               (when (and text (not (string-empty-p text)))
-                 (pi-coding-agent--render-history-text text))
-               (setq pending-tool-count (+ pending-tool-count tool-count)))
-             (setq prev-role "assistant"))
-            ("compactionSummary"
-             (flush-tools)
-             (let* ((summary (plist-get message :summary))
-                    (tokens-before (plist-get message :tokensBefore))
-                    (timestamp (pi-coding-agent--ms-to-time (plist-get message :timestamp))))
-               (pi-coding-agent--display-compaction-result tokens-before summary timestamp))
-             (setq prev-role "compactionSummary"))
-            ("toolResult"
-             nil))))
-      (flush-tools))))
+                (concat "\n" (pi-coding-agent--make-separator "You" timestamp) "\n"
+                        text "\n"))))
+           (setq prev-role "user"))
+          ("assistant"
+           (when (not (equal prev-role "assistant"))
+             (pi-coding-agent--append-to-chat
+              (concat "\n" (pi-coding-agent--make-separator "Assistant") "\n")))
+           (let* ((content (plist-get message :content))
+                  (text (pi-coding-agent--extract-message-text message)))
+             (when (and text (not (string-empty-p text)))
+               (pi-coding-agent--render-history-text text))
+             ;; Render each tool call with its result
+             (when (vectorp content)
+               (dotimes (j (length content))
+                 (let ((block (aref content j)))
+                   (when (equal (plist-get block :type) "toolCall")
+                     (pi-coding-agent--render-history-tool
+                      block (gethash (plist-get block :id) results)))))))
+           (setq prev-role "assistant"))
+          ("compactionSummary"
+           (let* ((summary (plist-get message :summary))
+                  (tokens-before (plist-get message :tokensBefore))
+                  (timestamp (pi-coding-agent--ms-to-time (plist-get message :timestamp))))
+             (pi-coding-agent--display-compaction-result tokens-before summary timestamp))
+           (setq prev-role "compactionSummary"))
+          ("toolResult"
+           nil))))))
 
 (defun pi-coding-agent--display-session-history (messages &optional chat-buf)
   "Display session history MESSAGES in the chat buffer.

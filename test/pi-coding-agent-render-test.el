@@ -342,6 +342,131 @@ agent_end + next section's leading newline must not create triple newlines."
 
 ;;; History Display
 
+(ert-deftest pi-coding-agent-test-history-renders-tool-with-output ()
+  "Tool calls in history render with header and output, not just a count."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((messages [(:role "assistant"
+                      :content [(:type "text" :text "Let me check.")
+                                (:type "toolCall" :id "tc1"
+                                 :name "bash"
+                                 :arguments (:command "ls -la"))]
+                      :timestamp 1704067200000)
+                     (:role "toolResult" :toolCallId "tc1"
+                      :toolName "bash"
+                      :content [(:type "text" :text "total 42")]
+                      :isError :json-false
+                      :timestamp 1704067201000)]))
+      (pi-coding-agent--display-history-messages messages))
+    ;; Should show command header and output
+    (should (string-match-p "ls -la" (buffer-string)))
+    (should (string-match-p "total 42" (buffer-string)))
+    ;; Should have a tool block overlay
+    (should (cl-some (lambda (ov) (overlay-get ov 'pi-coding-agent-tool-block))
+                     (overlays-in (point-min) (point-max))))))
+
+(ert-deftest pi-coding-agent-test-history-renders-multiple-tools-in-order ()
+  "Multiple tool calls render with headers and output in order."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((messages [(:role "assistant"
+                      :content [(:type "toolCall" :id "tc1"
+                                 :name "bash"
+                                 :arguments (:command "git status"))
+                                (:type "toolCall" :id "tc2"
+                                 :name "read"
+                                 :arguments (:path "src/main.py"))]
+                      :timestamp 1704067200000)
+                     (:role "toolResult" :toolCallId "tc1"
+                      :toolName "bash"
+                      :content [(:type "text" :text "On branch master")]
+                      :isError :json-false
+                      :timestamp 1704067201000)
+                     (:role "toolResult" :toolCallId "tc2"
+                      :toolName "read"
+                      :content [(:type "text" :text "import sys")]
+                      :isError :json-false
+                      :timestamp 1704067202000)]))
+      (pi-coding-agent--display-history-messages messages))
+    ;; Both headers and outputs present, in order
+    (let ((git-pos (string-match "git status" (buffer-string)))
+          (read-pos (string-match "read src/main" (buffer-string))))
+      (should git-pos)
+      (should read-pos)
+      (should (< git-pos read-pos)))
+    (should (string-match-p "On branch master" (buffer-string)))
+    (should (string-match-p "import sys" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-history-renders-tools-across-assistant-messages ()
+  "Tools from consecutive assistant messages all render fully."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((messages [(:role "assistant"
+                      :content [(:type "toolCall" :id "tc1"
+                                 :name "bash"
+                                 :arguments (:command "pwd"))]
+                      :timestamp 1704067200000)
+                     (:role "toolResult" :toolCallId "tc1"
+                      :toolName "bash"
+                      :content [(:type "text" :text "/home/user")]
+                      :isError :json-false
+                      :timestamp 1704067201000)
+                     (:role "assistant"
+                      :content [(:type "toolCall" :id "tc2"
+                                 :name "read"
+                                 :arguments (:path "foo.el"))]
+                      :timestamp 1704067202000)
+                     (:role "toolResult" :toolCallId "tc2"
+                      :toolName "read"
+                      :content [(:type "text" :text "(defun foo ())")]
+                      :isError :json-false
+                      :timestamp 1704067203000)]))
+      (pi-coding-agent--display-history-messages messages))
+    ;; Both tool headers and outputs should appear
+    (should (string-match-p "pwd" (buffer-string)))
+    (should (string-match-p "/home/user" (buffer-string)))
+    (should (string-match-p "read foo\\.el" (buffer-string)))
+    (should (string-match-p "(defun foo ())" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-history-renders-tool-error ()
+  "Failed tool calls render with error overlay face."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((messages [(:role "assistant"
+                      :content [(:type "toolCall" :id "tc1"
+                                 :name "bash"
+                                 :arguments (:command "false"))]
+                      :timestamp 1704067200000)
+                     (:role "toolResult" :toolCallId "tc1"
+                      :toolName "bash"
+                      :content [(:type "text" :text "exit code 1")]
+                      :isError t
+                      :timestamp 1704067201000)]))
+      (pi-coding-agent--display-history-messages messages))
+    (should (string-match-p "false" (buffer-string)))
+    (should (string-match-p "exit code 1" (buffer-string)))
+    ;; Error overlay face
+    (should (cl-some (lambda (ov) (eq (overlay-get ov 'face)
+                                      'pi-coding-agent-tool-block-error))
+                     (overlays-in (point-min) (point-max))))))
+
+(ert-deftest pi-coding-agent-test-history-renders-tool-without-result ()
+  "Tool calls without a matching result still render the header."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((messages [(:role "assistant"
+                      :content [(:type "toolCall" :id "tc1"
+                                 :name "bash"
+                                 :arguments (:command "sleep 999"))]
+                      :stopReason "aborted"
+                      :timestamp 1704067200000)]))
+      (pi-coding-agent--display-history-messages messages))
+    ;; Header should still appear
+    (should (string-match-p "sleep 999" (buffer-string)))
+    ;; Should have a tool block overlay (finalized without result)
+    (should (cl-some (lambda (ov) (overlay-get ov 'pi-coding-agent-tool-block))
+                     (overlays-in (point-min) (point-max))))))
+
 (ert-deftest pi-coding-agent-test-history-displays-compaction-summary ()
   "Compaction summary messages display with header, tokens, and summary."
   (with-temp-buffer
