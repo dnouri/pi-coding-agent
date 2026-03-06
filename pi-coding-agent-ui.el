@@ -1239,9 +1239,9 @@ Returns nil if CONTEXT-WINDOW is 0."
     (if (null context-tokens)
         (format " ?/%s" (pi-coding-agent--format-tokens-compact context-window))
       (let* ((pct (* (/ (float context-tokens) context-window) 100))
-             ;; Note: %% needed because % has special meaning in header-line-format
-             (pct-str (format " %.1f%%%%/%s" pct
-                              (pi-coding-agent--format-tokens-compact context-window))))
+             (pct-str (pi-coding-agent--header-escape-text
+                       (format " %.1f%%/%s" pct
+                               (pi-coding-agent--format-tokens-compact context-window)))))
         (propertize pct-str
                     'face (cond
                            ((> pct pi-coding-agent-context-error-threshold) 'error)
@@ -1269,13 +1269,17 @@ Returns nil if STATS is nil."
        (format " $%.2f" cost)
        (pi-coding-agent--header-format-context context-tokens context-window)))))
 
+(defun pi-coding-agent--header-escape-text (text)
+  "Escape TEXT for use in `header-line-format'."
+  (replace-regexp-in-string "%" "%%" text t t))
+
 (defun pi-coding-agent--header-format-extension-status (ext-status)
   "Format EXT-STATUS alist for header-line display.
 Returns extension statuses joined with \" · \", or empty string."
   (if (null ext-status)
       ""
     (mapconcat (lambda (pair)
-                 (propertize (cdr pair) 'face 'pi-coding-agent-retry-notice))
+                 (pi-coding-agent--header-escape-text (cdr pair)))
                ext-status
                " · ")))
 
@@ -1310,7 +1314,8 @@ Returns a leading-pipe group string or empty string
 when no extension info exists."
   (let* ((status-str (pi-coding-agent--header-format-extension-status ext-status))
          (working-str (if (and working-message (not (string-empty-p working-message)))
-                          (propertize working-message 'face 'shadow)
+                          (propertize (pi-coding-agent--header-escape-text working-message)
+                                      'face 'shadow)
                         ""))
          (parts nil))
     (unless (string-empty-p status-str)

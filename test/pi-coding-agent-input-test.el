@@ -2214,6 +2214,17 @@ Pi handles command expansion on the server side."
       (should (string-match-p "My Session" header))
       (should (string-match-p "Git: synced · 📖 Skimming…" header)))))
 
+(ert-deftest pi-coding-agent-test-header-extension-group-escapes-percent-signs ()
+  "Extension header text escapes percent signs for header-line display."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--state '(:model (:name "gpt-5.4" :contextWindow 200000))
+          pi-coding-agent--extension-status '(("sub-status:usage" . "5h 4% · Week 3% · degraded"))
+          pi-coding-agent--working-message "refresh 50%")
+    (let ((header (substring-no-properties (pi-coding-agent--header-line-string))))
+      (should (string-match-p "5h 4%% · Week 3%% · degraded" header))
+      (should (string-match-p "refresh 50%%" header)))))
+
 (ert-deftest pi-coding-agent-test-header-session-name-in-context-group ()
   "Context group shows session name when set, collapses when nil."
   (with-temp-buffer

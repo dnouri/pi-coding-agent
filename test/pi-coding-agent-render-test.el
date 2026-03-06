@@ -1182,13 +1182,16 @@ since we don't display them locally. Let pi's message_start handle it."
     (should (null pi-coding-agent--working-message))))
 
 (ert-deftest pi-coding-agent-test-header-format-extension-status ()
-  "Extension status formatter returns inline status text without pipe."
+  "Extension status formatter returns inline neutral status text without pipe."
   ;; Empty status returns empty string
   (should (equal (pi-coding-agent--header-format-extension-status nil) ""))
   ;; Single status
-  (let ((result (pi-coding-agent--header-format-extension-status '(("ext1" . "Processing...")))))
+  (let* ((result (pi-coding-agent--header-format-extension-status '(("ext1" . "Processing..."))))
+         (pos (string-match "Processing" result)))
     (should-not (string-match-p "│" result))
-    (should (string-match-p "Processing" result)))
+    (should (string-match-p "Processing" result))
+    (should pos)
+    (should-not (get-text-property pos 'face result)))
   ;; Multiple statuses joined with separator
   (let ((result (pi-coding-agent--header-format-extension-status
                  '(("ext1" . "Status 1") ("ext2" . "Status 2")))))
