@@ -38,6 +38,33 @@ previous 90s timeout gave only 38%% margin; 180s gives ~177%%.")
   "Format SECONDS as a human-readable duration with millisecond precision."
   (format "%.3fs" (float seconds)))
 
+;;;; Batch Emacs Helpers
+
+(defun pi-coding-agent-test--read-batch-emacs-result (expression)
+  "Evaluate EXPRESSION in a fresh batch Emacs and read its printed result.
+Initializes packages, then re-prepends the current project root to
+`load-path' so the checkout under test wins over any installed copy."
+  (let* ((emacs (expand-file-name invocation-name invocation-directory))
+         (repo-root (file-name-directory (locate-library "pi-coding-agent")))
+         (output-buffer (generate-new-buffer " *pi-coding-agent-batch-emacs*"))
+         (exit-code (call-process emacs nil output-buffer nil
+                                  "--batch" "-Q" "-L" repo-root
+                                  "--eval" "(require 'package)"
+                                  "--eval" "(package-initialize)"
+                                  "--eval" "(setq load-prefer-newer t)"
+                                  "--eval"
+                                  (format "(setq load-path (cons %S load-path))"
+                                          repo-root)
+                                  "--eval" expression)))
+    (unwind-protect
+        (progn
+          (unless (eq 0 exit-code)
+            (error "Batch Emacs exited with %s" exit-code))
+          (with-current-buffer output-buffer
+            (goto-char (point-min))
+            (read (current-buffer))))
+      (kill-buffer output-buffer))))
+
 ;;;; Waiting Helpers
 
 (defun pi-coding-agent-test-wait-until (predicate &optional timeout poll-interval process)

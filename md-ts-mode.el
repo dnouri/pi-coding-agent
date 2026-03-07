@@ -1242,20 +1242,15 @@ VALUE non-nil hides markup, nil shows it."
 
 ;;;###autoload
 (defun md-ts-mode-maybe ()
-  "Enable `md-ts-mode' when its grammar is available."
+  "Enable `md-ts-mode' when its grammar is available.
+This helper is for explicit user configuration; loading the bundled
+mode does not register global Markdown file associations or remaps."
   (declare-function treesit-language-available-p "treesit.c")
   (if (or (treesit-language-available-p 'markdown)
           (eq treesit-enabled-modes t)
           (memq 'md-ts-mode treesit-enabled-modes))
       (md-ts-mode)
     (fundamental-mode)))
-
-;;;###autoload
-(add-to-list 'auto-mode-alist '("\\.md\\'" . md-ts-mode-maybe))
-;;;###autoload
-(when (boundp 'treesit-major-mode-remap-alist)
-  (add-to-list 'treesit-major-mode-remap-alist
-               '(markdown-mode . md-ts-mode)))
 
 (provide 'md-ts-mode)
 ;;; md-ts-mode.el ends here
