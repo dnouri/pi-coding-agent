@@ -1,0 +1,25 @@
+{
+  "description": "Extension confirm flow with scenario-owned timeout data.",
+  "commands": [
+    {
+      "name": "test-confirm",
+      "description": "Trigger fake extension confirm",
+      "source": "extension",
+      "path": "test-extension.ts"
+    }
+  ],
+  "prompt": {
+    "type": "extension_dialog",
+    "command_name": "/test-confirm",
+    "method": "confirm",
+    "title": "Spike Confirm",
+    "message": "Approve fake extension flow?",
+    "timeout_ms": 100,
+    "response_messages": {
+      "confirmed": "CONFIRMED",
+      "declined": "CANCELLED",
+      "cancelled": "CANCELLED",
+      "timeout": "TIMED OUT"
+    }
+  }
+}

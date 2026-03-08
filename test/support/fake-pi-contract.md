@@ -22,6 +22,7 @@ special fake-only branch.
 - Harness executable: `test/support/fake_pi.py`
 - Harness contract note: `test/support/fake-pi-contract.md`
 - Scenario fixtures / transcripts: `test/fixtures/fake-pi/`
+- Scenario fixture format notes: `test/fixtures/fake-pi/README.md`
 - One-off experiments: `tmp/`
 
 The harness should speak strict JSONL on the wire while using a simpler,

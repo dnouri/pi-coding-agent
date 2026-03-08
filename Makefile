@@ -83,6 +83,7 @@ test: .deps-stamp
 		-l pi-coding-agent-input-test \
 		-l pi-coding-agent-menu-test \
 		-l pi-coding-agent-build-test \
+		-l pi-coding-agent-fake-pi-test \
 		-l pi-coding-agent-test \
 		$(if $(SELECTOR),--eval '(ert-run-tests-batch-and-exit "$(SELECTOR)")',-f ert-run-tests-batch-and-exit) \
 		>$$OUTPUT 2>&1; \

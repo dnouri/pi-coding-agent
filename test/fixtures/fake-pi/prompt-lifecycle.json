@@ -1,0 +1,12 @@
+{
+  "description": "Abortable prompt lifecycle with streamed text chunks and steer support.",
+  "commands": [],
+  "prompt": {
+    "type": "text_stream",
+    "assistant_text": "Fake reply for: {message}",
+    "steer_assistant_text": "Steered fake reply for: {message}",
+    "chunk_count": 6,
+    "delay_ms": 30,
+    "echo_user": true
+  }
+}

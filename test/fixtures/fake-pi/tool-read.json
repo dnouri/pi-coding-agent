@@ -1,0 +1,16 @@
+{
+  "description": "Tool execution flow for deterministic rendering tests.",
+  "commands": [],
+  "prompt": {
+    "type": "tool_stream",
+    "tool_name": "read",
+    "tool_args": {
+      "path": "/tmp/fake-tool.txt"
+    },
+    "partial_result_text": "fake tool output\n",
+    "result_text": "fake tool output\nmore output\n",
+    "assistant_text": "Tool finished",
+    "delay_ms": 30,
+    "echo_user": true
+  }
+}
