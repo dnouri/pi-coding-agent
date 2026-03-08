@@ -231,6 +231,11 @@ Required response shape:
 - matching request `id`
 - one of `confirmed`, `value`, or `cancelled`
 
+Timeouts for dialog requests should be explicit scenario data, not hidden magic
+constants in the harness. Fast defaults are good for automated tests, but the
+manual-debugging path should be able to extend or disable those timeouts from
+the CLI so a human can inspect the UI before responding.
+
 ## Real session-file minimum
 
 The fake must create real temporary files, not invented paths. The minimum
