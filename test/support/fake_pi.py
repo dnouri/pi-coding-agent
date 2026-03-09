@@ -13,7 +13,7 @@ Manual usage examples:
     ./test/support/fake_pi.py --scenario extension-confirm \
         --extension-timeout-ms 10000 --log-file /tmp/fake-pi.log
 
-Scenario files live in ``test/fixtures/fake-pi/`` and currently support two
+Scenario files live in ``test/fixtures/fake-pi/`` and currently support four
 prompt behaviors:
 
 ``text_stream``
@@ -25,6 +25,14 @@ prompt behaviors:
     ``extension_ui_response``.  The timeout is scenario data and can be
     overridden (or disabled with ``--extension-timeout-ms 0``) for manual tmux
     debugging.
+
+``custom_message``
+    A slash command that optionally emits one visible custom message without a
+    full assistant turn.
+
+``tool_stream``
+    Emits the streamed tool-call and tool-execution event surface, then ends
+    with optional assistant text.
 """
 
 from __future__ import annotations
@@ -96,6 +104,15 @@ class ExtensionDialogPrompt:
 
 
 @dataclass(frozen=True)
+class CustomMessagePrompt:
+    """Scenario data for a slash command that may emit one custom message."""
+
+    type: Literal["custom_message"]
+    command_name: str
+    message_text: str | None = None
+
+
+@dataclass(frozen=True)
 class ToolStreamPrompt:
     """Scenario data for a streamed tool execution flow."""
 
@@ -109,7 +126,9 @@ class ToolStreamPrompt:
     echo_user: bool = True
 
 
-PromptBehavior = TextStreamPrompt | ExtensionDialogPrompt | ToolStreamPrompt
+PromptBehavior = (
+    TextStreamPrompt | ExtensionDialogPrompt | CustomMessagePrompt | ToolStreamPrompt
+)
 
 
 @dataclass(frozen=True)
@@ -237,6 +256,12 @@ def load_scenario(path: Path, name: str) -> Scenario:
                 else None
             ),
             response_messages=dict(prompt_data.get("response_messages", {})),
+        )
+    elif prompt_type == "custom_message":
+        prompt = CustomMessagePrompt(
+            type="custom_message",
+            command_name=prompt_data["command_name"],
+            message_text=prompt_data.get("message_text"),
         )
     elif prompt_type == "tool_stream":
         prompt = ToolStreamPrompt(
@@ -372,6 +397,15 @@ class FakePiHarness:
                     name=f"fake-pi-dialog-{self.scenario.name}",
                     target=lambda: self._run_extension_dialog(message, behavior),
                 )
+            case CustomMessagePrompt() as behavior:
+                if message != behavior.command_name:
+                    self._fail(
+                        command,
+                        f"Scenario {self.scenario.name} only supports {behavior.command_name}",
+                    )
+                    return
+                self._respond(command)
+                self._run_custom_message_prompt(message, behavior)
             case ToolStreamPrompt() as behavior:
                 self._respond(command)
                 self._start_run(
@@ -526,6 +560,22 @@ class FakePiHarness:
         self._write_json({"type": "message_start", "message": followup})
         self._write_json({"type": "message_end", "message": followup})
         self._finish_run([followup])
+
+    def _run_custom_message_prompt(
+        self,
+        command_text: str,
+        behavior: CustomMessagePrompt,
+    ) -> None:
+        """Run a slash command that may emit one visible custom message."""
+        self._persist_user_message(self._build_user_message(command_text))
+        if not behavior.message_text:
+            return
+        followup = self._build_custom_message(
+            behavior.message_text.format(message=command_text)
+        )
+        self._persist_custom_message(followup)
+        self._write_json({"type": "message_start", "message": followup})
+        self._write_json({"type": "message_end", "message": followup})
 
     def _run_tool_prompt(self, message: str, behavior: ToolStreamPrompt) -> None:
         """Run a prompt that emits tool-call and tool-execution events."""

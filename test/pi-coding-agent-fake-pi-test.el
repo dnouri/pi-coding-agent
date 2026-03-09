@@ -228,6 +228,36 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
           0.01
           (plist-get session :process)))))))
 
+(ert-deftest pi-coding-agent-fake-pi-test-custom-message-command-emits-visible-message ()
+  "A custom-message command emits visible custom message events."
+  (pi-coding-agent-fake-pi-test-with-process (proc "extension-message")
+    (pi-coding-agent-fake-pi-test--send proc '(:type "prompt" :message "/test-message"))
+    (let ((response (pi-coding-agent-fake-pi-test--pop-object proc)))
+      (should (eq (plist-get response :success) t))
+      (should (equal (plist-get response :command) "prompt")))
+    (let* ((start (pi-coding-agent-fake-pi-test--pop-object proc))
+           (message (plist-get start :message)))
+      (should (equal (plist-get start :type) "message_start"))
+      (should (equal (plist-get message :role) "custom"))
+      (should (eq (plist-get message :display) t))
+      (should (equal (plist-get message :content) "Test message from extension")))
+    (let* ((end (pi-coding-agent-fake-pi-test--pop-object proc))
+           (message (plist-get end :message)))
+      (should (equal (plist-get end :type) "message_end"))
+      (should (equal (plist-get message :role) "custom")))))
+
+(ert-deftest pi-coding-agent-fake-pi-test-custom-noop-command-skips-message-events ()
+  "A no-op custom-message command returns without emitting display events."
+  (pi-coding-agent-fake-pi-test-with-process (proc "extension-noop")
+    (pi-coding-agent-fake-pi-test--send proc '(:type "prompt" :message "/test-noop"))
+    (let ((response (pi-coding-agent-fake-pi-test--pop-object proc)))
+      (should (eq (plist-get response :success) t))
+      (should (equal (plist-get response :command) "prompt")))
+    (pi-coding-agent-fake-pi-test--send proc '(:type "get_state"))
+    (let ((response (pi-coding-agent-fake-pi-test--pop-object proc)))
+      (should (equal (plist-get response :command) "get_state"))
+      (should (eq (plist-get response :success) t)))))
+
 (ert-deftest pi-coding-agent-fake-pi-test-prompt-response-precedes-stream-events ()
   "prompt returns success first, then streams lifecycle events."
   (pi-coding-agent-fake-pi-test-with-process (proc "prompt-lifecycle")

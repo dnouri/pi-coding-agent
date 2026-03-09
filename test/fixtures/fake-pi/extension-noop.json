@@ -1,0 +1,15 @@
+{
+  "description": "Extension-like slash command that returns immediately without display events.",
+  "commands": [
+    {
+      "name": "test-noop",
+      "description": "Trigger fake no-op extension command",
+      "source": "extension",
+      "path": "test-extension.ts"
+    }
+  ],
+  "prompt": {
+    "type": "custom_message",
+    "command_name": "/test-noop"
+  }
+}

@@ -59,6 +59,24 @@ Example:
 }
 ```
 
+## `custom_message`
+
+A slash-command scenario that optionally emits one visible custom message
+without a full assistant turn.  This is useful for extension-like commands
+such as `/test-message` or `/test-noop`.
+
+Example:
+
+```json
+{
+  "prompt": {
+    "type": "custom_message",
+    "command_name": "/test-message",
+    "message_text": "Test message from extension"
+  }
+}
+```
+
 ## `tool_stream`
 
 Emits `toolcall_start`, `toolcall_delta`, `tool_execution_start`,

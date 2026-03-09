@@ -1,0 +1,16 @@
+{
+  "description": "Extension-like slash command that emits one visible custom message.",
+  "commands": [
+    {
+      "name": "test-message",
+      "description": "Trigger fake custom extension message",
+      "source": "extension",
+      "path": "test-extension.ts"
+    }
+  ],
+  "prompt": {
+    "type": "custom_message",
+    "command_name": "/test-message",
+    "message_text": "Test message from extension"
+  }
+}

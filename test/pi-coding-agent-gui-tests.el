@@ -6,11 +6,15 @@
 ;; Run with: make test-gui
 ;;
 ;; These tests focus on behavior that CANNOT be tested with unit tests:
-;; - Real window scrolling during LLM streaming
-;; - Auto-scroll vs scroll-preservation with actual content
-;; - Tool invocation end-to-end
+;; - Real window scrolling during streamed updates in a displayed buffer
+;; - Auto-scroll vs scroll-preservation with deterministic fake scenarios
+;; - Tool-block overlays and extension UI behavior through the subprocess seam
 ;;
-;; Many behaviors (history, spacing, kill-buffer) are covered by unit tests.
+;; Many behaviors (history, spacing, and linked-buffer teardown) are covered
+;; more directly by unit tests.
+;;
+;; For quick fake-backed debugging with a visible window:
+;;   ./test/run-gui-tests.sh pi-coding-agent-gui-test-scroll-auto-when-at-end
 
 ;;; Code:
 
@@ -21,8 +25,9 @@
 ;;;; Session Tests
 
 (ert-deftest pi-coding-agent-gui-test-session-starts ()
-  "Test that pi session starts with proper layout."
-  (pi-coding-agent-gui-test-with-session
+  "Test that a fake-backed pi session starts with proper layout."
+  (pi-coding-agent-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "prompt-lifecycle")
     (should (pi-coding-agent-gui-test-session-active-p))
     (should (pi-coding-agent-gui-test-chat-window))
     (should (pi-coding-agent-gui-test-input-window))
@@ -31,203 +36,102 @@
 ;;;; Scroll Preservation Tests
 
 (ert-deftest pi-coding-agent-gui-test-scroll-preserved-streaming ()
-  "Test scroll position preserved during streaming response."
-  (pi-coding-agent-gui-test-with-session
+  "Test scroll position is preserved while a fake stream updates below."
+  (pi-coding-agent-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "scrolling-text")
+    (pi-coding-agent-gui-test-send "first turn")
+    (pi-coding-agent-gui-test-scroll-up 20)
+    (should-not (pi-coding-agent-gui-test-at-end-p))
+    (let ((line-before (pi-coding-agent-gui-test-top-line-number)))
+      (should (> line-before 1))
+      (pi-coding-agent-gui-test-send "second turn")
+      (should (= line-before (pi-coding-agent-gui-test-top-line-number)))
+      (should (pi-coding-agent-gui-test-chat-contains "Scroll line 24 for second turn")))))
+
+(ert-deftest pi-coding-agent-gui-test-scroll-preserved-tool-use ()
+  "Test scroll position is preserved while fake tool output arrives."
+  (pi-coding-agent-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "tool-read")
     (pi-coding-agent-gui-test-ensure-scrollable)
     (pi-coding-agent-gui-test-scroll-up 20)
     (should-not (pi-coding-agent-gui-test-at-end-p))
     (let ((line-before (pi-coding-agent-gui-test-top-line-number)))
       (should (> line-before 1))
-      (pi-coding-agent-gui-test-send "Say: ok")
-      (should (= line-before (pi-coding-agent-gui-test-top-line-number))))))
-
-(ert-deftest pi-coding-agent-gui-test-scroll-preserved-tool-use ()
-  "Test scroll position preserved when pi uses tools."
-  (pi-coding-agent-gui-test-with-session
-    (pi-coding-agent-gui-test-ensure-scrollable)
-    (let ((test-file (pi-coding-agent-gui-test-create-temp-file "test.txt" "Hi\n")))
-      (unwind-protect
-          (progn
-            (pi-coding-agent-gui-test-scroll-up 20)
-            (should-not (pi-coding-agent-gui-test-at-end-p))
-            (let ((line-before (pi-coding-agent-gui-test-top-line-number)))
-              (should (> line-before 1))
-              ;; Send without waiting for idle — model may re-call read (~2%)
-              (pi-coding-agent-gui-test-send
-               (format "Read the file %s" test-file) t)
-              ;; Wait for tool output, then check scroll preserved
-              (should
-               (pi-coding-agent-test-wait-until
-                (lambda () (pi-coding-agent-gui-test-chat-matches "^read "))
-                pi-coding-agent-test-gui-timeout
-                pi-coding-agent-test-poll-interval
-                (plist-get pi-coding-agent-gui-test--session :process)))
-              (should (= line-before (pi-coding-agent-gui-test-top-line-number)))))
-        (pi-coding-agent-gui-test-delete-temp-file test-file)))))
+      (pi-coding-agent-gui-test-send "Use the fake read tool")
+      (should (= line-before (pi-coding-agent-gui-test-top-line-number)))
+      (should (pi-coding-agent-gui-test-chat-contains "fake tool output")))))
 
 (ert-deftest pi-coding-agent-gui-test-scroll-auto-when-at-end ()
-  "Test auto-scroll when user is at end of buffer.
-Also verifies window-point stayed at end across previous tests (shared session).
-Regression: display-agent-end was leaving window-point behind point-max,
-breaking auto-scroll for subsequent turns."
-  (pi-coding-agent-gui-test-with-session
-    ;; After previous tests, window-point should still be at end (following)
-    ;; This catches the regression where display-agent-end left point behind
-    (should (pi-coding-agent-gui-test-window-point-at-end-p))
-    ;; Explicitly scroll to end (main test purpose) and verify auto-scroll works
-    (pi-coding-agent-gui-test-scroll-to-end)
-    (should (pi-coding-agent-gui-test-at-end-p))
-    (pi-coding-agent-gui-test-send "Say: ok")
-    (should (pi-coding-agent-gui-test-at-end-p))))
-
-;;;; Window Management Tests
-
-(ert-deftest pi-coding-agent-gui-test-window-both-visible ()
-  "Test both chat and input windows are visible."
-  (pi-coding-agent-gui-test-with-session
-    (should (pi-coding-agent-gui-test-chat-window))
-    (should (pi-coding-agent-gui-test-input-window))
-    (should (window-live-p (pi-coding-agent-gui-test-chat-window)))
-    (should (window-live-p (pi-coding-agent-gui-test-input-window)))))
-
-(ert-deftest pi-coding-agent-gui-test-window-kill-both ()
-  "Test killing chat buffer also kills input buffer."
+  "Test auto-scroll when user is at end across deterministic fake turns.
+Regression: `pi-coding-agent--display-agent-end' must leave window-point at
+buffer end so the next streamed turn still follows automatically."
   (pi-coding-agent-gui-test-with-fresh-session
-    (let ((chat-buf (plist-get pi-coding-agent-gui-test--session :chat-buffer))
-          (input-buf (plist-get pi-coding-agent-gui-test--session :input-buffer)))
-      (should (buffer-live-p chat-buf))
-      (should (buffer-live-p input-buf))
-      (kill-buffer chat-buf)
-      (should-not (buffer-live-p chat-buf))
-      (should-not (buffer-live-p input-buf)))))
+    (:backend fake :fake-scenario "scrolling-text")
+    (pi-coding-agent-gui-test-send "first turn")
+    (should (pi-coding-agent-gui-test-window-point-at-end-p))
+    (should (pi-coding-agent-gui-test-at-end-p))
+    (pi-coding-agent-gui-test-send "second turn")
+    (should (pi-coding-agent-gui-test-window-point-at-end-p))
+    (should (pi-coding-agent-gui-test-at-end-p))
+    (should (pi-coding-agent-gui-test-chat-contains "Scroll line 24 for second turn"))))
 
 ;;;; Content Tests
 
 (ert-deftest pi-coding-agent-gui-test-content-tool-output-shown ()
-  "Test that tool output appears in chat."
-  (pi-coding-agent-gui-test-with-session
-    (let ((test-file (pi-coding-agent-gui-test-create-temp-file "tool-test.txt" "XYZ123\n")))
-      (unwind-protect
-          (progn
-            ;; Don't wait for idle: the model occasionally re-calls the read
-            ;; tool (qwen3:1.7b ~2% re-call rate), causing an infinite loop
-            ;; in the agent.  Instead, poll for the expected content.
-            ;; Note: /no_think dropped — spike testing showed it actually
-            ;; *reduces* tool call reliability with qwen3:1.7b.
-            (pi-coding-agent-gui-test-send
-             (format "Read the file %s" test-file) t)
-            ;; Wait for tool output to appear (not for idle)
-            (should
-             (pi-coding-agent-test-wait-until
-              (lambda ()
-                (and (pi-coding-agent-gui-test-chat-matches "^read ")
-                     (pi-coding-agent-gui-test-chat-text-in-tool-block-p "XYZ123")))
-              pi-coding-agent-test-gui-timeout
-              pi-coding-agent-test-poll-interval
-              (plist-get pi-coding-agent-gui-test--session :process))))
-        (pi-coding-agent-gui-test-delete-temp-file test-file)))))
+  "Test that fake-backed tool output appears in chat and in the tool block."
+  (pi-coding-agent-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "tool-read")
+    (pi-coding-agent-gui-test-send "Use the fake read tool")
+    (should (pi-coding-agent-gui-test-chat-contains "read /tmp/fake-tool.txt"))
+    (should (pi-coding-agent-gui-test-chat-text-in-tool-block-p "fake tool output"))
+    (should (pi-coding-agent-gui-test-chat-contains "Tool finished"))))
 
 (ert-deftest pi-coding-agent-gui-test-tool-overlay-bounded ()
-  "Test that tool block overlay doesn't extend beyond tool output.
-Regression test: overlay with rear-advance was extending to subsequent content."
+  "Test that the tool overlay stops before later assistant text.
+Regression: `pi-coding-agent--tool-overlay-finalize' must replace the
+rear-advance overlay before assistant text continues after the tool block."
   (pi-coding-agent-gui-test-with-fresh-session
-    (let ((test-file (pi-coding-agent-gui-test-create-temp-file "overlay-test.txt" "BEFORE\n")))
-      (unwind-protect
-          (progn
-            ;; Step 1: Read the file (simple prompt, ~85% tool call rate)
-            ;; Send without waiting for idle — avoids race where
-            ;; wait-for-idle returns before streaming starts.
-            (pi-coding-agent-gui-test-send
-             (format "Read the file %s" test-file) t)
-            ;; Wait for tool output to appear
-            (should
-             (pi-coding-agent-test-wait-until
-              (lambda () (pi-coding-agent-gui-test-chat-contains "BEFORE"))
-              pi-coding-agent-test-gui-timeout
-              pi-coding-agent-test-poll-interval
-              (plist-get pi-coding-agent-gui-test--session :process)))
-            ;; Step 2: Get text AFTER the tool block (separate turn)
-            ;; Simple text prompt — no tool needed, very reliable.
-            (pi-coding-agent-gui-test-send "Say ENDMARKER" t)
-            (should
-             (pi-coding-agent-test-wait-until
-              (lambda () (pi-coding-agent-gui-test-chat-contains "ENDMARKER"))
-              pi-coding-agent-test-gui-timeout
-              pi-coding-agent-test-poll-interval
-              (plist-get pi-coding-agent-gui-test--session :process)))
-            ;; Now check: ENDMARKER should NOT be inside a tool-block overlay
-            (with-current-buffer (plist-get pi-coding-agent-gui-test--session :chat-buffer)
-              (goto-char (point-min))
-              (when (search-forward "ENDMARKER" nil t)
-                (let* ((pos (match-beginning 0))
-                       (overlays (overlays-at pos))
-                       (tool-overlay (seq-find
-                                      (lambda (ov) (overlay-get ov 'pi-coding-agent-tool-block))
-                                      overlays)))
-                  (should-not tool-overlay)))))
-        (pi-coding-agent-gui-test-delete-temp-file test-file)))))
-
-;;;; Formatting Tests
-
-(ert-deftest pi-coding-agent-gui-test-no-consecutive-blank-lines ()
-  "Test that chat buffer never has two consecutive blank lines.
-This test runs after other tests to check accumulated content from
-multiple turns, tool uses, and streaming responses."
-  (pi-coding-agent-gui-test-with-session
-    (let* ((content (pi-coding-agent-gui-test-chat-content))
-           (triple-newline-pos (string-match "\n\n\n" content)))
-      (when triple-newline-pos
-        ;; Show context around the problem for debugging
-        (let* ((start (max 0 (- triple-newline-pos 50)))
-               (end (min (length content) (+ triple-newline-pos 80)))
-               (context (substring content start end))
-               (context-visible (replace-regexp-in-string "\n" "↵\n" context)))
-          (ert-fail (format "Found consecutive blank lines at position %d:\n%s"
-                            triple-newline-pos context-visible))))
-      (should-not triple-newline-pos))))
+    (:backend fake :fake-scenario "tool-read")
+    (pi-coding-agent-gui-test-send "Use the fake read tool")
+    (with-current-buffer (plist-get pi-coding-agent-gui-test--session :chat-buffer)
+      (goto-char (point-min))
+      (search-forward "fake tool output")
+      (let* ((tool-pos (match-beginning 0))
+             (tool-overlay (seq-find
+                            (lambda (ov) (overlay-get ov 'pi-coding-agent-tool-block))
+                            (overlays-at tool-pos))))
+        (should tool-overlay))
+      (goto-char (point-min))
+      (search-forward "Tool finished")
+      (let* ((assistant-pos (match-beginning 0))
+             (tool-overlay (seq-find
+                            (lambda (ov) (overlay-get ov 'pi-coding-agent-tool-block))
+                            (overlays-at assistant-pos))))
+        (should-not tool-overlay)))))
 
 ;;;; Extension Command Tests
 
 (ert-deftest pi-coding-agent-gui-test-extension-command-returns-to-idle ()
-  "Extension command without LLM turn returns to idle immediately."
-  (let ((pi-coding-agent-extra-args
-         (list "-e" pi-coding-agent-gui-test-extension-path
-               "--no-extensions")))
-    (pi-coding-agent-gui-test-with-fresh-session
-      (pi-coding-agent-gui-test-send "/test-noop" t)
-      (sleep-for 0.5)
-      (should (pi-coding-agent-gui-test-wait-for-idle 2)))))
+  "Fake extension command without a visible turn returns to idle immediately."
+  (pi-coding-agent-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "extension-noop")
+    (pi-coding-agent-gui-test-send "/test-noop" t)
+    (should (pi-coding-agent-gui-test-wait-for-idle 2))))
 
 (ert-deftest pi-coding-agent-gui-test-extension-custom-message-displayed ()
-  "Extension command that sends custom message displays content in chat.
-Tests that pi.sendMessage() with display:true shows content in the chat buffer."
-  (let ((pi-coding-agent-extra-args
-         (list "-e" pi-coding-agent-gui-test-extension-path
-               "--no-extensions")))
-    (pi-coding-agent-gui-test-with-fresh-session
-      ;; Send the test-message command which calls pi.sendMessage()
-      (pi-coding-agent-gui-test-send "/test-message" t)
-      ;; Wait for the message to appear
-      (sleep-for 1)
-      ;; The custom message content should be in the chat buffer
-      (should (pi-coding-agent-gui-test-chat-contains "Test message from extension")))))
+  "Fake extension command displays a custom message in chat."
+  (pi-coding-agent-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "extension-message")
+    (pi-coding-agent-gui-test-send "/test-message")
+    (should (pi-coding-agent-gui-test-chat-contains "Test message from extension"))))
 
 (ert-deftest pi-coding-agent-gui-test-extension-confirm-response-displayed ()
-  "Extension confirm dialog response triggers follow-up message display.
-Tests that after ctx.ui.confirm() returns, the subsequent pi.sendMessage()
-is properly displayed in the chat buffer."
-  (let ((pi-coding-agent-extra-args
-         (list "-e" pi-coding-agent-gui-test-extension-path
-               "--no-extensions")))
-    (pi-coding-agent-gui-test-with-fresh-session
-      ;; Mock yes-or-no-p to return t (user confirms)
-      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_prompt) t)))
-        ;; Send the test-confirm command
-        (pi-coding-agent-gui-test-send "/test-confirm" t)
-        ;; Wait for the follow-up message to appear
-        (sleep-for 2)
-        ;; The follow-up message should be in the chat buffer
-        (should (pi-coding-agent-gui-test-chat-contains "CONFIRMED"))))))
+  "Fake extension confirm response triggers the displayed follow-up message."
+  (pi-coding-agent-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "extension-confirm")
+    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_prompt) t)))
+      (pi-coding-agent-gui-test-send "/test-confirm")
+      (should (pi-coding-agent-gui-test-chat-contains "CONFIRMED")))))
 
 ;;;; Streaming Fontification Tests
 

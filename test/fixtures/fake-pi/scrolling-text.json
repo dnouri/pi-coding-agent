@@ -1,0 +1,11 @@
+{
+  "description": "Long multi-line streamed text for deterministic GUI scroll regressions.",
+  "commands": [],
+  "prompt": {
+    "type": "text_stream",
+    "assistant_text": "Scroll line 1 for {message}\nScroll line 2 for {message}\nScroll line 3 for {message}\nScroll line 4 for {message}\nScroll line 5 for {message}\nScroll line 6 for {message}\nScroll line 7 for {message}\nScroll line 8 for {message}\nScroll line 9 for {message}\nScroll line 10 for {message}\nScroll line 11 for {message}\nScroll line 12 for {message}\nScroll line 13 for {message}\nScroll line 14 for {message}\nScroll line 15 for {message}\nScroll line 16 for {message}\nScroll line 17 for {message}\nScroll line 18 for {message}\nScroll line 19 for {message}\nScroll line 20 for {message}\nScroll line 21 for {message}\nScroll line 22 for {message}\nScroll line 23 for {message}\nScroll line 24 for {message}",
+    "chunk_count": 12,
+    "delay_ms": 15,
+    "echo_user": true
+  }
+}
