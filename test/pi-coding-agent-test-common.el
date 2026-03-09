@@ -23,15 +23,14 @@
   "Timeout in seconds for RPC calls in tests.")
 
 (defvar pi-coding-agent-test-integration-timeout 600
-  "Timeout in seconds for integration tests.
-The steer test requires two LLM round-trips.  With qwen3:1.7b at
-maxTokens=500 on CPU-only CI runners, each turn can take up to 150s.
-Two turns: ~300s.  600s provides sufficient margin for noisy runners.")
+  "Timeout in seconds for real-backend integration tests.
+The shared contract still includes multi-turn model interactions, so the real
+lane keeps a generous timeout for slower CI runners.")
 
 (defvar pi-coding-agent-test-gui-timeout 180
-  "Timeout in seconds for GUI tests (includes real LLM responses).
-qwen3:1.7b tool calls take 50-65s on CI (5x local speed).  The
-previous 90s timeout gave only 38%% margin; 180s gives ~177%%.")
+  "Timeout in seconds for GUI tests.
+The GUI suite is fake-backed, but it still waits for real Emacs window updates,
+redisplay, and subprocess event delivery.")
 
 ;;;; Formatting Helpers
 

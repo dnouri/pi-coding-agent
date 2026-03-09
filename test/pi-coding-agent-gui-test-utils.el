@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 ;;
-;; Shared utilities for GUI integration tests.
+;; Shared utilities for deterministic GUI tests.
 ;;
 ;; Usage:
 ;;   (require 'pi-coding-agent-gui-test-utils)

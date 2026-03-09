@@ -55,6 +55,7 @@ module, direct `setq` is fine.
 | `test/pi-coding-agent-test.el` | Entry point / cross-module integration |
 | `test/pi-coding-agent-test-common.el` | Shared fixtures: mock-session macro, toolcall helpers, fake-pi launch helpers |
 | `test/pi-coding-agent-integration-test-common.el` | Shared integration backend helpers and contract macros |
+| `test/pi-coding-agent-integration-test-common-test.el` | Unit tests for shared integration helper macros |
 | `test/pi-coding-agent-integration-rpc-smoke-test.el` | Cheap shared fake/real RPC canaries |
 | `test/pi-coding-agent-integration-prompt-contract-test.el` | Shared fake/real prompt lifecycle + abort contracts |
 | `test/pi-coding-agent-integration-session-contract-test.el` | Shared fake/real session-file persistence contract |
