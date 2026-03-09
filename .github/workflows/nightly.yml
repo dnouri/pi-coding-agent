@@ -23,8 +23,20 @@ jobs:
         run: emacs --batch -Q -L . -l scripts/install-ts-grammars.el
       - run: make check
 
-  integration:
-    name: Integration (pi@${{ matrix.pi_version }})
+  integration-fake:
+    name: Integration fake
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: purcell/setup-emacs@master
+        with:
+          version: '30.1'
+      - name: Run fake backend contract
+        run: make test-integration-fake
+
+  integration-real:
+    name: Integration real (pi@${{ matrix.pi_version }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -41,12 +53,10 @@ jobs:
       - uses: purcell/setup-emacs@master
         with:
           version: '30.1'
-      - name: Install tree-sitter grammars
-        run: emacs --batch -Q -L . -l scripts/install-ts-grammars.el
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      
+
       - name: Get pi version
         run: |
           if [ "${{ matrix.pi_version }}" = "pinned" ]; then
@@ -54,7 +64,7 @@ jobs:
           else
             echo "PI_VERSION=${{ matrix.pi_version }}" >> $GITHUB_ENV
           fi
-      
+
       - name: Setup Ollama model
         run: |
           for i in {1..30}; do curl -s http://localhost:11434/api/tags && break; sleep 1; done
@@ -62,55 +72,22 @@ jobs:
           # Warm up: first inference loads weights into memory (10-30s cold start)
           curl -s http://localhost:11434/api/generate \
             -d '{"model":"qwen3:1.7b","prompt":"hi","stream":false,"think":false,"options":{"num_predict":1}}' > /dev/null
-      
-      - name: Run tests
-        run: make test-integration-ci PI_VERSION=${{ env.PI_VERSION }}
+
+      - name: Run real backend contract
+        run: make test-integration-ci-real PI_VERSION=${{ env.PI_VERSION }}
         env:
           PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-test
 
   gui:
-    name: GUI (pi@${{ matrix.pi_version }})
+    name: GUI
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        pi_version: ['pinned', 'latest']
-    services:
-      ollama:
-        image: ollama/ollama:latest
-        ports:
-          - 11434:11434
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Emacs
         run: sudo apt-get update && sudo apt-get install -y emacs xvfb
       - name: Install tree-sitter grammars
         run: emacs --batch -Q -L . -l scripts/install-ts-grammars.el
-      
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      
-      - name: Get pi version
-        run: |
-          if [ "${{ matrix.pi_version }}" = "pinned" ]; then
-            echo "PI_VERSION=$(grep '^PI_VERSION' Makefile | head -1 | sed 's/.*?= *//')" >> $GITHUB_ENV
-          else
-            echo "PI_VERSION=${{ matrix.pi_version }}" >> $GITHUB_ENV
-          fi
-      
-      - name: Setup Ollama model
-        run: |
-          for i in {1..30}; do curl -s http://localhost:11434/api/tags && break; sleep 1; done
-          curl -s http://localhost:11434/api/pull -d '{"name":"qwen3:1.7b"}' | tail -1
-          # Warm up: first inference loads weights into memory (10-30s cold start)
-          curl -s http://localhost:11434/api/generate \
-            -d '{"model":"qwen3:1.7b","prompt":"hi","stream":false,"think":false,"options":{"num_predict":1}}' > /dev/null
-      
-      - name: Run tests
-        run: make test-gui-ci PI_VERSION=${{ env.PI_VERSION }}
-        env:
-          PI_HEADLESS: 1
-          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-test
+      - name: Run fake-backed GUI tests
+        run: make test-gui-ci

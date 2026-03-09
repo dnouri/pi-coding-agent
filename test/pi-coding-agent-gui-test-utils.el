@@ -29,13 +29,14 @@
 ;;;; Configuration
 
 (defvar pi-coding-agent-gui-test-model '(:provider "ollama" :modelId "qwen3:1.7b")
-  "Model to use for tests. Supports tool calling.")
+  "Frontend model state pushed at GUI-session startup on every backend.")
 
 (defconst pi-coding-agent-gui-test-default-fake-scenario "prompt-lifecycle"
   "Default fake-pi scenario for GUI tests.")
 
-(defvar pi-coding-agent-gui-test-default-session-options '(:backend real)
-  "Default session options for GUI tests.")
+(defvar pi-coding-agent-gui-test-default-session-options '(:backend fake)
+  "Default session options for GUI tests.
+The deterministic suite uses fake-pi unless a test opts into the real backend.")
 
 ;;;; Session State
 
@@ -159,7 +160,7 @@ DIR defaults to /tmp.  OPTIONS accepts `:backend', `:fake-scenario', and
                           pi-coding-agent--process))))
         (when (and chat-buf proc)
           (pi-coding-agent-gui-test--instrument-display-handler proc)
-          ;; Set model and disable thinking for faster tests.
+          ;; Keep GUI sessions on the normal frontend initialization path.
           (with-current-buffer chat-buf
             (pi-coding-agent--rpc-sync
              proc
@@ -433,7 +434,7 @@ Signals error if layout is wrong."
 
 (defun pi-coding-agent-gui-test-ensure-scrollable ()
   "Ensure chat has enough content to test scrolling.
-Inserts dummy content directly (no LLM calls) for speed."
+Inserts dummy content directly for speed, without backend traffic."
   (pi-coding-agent-gui-test-ensure-session)
   (let* ((win (pi-coding-agent-gui-test-chat-window))
          (buf (plist-get pi-coding-agent-gui-test--session :chat-buffer))

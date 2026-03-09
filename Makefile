@@ -20,9 +20,9 @@ SELECTOR ?=
 VERBOSE ?=
 
 .PHONY: test test-unit test-core test-ui test-render test-input test-menu test-build
-.PHONY: test-integration test-integration-fake test-integration-real test-integration-ci test-gui test-gui-ci test-all
+.PHONY: test-integration test-integration-fake test-integration-real test-integration-ci test-integration-ci-real test-gui test-gui-ci test-all
 .PHONY: check check-parens compile lint lint-checkdoc lint-package clean clean-cache help
-.PHONY: ollama-start ollama-stop ollama-status setup-pi setup-models install-hooks
+.PHONY: ollama-start ollama-stop ollama-status setup-pi install-hooks
 
 help:
 	@echo "Targets:"
@@ -34,20 +34,21 @@ help:
 	@echo "  make test-menu        Menu/session tests only"
 	@echo "  make test-build       Build/dependency helper tests only"
 	@echo "  make test-unit        Compile + all unit tests"
-	@echo "  make test-integration Shared integration tests (fake + real; local target starts Ollama)"
+	@echo "  make test-integration Shared integration tests (fake first, then real; local target starts Ollama for the real lane)"
 	@echo "  make test-integration-fake Shared integration tests against fake backend only"
 	@echo "  make test-integration-real Shared integration tests against real backend only (local target starts Ollama)"
-	@echo "  make test-gui         GUI tests (local, starts Ollama)"
+	@echo "  make test-gui         Deterministic fake-backed GUI tests (SELECTOR=pattern; no Docker)"
 	@echo "  make lint             Checkdoc + package-lint"
 	@echo "  make check            Compile, lint, unit tests (pre-commit)"
 	@echo "  make install-hooks    Set up git pre-commit hook"
 	@echo "  make clean            Remove generated files"
 	@echo ""
 	@echo "CI targets:"
-	@echo "  make test-unit           (used by Unit Tests workflow)"
-	@echo "  make lint                (used by Lint workflow)"
-	@echo "  make test-integration-ci (Ollama already running)"
-	@echo "  make test-gui-ci         (Ollama already running)"
+	@echo "  make test-unit              (used by Unit Tests workflow)"
+	@echo "  make lint                   (used by Lint workflow)"
+	@echo "  make test-integration-ci    (CI-shaped integration run: fake lane, then real lane; expects Ollama already running)"
+	@echo "  make test-integration-ci-real (real integration lane with Ollama already running)"
+	@echo "  make test-gui-ci            (fake-backed GUI lane under xvfb/headless)"
 
 # ============================================================
 # Dependencies
@@ -68,6 +69,8 @@ deps: .deps-stamp
 # ============================================================
 
 SHELL = /bin/bash
+MAKE_SELECTOR = $(if $(SELECTOR),SELECTOR='$(SELECTOR)',)
+GUI_SELECTOR_ARG = $(if $(SELECTOR),$(SELECTOR),)
 
 test: .deps-stamp
 	@echo "=== Unit Tests ==="
@@ -145,15 +148,6 @@ setup-pi:
 	@echo "Using pi: $(PI_BIN)"
 	@$(PI_BIN) --version || (echo "ERROR: pi not working"; exit 1)
 
-# Setup models.json - uses PI_CODING_AGENT_DIR if set, else temp dir
-setup-models:
-	@if [ -z "$$PI_CODING_AGENT_DIR" ]; then \
-		export PI_CODING_AGENT_DIR=$$(mktemp -d); \
-		echo "PI_CODING_AGENT_DIR=$$PI_CODING_AGENT_DIR"; \
-	fi; \
-	mkdir -p "$$PI_CODING_AGENT_DIR"; \
-	cp test/fixtures/ollama-models.json "$$PI_CODING_AGENT_DIR/models.json"
-
 # ============================================================
 # Integration tests
 # ============================================================
@@ -165,61 +159,64 @@ INTEGRATION_BATCH = $(BATCH) -L test \
 	$(LOCAL_LOAD_PATH) \
 	-l pi-coding-agent -l pi-coding-agent-integration-test \
 	$(if $(SELECTOR),--eval '(ert-run-tests-batch-and-exit "$(SELECTOR)")',-f ert-run-tests-batch-and-exit)
-
-# Local: starts Ollama via Docker for the real backend lane
-test-integration: .deps-stamp setup-pi
-	@echo "=== Integration Tests (fake + real, pi@$(PI_VERSION)) ==="
-	@./scripts/ollama.sh start
-	@PI_CODING_AGENT_DIR=$$(mktemp -d) && \
-		cp test/fixtures/ollama-models.json "$$PI_CODING_AGENT_DIR/models.json" && \
-		env PATH="$(PI_BIN_DIR):$$PATH" PI_CODING_AGENT_DIR="$$PI_CODING_AGENT_DIR" PI_RUN_INTEGRATION=1 \
+# Reuse CI's session directory when provided, but stay locally runnable by
+# creating and cleaning up a temporary session directory otherwise.
+REAL_INTEGRATION_RUN = \
+	SESSION_DIR="$$PI_CODING_AGENT_DIR"; \
+	CLEANUP_SESSION_DIR=0; \
+	if [ -z "$$SESSION_DIR" ]; then \
+		SESSION_DIR=$$(mktemp -d); \
+		CLEANUP_SESSION_DIR=1; \
+	else \
+		mkdir -p "$$SESSION_DIR"; \
+	fi; \
+	cp test/fixtures/ollama-models.json "$$SESSION_DIR/models.json"; \
+	env PATH="$(PI_BIN_DIR):$$PATH" PI_CODING_AGENT_DIR="$$SESSION_DIR" PI_RUN_INTEGRATION=1 PI_INTEGRATION_BACKENDS=real \
 		$(INTEGRATION_BATCH); \
-		status=$$?; rm -rf "$$PI_CODING_AGENT_DIR"; exit $$status
+	status=$$?; \
+	if [ "$$CLEANUP_SESSION_DIR" = "1" ]; then rm -rf "$$SESSION_DIR"; fi; \
+	exit $$status
+
+# Local default: fake lane first, then the slower real compatibility lane.
+test-integration:
+	@$(MAKE) --no-print-directory test-integration-fake $(MAKE_SELECTOR)
+	@$(MAKE) --no-print-directory test-integration-real $(MAKE_SELECTOR)
 
 # Local: fake backend only (no pi install or Ollama needed)
 test-integration-fake: .deps-stamp
 	@echo "=== Integration Tests (fake backend only) ==="
-	env PI_RUN_INTEGRATION=1 PI_INTEGRATION_BACKENDS=fake \
+	@env PI_RUN_INTEGRATION=1 PI_INTEGRATION_BACKENDS=fake \
 		$(INTEGRATION_BATCH)
 
 # Local: real backend only
 test-integration-real: .deps-stamp setup-pi
 	@echo "=== Integration Tests (real backend only, pi@$(PI_VERSION)) ==="
 	@./scripts/ollama.sh start
-	@PI_CODING_AGENT_DIR=$$(mktemp -d) && \
-		cp test/fixtures/ollama-models.json "$$PI_CODING_AGENT_DIR/models.json" && \
-		env PATH="$(PI_BIN_DIR):$$PATH" PI_CODING_AGENT_DIR="$$PI_CODING_AGENT_DIR" PI_RUN_INTEGRATION=1 PI_INTEGRATION_BACKENDS=real \
-		$(INTEGRATION_BATCH); \
-		status=$$?; rm -rf "$$PI_CODING_AGENT_DIR"; exit $$status
+	@$(REAL_INTEGRATION_RUN)
 
-# CI: Ollama already running via services block
-test-integration-ci: .deps-stamp setup-pi
-	@echo "=== Integration Tests CI (fake + real, pi@$(PI_VERSION)) ==="
-	@mkdir -p "$$PI_CODING_AGENT_DIR"
-	@cp test/fixtures/ollama-models.json "$$PI_CODING_AGENT_DIR/models.json"
-	env PATH="$(PI_BIN_DIR):$$PATH" PI_RUN_INTEGRATION=1 \
-		$(INTEGRATION_BATCH)
+# CI-shaped default: fast fake lane first, then the real backend lane.
+test-integration-ci:
+	@$(MAKE) --no-print-directory test-integration-fake $(MAKE_SELECTOR)
+	@$(MAKE) --no-print-directory test-integration-ci-real $(MAKE_SELECTOR)
+
+# CI: Ollama already running via services block for the real lane.
+test-integration-ci-real: .deps-stamp setup-pi
+	@echo "=== Integration Tests CI (real backend only, pi@$(PI_VERSION)) ==="
+	@$(REAL_INTEGRATION_RUN)
 
 # ============================================================
 # GUI tests
 # ============================================================
 
-# Local: starts Ollama via Docker
-test-gui: clean .deps-stamp setup-pi
-	@echo "=== GUI Tests (pi@$(PI_VERSION)) ==="
-	@./scripts/ollama.sh start
-	@PI_CODING_AGENT_DIR=$$(mktemp -d) && \
-		cp test/fixtures/ollama-models.json "$$PI_CODING_AGENT_DIR/models.json" && \
-		env PATH="$(PI_BIN_DIR):$$PATH" PI_CODING_AGENT_DIR="$$PI_CODING_AGENT_DIR" \
-		./test/run-gui-tests.sh; \
-		status=$$?; rm -rf "$$PI_CODING_AGENT_DIR"; exit $$status
+# Local: deterministic fake-backed GUI regressions (no Docker or pi install).
+test-gui: .deps-stamp
+	@echo "=== GUI Tests (fake backend only) ==="
+	@./test/run-gui-tests.sh $(GUI_SELECTOR_ARG)
 
-# CI: Ollama already running via services block
-test-gui-ci: clean .deps-stamp setup-pi
-	@echo "=== GUI Tests CI (pi@$(PI_VERSION)) ==="
-	@mkdir -p "$$PI_CODING_AGENT_DIR"
-	@cp test/fixtures/ollama-models.json "$$PI_CODING_AGENT_DIR/models.json"
-	env PATH="$(PI_BIN_DIR):$$PATH" ./test/run-gui-tests.sh
+# CI: same fake-backed suite under xvfb/headless.
+test-gui-ci: .deps-stamp
+	@echo "=== GUI Tests CI (fake backend only) ==="
+	@PI_HEADLESS=1 ./test/run-gui-tests.sh --headless $(GUI_SELECTOR_ARG)
 
 # ============================================================
 # All tests
