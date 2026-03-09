@@ -53,8 +53,13 @@ module, direct `setq` is fine.
 | `test/pi-coding-agent-menu-test.el` | Session management, transient menu, reconnect |
 | `test/pi-coding-agent-build-test.el` | Batch helper scripts for dependency and grammar installation |
 | `test/pi-coding-agent-test.el` | Entry point / cross-module integration |
-| `test/pi-coding-agent-test-common.el` | Shared fixtures: mock-session macro, toolcall helpers |
-| `test/pi-coding-agent-integration-test.el` | Integration tests (require running pi + Ollama) |
+| `test/pi-coding-agent-test-common.el` | Shared fixtures: mock-session macro, toolcall helpers, fake-pi launch helpers |
+| `test/pi-coding-agent-integration-test-common.el` | Shared integration backend helpers and contract macros |
+| `test/pi-coding-agent-integration-rpc-smoke-test.el` | Cheap shared fake/real RPC canaries |
+| `test/pi-coding-agent-integration-prompt-contract-test.el` | Shared fake/real prompt lifecycle + abort contracts |
+| `test/pi-coding-agent-integration-session-contract-test.el` | Shared fake/real session-file persistence contract |
+| `test/pi-coding-agent-integration-steering-contract-test.el` | Shared fake/real steering contract |
+| `test/pi-coding-agent-integration-test.el` | Integration suite entry point (loads all shared contract modules) |
 | `test/pi-coding-agent-gui-tests.el` | GUI tests (require display or xvfb) |
 
 ## Other Files
@@ -84,11 +89,20 @@ make test-menu
 make test-build
 ```
 
+Run shared integration contracts:
+```bash
+make test-integration          # fake + real
+make test-integration-fake     # fake only, fast
+make test-integration-real     # real only
+```
+
 Run a filtered subset by ERT pattern:
 ```bash
 make test SELECTOR=fontify-buffer-tail
 make test SELECTOR=toolcall-delta
 make test SELECTOR='abort\|followup'
+make test-integration-fake SELECTOR=rpc-smoke
+make test-integration-real SELECTOR=steering-contract
 ```
 
 The `SELECTOR` value is an ERT selector string — a substring match

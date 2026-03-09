@@ -20,7 +20,7 @@ SELECTOR ?=
 VERBOSE ?=
 
 .PHONY: test test-unit test-core test-ui test-render test-input test-menu test-build
-.PHONY: test-integration test-integration-ci test-gui test-gui-ci test-all
+.PHONY: test-integration test-integration-fake test-integration-real test-integration-ci test-gui test-gui-ci test-all
 .PHONY: check check-parens compile lint lint-checkdoc lint-package clean clean-cache help
 .PHONY: ollama-start ollama-stop ollama-status setup-pi setup-models install-hooks
 
@@ -34,7 +34,9 @@ help:
 	@echo "  make test-menu        Menu/session tests only"
 	@echo "  make test-build       Build/dependency helper tests only"
 	@echo "  make test-unit        Compile + all unit tests"
-	@echo "  make test-integration Integration tests (local, starts Ollama)"
+	@echo "  make test-integration Shared integration tests (fake + real; local target starts Ollama)"
+	@echo "  make test-integration-fake Shared integration tests against fake backend only"
+	@echo "  make test-integration-real Shared integration tests against real backend only (local target starts Ollama)"
 	@echo "  make test-gui         GUI tests (local, starts Ollama)"
 	@echo "  make lint             Checkdoc + package-lint"
 	@echo "  make check            Compile, lint, unit tests (pre-commit)"
@@ -156,31 +158,47 @@ setup-models:
 # Integration tests
 # ============================================================
 
-# Local: starts Ollama via Docker
-test-integration: clean .deps-stamp setup-pi
-	@echo "=== Integration Tests (pi@$(PI_VERSION)) ==="
+INTEGRATION_BATCH = $(BATCH) -L test \
+	--eval "(setq load-prefer-newer t)" \
+	--eval "(require 'package)" \
+	--eval "(package-initialize)" \
+	$(LOCAL_LOAD_PATH) \
+	-l pi-coding-agent -l pi-coding-agent-integration-test \
+	$(if $(SELECTOR),--eval '(ert-run-tests-batch-and-exit "$(SELECTOR)")',-f ert-run-tests-batch-and-exit)
+
+# Local: starts Ollama via Docker for the real backend lane
+test-integration: .deps-stamp setup-pi
+	@echo "=== Integration Tests (fake + real, pi@$(PI_VERSION)) ==="
 	@./scripts/ollama.sh start
 	@PI_CODING_AGENT_DIR=$$(mktemp -d) && \
 		cp test/fixtures/ollama-models.json "$$PI_CODING_AGENT_DIR/models.json" && \
 		env PATH="$(PI_BIN_DIR):$$PATH" PI_CODING_AGENT_DIR="$$PI_CODING_AGENT_DIR" PI_RUN_INTEGRATION=1 \
-		$(BATCH) -L test \
-			--eval "(require 'package)" \
-			--eval "(package-initialize)" \
-			$(LOCAL_LOAD_PATH) \
-			-l pi-coding-agent -l pi-coding-agent-integration-test -f ert-run-tests-batch-and-exit; \
+		$(INTEGRATION_BATCH); \
+		status=$$?; rm -rf "$$PI_CODING_AGENT_DIR"; exit $$status
+
+# Local: fake backend only (no pi install or Ollama needed)
+test-integration-fake: .deps-stamp
+	@echo "=== Integration Tests (fake backend only) ==="
+	env PI_RUN_INTEGRATION=1 PI_INTEGRATION_BACKENDS=fake \
+		$(INTEGRATION_BATCH)
+
+# Local: real backend only
+test-integration-real: .deps-stamp setup-pi
+	@echo "=== Integration Tests (real backend only, pi@$(PI_VERSION)) ==="
+	@./scripts/ollama.sh start
+	@PI_CODING_AGENT_DIR=$$(mktemp -d) && \
+		cp test/fixtures/ollama-models.json "$$PI_CODING_AGENT_DIR/models.json" && \
+		env PATH="$(PI_BIN_DIR):$$PATH" PI_CODING_AGENT_DIR="$$PI_CODING_AGENT_DIR" PI_RUN_INTEGRATION=1 PI_INTEGRATION_BACKENDS=real \
+		$(INTEGRATION_BATCH); \
 		status=$$?; rm -rf "$$PI_CODING_AGENT_DIR"; exit $$status
 
 # CI: Ollama already running via services block
-test-integration-ci: clean .deps-stamp setup-pi
-	@echo "=== Integration Tests CI (pi@$(PI_VERSION)) ==="
+test-integration-ci: .deps-stamp setup-pi
+	@echo "=== Integration Tests CI (fake + real, pi@$(PI_VERSION)) ==="
 	@mkdir -p "$$PI_CODING_AGENT_DIR"
 	@cp test/fixtures/ollama-models.json "$$PI_CODING_AGENT_DIR/models.json"
 	env PATH="$(PI_BIN_DIR):$$PATH" PI_RUN_INTEGRATION=1 \
-	$(BATCH) -L test \
-		--eval "(require 'package)" \
-		--eval "(package-initialize)" \
-		$(LOCAL_LOAD_PATH) \
-		-l pi-coding-agent -l pi-coding-agent-integration-test -f ert-run-tests-batch-and-exit
+		$(INTEGRATION_BATCH)
 
 # ============================================================
 # GUI tests

@@ -15,17 +15,6 @@
 (defconst pi-coding-agent-fake-pi-test--timeout 5
   "Timeout in seconds for fake-pi black-box tests.")
 
-(defconst pi-coding-agent-fake-pi-test--script
-  (expand-file-name "support/fake_pi.py"
-                    (file-name-directory (or load-file-name buffer-file-name)))
-  "Absolute path to the fake-pi harness script.")
-
-(defun pi-coding-agent-fake-pi-test--python ()
-  "Return a Python executable path, or skip if none is available." 
-  (or (executable-find "python3")
-      (executable-find "python")
-      (ert-skip "python3 or python not found")))
-
 (defun pi-coding-agent-fake-pi-test--process-filter (proc output)
   "Capture JSONL OUTPUT from fake-pi PROC."
   (let* ((partial (or (process-get proc 'fake-pi-partial) ""))
@@ -47,11 +36,9 @@
   "Start fake-pi for SCENARIO with optional EXTRA-ARGS."
   (let ((proc (make-process
                :name (format "fake-pi-test-%s" scenario)
-               :command (append (list (pi-coding-agent-fake-pi-test--python)
-                                      pi-coding-agent-fake-pi-test--script
-                                      "--mode" "rpc"
-                                      "--scenario" scenario)
-                                extra-args)
+               :command (append (pi-coding-agent-test-fake-pi-executable)
+                                (list "--mode" "rpc")
+                                (pi-coding-agent-test-fake-pi-extra-args scenario extra-args))
                :connection-type 'pipe
                :coding 'utf-8-unix
                :filter #'pi-coding-agent-fake-pi-test--process-filter
@@ -107,14 +94,6 @@ SPEC is (PROC SCENARIO &rest EXTRA-ARGS)."
   "Return the :type fields from OBJECTS."
   (mapcar (lambda (obj) (plist-get obj :type)) objects))
 
-(defun pi-coding-agent-fake-pi-test--executable-command ()
-  "Return the command list for launching fake-pi through Emacs.
-Uses python3 in the unit suite so `make test' does not require a separate
-uv installation, while the script itself still keeps uv metadata and an
-executable shebang for manual runs." 
-  (list (pi-coding-agent-fake-pi-test--python)
-        pi-coding-agent-fake-pi-test--script))
-
 (defmacro pi-coding-agent-fake-pi-test-with-session (spec &rest body)
   "Create a real pi-coding-agent session against fake-pi, then run BODY.
 SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
@@ -124,9 +103,9 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
         (extra-args (nthcdr 2 spec)))
     `(let* ((default-directory "/tmp/")
             (pi-coding-agent-executable
-             (pi-coding-agent-fake-pi-test--executable-command))
+             (pi-coding-agent-test-fake-pi-executable))
             (pi-coding-agent-extra-args
-             (append (list "--scenario" ,scenario) (list ,@extra-args)))
+             (pi-coding-agent-test-fake-pi-extra-args ,scenario (list ,@extra-args)))
             (,session nil))
        (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
                  ((symbol-function 'pi-coding-agent--display-buffers) #'ignore))

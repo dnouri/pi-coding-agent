@@ -3,12 +3,13 @@
 ;;; Commentary:
 
 ;; Common definitions shared across pi-coding-agent test files.
-;; Centralizes timeout values, the mock-session macro, and toolcall
-;; streaming helpers for easy adjustment (e.g., slow CI).
+;; Centralizes timeout values, fake-pi launch helpers, the mock-session
+;; macro, and toolcall streaming helpers for easy adjustment (e.g., slow CI).
 
 ;;; Code:
 
 (require 'cl-lib) ; for cl-letf in mock-session macro
+(require 'ert)
 
 ;;; Timeout Configuration
 
@@ -37,6 +38,31 @@ previous 90s timeout gave only 38%% margin; 180s gives ~177%%.")
 (defun pi-coding-agent-test-format-elapsed (seconds)
   "Format SECONDS as a human-readable duration with millisecond precision."
   (format "%.3fs" (float seconds)))
+
+;;;; Fake-pi Helpers
+
+(defconst pi-coding-agent-test-fake-pi-script
+  (expand-file-name "support/fake_pi.py"
+                    (file-name-directory (or load-file-name buffer-file-name)))
+  "Absolute path to the fake-pi harness script.")
+
+(defun pi-coding-agent-test-python-executable ()
+  "Return a Python executable path, or skip if none is available."
+  (or (executable-find "python3")
+      (executable-find "python")
+      (ert-skip "python3 or python not found")))
+
+(defun pi-coding-agent-test-fake-pi-executable ()
+  "Return the command list for launching the fake-pi harness.
+Uses python3 in the test suite so local and CI runs do not need a
+separate uv dependency, while the script itself still keeps uv metadata
+and an executable shebang for manual runs."
+  (list (pi-coding-agent-test-python-executable)
+        pi-coding-agent-test-fake-pi-script))
+
+(defun pi-coding-agent-test-fake-pi-extra-args (scenario &optional extra-args)
+  "Return fake-pi CLI args for SCENARIO plus optional EXTRA-ARGS."
+  (append (list "--scenario" scenario) extra-args))
 
 ;;;; Batch Emacs Helpers
 

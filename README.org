@@ -339,14 +339,29 @@ package development.
 
 ** Running tests locally
 
-Requires Docker for integration and GUI tests (Ollama runs in a container).
+The shared integration contract has two lanes:
+- a fast fake-pi lane for deterministic RPC-boundary checks
+- a real pi lane for backend compatibility coverage
+
+The default local integration target runs both lanes, so it still needs
+Docker for Ollama.  The fake-only lane does not.
 
 #+begin_src bash
 # Byte-compile, lint, and unit tests (fast, no Docker)
 make check
 
-# Integration tests (requires Docker)
+# Shared integration contract: fake + real (requires Docker for the real lane)
 make test-integration
+
+# Fast integration lane against the fake-pi harness only (no Docker)
+make test-integration-fake
+
+# Real pi lane only (requires Docker)
+make test-integration-real
+
+# Run a single integration module or contract by selector
+make test-integration-fake SELECTOR=rpc-smoke
+make test-integration-real SELECTOR=steering-contract
 
 # GUI tests (requires Docker)
 make test-gui
@@ -372,7 +387,7 @@ By default, GUI tests auto-detect whether to show a window or run headless.
 GitHub Actions runs on every push:
 - =test-unit.yml= - Unit tests across Emacs 29.4, 30.1, and snapshot (31)
 - =lint.yml= - Byte-compile, checkdoc, package-lint across Emacs 29.4, 30.1, and snapshot
-- =test-integration.yml= - Integration tests with Docker Ollama
+- =test-integration.yml= - Shared integration contract against fake pi and real pi
 - =test-gui.yml= - GUI tests with xvfb virtual framebuffer
 
 Nightly builds test against the pinned pi version (from Makefile) and latest.
