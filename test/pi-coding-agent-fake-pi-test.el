@@ -81,14 +81,34 @@ SPEC is (PROC SCENARIO &rest EXTRA-ARGS)."
 
 (defun pi-coding-agent-fake-pi-test--collect-until (proc predicate &optional timeout)
   "Collect objects from PROC until PREDICATE returns non-nil for the latest one."
-  (let ((items nil)
-        (limit (or timeout pi-coding-agent-fake-pi-test--timeout))
-        done)
+  (let* ((items nil)
+         (limit (or timeout pi-coding-agent-fake-pi-test--timeout))
+         (deadline (+ (float-time) limit))
+         done)
     (while (not done)
-      (let ((item (pi-coding-agent-fake-pi-test--pop-object proc limit)))
+      (let* ((remaining (- deadline (float-time)))
+             (item (pi-coding-agent-fake-pi-test--pop-object
+                    proc (max 0.0 remaining))))
         (setq items (append items (list item))
               done (funcall predicate item))))
     items))
+
+(ert-deftest pi-coding-agent-fake-pi-test-collect-until-spends-one-timeout-budget ()
+  "Repeated reads should spend one timeout budget instead of resetting it."
+  (let ((timeouts nil)
+        (items '((:type "message_start") (:type "agent_end"))))
+    (cl-letf (((symbol-function 'pi-coding-agent-fake-pi-test--pop-object)
+               (lambda (_proc timeout)
+                 (push timeout timeouts)
+                 (sleep-for 0.01)
+                 (pop items))))
+      (pi-coding-agent-fake-pi-test--collect-until
+       :ignored
+       (lambda (item) (equal (plist-get item :type) "agent_end"))
+       1.0))
+    (setq timeouts (nreverse timeouts))
+    (should (= (length timeouts) 2))
+    (should (> (car timeouts) (cadr timeouts)))))
 
 (defun pi-coding-agent-fake-pi-test--event-types (objects)
   "Return the :type fields from OBJECTS."
@@ -156,6 +176,34 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
       (should (eq (plist-get response :success) t))
       (should (equal (plist-get response :command) "get_state"))
       (should (file-exists-p session-file)))))
+
+(ert-deftest pi-coding-agent-fake-pi-test-requires-newline-before-eof ()
+  "EOF alone must not act as an implicit JSONL record delimiter."
+  (pi-coding-agent-fake-pi-test-with-process (proc "prompt-lifecycle")
+    (process-send-string proc "{\"type\":\"get_state\"}")
+    (process-send-eof proc)
+    (should
+     (pi-coding-agent-test-wait-until
+      (lambda () (not (process-live-p proc)))
+      pi-coding-agent-fake-pi-test--timeout
+      0.01))
+    (should-not (process-get proc 'fake-pi-objects))))
+
+(ert-deftest pi-coding-agent-fake-pi-test-cleans-session-root-on-exit ()
+  "The fake removes its temporary session directory when the process exits."
+  (pi-coding-agent-fake-pi-test-with-process (proc "prompt-lifecycle")
+    (pi-coding-agent-fake-pi-test--send proc '(:type "get_state"))
+    (let* ((response (pi-coding-agent-fake-pi-test--pop-object proc))
+           (session-file (plist-get (plist-get response :data) :sessionFile))
+           (session-root (directory-file-name (file-name-directory session-file))))
+      (should (file-directory-p session-root))
+      (process-send-eof proc)
+      (should
+       (pi-coding-agent-test-wait-until
+        (lambda () (not (process-live-p proc)))
+        pi-coding-agent-fake-pi-test--timeout
+        0.01))
+      (should-not (file-exists-p session-root)))))
 
 (ert-deftest pi-coding-agent-fake-pi-test-get-commands-returns-configured-commands ()
   "get_commands returns the scenario's slash-command list." 
@@ -440,6 +488,34 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
         (should (equal (plist-get after-data :messageCount) 0))
         (should (not (equal after-file before-file)))
         (should (file-exists-p after-file))))))
+
+(ert-deftest pi-coding-agent-fake-pi-test-new-session-waits-for-old-run-to-stop ()
+  "new_session should not leak stale streaming events after it succeeds."
+  (pi-coding-agent-fake-pi-test-with-process (proc "prompt-lifecycle")
+    (pi-coding-agent-fake-pi-test--send proc '(:type "prompt" :message "before reset"))
+    (should (equal (plist-get (pi-coding-agent-fake-pi-test--pop-object proc) :command)
+                   "prompt"))
+    (let ((seen-first-delta nil)
+          (new-session-response nil))
+      (while (not seen-first-delta)
+        (let* ((obj (pi-coding-agent-fake-pi-test--pop-object proc))
+               (msg-event (plist-get obj :assistantMessageEvent)))
+          (when (and (equal (plist-get obj :type) "message_update")
+                     (equal (plist-get msg-event :type) "text_delta"))
+            (setq seen-first-delta t))))
+      (pi-coding-agent-fake-pi-test--send proc '(:type "new_session"))
+      (while (not new-session-response)
+        (let ((obj (pi-coding-agent-fake-pi-test--pop-object proc)))
+          (when (and (equal (plist-get obj :type) "response")
+                     (equal (plist-get obj :command) "new_session"))
+            (setq new-session-response obj))))
+      (sleep-for 0.2)
+      (should-not (process-get proc 'fake-pi-objects))
+      (pi-coding-agent-fake-pi-test--send proc '(:type "get_state"))
+      (let* ((state (pi-coding-agent-fake-pi-test--pop-object proc))
+             (data (plist-get state :data)))
+        (should (equal (plist-get data :messageCount) 0))
+        (should (eq (plist-get data :isStreaming) :false))))))
 
 (ert-deftest pi-coding-agent-fake-pi-test-set-session-name-writes-session-info ()
   "set_session_name appends a real session_info entry that Emacs can parse."

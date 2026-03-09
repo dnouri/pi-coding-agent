@@ -188,7 +188,8 @@ def iter_jsonl_commands(stream: BinaryIO) -> Iterator[JsonDict]:
 
     This intentionally reads bytes and splits on ``b"\n"`` only, because
     Python's text-mode line iteration treats lone ``\r`` as a newline and would
-    drift from pi's RPC framing contract.
+    drift from pi's RPC framing contract. EOF does not terminate an incomplete
+    record: without a final LF, the trailing bytes are ignored.
     """
     buffer = b""
     while chunk := stream.read1(4096):
@@ -204,11 +205,6 @@ def iter_jsonl_commands(stream: BinaryIO) -> Iterator[JsonDict]:
             if not line:
                 continue
             yield json.loads(line.decode("utf-8"))
-    if buffer:
-        if buffer.endswith(b"\r"):
-            buffer = buffer[:-1]
-        if buffer:
-            yield json.loads(buffer.decode("utf-8"))
 
 
 def default_scenario_dir() -> Path:
@@ -308,9 +304,10 @@ class FakePiHarness:
         self._pending_steer_message: str | None = None
         self._run_thread: threading.Thread | None = None
         self._message_serial = 0
-        self._session_root = Path(
-            tempfile.mkdtemp(prefix="fake-pi-", dir=session_dir)
+        self._session_root_dir = tempfile.TemporaryDirectory(
+            prefix="fake-pi-", dir=session_dir
         )
+        self._session_root = Path(self._session_root_dir.name)
         model = {
             "id": "fake-model",
             "name": "Fake Model",
@@ -325,14 +322,13 @@ class FakePiHarness:
 
     def run(self) -> int:
         """Process stdin commands until EOF."""
-        for command in iter_jsonl_commands(sys.stdin.buffer):
-            self.handle(command)
-        if self._run_thread and self._run_thread.is_alive():
-            if self._pending_extension_id is not None:
-                self._abort_requested.set()
-                self._extension_waiter.set()
-            self._run_thread.join(timeout=5)
-        return 0
+        try:
+            for command in iter_jsonl_commands(sys.stdin.buffer):
+                self.handle(command)
+            return 0
+        finally:
+            self._stop_active_run()
+            self._session_root_dir.cleanup()
 
     def handle(self, command: JsonDict) -> None:
         """Handle a single RPC command."""
@@ -428,8 +424,7 @@ class FakePiHarness:
 
     def _handle_new_session(self, command: JsonDict) -> None:
         """Reset the fake to a fresh session."""
-        self._abort_requested.set()
-        self._pending_steer_message = None
+        self._stop_active_run()
         self._reset_session_file()
         self.state.is_streaming = False
         self.state.session_name = None
@@ -747,10 +742,36 @@ class FakePiHarness:
             return "value"
         return "cancelled"
 
+    def _stop_active_run(self) -> None:
+        """Stop and join the active worker thread, if any."""
+        thread = self._run_thread
+        if thread is None:
+            self.state.is_streaming = False
+            self._pending_steer_message = None
+            self._abort_requested.clear()
+            return
+        self._abort_requested.set()
+        self._extension_waiter.set()
+        if thread.is_alive():
+            thread.join(timeout=5)
+        if self._run_thread is thread:
+            self._run_thread = None
+        self.state.is_streaming = False
+        self._pending_steer_message = None
+        self._abort_requested.clear()
+
     def _start_run(self, *, name: str, target: Callable[[], None]) -> None:
         """Start a daemon worker for prompt playback."""
-        self._run_thread = threading.Thread(target=target, name=name, daemon=True)
-        self._run_thread.start()
+        def runner() -> None:
+            try:
+                target()
+            finally:
+                if self._run_thread is thread:
+                    self._run_thread = None
+
+        thread = threading.Thread(target=runner, name=name, daemon=True)
+        self._run_thread = thread
+        thread.start()
 
     def _take_pending_steer(self) -> str | None:
         """Return and clear the queued steering message, if any."""

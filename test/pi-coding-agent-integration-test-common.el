@@ -16,6 +16,9 @@
 (defconst pi-coding-agent-integration--default-fake-scenario "prompt-lifecycle"
   "Default fake-pi scenario for shared integration tests.")
 
+(defconst pi-coding-agent-integration--all-backends '(fake real)
+  "All backends that shared integration tests define explicitly.")
+
 (defvar pi-coding-agent-integration--backend nil
   "Backend plist for the currently running integration test.")
 
@@ -109,12 +112,14 @@ and `:fake-extra-args'.  Within BODY,
 (defmacro pi-coding-agent-integration-deftest (spec docstring &rest body)
   "Define a shared integration contract from SPEC for fake and real backends.
 SPEC is (NAME &rest OPTIONS), where OPTIONS accepts the same keywords as
-`pi-coding-agent-integration-with-backend'."
+`pi-coding-agent-integration-with-backend'.
+Both backend variants are always defined; runtime environment filters decide
+which ones execute or skip."
   (declare (indent 2) (debug t))
   (let ((name (car spec))
         (options (cdr spec))
         (tests nil))
-    (dolist (backend (pi-coding-agent-integration--enabled-backends))
+    (dolist (backend pi-coding-agent-integration--all-backends)
       (push
        `(ert-deftest ,(intern (format "pi-coding-agent-integration-%s/%s"
                                       name backend)) ()
