@@ -1,5 +1,8 @@
 #!/bin/bash
-# run-gui-tests.sh - Run ERT tests that require a GUI
+# run-gui-tests.sh - Run the deterministic fake-backed GUI ERT suite
+#
+# No Docker, Ollama, or real pi install is required.  The suite still uses a
+# real Emacs frame/window environment and the normal subprocess seam.
 #
 # Usage:
 #   ./test/run-gui-tests.sh [options] [test-selector]
@@ -13,7 +16,7 @@
 # Examples:
 #   ./test/run-gui-tests.sh                        # Run with display
 #   ./test/run-gui-tests.sh --headless             # Run headless
-#   ./test/run-gui-tests.sh pi-coding-agent-gui-test-session    # Run specific test
+#   ./test/run-gui-tests.sh pi-coding-agent-gui-test-session    # Run one GUI test
 
 set -e
 
@@ -147,7 +150,6 @@ EOF
 set +e
 if [ "$HEADLESS" = "1" ]; then
     # GDK_BACKEND=x11 forces GTK/PGTK to use X11 instead of auto-detecting Wayland
-    # PATH must be passed explicitly so Emacs can find 'pi'
     # </dev/null prevents "standard input is not a tty" error in CI
     xvfb-run -a env GDK_BACKEND=x11 PATH="$PATH" emacs -Q -l /tmp/run-gui-tests.el </dev/null 2>&1
 else

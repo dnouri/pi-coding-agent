@@ -3,7 +3,7 @@
 ;;; Commentary:
 ;;
 ;; ERT tests that require a real Emacs GUI (windows, frames, scrolling).
-;; Run with: make test-gui
+;; Run with: make test-gui [SELECTOR=pattern]
 ;;
 ;; These tests focus on behavior that CANNOT be tested with unit tests:
 ;; - Real window scrolling during streamed updates in a displayed buffer
