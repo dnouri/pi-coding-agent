@@ -19,7 +19,7 @@ SELECTOR ?=
 # Example: make test VERBOSE=1
 VERBOSE ?=
 
-.PHONY: test test-unit test-core test-ui test-render test-input test-menu
+.PHONY: test test-unit test-core test-ui test-render test-input test-menu test-build
 .PHONY: test-integration test-integration-ci test-gui test-gui-ci test-all
 .PHONY: check check-parens compile lint lint-checkdoc lint-package clean clean-cache help
 .PHONY: ollama-start ollama-stop ollama-status setup-pi setup-models install-hooks
@@ -32,6 +32,7 @@ help:
 	@echo "  make test-render      Render tests only"
 	@echo "  make test-input       Input buffer tests only"
 	@echo "  make test-menu        Menu/session tests only"
+	@echo "  make test-build       Build/dependency helper tests only"
 	@echo "  make test-unit        Compile + all unit tests"
 	@echo "  make test-integration Integration tests (local, starts Ollama)"
 	@echo "  make test-gui         GUI tests (local, starts Ollama)"
@@ -51,17 +52,11 @@ help:
 # ============================================================
 
 # Install package dependencies (sentinel file avoids re-running every time).
-# Note: We need transient 0.9.0+ (3-element group vector format).
-# Emacs 30 ships 0.7.2, so all Emacs versions need MELPA transient.
-.deps-stamp: Makefile
-	@$(BATCH) \
-		--eval "(require 'package)" \
-		--eval "(push '(\"melpa\" . \"https://melpa.org/packages/\") package-archives)" \
-		--eval "(package-initialize)" \
-		--eval "(package-refresh-contents)" \
-		--eval "(package-install (cadr (assq 'transient package-archive-contents)))" \
-		--eval "(message \"Dependencies installed\")" 2>&1 \
-		| grep -E "^Dependencies installed$$|^Error:" || true
+# Requirements come from pi-coding-agent.el's Package-Requires header.
+# The helper upgrades built-in packages when Emacs ships an older version
+# than the package requires (for example transient on Emacs 29/30).
+.deps-stamp: Makefile scripts/install-deps.el scripts/pi-coding-agent-build.el
+	@$(BATCH) -L scripts -l scripts/install-deps.el
 	@touch $@
 
 deps: .deps-stamp
@@ -87,6 +82,7 @@ test: .deps-stamp
 		-l pi-coding-agent-render-test \
 		-l pi-coding-agent-input-test \
 		-l pi-coding-agent-menu-test \
+		-l pi-coding-agent-build-test \
 		-l pi-coding-agent-test \
 		$(if $(SELECTOR),--eval '(ert-run-tests-batch-and-exit "$(SELECTOR)")',-f ert-run-tests-batch-and-exit) \
 		>$$OUTPUT 2>&1; \
@@ -116,6 +112,9 @@ test-input: .deps-stamp
 	@$(BATCH_TEST) -l pi-coding-agent-input-test -f ert-run-tests-batch-and-exit
 test-menu: .deps-stamp
 	@$(BATCH_TEST) -l pi-coding-agent-menu-test -f ert-run-tests-batch-and-exit
+
+test-build: .deps-stamp
+	@$(BATCH_TEST) -l pi-coding-agent-build-test -f ert-run-tests-batch-and-exit
 
 test-unit: compile test
 
@@ -228,19 +227,19 @@ ollama-status:
 
 check-parens:
 	@echo "=== Check Parens ==="
-	@OUTPUT=$$($(BATCH) --eval '(condition-case err (dolist (f (list "pi-coding-agent-core.el" "pi-coding-agent-ui.el" "pi-coding-agent-render.el" "pi-coding-agent-input.el" "pi-coding-agent-menu.el" "pi-coding-agent.el")) (with-current-buffer (find-file-noselect f) (check-parens) (message "%s OK" f))) (user-error (message "FAIL: %s" (error-message-string err)) (kill-emacs 1)))' 2>&1); \
+	@OUTPUT=$$($(BATCH) --eval '(condition-case err (dolist (f (list "scripts/pi-coding-agent-build.el" "scripts/install-deps.el" "scripts/install-ts-grammars.el" "pi-coding-agent-core.el" "pi-coding-agent-grammars.el" "pi-coding-agent-ui.el" "pi-coding-agent-render.el" "pi-coding-agent-input.el" "pi-coding-agent-menu.el" "pi-coding-agent.el")) (with-current-buffer (find-file-noselect f) (check-parens) (message "%s OK" f))) (user-error (message "FAIL: %s" (error-message-string err)) (kill-emacs 1)))' 2>&1); \
 	echo "$$OUTPUT" | grep -E "OK$$|FAIL:"; \
 	echo "$$OUTPUT" | grep -q "FAIL:" && exit 1 || true
 
 compile: .deps-stamp
-	@rm -f *.elc
+	@rm -f *.elc scripts/*.elc
 	@echo "=== Byte-compile ==="
-	@$(BATCH) \
+	@$(BATCH) -L scripts \
 		--eval "(require 'package)" \
 		--eval "(package-initialize)" \
 		$(LOCAL_LOAD_PATH) \
 		--eval "(setq byte-compile-error-on-warn t)" \
-		-f batch-byte-compile pi-coding-agent-core.el pi-coding-agent-ui.el pi-coding-agent-render.el pi-coding-agent-input.el pi-coding-agent-menu.el pi-coding-agent.el
+		-f batch-byte-compile scripts/pi-coding-agent-build.el scripts/install-deps.el scripts/install-ts-grammars.el pi-coding-agent-core.el pi-coding-agent-grammars.el pi-coding-agent-ui.el pi-coding-agent-render.el pi-coding-agent-input.el pi-coding-agent-menu.el pi-coding-agent.el
 
 lint: lint-checkdoc lint-package
 
@@ -249,7 +248,11 @@ lint-checkdoc:
 	@OUTPUT=$$($(BATCH) \
 		--eval "(require 'checkdoc)" \
 		--eval "(setq sentence-end-double-space nil)" \
+		--eval "(checkdoc-file \"scripts/pi-coding-agent-build.el\")" \
+		--eval "(checkdoc-file \"scripts/install-deps.el\")" \
+		--eval "(checkdoc-file \"scripts/install-ts-grammars.el\")" \
 		--eval "(checkdoc-file \"pi-coding-agent-core.el\")" \
+		--eval "(checkdoc-file \"pi-coding-agent-grammars.el\")" \
 		--eval "(checkdoc-file \"pi-coding-agent-ui.el\")" \
 		--eval "(checkdoc-file \"pi-coding-agent-render.el\")" \
 		--eval "(checkdoc-file \"pi-coding-agent-input.el\")" \
@@ -269,7 +272,7 @@ lint-package:
 		          (package-install 'package-lint))" \
 		--eval "(require 'package-lint)" \
 		--eval "(setq package-lint-main-file \"pi-coding-agent.el\")" \
-		-f package-lint-batch-and-exit pi-coding-agent.el pi-coding-agent-ui.el pi-coding-agent-render.el pi-coding-agent-input.el pi-coding-agent-menu.el pi-coding-agent-core.el
+		-f package-lint-batch-and-exit pi-coding-agent.el pi-coding-agent-ui.el pi-coding-agent-render.el pi-coding-agent-input.el pi-coding-agent-menu.el pi-coding-agent-core.el pi-coding-agent-grammars.el
 
 check: compile lint test
 
@@ -278,7 +281,7 @@ check: compile lint test
 # ============================================================
 
 clean:
-	@rm -f *.elc test/*.elc .deps-stamp
+	@rm -f *.elc scripts/*.elc test/*.elc .deps-stamp
 
 clean-cache:
 	@./scripts/ollama.sh stop 2>/dev/null || true

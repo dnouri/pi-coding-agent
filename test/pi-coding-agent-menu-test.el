@@ -15,6 +15,24 @@
 (require 'pi-coding-agent)
 (require 'pi-coding-agent-test-common)
 
+;;; Version Checks
+
+(ert-deftest pi-coding-agent-test-normalize-version-ignores-prefix-and-suffix ()
+  "Version parsing should keep only the numeric portion."
+  (should (equal "0.12.0"
+                 (pi-coding-agent--normalize-version
+                  "v0.12.0-15-gfe5214e6-builtin"))))
+
+(ert-deftest pi-coding-agent-test-version-at-least-p-rejects-old-built-in-version ()
+  "Older transient versions should fail the minimum version check."
+  (should-not (pi-coding-agent--version-at-least-p "0.7.2.2" "0.9.0")))
+
+(ert-deftest pi-coding-agent-test-version-at-least-p-accepts-built-in-snapshot-format ()
+  "Snapshot version strings with prefixes should still compare correctly."
+  (should (pi-coding-agent--version-at-least-p
+           "v0.12.0-15-gfe5214e6-builtin"
+           "0.9.0")))
+
 ;;; Session Management
 
 (ert-deftest pi-coding-agent-test-buffer-name-default-session ()

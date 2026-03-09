@@ -610,6 +610,13 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
 
 ;;; Essential Grammar Install Prompt (markdown + markdown-inline)
 
+(ert-deftest pi-coding-agent-test-essential-grammars-ignore-optional-gaps ()
+  "Only Markdown grammars should count as essential for chat rendering."
+  (cl-letf (((symbol-function 'treesit-language-available-p)
+             (lambda (lang &rest _)
+               (memq lang '(markdown markdown-inline)))))
+    (should-not (pi-coding-agent--missing-essential-grammars))))
+
 (ert-deftest pi-coding-agent-test-missing-essential-grammars-detected ()
   "Detect when markdown or markdown-inline grammars are missing."
   (cl-letf (((symbol-function 'treesit-language-available-p)
@@ -767,6 +774,8 @@ Catches accidentally dropped or malformed entries."
       ;; python and bash are installed, rest should be missing
       (should-not (memq 'python missing))
       (should-not (memq 'bash missing))
+      (should-not (memq 'markdown missing))
+      (should-not (memq 'markdown-inline missing))
       (should (memq 'javascript missing))
       (should (memq 'rust missing)))))
 

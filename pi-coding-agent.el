@@ -7,7 +7,7 @@
 ;; URL: https://github.com/dnouri/pi-coding-agent
 ;; Keywords: ai llm ai-pair-programming tools
 ;; Version: 2.0.1
-;; Package-Requires: ((emacs "29.1") (transient "0.9.0"))
+;; Package-Requires: ((emacs "29.1") (transient "0.9.0") (md-ts-mode "0.3.0"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -36,6 +36,9 @@
 ;;   - Emacs 29.1 or later (tree-sitter support required)
 ;;   - pi coding agent 0.52.9 or later, installed and in PATH
 ;;   - tree-sitter grammars for markdown and markdown-inline
+;;
+;; pi-coding-agent uses `md-ts-mode` for its chat buffers only; loading it
+;; does not change global Markdown file associations.
 ;;
 ;; Usage:
 ;;   M-x pi-coding-agent         Start or focus session in current project

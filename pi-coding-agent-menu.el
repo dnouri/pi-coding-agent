@@ -43,13 +43,34 @@
 (require 'pi-coding-agent-render)
 (require 'transient)
 
+(defconst pi-coding-agent--minimum-transient-version "0.9.0"
+  "Minimum supported transient version.")
+
+(defun pi-coding-agent--normalize-version (version)
+  "Return the numeric prefix of VERSION, or nil when none is present."
+  (when (and (stringp version)
+             (string-match "[0-9]+\\(?:\\.[0-9]+\\)*" version))
+    (match-string 0 version)))
+
+(defun pi-coding-agent--version-at-least-p (version minimum)
+  "Return non-nil when VERSION satisfies MINIMUM.
+VERSION may include a leading prefix like `v' or extra suffix text."
+  (let ((normalized (pi-coding-agent--normalize-version version)))
+    (and normalized
+         (not (version< normalized minimum)))))
+
 (when (and (not (bound-and-true-p byte-compile-current-file))
            (or (not (boundp 'transient-version))
-               (version< transient-version "0.9.0")))
+               (not (pi-coding-agent--version-at-least-p
+                     transient-version
+                     pi-coding-agent--minimum-transient-version))))
   (display-warning 'pi-coding-agent
-                   (format "pi-coding-agent requires transient >= 0.9.0, \
+                   (format "pi-coding-agent requires transient >= %s, \
 but %s is loaded.
-  Fix: M-x package-install RET transient RET, then restart Emacs."
+  Fix: upgrade transient from MELPA.  If Emacs is using an older built-in
+  copy, set `package-install-upgrade-built-in' to t before running
+  M-x package-install RET transient RET, then restart Emacs."
+                           pi-coding-agent--minimum-transient-version
                            (if (boundp 'transient-version)
                                transient-version
                              "unknown"))

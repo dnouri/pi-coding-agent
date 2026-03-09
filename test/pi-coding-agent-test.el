@@ -523,61 +523,81 @@ must decide whether this is a no-op."
         (ignore-errors (kill-buffer "*pi-coding-agent-test-non-pi*"))
         (delete-other-windows)))))
 
-(ert-deftest pi-coding-agent-test-vendored-md-ts-mode-leaves-global-markdown-settings-alone ()
-  "Loading vendored `md-ts-mode' keeps Markdown associations opt-in."
+(ert-deftest pi-coding-agent-test-transient-warning-explains-built-in-upgrade ()
+  "Loading the menu with an old transient explains how to upgrade it."
   (let* ((expression
           (mapconcat
            #'identity
            '("(progn"
-             "  (defvar treesit-major-mode-remap-alist nil)"
-             "  (let ((before-auto (copy-tree auto-mode-alist))"
-             "        (before-remap (copy-tree treesit-major-mode-remap-alist)))"
-             "    (require 'md-ts-mode)"
-             "    (prin1 (list"
-             "            :auto-unchanged (equal before-auto auto-mode-alist)"
-             "            :remap-unchanged (equal before-remap treesit-major-mode-remap-alist)"
-             "            :md-mode-defined (fboundp 'md-ts-mode)"
-             "            :md-mode-maybe-defined (fboundp 'md-ts-mode-maybe)"
-             "            :before-md-association (assoc \"\\.md\\'\" before-auto)"
-             "            :after-md-association (assoc \"\\.md\\'\" auto-mode-alist)"
-             "            :before-markdown-remap (alist-get 'markdown-mode before-remap)"
-             "            :after-markdown-remap (alist-get 'markdown-mode treesit-major-mode-remap-alist)))))")
+             "  (require 'cl-lib)"
+             "  (require 'transient)"
+             "  (setq transient-version \"0.7.2.2\")"
+             "  (let (captured)"
+             "    (cl-letf (((symbol-function 'display-warning)"
+             "               (lambda (_type message &rest _)"
+             "                 (setq captured message))))"
+             "      (load (expand-file-name \"pi-coding-agent-menu.el\""
+             "                              (file-name-directory"
+             "                               (locate-library \"pi-coding-agent\")))"
+             "            nil t))"
+             "    (prin1 captured)))")
            " "))
          (result (pi-coding-agent-test--read-batch-emacs-result expression)))
+    (should (string-match-p "upgrade transient from MELPA" result))
+    (should (string-match-p "package-install-upgrade-built-in" result))))
+
+(ert-deftest pi-coding-agent-test-transient-version-check-handles-built-in-snapshot-format ()
+  "Loading the menu tolerates built-in transient version strings with a prefix."
+  (let* ((expression
+          (mapconcat
+           #'identity
+           '("(progn"
+             "  (require 'cl-lib)"
+             "  (require 'transient)"
+             "  (setq transient-version \"v0.12.0-15-gfe5214e6-builtin\")"
+             "  (let (captured err)"
+             "    (cl-letf (((symbol-function 'display-warning)"
+             "               (lambda (_type message &rest _)"
+             "                 (setq captured message))))"
+             "      (condition-case load-err"
+             "          (load (expand-file-name \"pi-coding-agent-menu.el\""
+             "                                  (file-name-directory"
+             "                                   (locate-library \"pi-coding-agent\")))"
+             "                nil t)"
+             "        (error (setq err (error-message-string load-err)))))"
+             "    (prin1 (list :warning captured :error err))))")
+           " "))
+         (result (pi-coding-agent-test--read-batch-emacs-result expression)))
+    (should-not (plist-get result :error))
+    (should-not (plist-get result :warning))))
+
+(ert-deftest pi-coding-agent-test-md-ts-mode-package-load-leaves-global-markdown-settings-alone ()
+  "Loading `md-ts-mode' keeps global Markdown associations opt-in."
+  (let ((result (pi-coding-agent-test--markdown-load-state 'md-ts-mode)))
     (should (eq t (plist-get result :auto-unchanged)))
-    (should (eq t (plist-get result :remap-unchanged)))
+    (should (eq t (plist-get result :major-remap-unchanged)))
+    (should (eq t (plist-get result :treesit-remap-unchanged)))
     (should (eq t (plist-get result :md-mode-defined)))
     (should (eq t (plist-get result :md-mode-maybe-defined)))
     (should (equal (plist-get result :before-md-association)
                    (plist-get result :after-md-association)))
-    (should (equal (plist-get result :before-markdown-remap)
-                   (plist-get result :after-markdown-remap)))))
+    (should (equal (plist-get result :before-major-markdown-remap)
+                   (plist-get result :after-major-markdown-remap)))
+    (should (equal (plist-get result :before-treesit-markdown-remap)
+                   (plist-get result :after-treesit-markdown-remap)))))
 
 (ert-deftest pi-coding-agent-test-package-load-leaves-global-markdown-settings-alone ()
   "Loading `pi-coding-agent' does not change global Markdown mode settings."
-  (let* ((expression
-          (mapconcat
-           #'identity
-           '("(progn"
-             "  (defvar treesit-major-mode-remap-alist nil)"
-             "  (let ((before-auto (copy-tree auto-mode-alist))"
-             "        (before-remap (copy-tree treesit-major-mode-remap-alist)))"
-             "    (require 'pi-coding-agent)"
-             "    (prin1 (list"
-             "            :auto-unchanged (equal before-auto auto-mode-alist)"
-             "            :remap-unchanged (equal before-remap treesit-major-mode-remap-alist)"
-             "            :before-md-association (assoc \"\\.md\\'\" before-auto)"
-             "            :after-md-association (assoc \"\\.md\\'\" auto-mode-alist)"
-             "            :before-markdown-remap (alist-get 'markdown-mode before-remap)"
-             "            :after-markdown-remap (alist-get 'markdown-mode treesit-major-mode-remap-alist)))))")
-           " "))
-         (result (pi-coding-agent-test--read-batch-emacs-result expression)))
+  (let ((result (pi-coding-agent-test--markdown-load-state 'pi-coding-agent)))
     (should (eq t (plist-get result :auto-unchanged)))
-    (should (eq t (plist-get result :remap-unchanged)))
+    (should (eq t (plist-get result :major-remap-unchanged)))
+    (should (eq t (plist-get result :treesit-remap-unchanged)))
     (should (equal (plist-get result :before-md-association)
                    (plist-get result :after-md-association)))
-    (should (equal (plist-get result :before-markdown-remap)
-                   (plist-get result :after-markdown-remap)))))
+    (should (equal (plist-get result :before-major-markdown-remap)
+                   (plist-get result :after-major-markdown-remap)))
+    (should (equal (plist-get result :before-treesit-markdown-remap)
+                   (plist-get result :after-treesit-markdown-remap)))))
 
 (provide 'pi-coding-agent-test)
 ;;; pi-coding-agent-test.el ends here

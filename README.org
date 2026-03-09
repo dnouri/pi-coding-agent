@@ -8,9 +8,43 @@
 #+html: <a href="https://github.com/dnouri/pi-coding-agent/actions/workflows/nightly.yml"><img alt="Nightly" src="https://github.com/dnouri/pi-coding-agent/actions/workflows/nightly.yml/badge.svg"/></a>
 #+html: <a href="https://github.com/dnouri/pi-coding-agent/actions/workflows/melpazoid.yml"><img alt="melpazoid" src="https://github.com/dnouri/pi-coding-agent/actions/workflows/melpazoid.yml/badge.svg"/></a>
 
-An Emacs frontend for the [[https://shittycodingagent.ai/][pi coding agent]].
+An Emacs frontend for the [[https://pi.dev][pi coding agent]].
 
 #+html: <a href="https://danielnouri.org/media/pi-coding-agent-demo.mp4"><img src="https://danielnouri.org/media/pi-coding-agent-preview.gif" alt="pi-coding-agent demo - click to play" width="600" height="600"></a>
+
+* Quick Start
+
+If you already have a working Emacs with tree-sitter support, this is the
+shortest path to a usable session:
+
+#+begin_src bash
+# 1. Install the pi CLI
+npm install -g @mariozechner/pi-coding-agent
+
+# Or with mise
+mise use -g npm:@mariozechner/pi-coding-agent
+
+# 2. Authenticate the CLI
+pi --login
+#+end_src
+
+If you prefer not to use OAuth, configure the provider API keys supported by
+pi instead.
+
+Then install the Emacs package from MELPA:
+
+#+begin_src
+M-x package-install RET pi-coding-agent RET
+#+end_src
+
+Then start a session:
+
+#+begin_src
+M-x pi-coding-agent
+#+end_src
+
+On first start, pi-coding-agent may prompt to install the tree-sitter grammars
+needed for markdown rendering.  That requires a C compiler (=gcc= or =cc=).
 
 * Features
 
@@ -24,46 +58,14 @@ An Emacs frontend for the [[https://shittycodingagent.ai/][pi coding agent]].
 - Rich header line: activity phase, session name, extension status
 - Input history with search (M-p/M-n, C-r)
 - Magit-style transient menu for all commands
+- Basic support for pi extensions and extension commands
 
 * Requirements
 
 - Emacs 29.1 or later (with tree-sitter support)
 - [[https://pi.dev][pi coding agent]] 0.52.9 or later, installed and in PATH
+- pi CLI authentication via =pi --login= or provider API keys
 - A C compiler (=gcc= or =cc=) for installing tree-sitter grammars
-
-** Installing pi coding agent
-
-#+begin_src bash
-# Install with npm
-npm install -g @mariozechner/pi-coding-agent
-
-# Or with mise
-mise use -g npm:@mariozechner/pi-coding-agent
-#+end_src
-
-** Tree-sitter grammars
-
-pi-coding-agent uses Emacs's built-in tree-sitter support to render
-markdown and highlight code blocks in the chat buffer.  This requires
-small grammar libraries to be compiled and installed — a one-time step
-that needs a C compiler (=gcc= or =cc=).
-
-On first session start, you are prompted to install the two grammars
-needed for markdown rendering.  A second prompt offers ~20 additional
-grammars for syntax highlighting inside code blocks (Python,
-JavaScript, Rust, etc.).  Both prompts appear at most once — if you
-decline, the choice is remembered.
-
-To check which grammars are installed or install them later:
-
-#+begin_src
-M-x pi-coding-agent-install-grammars
-#+end_src
-
-If you manage tree-sitter grammars outside of Emacs (e.g. via a system
-package manager), set =pi-coding-agent-essential-grammar-action= to
-=warn= to suppress the essential grammar prompt.  The optional grammar
-prompt can be dismissed once and will not reappear.
 
 * Installation
 
@@ -74,6 +76,12 @@ Install from [[https://melpa.org/#/pi-coding-agent][MELPA]]:
 #+begin_src
 M-x package-install RET pi-coding-agent RET
 #+end_src
+
+MELPA installs =transient= and =md-ts-mode= automatically.
+=pi-coding-agent= uses =md-ts-mode= only for its own chat buffers, so
+installing or loading it does not change how unrelated =.md= files open.
+If you want tree-sitter Markdown globally, configure =md-ts-mode=
+separately.
 
 Or with =use-package=:
 
@@ -93,24 +101,81 @@ If you don't have MELPA configured, add this to your init file:
 
 ** Manual installation
 
-Clone the repository and add to your load path:
+If you prefer a plain Git checkout, configure MELPA first (see above),
+then evaluate this once to install the external dependencies:
+
+#+begin_src emacs-lisp
+(require 'package)
+(setq package-install-upgrade-built-in t)
+(package-initialize)
+(unless package-archive-contents
+  (package-refresh-contents))
+(package-install 'transient)
+(package-install 'md-ts-mode)
+#+end_src
+
+The =package-install-upgrade-built-in= setting upgrades Emacs's bundled
+=transient= when needed.
+
+Then clone the repository and add it to your load path:
 
 #+begin_src bash
 git clone https://github.com/dnouri/pi-coding-agent ~/.emacs.d/site-lisp/pi-coding-agent
 #+end_src
 
 #+begin_src emacs-lisp
+(require 'package)
+(package-initialize)
 (add-to-list 'load-path "~/.emacs.d/site-lisp/pi-coding-agent")
 (require 'pi-coding-agent)
 #+end_src
 
-Or with =use-package=:
+Or with =use-package= (after installing =transient= and =md-ts-mode= as
+above):
 
 #+begin_src emacs-lisp
 (use-package pi-coding-agent
   :load-path "~/.emacs.d/site-lisp/pi-coding-agent"
   :init (defalias 'pi 'pi-coding-agent))
 #+end_src
+
+** First start
+
+Make sure the pi CLI is authenticated before expecting models to appear.
+The simplest path is:
+
+#+begin_src bash
+pi --login
+#+end_src
+
+If you prefer not to use OAuth, configure the provider API keys supported by
+pi instead.  If =M-x pi-coding-agent= starts but says no model is available,
+the CLI usually still needs authentication.
+
+pi-coding-agent uses Emacs's built-in tree-sitter support to render
+markdown and highlight code blocks in the chat buffer.  This requires
+small grammar libraries to be compiled and installed — a one-time step
+that needs a C compiler (=gcc= or =cc=).
+
+On first session start, pi-coding-agent can prompt to install the two
+grammars needed for markdown rendering.  If you decline that essential
+prompt, it appears again next time until the grammars are installed or
+you change =pi-coding-agent-essential-grammar-action=.  A separate
+optional prompt offers additional grammars for syntax highlighting
+inside code blocks (Python, JavaScript, Rust, etc.).  Declining the
+optional prompt is remembered and it appears again only if new grammar
+recipes are added or you clear =pi-coding-agent-grammar-declined-set=.
+
+To check which grammars are installed or install them later:
+
+#+begin_src
+M-x pi-coding-agent-install-grammars
+#+end_src
+
+If you manage tree-sitter grammars outside of Emacs (e.g. via a system
+package manager), set =pi-coding-agent-essential-grammar-action= to
+=warn= to suppress the essential grammar prompt.  The optional grammar
+prompt can be dismissed once and will not reappear.
 
 * Usage
 
@@ -166,14 +231,12 @@ paste from other buffers, use registers or kill-ring history. Your prompt
 stays put while the AI responds above.
 
 Slash commands (=/command=) work with completion: type =/= then =TAB= to
-see available commands, including prompt templates from =~/.pi/agent/prompts/=.
+see available commands, including prompt templates from =~/.pi/agent/prompts/=
+and skills from =~/.agents/skills/=.
 
 ** 📎 Editor Features
 
 Several features match the TUI experience:
-
-- *File reference (@)*: Type =@= to search project files. Respects =.gitignore=.
-  Results are cached for 30 seconds to keep completion fast.
 
 - *Path completion (Tab)*: Complete relative paths like =./=, =../=, =~/=.
 
@@ -181,6 +244,17 @@ Several features match the TUI experience:
   - =C-c C-c= queues a /follow-up/ message, delivered after the agent finishes
   - =C-c C-s= queues a /steering/ message, delivered after current tool
     (interrupts remaining tools; only works when agent is busy)
+
+** 🧩 Extension Support
+
+pi-coding-agent has basic support for pi extensions.  Extension commands
+show up in slash completion and the transient menu, extension tools run
+normally, and extensions can use notifications, confirm/select/input
+prompts, prefill the input buffer, and show status text.
+
+Rich TUI-specific extension UI is not supported in Emacs yet: custom
+widgets, custom editor components, custom headers/footers, and other
+component-based views are unavailable or fall back.
 
 ** 🔧 Tool Output
 
@@ -258,7 +332,10 @@ The input buffer uses plain =text-mode= by default.  Set
 =pi-coding-agent-input-markdown-highlighting= to =t= for tree-sitter
 markdown highlighting (bold, code spans, fenced blocks) in new sessions.
 
-* Testing
+* Development
+
+Most users can skip this section.  It is for contributors and local
+package development.
 
 ** Running tests locally
 
@@ -303,7 +380,7 @@ Nightly builds test against the pinned pi version (from Makefile) and latest.
 * Links
 
 - [[https://danielnouri.org/notes/2025/12/30/an-emacs-mode-for-a-shitty-coding-agent/][Blog post]]: Background and motivation
-- [[https://shittycodingagent.ai/][shittycodingagent.ai]]: pi coding agent home page
+- [[https://pi.dev][pi.dev]]: pi coding agent home page
 
 * License
 

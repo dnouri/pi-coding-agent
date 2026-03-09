@@ -42,7 +42,15 @@
 (require 'treesit)
 (require 'seq)
 
-(defvar pi-coding-agent-grammar-recipes
+(defconst pi-coding-agent-essential-grammar-recipes
+  '((markdown "https://github.com/tree-sitter-grammars/tree-sitter-markdown"
+              "v0.4.1" "tree-sitter-markdown/src")
+    (markdown-inline "https://github.com/tree-sitter-grammars/tree-sitter-markdown"
+                     "v0.4.1" "tree-sitter-markdown-inline/src"))
+  "Tree-sitter grammar recipes required for chat rendering.
+Each entry is (LANG URL REVISION [SOURCE-DIR]).")
+
+(defconst pi-coding-agent-optional-grammar-recipes
   '((python      "https://github.com/tree-sitter/tree-sitter-python"       "v0.23.6")
     (javascript  "https://github.com/tree-sitter/tree-sitter-javascript"   "v0.23.1")
     (typescript  "https://github.com/tree-sitter/tree-sitter-typescript"   "v0.23.2" "typescript/src")
@@ -71,10 +79,13 @@
     (gomod       "https://github.com/camdencheek/tree-sitter-go-mod"       "v1.1.0")
     (php         "https://github.com/tree-sitter/tree-sitter-php"          "v0.23.11" "php/src")
     (scala       "https://github.com/tree-sitter/tree-sitter-scala"        "v0.23.4"))
-  "Tree-sitter grammar recipes for code block languages.
-Each entry is (LANG URL REVISION [SOURCE-DIR]).  Covers languages
-with built-in tree-sitter modes in Emacs 29+ and popular languages
-with well-maintained third-party modes (clojure, haskell, kotlin, scala).")
+  "Tree-sitter grammar recipes used for optional embedded code highlighting.
+Each entry is (LANG URL REVISION [SOURCE-DIR]).")
+
+(defconst pi-coding-agent-grammar-recipes
+  (append pi-coding-agent-essential-grammar-recipes
+          pi-coding-agent-optional-grammar-recipes)
+  "All tree-sitter grammar recipes needed by pi-coding-agent.")
 
 ;; Register recipes so `M-x treesit-install-language-grammar' works
 ;; on Emacs 29/30 (which ship with zero recipes).  Use APPEND so user
@@ -84,8 +95,13 @@ with well-maintained third-party modes (clojure, haskell, kotlin, scala).")
 
 ;;;; Detection
 
-(defconst pi-coding-agent--essential-grammars '(markdown markdown-inline)
+(defconst pi-coding-agent--essential-grammars
+  (mapcar #'car pi-coding-agent-essential-grammar-recipes)
   "Grammars required for the chat buffer to render properly.")
+
+(defconst pi-coding-agent--optional-grammars
+  (mapcar #'car pi-coding-agent-optional-grammar-recipes)
+  "Recipe grammars used only for optional embedded code highlighting.")
 
 (defun pi-coding-agent--missing-essential-grammars ()
   "Return list of essential grammars that are not installed."
@@ -94,15 +110,15 @@ with well-maintained third-party modes (clojure, haskell, kotlin, scala).")
               pi-coding-agent--essential-grammars))
 
 (defun pi-coding-agent--missing-optional-grammars ()
-  "Return list of recipe grammars that are not installed."
+  "Return optional recipe grammars that are not installed."
   (seq-filter (lambda (lang)
                 (not (treesit-language-available-p lang)))
-              (mapcar #'car pi-coding-agent-grammar-recipes)))
+              pi-coding-agent--optional-grammars))
 
 (defun pi-coding-agent--installed-optional-grammars ()
-  "Return list of recipe grammars that are installed."
+  "Return optional recipe grammars that are installed."
   (seq-filter #'treesit-language-available-p
-              (mapcar #'car pi-coding-agent-grammar-recipes)))
+              pi-coding-agent--optional-grammars))
 
 ;;;; Installation
 
@@ -147,7 +163,8 @@ chat buffer to render properly.
   :group 'pi-coding-agent)
 
 (defun pi-coding-agent--maybe-install-essential-grammars ()
-  "Handle missing essential grammars per `pi-coding-agent-essential-grammar-action'.
+  "Handle missing essential grammars.
+Behavior comes from `pi-coding-agent-essential-grammar-action'.
 Respects `noninteractive' (batch mode always skips)."
   (unless noninteractive
     (let ((missing (pi-coding-agent--missing-essential-grammars)))

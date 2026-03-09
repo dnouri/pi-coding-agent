@@ -65,6 +65,30 @@ Initializes packages, then re-prepends the current project root to
             (read (current-buffer))))
       (kill-buffer output-buffer))))
 
+(defun pi-coding-agent-test--markdown-load-state (library)
+  "Return Markdown association state after requiring LIBRARY in batch Emacs."
+  (pi-coding-agent-test--read-batch-emacs-result
+   (format "(progn
+  (defvar major-mode-remap-alist nil)
+  (defvar treesit-major-mode-remap-alist nil)
+  (let ((before-auto (copy-tree auto-mode-alist))
+        (before-major-remap (copy-tree major-mode-remap-alist))
+        (before-treesit-remap (copy-tree treesit-major-mode-remap-alist)))
+    (require '%s)
+    (prin1 (list
+            :auto-unchanged (equal before-auto auto-mode-alist)
+            :major-remap-unchanged (equal before-major-remap major-mode-remap-alist)
+            :treesit-remap-unchanged (equal before-treesit-remap treesit-major-mode-remap-alist)
+            :md-mode-defined (fboundp 'md-ts-mode)
+            :md-mode-maybe-defined (fboundp 'md-ts-mode-maybe)
+            :before-md-association (assoc \"\\.md\\'\" before-auto)
+            :after-md-association (assoc \"\\.md\\'\" auto-mode-alist)
+            :before-major-markdown-remap (alist-get 'markdown-mode before-major-remap)
+            :after-major-markdown-remap (alist-get 'markdown-mode major-mode-remap-alist)
+            :before-treesit-markdown-remap (alist-get 'markdown-mode before-treesit-remap)
+            :after-treesit-markdown-remap (alist-get 'markdown-mode treesit-major-mode-remap-alist)))))"
+           library)))
+
 ;;;; Waiting Helpers
 
 (defun pi-coding-agent-test-wait-until (predicate &optional timeout poll-interval process)
