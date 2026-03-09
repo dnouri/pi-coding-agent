@@ -11,7 +11,9 @@
 ;;     (pi-coding-agent-gui-test-send "Hello")
 ;;     (should (pi-coding-agent-gui-test-chat-contains "Fake reply for: Hello")))
 ;;
-;; Session helpers accept an optional literal plist as the first form.
+;; Session-entry helpers require a literal plist as the first form, including
+;; an explicit `:backend'.  Once a session is active, inner helper calls may
+;; reuse its options.
 ;; New GUI regressions should prefer fresh fake-backed sessions unless a shared
 ;; session is deliberately needed and justified.
 
@@ -32,11 +34,7 @@
   "Frontend model state pushed at GUI-session startup on every backend.")
 
 (defconst pi-coding-agent-gui-test-default-fake-scenario "prompt-lifecycle"
-  "Default fake-pi scenario for GUI tests.")
-
-(defvar pi-coding-agent-gui-test-default-session-options '(:backend fake)
-  "Default session options for GUI tests.
-The deterministic suite uses fake-pi unless a test opts into the real backend.")
+  "Default fake-pi scenario when a fake backend is chosen explicitly.")
 
 ;;;; Session State
 
@@ -53,11 +51,10 @@ The deterministic suite uses fake-pi unless a test opts into the real backend.")
 
 (defun pi-coding-agent-gui-test--normalize-backend (backend)
   "Return BACKEND normalized to either `real' or `fake'."
-  (pcase (or backend (plist-get pi-coding-agent-gui-test-default-session-options
-                                :backend))
+  (pcase backend
     ('real 'real)
     ('fake 'fake)
-    (_ (error "Unknown GUI test backend: %S" backend))))
+    (_ (error "GUI test sessions require explicit :backend, got: %S" backend))))
 
 (defun pi-coding-agent-gui-test--backend-spec (backend &optional fake-scenario fake-extra-args)
   "Return backend plist for BACKEND.
@@ -80,20 +77,24 @@ FAKE-SCENARIO and FAKE-EXTRA-ARGS apply only to the fake backend."
            :extra-args pi-coding-agent-extra-args))))
 
 (defun pi-coding-agent-gui-test--normalize-session-options (options)
-  "Return normalized GUI session OPTIONS plist."
-  (let* ((merged (append options pi-coding-agent-gui-test-default-session-options nil))
-         (backend (pi-coding-agent-gui-test--normalize-backend
-                   (plist-get merged :backend))))
+  "Return normalized GUI session OPTIONS plist.
+OPTIONS must include an explicit `:backend'.  Fake sessions may omit
+`:fake-scenario', which defaults to
+`pi-coding-agent-gui-test-default-fake-scenario'."
+  (let ((backend (pi-coding-agent-gui-test--normalize-backend
+                  (plist-get options :backend))))
     (list :backend backend
-          :fake-scenario (or (plist-get merged :fake-scenario)
+          :fake-scenario (or (plist-get options :fake-scenario)
                              pi-coding-agent-gui-test-default-fake-scenario)
-          :fake-extra-args (plist-get merged :fake-extra-args))))
+          :fake-extra-args (plist-get options :fake-extra-args))))
 
 (defun pi-coding-agent-gui-test--current-session-options ()
-  "Return the current session options, or the normalized defaults."
+  "Return the current session options.
+Signal an error when no session is active, so test entry points must declare
+an explicit backend instead of relying on a hidden default."
   (if (pi-coding-agent-gui-test-session-active-p)
       (plist-get pi-coding-agent-gui-test--session :options)
-    (pi-coding-agent-gui-test--normalize-session-options nil)))
+    (error "No active GUI test session; pass explicit options with :backend")))
 
 (defun pi-coding-agent-gui-test--session-matches-p (options)
   "Return non-nil when current session already matches OPTIONS."
@@ -123,8 +124,9 @@ FAKE-SCENARIO and FAKE-EXTRA-ARGS apply only to the fake backend."
 
 (defun pi-coding-agent-gui-test-start-session (&optional dir options)
   "Start a new pi session in DIR with OPTIONS.
-DIR defaults to /tmp.  OPTIONS accepts `:backend', `:fake-scenario', and
-`:fake-extra-args'.  Returns the session plist."
+DIR defaults to /tmp.  OPTIONS must include an explicit `:backend' and may
+also set `:fake-scenario' and `:fake-extra-args'.  Returns the session
+plist."
   (let* ((options (pi-coding-agent-gui-test--normalize-session-options options))
          (backend (pi-coding-agent-gui-test--backend-spec
                    (plist-get options :backend)
@@ -186,9 +188,9 @@ DIR defaults to /tmp.  OPTIONS accepts `:backend', `:fake-scenario', and
 
 (defun pi-coding-agent-gui-test-ensure-session (&optional options)
   "Ensure a test session matching OPTIONS is active.
-When OPTIONS is nil, preserve the current session backend if one is active;
-otherwise fall back to the default session options.  Also ensures proper
-window layout."
+When OPTIONS is nil, preserve the current session options if one is active.
+Otherwise signal an error so the test entry point must declare an explicit
+backend.  Also ensures proper window layout."
   (let ((options (if options
                      (pi-coding-agent-gui-test--normalize-session-options options)
                    (pi-coding-agent-gui-test--current-session-options))))
@@ -209,16 +211,28 @@ window layout."
           (let ((input-win (split-window nil -10 'below)))
             (set-window-buffer input-win input-buf)))))))
 
+(defun pi-coding-agent-gui-test--macro-session-forms (macro-name forms)
+  "Return (OPTIONS . BODY) from FORMS for MACRO-NAME.
+Signal an error unless FORMS starts with a literal plist containing
+an explicit `:backend'."
+  (let ((options (car forms)))
+    (unless (and (listp options)
+                 (keywordp (car options))
+                 (plist-member options :backend))
+      (error "%s requires an explicit session options plist with :backend"
+             macro-name))
+    (cons options (cdr forms))))
+
 ;;;; Macros for Test Structure
 
 (defmacro pi-coding-agent-gui-test-with-session (&rest forms)
   "Execute FORMS with an active pi session.
-If the first form is a literal plist, treat it as session options.
-Otherwise reuse the default session options."
+FORMS must start with a literal session options plist containing an explicit
+`:backend'."
   (declare (indent 0) (debug t))
-  (let* ((first (car forms))
-         (options (when (and (listp first) (keywordp (car first))) first))
-         (body (if options (cdr forms) forms)))
+  (pcase-let* ((`(,options . ,body)
+                (pi-coding-agent-gui-test--macro-session-forms
+                 'pi-coding-agent-gui-test-with-session forms)))
     `(progn
        (pi-coding-agent-gui-test-ensure-session ',options)
        (ert-info ((format "backend: %s"
@@ -228,12 +242,12 @@ Otherwise reuse the default session options."
 
 (defmacro pi-coding-agent-gui-test-with-fresh-session (&rest forms)
   "Execute FORMS with a fresh pi session.
-If the first form is a literal plist, treat it as session options.
-Otherwise use the default session options."
+FORMS must start with a literal session options plist containing an explicit
+`:backend'."
   (declare (indent 0) (debug t))
-  (let* ((first (car forms))
-         (options (when (and (listp first) (keywordp (car first))) first))
-         (body (if options (cdr forms) forms)))
+  (pcase-let* ((`(,options . ,body)
+                (pi-coding-agent-gui-test--macro-session-forms
+                 'pi-coding-agent-gui-test-with-fresh-session forms)))
     `(progn
        (pi-coding-agent-gui-test-end-session)
        (pi-coding-agent-gui-test-start-session nil ',options)
