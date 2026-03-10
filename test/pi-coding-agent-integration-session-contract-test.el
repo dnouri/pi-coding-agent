@@ -20,7 +20,9 @@
           pi-coding-agent--event-handlers)
     (let ((prompt-response (pi-coding-agent--rpc-sync
                             proc
-                            '(:type "prompt" :message "/no_think Say session")
+                            `(:type "prompt"
+                              :message
+                              ,pi-coding-agent-integration--prompt-session-materialize-message)
                             pi-coding-agent-test-rpc-timeout)))
       (should prompt-response)
       (should (eq (plist-get prompt-response :success) t)))

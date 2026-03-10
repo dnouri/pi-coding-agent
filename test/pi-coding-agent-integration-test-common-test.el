@@ -27,5 +27,15 @@ set of test definitions produced at macro-expansion time."
                    '(pi-coding-agent-integration-sample-contract/fake
                      pi-coding-agent-integration-sample-contract/real)))))
 
+(ert-deftest pi-coding-agent-integration-test-common-test-uses-tuned-lifecycle-prompt ()
+  "Lifecycle contract should keep the shortest proven prompt fixture."
+  (should (equal pi-coding-agent-integration--prompt-lifecycle-message
+                 "/no_think Say OK")))
+
+(ert-deftest pi-coding-agent-integration-test-common-test-uses-tuned-session-prompt ()
+  "Session contract should keep the terse session-materializing prompt."
+  (should (equal pi-coding-agent-integration--prompt-session-materialize-message
+                 "/no_think Say: test")))
+
 (provide 'pi-coding-agent-integration-test-common-test)
 ;;; pi-coding-agent-integration-test-common-test.el ends here

@@ -19,6 +19,26 @@
 (defconst pi-coding-agent-integration--all-backends '(fake real)
   "All backends that shared integration tests define explicitly.")
 
+(defconst pi-coding-agent-integration--prompt-lifecycle-message
+  "/no_think Say OK"
+  "Terse lifecycle prompt kept intentionally short for the real backend.")
+
+(defconst pi-coding-agent-integration--prompt-abort-message
+  "/no_think Count from 1 to 100 slowly"
+  "Abort contract prompt that should stream long enough to interrupt.")
+
+(defconst pi-coding-agent-integration--prompt-session-materialize-message
+  "/no_think Say: test"
+  "Shortest proven prompt that materializes a real session file quickly.")
+
+(defconst pi-coding-agent-integration--prompt-steering-initial-message
+  "/no_think Say: working"
+  "Initial prompt for steering-contract coverage.")
+
+(defconst pi-coding-agent-integration--prompt-steering-queued-message
+  "/no_think Say: queued-steer-test"
+  "Queued steering prompt used to verify visible delivery ordering.")
+
 (defvar pi-coding-agent-integration--backend nil
   "Backend plist for the currently running integration test.")
 

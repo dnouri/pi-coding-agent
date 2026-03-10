@@ -28,7 +28,9 @@
           pi-coding-agent--event-handlers)
     (let ((prompt-response (pi-coding-agent--rpc-sync
                             proc
-                            '(:type "prompt" :message "/no_think Say: working")
+                            `(:type "prompt"
+                              :message
+                              ,pi-coding-agent-integration--prompt-steering-initial-message)
                             pi-coding-agent-test-rpc-timeout)))
       (should prompt-response)
       (should (eq (plist-get prompt-response :success) t)))
@@ -38,7 +40,9 @@
         (accept-process-output proc pi-coding-agent-test-poll-interval)))
     (let ((steer-response (pi-coding-agent--rpc-sync
                            proc
-                           '(:type "steer" :message "/no_think Say: queued-steer-test")
+                           `(:type "steer"
+                             :message
+                             ,pi-coding-agent-integration--prompt-steering-queued-message)
                            pi-coding-agent-test-rpc-timeout)))
       (should steer-response)
       (should (eq (plist-get steer-response :success) t))

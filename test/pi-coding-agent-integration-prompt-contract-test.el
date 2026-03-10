@@ -35,9 +35,11 @@
                (setq got-agent-end t))))
           pi-coding-agent--event-handlers)
     (setq prompt-response
-          (pi-coding-agent--rpc-sync proc
-                                     '(:type "prompt" :message "/no_think Say hello from the contract")
-                                     pi-coding-agent-test-rpc-timeout))
+          (pi-coding-agent--rpc-sync
+           proc
+           `(:type "prompt"
+             :message ,pi-coding-agent-integration--prompt-lifecycle-message)
+           pi-coding-agent-test-rpc-timeout))
     (should prompt-response)
     (should (eq (plist-get prompt-response :success) t))
     (should (equal (plist-get prompt-response :command) "prompt"))
@@ -85,9 +87,11 @@
                (setq got-agent-end t))))
           pi-coding-agent--event-handlers)
     (setq prompt-response
-          (pi-coding-agent--rpc-sync proc
-                                     '(:type "prompt" :message "/no_think Count from 1 to 100 slowly")
-                                     pi-coding-agent-test-rpc-timeout))
+          (pi-coding-agent--rpc-sync
+           proc
+           `(:type "prompt"
+             :message ,pi-coding-agent-integration--prompt-abort-message)
+           pi-coding-agent-test-rpc-timeout))
     (should (eq (plist-get prompt-response :success) t))
     (with-timeout (pi-coding-agent-test-rpc-timeout
                    (ert-fail "Timeout waiting for abortable prompt to start streaming"))
