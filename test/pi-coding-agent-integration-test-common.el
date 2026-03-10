@@ -180,5 +180,11 @@ short-lived overlapping RPCs."
                  ""))
      (t ""))))
 
+(defun pi-coding-agent-integration--response-has-existing-session-file-p (response)
+  "Return non-nil when RESPONSE data names a session file on disk."
+  (let* ((data (plist-get response :data))
+         (session-file (plist-get data :sessionFile)))
+    (and session-file (file-exists-p session-file))))
+
 (provide 'pi-coding-agent-integration-test-common)
 ;;; pi-coding-agent-integration-test-common.el ends here
