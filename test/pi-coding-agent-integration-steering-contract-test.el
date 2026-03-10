@@ -16,13 +16,18 @@
   "A steer command queued during streaming is delivered visibly later on."
   (let ((got-agent-start nil)
         (got-agent-end nil)
+        (queued-delivered nil)
         (user-message-events nil))
     (push (lambda (event)
             (when (equal (plist-get event :type) "agent_start")
               (setq got-agent-start t))
             (when (and (equal (plist-get event :type) "message_start")
                        (equal (plist-get (plist-get event :message) :role) "user"))
-              (push event user-message-events))
+              (push event user-message-events)
+              (when (string-match-p "queued-steer-test"
+                                    (pi-coding-agent-integration--message-text
+                                     (plist-get event :message)))
+                (setq queued-delivered t)))
             (when (equal (plist-get event :type) "agent_end")
               (setq got-agent-end t)))
           pi-coding-agent--event-handlers)
@@ -48,7 +53,16 @@
       (should (eq (plist-get steer-response :success) t))
       (should (equal (plist-get steer-response :command) "steer")))
     (with-timeout (pi-coding-agent-test-integration-timeout
-                   (ert-fail "Timeout waiting for steering delivery"))
+                   (ert-fail "Timeout waiting for queued steer delivery"))
+      (while (not queued-delivered)
+        (accept-process-output proc pi-coding-agent-test-poll-interval)))
+    (let ((abort-response (pi-coding-agent--rpc-sync proc '(:type "abort")
+                                                     pi-coding-agent-test-rpc-timeout)))
+      (should abort-response)
+      (should (eq (plist-get abort-response :success) t))
+      (should (equal (plist-get abort-response :command) "abort")))
+    (with-timeout (pi-coding-agent-test-rpc-timeout
+                   (ert-fail "Timeout waiting for agent_end after steering abort"))
       (while (not got-agent-end)
         (accept-process-output proc pi-coding-agent-test-poll-interval)))
     (setq user-message-events (nreverse user-message-events))
@@ -59,7 +73,11 @@
                                          (pi-coding-agent-integration--message-text
                                           (plist-get event :message))))
                        user-message-events)))
-      (should queued-msg))))
+      (should queued-msg))
+    (let* ((state (pi-coding-agent--rpc-sync proc '(:type "get_state")
+                                             pi-coding-agent-test-rpc-timeout))
+           (data (plist-get state :data)))
+      (should (eq (plist-get data :isStreaming) :false)))))
 
 (provide 'pi-coding-agent-integration-steering-contract-test)
 ;;; pi-coding-agent-integration-steering-contract-test.el ends here
