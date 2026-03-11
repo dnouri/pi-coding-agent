@@ -125,6 +125,37 @@
     ;; Tool args cache should be empty
     (should (= 0 (hash-table-count pi-coding-agent--tool-args-cache)))))
 
+(ert-deftest pi-coding-agent-test-clear-chat-buffer-removes-pi-owned-render-overlays ()
+  "Clearing chat buffer removes stale pi-owned tool and diff overlays."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "tool\n+ 1 added\n- 2 removed\n"))
+    (let ((tool-ov (make-overlay 1 5 nil nil nil))
+          (tool-count 0)
+          (diff-count 0))
+      (overlay-put tool-ov 'pi-coding-agent-tool-block t)
+      (setq pi-coding-agent--pending-tool-overlay tool-ov)
+      (pi-coding-agent--apply-diff-overlays 6 (point-max))
+      (dolist (ov (overlays-in (point-min) (point-max)))
+        (when (overlay-get ov 'pi-coding-agent-tool-block)
+          (setq tool-count (1+ tool-count)))
+        (when (overlay-get ov 'pi-coding-agent-diff-overlay)
+          (setq diff-count (1+ diff-count))))
+      (should (= tool-count 1))
+      (should (= diff-count 4)))
+    (pi-coding-agent--clear-chat-buffer)
+    (let ((tool-count 0)
+          (diff-count 0))
+      (dolist (ov (overlays-in (point-min) (point-max)))
+        (when (overlay-get ov 'pi-coding-agent-tool-block)
+          (setq tool-count (1+ tool-count)))
+        (when (overlay-get ov 'pi-coding-agent-diff-overlay)
+          (setq diff-count (1+ diff-count))))
+      (should (= tool-count 0))
+      (should (= diff-count 0))
+      (should-not pi-coding-agent--pending-tool-overlay))))
+
 (ert-deftest pi-coding-agent-test-new-session-clears-buffer-from-different-context ()
   "New session clears buffer and updates state even when callback runs elsewhere.
 This tests that the async callback properly captures the chat buffer reference,

@@ -927,6 +927,16 @@ Returns a plist with:
               :hidden-lines (if (and truncated-first-line (= hidden 0)) 1 hidden)
               :line-map line-map-vec)))))
 
+(defun pi-coding-agent--clear-render-artifacts ()
+  "Delete pi-owned render overlays in the current chat buffer.
+This removes completed/pending tool overlays and diff overlays before
+buffer reset or history rebuild, then clears the pending overlay slot so
+buffer state and overlay state stay consistent.  Tree-sitter overlays are
+left alone."
+  (remove-overlays (point-min) (point-max) 'pi-coding-agent-tool-block t)
+  (remove-overlays (point-min) (point-max) 'pi-coding-agent-diff-overlay t)
+  (setq pi-coding-agent--pending-tool-overlay nil))
+
 (defun pi-coding-agent--tool-overlay-create (tool-name &optional path)
   "Create overlay for tool block TOOL-NAME at point.
 Optional PATH stores the file path for navigation.
@@ -1831,6 +1841,7 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
   (when (and chat-buf (buffer-live-p chat-buf))
     (with-current-buffer chat-buf
       (let ((inhibit-read-only t))
+        (pi-coding-agent--clear-render-artifacts)
         (erase-buffer)
         (insert (pi-coding-agent--format-startup-header) "\n")
         (when (vectorp messages)

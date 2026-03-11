@@ -388,6 +388,33 @@ agent_end + next section's leading newline must not create triple newlines."
     (should (cl-some (lambda (ov) (overlay-get ov 'pi-coding-agent-tool-block))
                      (overlays-in (point-min) (point-max))))))
 
+(ert-deftest pi-coding-agent-test-display-session-history-does-not-accumulate-stale-tool-overlays ()
+  "Rebuilding session history removes stale pi-owned tool overlays first."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((messages [(:role "assistant"
+                      :content [(:type "text" :text "Let me check.")
+                                (:type "toolCall" :id "tc1"
+                                 :name "bash"
+                                 :arguments (:command "ls -la"))]
+                      :timestamp 1704067200000)
+                     (:role "toolResult" :toolCallId "tc1"
+                      :toolName "bash"
+                      :content [(:type "text" :text "total 42")]
+                      :isError :json-false
+                      :timestamp 1704067201000)]))
+      (pi-coding-agent--display-session-history messages (current-buffer))
+      (pi-coding-agent--display-session-history messages (current-buffer))
+      (let ((tool-count 0)
+            (zero-tool-count 0))
+        (dolist (ov (overlays-in (point-min) (point-max)))
+          (when (overlay-get ov 'pi-coding-agent-tool-block)
+            (setq tool-count (1+ tool-count))
+            (when (= (overlay-start ov) (overlay-end ov))
+              (setq zero-tool-count (1+ zero-tool-count)))))
+        (should (= tool-count 1))
+        (should (= zero-tool-count 0))))))
+
 (ert-deftest pi-coding-agent-test-history-renders-multiple-tools-in-order ()
   "Multiple tool calls render with headers and output in order."
   (with-temp-buffer

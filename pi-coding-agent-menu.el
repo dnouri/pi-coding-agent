@@ -273,6 +273,7 @@ Used when starting a new session."
   (when-let* ((chat-buf (pi-coding-agent--get-chat-buffer)))
     (with-current-buffer chat-buf
       (let ((inhibit-read-only t))
+        (pi-coding-agent--clear-render-artifacts)
         (erase-buffer)
         (insert (pi-coding-agent--format-startup-header))
         (insert "\n")
