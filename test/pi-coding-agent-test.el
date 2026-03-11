@@ -10,6 +10,41 @@
 (require 'pi-coding-agent)
 (require 'pi-coding-agent-test-common)
 
+;;; Shared Test Helpers
+
+(ert-deftest pi-coding-agent-test-backend-spec-builds-fake-launch-config ()
+  "Shared test helper builds fake backend launch data from a scenario name."
+  (let* ((spec (pi-coding-agent-test-backend-spec 'fake "prompt-lifecycle"
+                                                  "tool-read"
+                                                  '("--log-file" "/tmp/fake-pi.log")))
+         (executable (plist-get spec :executable)))
+    (should (eq (plist-get spec :name) 'fake))
+    (should (equal (plist-get spec :label) "fake:tool-read"))
+    (should (equal (plist-get spec :scenario) "tool-read"))
+    (should (equal (plist-get spec :extra-args)
+                   '("--scenario" "tool-read"
+                     "--log-file" "/tmp/fake-pi.log")))
+    (should (equal (car executable)
+                   (pi-coding-agent-test-python-executable)))
+    (should (equal (cadr executable)
+                   pi-coding-agent-test-fake-pi-script))))
+
+(ert-deftest pi-coding-agent-test-backend-spec-builds-real-launch-config ()
+  "Shared test helper preserves the configured real backend launch command."
+  (let ((pi-coding-agent-executable '("pi" "rpc"))
+        (pi-coding-agent-extra-args '("--model" "fake")))
+    (let ((spec (pi-coding-agent-test-backend-spec 'real "prompt-lifecycle")))
+      (should (eq (plist-get spec :name) 'real))
+      (should (equal (plist-get spec :label) "real"))
+      (should (equal (plist-get spec :executable) '("pi" "rpc")))
+      (should (equal (plist-get spec :extra-args) '("--model" "fake")))
+      (should-not (plist-member spec :scenario)))))
+
+(ert-deftest pi-coding-agent-test-backend-spec-rejects-unknown-backend ()
+  "Shared backend helper should fail loudly for unsupported backends."
+  (should-error
+   (pi-coding-agent-test-backend-spec 'bogus "prompt-lifecycle")))
+
 ;;; Main Entry Point
 
 (ert-deftest pi-coding-agent-test-pi-coding-agent-creates-chat-buffer ()

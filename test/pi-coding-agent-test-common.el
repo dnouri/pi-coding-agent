@@ -63,6 +63,29 @@ and an executable shebang for manual runs."
   "Return fake-pi CLI args for SCENARIO plus optional EXTRA-ARGS."
   (append (list "--scenario" scenario) extra-args))
 
+(defun pi-coding-agent-test-backend-spec
+    (backend default-fake-scenario &optional fake-scenario fake-extra-args)
+  "Return shared backend launch data for BACKEND.
+DEFAULT-FAKE-SCENARIO is used when BACKEND is `fake' and FAKE-SCENARIO is
+nil.  FAKE-EXTRA-ARGS are appended after the generated fake-pi scenario args."
+  (pcase backend
+    ('fake
+     (let* ((scenario (or fake-scenario default-fake-scenario))
+            (extra-args (pi-coding-agent-test-fake-pi-extra-args
+                         scenario fake-extra-args)))
+       (list :name 'fake
+             :label (format "fake:%s" scenario)
+             :executable (pi-coding-agent-test-fake-pi-executable)
+             :extra-args extra-args
+             :scenario scenario)))
+    ('real
+     (list :name 'real
+           :label "real"
+           :executable pi-coding-agent-executable
+           :extra-args pi-coding-agent-extra-args))
+    (_
+     (error "Unknown test backend: %S" backend))))
+
 ;;;; Batch Emacs Helpers
 
 (defun pi-coding-agent-test--read-batch-emacs-result (expression)

@@ -58,23 +58,11 @@ space-separated list like `fake,real'.  When unset, both backends run."
 (defun pi-coding-agent-integration--backend-spec (backend &optional fake-scenario fake-extra-args)
   "Return a backend plist for BACKEND.
 FAKE-SCENARIO and FAKE-EXTRA-ARGS apply only to the fake backend."
-  (pcase backend
-    ('fake
-     (let* ((scenario (or fake-scenario
-                          pi-coding-agent-integration--default-fake-scenario))
-            (extra-args (pi-coding-agent-test-fake-pi-extra-args scenario fake-extra-args)))
-       (list :name 'fake
-             :label (format "fake:%s" scenario)
-             :executable (pi-coding-agent-test-fake-pi-executable)
-             :extra-args extra-args
-             :scenario scenario)))
-    ('real
-     (list :name 'real
-           :label "real"
-           :executable pi-coding-agent-executable
-           :extra-args pi-coding-agent-extra-args))
-    (_
-     (error "Unknown integration backend: %S" backend))))
+  (pi-coding-agent-test-backend-spec
+   backend
+   pi-coding-agent-integration--default-fake-scenario
+   fake-scenario
+   fake-extra-args))
 
 (defun pi-coding-agent-integration--skip-unless-available (backend-spec)
   "Skip unless BACKEND-SPEC can run in the current environment."

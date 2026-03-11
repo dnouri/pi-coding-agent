@@ -17,7 +17,7 @@ The fake must enter through that seam unchanged. Test helpers may bind the
 executable and extra args, but production startup code should not grow a
 special fake-only branch.
 
-## Planned file layout
+## File layout
 
 - Harness executable: `test/support/fake_pi.py`
 - Harness contract note: `test/support/fake-pi-contract.md`
@@ -86,7 +86,7 @@ GUI/integration form when they still prove a real boundary risk:
 
 ## V1 command surface
 
-Required now because the current frontend or planned shared contract reads it:
+Required now because the current frontend and shared contract read it:
 
 - `get_state`
 - `get_commands`
@@ -99,12 +99,11 @@ Required now because the current frontend or planned shared contract reads it:
 - `set_thinking_level`
 - `extension_ui_response`
 
-Required for the shared integration contract that follows immediately after the
-harness lands:
+Also required by the shared integration contract:
 
 - `steer`
 
-Not required for the first fake-backed GUI and integration migration:
+Still out of scope:
 
 - `follow_up`
 - `get_messages`
@@ -252,20 +251,17 @@ That is enough for:
 - session-name persistence checks
 - resume metadata parsing in Emacs
 
-## Backend helper API plan
+## Backend helper API
 
 Keep backend choice explicit in tests.
 
-Proposed helper shape:
+The shared helper returns a backend plist with:
 
 - backend symbol: `real` or `fake`
-- fake scenarios named explicitly, e.g. `prompt-lifecycle`, `scroll-tool-read`,
-  `extension-confirm`
-- helper API returns a backend config object / plist with:
-  - backend label for failure output
-  - executable command list
-  - extra args
-  - optional scenario name
+- backend label for failure output
+- executable command list
+- extra args
+- optional fake scenario name
 
 The important design point is visibility: a failing test should say which
 backend and which scenario was running.
@@ -285,11 +281,3 @@ Out of scope until a concrete test needs it:
 - extension runtime behavior beyond the RPC UI sub-protocol
 - every event and field documented in upstream `rpc.md`
 
-## Phase progression
-
-Phase 1 decides the contract and helper API.
-Phase 2 implements the harness and real temp-session persistence.
-Phase 3 reuses this exact surface to run the same integration assertions on
-both fake and real backends.
-Phase 4 adds deterministic GUI scenarios on top of the same scenario DSL.
-Phase 5 makes the fake/real split the documented default workflow.

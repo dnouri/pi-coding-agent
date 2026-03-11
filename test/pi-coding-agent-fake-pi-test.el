@@ -20,17 +20,19 @@
   (let* ((partial (or (process-get proc 'fake-pi-partial) ""))
          (result (pi-coding-agent--accumulate-lines partial output))
          (lines (car result))
-         (objects (or (process-get proc 'fake-pi-objects) nil))
-         (invalid (or (process-get proc 'fake-pi-invalid-lines) nil)))
+         (objects (process-get proc 'fake-pi-objects))
+         (invalid (process-get proc 'fake-pi-invalid-lines))
+         (new-objects nil)
+         (new-invalid nil))
     (process-put proc 'fake-pi-raw-output
                  (concat (or (process-get proc 'fake-pi-raw-output) "") output))
     (process-put proc 'fake-pi-partial (cdr result))
     (dolist (line lines)
       (if-let ((json (pi-coding-agent--parse-json-line line)))
-          (setq objects (append objects (list json)))
-        (setq invalid (append invalid (list line)))))
-    (process-put proc 'fake-pi-objects objects)
-    (process-put proc 'fake-pi-invalid-lines invalid)))
+          (push json new-objects)
+        (push line new-invalid)))
+    (process-put proc 'fake-pi-objects (nconc objects (nreverse new-objects)))
+    (process-put proc 'fake-pi-invalid-lines (nconc invalid (nreverse new-invalid)))))
 
 (defun pi-coding-agent-fake-pi-test--start-process (scenario &optional extra-args)
   "Start fake-pi for SCENARIO with optional EXTRA-ARGS."
@@ -89,9 +91,9 @@ SPEC is (PROC SCENARIO &rest EXTRA-ARGS)."
       (let* ((remaining (- deadline (float-time)))
              (item (pi-coding-agent-fake-pi-test--pop-object
                     proc (max 0.0 remaining))))
-        (setq items (append items (list item))
-              done (funcall predicate item))))
-    items))
+        (push item items)
+        (setq done (funcall predicate item))))
+    (nreverse items)))
 
 (ert-deftest pi-coding-agent-fake-pi-test-collect-until-spends-one-timeout-budget ()
   "Repeated reads should spend one timeout budget instead of resetting it."

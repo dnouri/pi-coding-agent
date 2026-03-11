@@ -59,22 +59,11 @@
 (defun pi-coding-agent-gui-test--backend-spec (backend &optional fake-scenario fake-extra-args)
   "Return backend plist for BACKEND.
 FAKE-SCENARIO and FAKE-EXTRA-ARGS apply only to the fake backend."
-  (pcase (pi-coding-agent-gui-test--normalize-backend backend)
-    ('fake
-     (let* ((scenario (or fake-scenario
-                          pi-coding-agent-gui-test-default-fake-scenario))
-            (extra-args (pi-coding-agent-test-fake-pi-extra-args
-                         scenario fake-extra-args)))
-       (list :name 'fake
-             :label (format "fake:%s" scenario)
-             :executable (pi-coding-agent-test-fake-pi-executable)
-             :extra-args extra-args
-             :scenario scenario)))
-    ('real
-     (list :name 'real
-           :label "real"
-           :executable pi-coding-agent-executable
-           :extra-args pi-coding-agent-extra-args))))
+  (pi-coding-agent-test-backend-spec
+   (pi-coding-agent-gui-test--normalize-backend backend)
+   pi-coding-agent-gui-test-default-fake-scenario
+   fake-scenario
+   fake-extra-args))
 
 (defun pi-coding-agent-gui-test--normalize-session-options (options)
   "Return normalized GUI session OPTIONS plist.

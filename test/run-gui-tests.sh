@@ -42,6 +42,8 @@ fi
 WIDTH=80
 HEIGHT=22
 RESULTS_FILE=$(mktemp /tmp/ert-results.XXXXXX)
+RUNNER_FILE=$(mktemp /tmp/run-gui-tests.XXXXXX.el)
+trap 'rm -f "$RESULTS_FILE" "$RUNNER_FILE"' EXIT
 
 echo "=== Pi.el GUI Tests ==="
 echo "Project: $PROJECT_DIR"
@@ -54,12 +56,12 @@ fi
 echo ""
 
 # Create elisp to run tests
-cat > /tmp/run-gui-tests.el << 'ELISP_END'
+cat > "$RUNNER_FILE" << 'ELISP_END'
 ;; Setup
 (setq inhibit-startup-screen t)
 ELISP_END
 
-cat >> /tmp/run-gui-tests.el << EOF
+cat >> "$RUNNER_FILE" << EOF
 (set-frame-size (selected-frame) $WIDTH $HEIGHT)
 (add-to-list 'load-path "$PROJECT_DIR")
 (add-to-list 'load-path "$PROJECT_DIR/test")
@@ -123,16 +125,20 @@ cat >> /tmp/run-gui-tests.el << EOF
               (insert (format "        %S\n" (ert-test-result-with-condition-condition result))))
             ;; Debug: print diagnostic info on failure
             (when (and (boundp 'pi-coding-agent-gui-test--session) pi-coding-agent-gui-test--session)
+              (pi-coding-agent-gui-test--log "  --- Session config ---")
+              (pi-coding-agent-gui-test--log "  Backend: %s"
+                                (plist-get (plist-get pi-coding-agent-gui-test--session :backend)
+                                           :label))
+              (pi-coding-agent-gui-test--log "  Options: %S"
+                                (plist-get pi-coding-agent-gui-test--session :options))
               ;; Process status
               (when-let ((proc (plist-get pi-coding-agent-gui-test--session :process)))
                 (pi-coding-agent-gui-test--log "  --- Process status ---")
                 (pi-coding-agent-gui-test--log "  Status: %s, Exit: %s"
-                                  (process-status proc) (process-exit-status proc)))
-              ;; Session state
-              (pi-coding-agent-gui-test--log "  --- Session state ---")
-              (pi-coding-agent-gui-test--log "  Model: %s, Streaming: %s"
-                                (plist-get pi-coding-agent-gui-test--session :model)
-                                (plist-get pi-coding-agent-gui-test--session :streaming))
+                                  (process-status proc) (process-exit-status proc))
+                (pi-coding-agent-gui-test--log "  Events: %s, Last event: %S"
+                                  (or (process-get proc 'pi-coding-agent-gui-test-event-count) 0)
+                                  (process-get proc 'pi-coding-agent-gui-test-last-event)))
               ;; Chat buffer content
               (when-let ((chat-buf (plist-get pi-coding-agent-gui-test--session :chat-buffer)))
                 (when (buffer-live-p chat-buf)
@@ -151,9 +157,9 @@ set +e
 if [ "$HEADLESS" = "1" ]; then
     # GDK_BACKEND=x11 forces GTK/PGTK to use X11 instead of auto-detecting Wayland
     # </dev/null prevents "standard input is not a tty" error in CI
-    xvfb-run -a env GDK_BACKEND=x11 PATH="$PATH" emacs -Q -l /tmp/run-gui-tests.el </dev/null 2>&1
+    xvfb-run -a env GDK_BACKEND=x11 PATH="$PATH" emacs -Q -l "$RUNNER_FILE" </dev/null 2>&1
 else
-    emacs -Q -l /tmp/run-gui-tests.el 2>&1
+    emacs -Q -l "$RUNNER_FILE" 2>&1
 fi
 EXIT_CODE=$?
 set -e
@@ -161,8 +167,6 @@ set -e
 # Show results
 if [[ -f "$RESULTS_FILE" ]]; then
     cat "$RESULTS_FILE"
-    rm -f "$RESULTS_FILE"
 fi
-rm -f /tmp/run-gui-tests.el
 
 exit $EXIT_CODE
