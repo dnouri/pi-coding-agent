@@ -1,0 +1,16 @@
+{
+  "description": "Shared read-tool contract fixture for fake and real integration backends.",
+  "commands": [],
+  "prompt": {
+    "type": "tool_stream",
+    "tool_name": "read",
+    "tool_args": {
+      "path": "/tmp/fake-tool.txt"
+    },
+    "partial_result_text": "TOOL_CONTRACT_MARKER\n",
+    "result_text": "TOOL_CONTRACT_MARKER\n",
+    "assistant_text": "DONE",
+    "delay_ms": 30,
+    "echo_user": true
+  }
+}

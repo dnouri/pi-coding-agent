@@ -60,6 +60,7 @@ module, direct `setq` is fine.
 | `test/pi-coding-agent-integration-prompt-contract-test.el` | Shared fake/real prompt lifecycle + abort contracts |
 | `test/pi-coding-agent-integration-session-contract-test.el` | Shared fake/real session-file persistence contract |
 | `test/pi-coding-agent-integration-steering-contract-test.el` | Shared fake/real steering contract |
+| `test/pi-coding-agent-integration-tool-contract-test.el` | Shared fake/real tool execution contract |
 | `test/pi-coding-agent-integration-test.el` | Integration suite entry point (loads all shared contract modules) |
 | `test/pi-coding-agent-gui-tests.el` | GUI tests (require display or xvfb) |
 

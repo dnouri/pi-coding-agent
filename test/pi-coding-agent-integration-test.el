@@ -12,6 +12,7 @@
 (require 'pi-coding-agent-integration-prompt-contract-test)
 (require 'pi-coding-agent-integration-session-contract-test)
 (require 'pi-coding-agent-integration-steering-contract-test)
+(require 'pi-coding-agent-integration-tool-contract-test)
 
 (provide 'pi-coding-agent-integration-test)
 ;;; pi-coding-agent-integration-test.el ends here
