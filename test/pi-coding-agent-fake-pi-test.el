@@ -116,6 +116,18 @@ SPEC is (PROC SCENARIO &rest EXTRA-ARGS)."
   "Return the :type fields from OBJECTS."
   (mapcar (lambda (obj) (plist-get obj :type)) objects))
 
+(defun pi-coding-agent-fake-pi-test--run-cli (&rest args)
+  "Run fake-pi with ARGS and return `(:exit-code N :output STRING)'."
+  (let ((command
+         (concat
+          (mapconcat #'shell-quote-argument
+                     (append (pi-coding-agent-test-fake-pi-executable) args)
+                     " ")
+          " 2>&1")))
+    (with-temp-buffer
+      (list :exit-code (call-process-shell-command command nil (current-buffer) nil)
+            :output (buffer-string)))))
+
 (defmacro pi-coding-agent-fake-pi-test-with-session (spec &rest body)
   "Create a real pi-coding-agent session against fake-pi, then run BODY.
 SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
@@ -190,6 +202,24 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
       pi-coding-agent-fake-pi-test--timeout
       0.01))
     (should-not (process-get proc 'fake-pi-objects))))
+
+(ert-deftest pi-coding-agent-fake-pi-test-cli-rejects-unsupported-mode ()
+  "The fake should fail fast when asked to run in an unsupported mode."
+  (let* ((result (pi-coding-agent-fake-pi-test--run-cli
+                  "--mode" "interactive"
+                  "--scenario" "prompt-lifecycle"))
+         (output (plist-get result :output)))
+    (should-not (eq (plist-get result :exit-code) 0))
+    (should (string-match-p "invalid choice" output))
+    (should (string-match-p "interactive" output))))
+
+(ert-deftest pi-coding-agent-fake-pi-test-cli-reports-missing-scenario-cleanly ()
+  "The fake should name a missing scenario instead of showing a traceback."
+  (let* ((result (pi-coding-agent-fake-pi-test--run-cli "--scenario" "does-not-exist"))
+         (output (plist-get result :output)))
+    (should-not (eq (plist-get result :exit-code) 0))
+    (should (string-match-p "scenario not found: does-not-exist" output))
+    (should-not (string-match-p "Traceback" output))))
 
 (ert-deftest pi-coding-agent-fake-pi-test-cleans-session-root-on-exit ()
   "The fake removes its temporary session directory when the process exits."

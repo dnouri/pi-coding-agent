@@ -952,7 +952,7 @@ class FakePiHarness:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for the fake harness."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", default="rpc")
+    parser.add_argument("--mode", default="rpc", choices=["rpc"])
     parser.add_argument("--scenario", required=True)
     parser.add_argument("--scenario-dir", default=str(default_scenario_dir()))
     parser.add_argument("--session-dir")
@@ -987,13 +987,31 @@ def main(argv: list[str] | None = None) -> int:
     """Entry point for the fake-pi harness."""
     args = parse_args(argv)
     scenario_path = Path(args.scenario_dir) / f"{args.scenario}.json"
-    scenario = load_scenario(scenario_path, args.scenario)
+    try:
+        scenario = load_scenario(scenario_path, args.scenario)
+    except FileNotFoundError:
+        print(f"fake-pi: scenario not found: {args.scenario}", file=sys.stderr)
+        return 2
+    except json.JSONDecodeError as exc:
+        print(
+            f"fake-pi: invalid JSON in scenario {args.scenario}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+    except (KeyError, TypeError, ValueError) as exc:
+        print(f"fake-pi: invalid scenario {args.scenario}: {exc}", file=sys.stderr)
+        return 2
+    try:
+        split_responses = parse_split_responses(args.split_response)
+    except ValueError as exc:
+        print(f"fake-pi: {exc}", file=sys.stderr)
+        return 2
     harness = FakePiHarness(
         scenario=scenario,
         session_dir=args.session_dir,
         log_file=args.log_file,
         extension_timeout_ms=args.extension_timeout_ms,
-        split_responses=parse_split_responses(args.split_response),
+        split_responses=split_responses,
     )
     return harness.run()
 
