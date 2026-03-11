@@ -61,8 +61,11 @@ If TIMESTAMP (Emacs time value) is provided, display it in the header."
 Only shows the Assistant header once per prompt, even during retries.
 Note: status is set to `streaming' by the event handler."
   (pi-coding-agent--set-aborted nil)  ; Reset abort flag for new turn
-  ;; Only show header if not already shown for this prompt
+  ;; Only show header if not already shown for this prompt.
+  ;; Retries reuse the same visible assistant turn, so only advance the
+  ;; turn ID when we actually emit a new header.
   (unless pi-coding-agent--assistant-header-shown
+    (pi-coding-agent--advance-tool-turn-id)
     (pi-coding-agent--append-to-chat
      (concat "\n" (pi-coding-agent--make-separator "Assistant") "\n"))
     (setq pi-coding-agent--assistant-header-shown t))
@@ -373,6 +376,7 @@ Note: status is set to `idle' by the event handler."
           (skip-chars-backward "\n")
           (delete-region (point) (point-max))
           (insert "\n"))))
+    (pi-coding-agent--maintain-hot-tool-tail)
     (pi-coding-agent--set-activity-phase "idle")
     (pi-coding-agent--refresh-header)
     ;; Check follow-up queue and send next message if any (unless aborted)
@@ -946,6 +950,8 @@ automatically extends when content is inserted at its end."
     (overlay-put ov 'pi-coding-agent-tool-block t)
     (overlay-put ov 'pi-coding-agent-tool-name tool-name)
     (overlay-put ov 'face 'pi-coding-agent-tool-block)
+    (when pi-coding-agent--tool-turn-id
+      (overlay-put ov 'pi-coding-agent-turn-id pi-coding-agent--tool-turn-id))
     (when path
       (overlay-put ov 'pi-coding-agent-tool-path path))
     ov))
@@ -966,12 +972,16 @@ it from extending to subsequent content.  Sets pending overlay to nil."
           (offset (overlay-get pi-coding-agent--pending-tool-overlay
                                'pi-coding-agent-tool-offset))
           (line-map (overlay-get pi-coding-agent--pending-tool-overlay
-                                 'pi-coding-agent-line-map)))
+                                 'pi-coding-agent-line-map))
+          (turn-id (overlay-get pi-coding-agent--pending-tool-overlay
+                                'pi-coding-agent-turn-id)))
       (delete-overlay pi-coding-agent--pending-tool-overlay)
       (let ((ov (make-overlay start end nil nil nil)))  ; rear-advance=nil
         (overlay-put ov 'pi-coding-agent-tool-block t)
         (overlay-put ov 'pi-coding-agent-tool-name tool-name)
         (overlay-put ov 'pi-coding-agent-header-end header-end)
+        (when turn-id
+          (overlay-put ov 'pi-coding-agent-turn-id turn-id))
         (when path
           (overlay-put ov 'pi-coding-agent-tool-path path))
         (when offset
@@ -1418,6 +1428,10 @@ When IS-EDIT-DIFF is non-nil, apply diff overlays to the inserted block."
     (when is-edit-diff
       (pi-coding-agent--apply-diff-overlays content-start (point)))))
 
+(defun pi-coding-agent--tool-hidden-line-label (hidden-count)
+  "Return the plain display label for HIDDEN-COUNT hidden lines."
+  (format "... (%d more lines)" hidden-count))
+
 (defun pi-coding-agent--insert-tool-content-with-toggle
     (preview-content full-content lang is-edit-diff hidden-count expanded)
   "Insert tool content with a toggle button.
@@ -1430,7 +1444,7 @@ HIDDEN-COUNT is stored for the button label."
                             preview-content))
          (button-label (if expanded
                            "[-]"
-                         (format "... (%d more lines)" hidden-count))))
+                         (pi-coding-agent--tool-hidden-line-label hidden-count))))
     (pi-coding-agent--insert-rendered-tool-content
      display-content
      lang
@@ -1482,6 +1496,200 @@ Works anywhere inside a tool block overlay."
           (outline-cycle))
       ;; Not in a tool block
       (outline-cycle))))
+
+(defun pi-coding-agent--completed-tool-overlay-p (overlay)
+  "Return non-nil when OVERLAY is a completed tool block.
+Pending tool overlays are excluded because their final body has not yet
+been rendered."
+  (and (overlayp overlay)
+       (overlay-buffer overlay)
+       (overlay-get overlay 'pi-coding-agent-tool-block)
+       (not (eq overlay pi-coding-agent--pending-tool-overlay))
+       (overlay-get overlay 'pi-coding-agent-header-end)))
+
+(defun pi-coding-agent--tool-overlay-visible-body (overlay)
+  "Return the currently visible body text for completed tool OVERLAY.
+Extracts the text between the outer fence lines, removing only the
+wrapper newline inserted before the closing fence.  Collapsed blocks
+therefore cool into their visible preview only."
+  (when-let* ((header-end-marker (overlay-get overlay 'pi-coding-agent-header-end))
+              (header-end (and (markerp header-end-marker)
+                               (marker-position header-end-marker)))
+              (overlay-end (overlay-end overlay)))
+    (save-excursion
+      (goto-char header-end)
+      (when-let* ((opening-fence (pi-coding-agent--fence-line-info-at-point)))
+        (forward-line 1)
+        (let ((content-start (point))
+              (closing-start nil))
+          (while (and (not closing-start) (< (point) overlay-end))
+            (let ((line-info (pi-coding-agent--fence-line-info-at-point)))
+              (when (pi-coding-agent--fence-closing-line-p opening-fence line-info)
+                (setq closing-start (line-beginning-position))))
+            (unless closing-start
+              (forward-line 1)))
+          (when closing-start
+            (let ((wrapped-body (buffer-substring-no-properties
+                                 content-start closing-start)))
+              (if (string-suffix-p "\n" wrapped-body)
+                  (substring wrapped-body 0 -1)
+                wrapped-body))))))))
+
+(defun pi-coding-agent--tool-overlay-cold-metadata (overlay)
+  "Return cold-history metadata for completed tool OVERLAY.
+The result is a plist with `:visible-body' and, for currently collapsed
+blocks only, `:hidden-count'.  Expanded blocks intentionally return no
+hidden-count because cold history must stay preview-only and must not
+imply that hidden remainder can still be restored."
+  (when-let* ((header-end-marker (overlay-get overlay 'pi-coding-agent-header-end))
+              (header-end (and (markerp header-end-marker)
+                               (marker-position header-end-marker)))
+              (overlay-end (overlay-end overlay))
+              (visible-body (pi-coding-agent--tool-overlay-visible-body overlay)))
+    (let* ((button (pi-coding-agent--find-toggle-button-in-region
+                    header-end overlay-end))
+           (hidden-count (and button
+                              (not (button-get button 'pi-coding-agent-expanded))
+                              (button-get button 'hidden-count))))
+      (list :visible-body visible-body
+            :hidden-count (and (integerp hidden-count)
+                               (> hidden-count 0)
+                               hidden-count)))))
+
+(defun pi-coding-agent--region-byte-length (start end)
+  "Return byte length of the buffer region from START to END."
+  (if (>= start end)
+      0
+    (let ((start-bytes (position-bytes start))
+          (end-bytes (position-bytes end)))
+      (if (and start-bytes end-bytes)
+          (- end-bytes start-bytes)
+        (- end start)))))
+
+(defun pi-coding-agent--tool-overlay-rich-bytes (overlay)
+  "Return the rich-history byte cost of completed tool OVERLAY."
+  (pi-coding-agent--region-byte-length (overlay-start overlay)
+                                       (overlay-end overlay)))
+
+(defun pi-coding-agent--tool-overlay-turn-token (overlay)
+  "Return the turn token used to budget completed tool OVERLAY.
+Legacy or synthetic overlays without a turn ID fall back to their start
+position so they behave as singleton turns."
+  (or (overlay-get overlay 'pi-coding-agent-turn-id)
+      (overlay-start overlay)))
+
+(defun pi-coding-agent--group-completed-tool-overlays (overlays)
+  "Group completed tool OVERLAYS by turn, preserving buffer order."
+  (let ((sorted (sort (copy-sequence overlays)
+                      (lambda (a b)
+                        (< (overlay-start a) (overlay-start b))))))
+    (cl-labels ((finish-group (groups token bytes members)
+                  (if members
+                      (cons (list :turn-token token
+                                  :bytes bytes
+                                  :overlays (nreverse members))
+                            groups)
+                    groups)))
+      (let (groups current-token current-bytes current-overlays)
+        (dolist (overlay sorted)
+          (let ((token (pi-coding-agent--tool-overlay-turn-token overlay))
+                (bytes (pi-coding-agent--tool-overlay-rich-bytes overlay)))
+            (if (equal token current-token)
+                (progn
+                  (setq current-bytes (+ current-bytes bytes))
+                  (push overlay current-overlays))
+              (setq groups (finish-group groups current-token current-bytes
+                                         current-overlays)
+                    current-token token
+                    current-bytes bytes
+                    current-overlays (list overlay)))))
+        (nreverse (finish-group groups current-token current-bytes
+                                current-overlays))))))
+
+(defun pi-coding-agent--select-hot-tool-overlays (overlays)
+  "Return completed tool OVERLAYS that should remain hot.
+The newest `pi-coding-agent-hot-tool-turn-floor' turns stay hot
+unconditionally.  Older turns stay hot only while they fit inside the
+rich byte budget, preserving one contiguous hot tail."
+  (let ((groups (reverse (pi-coding-agent--group-completed-tool-overlays overlays)))
+        (turn-floor pi-coding-agent-hot-tool-turn-floor)
+        (byte-budget pi-coding-agent-hot-tool-byte-budget)
+        (hot-overlays nil)
+        (hot-bytes 0)
+        (kept-turns 0)
+        (keep-going t))
+    (dolist (group groups)
+      (when keep-going
+        (let ((group-overlays (plist-get group :overlays))
+              (group-bytes (plist-get group :bytes)))
+          (if (< kept-turns turn-floor)
+              (setq hot-overlays (append group-overlays hot-overlays)
+                    hot-bytes (+ hot-bytes group-bytes)
+                    kept-turns (1+ kept-turns))
+            (if (<= (+ hot-bytes group-bytes) byte-budget)
+                (setq hot-overlays (append group-overlays hot-overlays)
+                      hot-bytes (+ hot-bytes group-bytes))
+              (setq keep-going nil))))))
+    hot-overlays))
+
+(defun pi-coding-agent--cool-tool-overlay (overlay)
+  "Rewrite completed tool OVERLAY into its cold plain-history form.
+The cold form preserves the existing header and currently visible body
+text, rewrites the body as a bare fenced block, keeps only a plain
+hidden-line hint for currently collapsed blocks, removes diff overlays,
+and removes hot-only overlay/button affordances."
+  (when (pi-coding-agent--completed-tool-overlay-p overlay)
+    (when-let* ((header-end-marker (overlay-get overlay 'pi-coding-agent-header-end))
+                (header-end (and (markerp header-end-marker)
+                                 (marker-position header-end-marker)))
+                (overlay-end (overlay-end overlay))
+                (metadata (pi-coding-agent--tool-overlay-cold-metadata overlay))
+                (visible-body (plist-get metadata :visible-body)))
+      (let* ((inhibit-read-only t)
+             (hidden-count (plist-get metadata :hidden-count))
+             (cold-body (concat
+                         (pi-coding-agent--wrap-in-src-block visible-body nil)
+                         "\n"
+                         (when hidden-count
+                           (concat (pi-coding-agent--tool-hidden-line-label hidden-count)
+                                   "\n"))))
+             (overlay-start (overlay-start overlay)))
+        (remove-overlays overlay-start overlay-end 'pi-coding-agent-diff-overlay t)
+        (delete-overlay overlay)
+        (save-excursion
+          (goto-char header-end)
+          (delete-region header-end overlay-end)
+          (insert cold-body))
+        t))))
+
+(defun pi-coding-agent--cool-completed-tool-blocks (&optional overlays)
+  "Cool completed tool blocks in the current chat buffer.
+When OVERLAYS is non-nil, cool only that explicit subset.  Otherwise,
+cool all completed tool overlays in the buffer.  Blocks are processed
+from the end of the buffer backward so region rewrites do not disturb
+remaining candidates."
+  (let* ((source (or overlays
+                     (overlays-in (point-min) (point-max))))
+         (candidates (seq-filter #'pi-coding-agent--completed-tool-overlay-p
+                                 source))
+         (sorted (sort (copy-sequence candidates)
+                       (lambda (a b)
+                         (> (overlay-start a) (overlay-start b))))))
+    (pi-coding-agent--with-scroll-preservation
+      (save-excursion
+        (dolist (overlay sorted)
+          (pi-coding-agent--cool-tool-overlay overlay))))))
+
+(defun pi-coding-agent--maintain-hot-tool-tail ()
+  "Cool completed tool blocks that fall outside the hot-tail budget."
+  (let* ((completed (seq-filter #'pi-coding-agent--completed-tool-overlay-p
+                                (overlays-in (point-min) (point-max))))
+         (hot-overlays (pi-coding-agent--select-hot-tool-overlays completed))
+         (to-cool (seq-remove (lambda (overlay)
+                                (memq overlay hot-overlays))
+                              completed)))
+    (when to-cool
+      (pi-coding-agent--cool-completed-tool-blocks to-cool))))
 
 ;;;; File Navigation
 
@@ -1809,6 +2017,7 @@ Tool calls are rendered with headers, output, overlays, and toggles."
            (setq prev-role "user"))
           ("assistant"
            (when (not (equal prev-role "assistant"))
+             (pi-coding-agent--advance-tool-turn-id)
              (pi-coding-agent--append-to-chat
               (concat "\n" (pi-coding-agent--make-separator "Assistant") "\n")))
            (let* ((content (plist-get message :content))
@@ -1842,6 +2051,7 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
     (with-current-buffer chat-buf
       (let ((inhibit-read-only t))
         (pi-coding-agent--clear-render-artifacts)
+        (pi-coding-agent--set-tool-turn-id nil)
         (erase-buffer)
         (insert (pi-coding-agent--format-startup-header) "\n")
         (when (vectorp messages)
@@ -1850,6 +2060,7 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
         (unless (bolp) (insert "\n"))
         (pi-coding-agent--set-message-start-marker nil)
         (pi-coding-agent--set-streaming-marker nil)
+        (pi-coding-agent--maintain-hot-tool-tail)
         (goto-char (point-max))))))
 
 (provide 'pi-coding-agent-render)

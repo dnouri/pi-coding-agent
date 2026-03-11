@@ -264,6 +264,7 @@ Call this when starting a new session to ensure no stale state persists."
   (pi-coding-agent--set-aborted nil)
   (pi-coding-agent--set-message-start-marker nil)
   (pi-coding-agent--set-streaming-marker nil)
+  (pi-coding-agent--set-tool-turn-id nil)
   (when pi-coding-agent--tool-args-cache
     (clrhash pi-coding-agent--tool-args-cache)))
 
