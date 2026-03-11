@@ -96,6 +96,7 @@
           pi-coding-agent--in-code-block t
           pi-coding-agent--in-thinking-block t
           pi-coding-agent--line-parse-state 'code-fence
+          pi-coding-agent--tool-turn-id 7
           pi-coding-agent--pending-tool-overlay (make-overlay 1 1)
           pi-coding-agent--activity-phase "running")
     ;; Add entry to tool-args-cache
@@ -120,6 +121,7 @@
     (should (null pi-coding-agent--in-code-block))
     (should (null pi-coding-agent--in-thinking-block))
     (should (eq pi-coding-agent--line-parse-state 'line-start))
+    (should (null pi-coding-agent--tool-turn-id))
     (should (null pi-coding-agent--pending-tool-overlay))
     (should (equal pi-coding-agent--activity-phase "idle"))
     ;; Tool args cache should be empty

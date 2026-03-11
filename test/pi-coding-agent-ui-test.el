@@ -362,6 +362,11 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
   "pi-coding-agent-copy-raw-markdown defcustom defaults to nil."
   (should (eq pi-coding-agent-copy-raw-markdown nil)))
 
+(ert-deftest pi-coding-agent-test-hot-tool-tail-defcustom-defaults ()
+  "Automatic hot-tail cooling defaults keep a larger recent rich tail."
+  (should (= 4 pi-coding-agent-hot-tool-turn-floor))
+  (should (= 65536 pi-coding-agent-hot-tool-byte-budget)))
+
 (ert-deftest pi-coding-agent-test-kill-ring-save-strips-by-default ()
   "kill-ring-save strips hidden markup by default."
   (pi-coding-agent-test--with-chat-markup "Hello **bold** world"

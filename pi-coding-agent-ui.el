@@ -126,6 +126,22 @@ Prevents huge single-line outputs from blowing up the chat buffer."
   :type 'natnum
   :group 'pi-coding-agent)
 
+(defcustom pi-coding-agent-hot-tool-turn-floor 4
+  "Minimum number of recent completed tool turns to keep hot.
+Older completed tool blocks may be cooled automatically once they fall
+outside this recent-turn floor.  Set to 0 to let the byte budget decide
+all completed tool cooling."
+  :type 'natnum
+  :group 'pi-coding-agent)
+
+(defcustom pi-coding-agent-hot-tool-byte-budget 65536
+  "Maximum rich-history bytes to keep hot beyond the recent-turn floor.
+The budget counts completed tool block regions in the chat buffer.  The
+newest `pi-coding-agent-hot-tool-turn-floor' turns stay hot even if they
+already exceed this value.  Set to 0 to keep only the recent-turn floor."
+  :type 'natnum
+  :group 'pi-coding-agent)
+
 (defcustom pi-coding-agent-context-warning-threshold 70
   "Context usage percentage at which to show warning color."
   :type 'natnum
@@ -745,6 +761,20 @@ Used to replace raw markdown with rendered Org on message completion.")
 (defvar-local pi-coding-agent--tool-args-cache nil
   "Hash table mapping toolCallId to args.
 Needed because tool_execution_end events don't include args.")
+
+(defvar-local pi-coding-agent--tool-turn-id nil
+  "Current assistant turn identifier for tool-block maintenance.
+Completed tool overlays inherit this ID so automatic hot-tail cooling can
+preserve a recent-turn floor without parsing buffer text.")
+
+(defun pi-coding-agent--set-tool-turn-id (value)
+  "Set the current tool turn identifier to VALUE."
+  (setq pi-coding-agent--tool-turn-id value))
+
+(defun pi-coding-agent--advance-tool-turn-id ()
+  "Advance and return the current tool turn identifier."
+  (setq pi-coding-agent--tool-turn-id
+        (1+ (or pi-coding-agent--tool-turn-id 0))))
 
 (defvar-local pi-coding-agent--pending-tool-overlay nil
   "Overlay for tool block currently being executed.

@@ -315,6 +315,8 @@ Example configuration with =use-package=:
   (pi-coding-agent-input-window-height 10)        ; Height of input window
   (pi-coding-agent-tool-preview-lines 10)         ; Lines shown before collapsing tool output
   (pi-coding-agent-bash-preview-lines 5)          ; Lines shown for bash output
+  (pi-coding-agent-hot-tool-turn-floor 4)         ; Keep the newest 4 tool-heavy turns fully rich
+  (pi-coding-agent-hot-tool-byte-budget 65536)    ; Cool older rich tool history beyond ~64KB
   (pi-coding-agent-context-warning-threshold 70)  ; Warn when context exceeds this %
   (pi-coding-agent-context-error-threshold 90)    ; Critical when context exceeds this %
   (pi-coding-agent-visit-file-other-window t)     ; RET opens file in other window (nil for same)
@@ -331,6 +333,14 @@ when pasting into docs, Slack, or other markdown-aware contexts.
 The input buffer uses plain =text-mode= by default.  Set
 =pi-coding-agent-input-markdown-highlighting= to =t= for tree-sitter
 markdown highlighting (bold, code spans, fenced blocks) in new sessions.
+
+Old tool-heavy history cools automatically at stable boundaries: when a
+turn finishes and when session history is reloaded.  Recent tool turns
+stay fully rich; older completed tool blocks fall back to a cheaper
+preview-only fenced form without per-block overlays or language-tagged
+syntax highlighting.  Tune =pi-coding-agent-hot-tool-turn-floor= and
+=pi-coding-agent-hot-tool-byte-budget= if you want a larger or smaller
+rich tail.
 
 * Development
 
