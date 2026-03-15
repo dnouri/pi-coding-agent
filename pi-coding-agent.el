@@ -128,7 +128,8 @@ Returns the chat buffer."
         (pi-coding-agent--display-startup-header)))
     (with-current-buffer input-buf
       (setq default-directory dir)
-      (pi-coding-agent--set-chat-buffer chat-buf))
+      (pi-coding-agent--set-chat-buffer chat-buf)
+      (setq other-window-scroll-buffer chat-buf))
     chat-buf))
 
 ;;;###autoload

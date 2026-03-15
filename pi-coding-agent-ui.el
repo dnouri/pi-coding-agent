@@ -423,6 +423,18 @@ Returns the position of the heading line start, or nil if not found."
           (when (get-buffer-window) (recenter 0)))
       (message "No previous message"))))
 
+;;;; Input-Buffer Chat Navigation
+
+(defun pi-coding-agent-input-previous-message ()
+  "Move chat to the previous user message, keeping focus in input."
+  (interactive)
+  (let ((win (get-buffer-window other-window-scroll-buffer)))
+    (if (window-live-p win)
+        (save-selected-window
+          (select-window win)
+          (pi-coding-agent-previous-message))
+      (user-error "No chat window visible"))))
+
 
 ;;;; Copy Visible Text
 

@@ -446,6 +446,69 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
       (should (= (point) pos))
       (should (equal shown-message "No previous message")))))
 
+;;; Input-Buffer Chat Navigation
+
+(ert-deftest pi-coding-agent-test-input-previous-message-moves-chat ()
+  "C-c p from input moves chat to previous You heading."
+  (let ((chat-buf (generate-new-buffer "*test-chat*"))
+        (input-buf (generate-new-buffer "*test-input*")))
+    (unwind-protect
+        (progn
+          (delete-other-windows)
+          (switch-to-buffer chat-buf)
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (let ((inhibit-read-only t))
+              (pi-coding-agent-test--insert-chat-turns))
+            (pi-coding-agent--set-input-buffer input-buf)
+            (goto-char (point-min))
+            (pi-coding-agent-next-message)   ; → "You · 10:00"
+            (pi-coding-agent-next-message)   ; → "You · 10:05"
+            (pi-coding-agent-next-message))  ; → "You · 10:10"
+          (let ((input-win (split-window nil -10 'below)))
+            (set-window-buffer input-win input-buf)
+            (with-current-buffer input-buf
+              (pi-coding-agent-input-mode)
+              (setq other-window-scroll-buffer chat-buf))
+            (select-window input-win)
+            ;; Act: navigate to previous message from input
+            (pi-coding-agent-input-previous-message)
+            ;; Chat moved to second heading
+            (with-current-buffer chat-buf
+              (should (looking-at "You · 10:05")))
+            ;; Focus stayed in input
+            (should (eq (window-buffer (selected-window)) input-buf))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf)
+      (delete-other-windows))))
+
+(ert-deftest pi-coding-agent-test-input-previous-message-no-chat-window-errors ()
+  "Navigating from input without a visible chat window signals error."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (setq other-window-scroll-buffer (generate-new-buffer "*test-chat-hidden*"))
+    (unwind-protect
+        (should-error (pi-coding-agent-input-previous-message)
+                      :type 'user-error)
+      (kill-buffer other-window-scroll-buffer))))
+
+(ert-deftest pi-coding-agent-test-other-window-scroll-buffer-set ()
+  "Session setup sets `other-window-scroll-buffer' in input buffer."
+  (let ((root "/tmp/pi-coding-agent-test-scroll-other/"))
+    (make-directory root t)
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
+              ((symbol-function 'pi-coding-agent--display-buffers) #'ignore))
+      (unwind-protect
+          (progn
+            (let ((default-directory root))
+              (pi-coding-agent))
+            (let ((chat (get-buffer (pi-coding-agent-test--chat-buffer-name root)))
+                  (input (get-buffer (pi-coding-agent-test--input-buffer-name root))))
+              (with-current-buffer input
+                (should (eq other-window-scroll-buffer chat)))))
+        (pi-coding-agent-test--kill-session-buffers root)))))
+
 ;;; Turn Detection
 
 (ert-deftest pi-coding-agent-test-turn-index-on-first-heading ()
