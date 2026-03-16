@@ -1,0 +1,29 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  bench:
+    name: Table rendering
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: purcell/setup-emacs@master
+        with:
+          version: '30.1'
+      - name: Install tree-sitter grammars
+        run: emacs --batch -Q -L . -l scripts/install-ts-grammars.el
+      - name: Install package dependencies
+        run: make deps
+      - name: Run benchmarks (batch)
+        run: ./bench/run-bench.sh --batch -c 3 | tee bench-output.txt
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: bench-output.txt

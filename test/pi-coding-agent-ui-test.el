@@ -93,6 +93,14 @@ This ensures all files get code fences for consistent display."
     (should-not hl-line-mode)
     (should-not (buffer-local-value 'global-hl-line-mode (current-buffer)))))
 
+(ert-deftest pi-coding-agent-test-chat-mode-adds-window-change-hook ()
+  "pi-coding-agent-chat-mode installs the buffer-local width refresh hook."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (should (local-variable-p 'window-configuration-change-hook))
+    (should (memq #'pi-coding-agent--maybe-refresh-hot-tail-tables
+                  window-configuration-change-hook))))
+
 (ert-deftest pi-coding-agent-test-input-mode-derives-from-text ()
   "pi-coding-agent-input-mode derives from text-mode, not md-ts-mode by default."
   (with-temp-buffer
@@ -578,6 +586,52 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
     (goto-char (point-max))
     (forward-line -1)  ; on "Body text"
     (should-not (pi-coding-agent--at-you-heading-p))))
+
+;;; Hot Tail
+
+(ert-deftest pi-coding-agent-test-hot-tail-boundary-keeps-buffer-hot-when-few-turns ()
+  "Buffers with at most N headed turns stay entirely hot."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "You · 10:00\n===========\nFirst question\n\n"
+              "Assistant\n=========\nFirst answer\n\n"
+              "You · 10:05\n===========\nSecond question\n"))
+    (let ((pi-coding-agent-hot-tail-turn-count 3))
+      (pi-coding-agent--update-hot-tail-boundary)
+      (should (= (marker-position pi-coding-agent--hot-tail-start)
+                 (point-min))))))
+
+(ert-deftest pi-coding-agent-test-hot-tail-boundary-moves-to-nth-newest-heading ()
+  "Hot tail starts at the Nth newest headed turn boundary."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "You · 10:00\n===========\nFirst question\n\n"
+              "Assistant\n=========\nFirst answer\n\n"
+              "You · 10:05\n===========\nSecond question\n\n"
+              "Assistant\n=========\nSecond answer\n\n"
+              "You · 10:10\n===========\nThird question\n"))
+    (let ((pi-coding-agent-hot-tail-turn-count 3))
+      (pi-coding-agent--update-hot-tail-boundary)
+      (goto-char (marker-position pi-coding-agent--hot-tail-start))
+      (should (looking-at "You · 10:05")))))
+
+(ert-deftest pi-coding-agent-test-in-hot-tail-p-respects-boundary ()
+  "Positions before the hot-tail marker are cold; marker and later are hot."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "You · 10:00\n===========\nFirst question\n\n"
+              "Assistant\n=========\nFirst answer\n\n"
+              "You · 10:05\n===========\nSecond question\n\n"
+              "Assistant\n=========\nSecond answer\n\n"
+              "You · 10:10\n===========\nThird question\n"))
+    (let ((pi-coding-agent-hot-tail-turn-count 3))
+      (pi-coding-agent--update-hot-tail-boundary)
+      (should-not (pi-coding-agent--in-hot-tail-p (point-min)))
+      (should (pi-coding-agent--in-hot-tail-p
+               (marker-position pi-coding-agent--hot-tail-start))))))
 
 ;;; Executable Customization
 

@@ -7,7 +7,7 @@
 ;; URL: https://github.com/dnouri/pi-coding-agent
 ;; Keywords: ai llm ai-pair-programming tools
 ;; Version: 2.0.1
-;; Package-Requires: ((emacs "29.1") (transient "0.9.0") (md-ts-mode "0.3.0"))
+;; Package-Requires: ((emacs "29.1") (transient "0.9.0") (md-ts-mode "0.3.0") (markdown-table-wrap "0.1.0"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 

@@ -41,6 +41,7 @@
 ;;; Code:
 
 (require 'pi-coding-agent-ui)
+(require 'pi-coding-agent-table)
 (require 'cl-lib)
 (require 'ansi-color)
 
@@ -52,9 +53,12 @@
 (defun pi-coding-agent--display-user-message (text &optional timestamp)
   "Display user message TEXT in the chat buffer.
 If TIMESTAMP (Emacs time value) is provided, display it in the header."
-  (pi-coding-agent--append-to-chat
-   (concat "\n" (pi-coding-agent--make-separator "You" timestamp) "\n"
-           text "\n")))
+  (let ((start (with-current-buffer (pi-coding-agent--get-chat-buffer) (point-max))))
+    (pi-coding-agent--append-to-chat
+     (concat "\n" (pi-coding-agent--make-separator "You" timestamp) "\n"
+             text "\n"))
+    (with-current-buffer (pi-coding-agent--get-chat-buffer)
+      (pi-coding-agent--decorate-tables-in-region start (point-max)))))
 
 (defun pi-coding-agent--display-agent-start ()
   "Display separator for new agent turn.
@@ -173,7 +177,10 @@ fontification; tree-sitter re-parses at the C level on each insert."
         (save-excursion
           (goto-char (marker-position pi-coding-agent--streaming-marker))
           (insert transformed)
-          (set-marker pi-coding-agent--streaming-marker (point)))))))
+          (set-marker pi-coding-agent--streaming-marker (point))))
+      ;; After inserting text with completed lines, check for active table
+      (when (string-match-p "\n" delta)
+        (pi-coding-agent--maybe-decorate-streaming-table)))))
 
 (defun pi-coding-agent--thinking-insert-position ()
   "Return insertion position for thinking text.
@@ -626,7 +633,8 @@ which asks upfront before any buffers are touched."
     (when (and pi-coding-agent--input-buffer (buffer-live-p pi-coding-agent--input-buffer))
       (let ((input-buf pi-coding-agent--input-buffer))
         (pi-coding-agent--set-input-buffer nil) ; break cycle before kill
-        (kill-buffer input-buf)))))
+        (kill-buffer input-buf)))
+    (pi-coding-agent--cleanup-visible-string-buffer)))
 
 (defun pi-coding-agent--cleanup-input-on-kill ()
   "Clean up when input buffer is killed.
@@ -701,7 +709,9 @@ Updates buffer-local state and renders display updates."
           (when (plist-get message :display)
             (let ((content (plist-get message :content)))
               (when (and content (stringp content) (> (length content) 0))
-                (pi-coding-agent--append-to-chat (concat "\n" content "\n"))
+                (let ((start (point-max)))
+                  (pi-coding-agent--append-to-chat (concat "\n" content "\n"))
+                  (pi-coding-agent--decorate-tables-in-region start (point-max)))
                 ;; Reset so next assistant message shows its header
                 (setq pi-coding-agent--assistant-header-shown nil)))))
          (_
@@ -716,9 +726,14 @@ Updates buffer-local state and renders display updates."
      (when-let* ((msg-event (plist-get event :assistantMessageEvent))
                  (event-type (plist-get msg-event :type)))
        (pcase event-type
+         ("text_start") ; No-op: text block started, nothing to render
          ("text_delta"
           (pi-coding-agent--set-activity-phase "replying")
           (pi-coding-agent--display-message-delta (plist-get msg-event :delta)))
+         ("text_end"
+          ;; Text block ended — finalize any active table that may have
+          ;; a trailing row without newline (backstop for streaming).
+          (pi-coding-agent--maybe-decorate-streaming-table))
          ("thinking_start"
           (pi-coding-agent--display-thinking-start))
          ("thinking_delta"
@@ -838,7 +853,8 @@ Updates buffer-local state and renders display updates."
        ;; Process followup queue after successful compaction
        (pi-coding-agent--process-followup-queue)))
     ("agent_end"
-     (pi-coding-agent--display-agent-end))
+     (pi-coding-agent--display-agent-end)
+     (pi-coding-agent--update-hot-tail-boundary))
     ("auto_retry_start"
      (pi-coding-agent--display-retry-start event))
     ("auto_retry_end"
@@ -1668,12 +1684,15 @@ For example: '+ 7     code' or '-12     code'"
 TOKENS-BEFORE is the token count before compaction.
 SUMMARY is the compaction summary text (markdown).
 TIMESTAMP is optional time when compaction occurred."
-  (pi-coding-agent--append-to-chat
-   (concat "\n" (pi-coding-agent--make-separator "Compaction" timestamp) "\n"
-           (propertize (format "Compacted from %s tokens\n\n"
-                               (pi-coding-agent--format-number (or tokens-before 0)))
-                       'face 'pi-coding-agent-tool-name)
-           (or summary "") "\n")))
+  (let ((start (with-current-buffer (pi-coding-agent--get-chat-buffer) (point-max))))
+    (pi-coding-agent--append-to-chat
+     (concat "\n" (pi-coding-agent--make-separator "Compaction" timestamp) "\n"
+             (propertize (format "Compacted from %s tokens\n\n"
+                                 (pi-coding-agent--format-number (or tokens-before 0)))
+                         'face 'pi-coding-agent-tool-name)
+             (or summary "") "\n"))
+    (with-current-buffer (pi-coding-agent--get-chat-buffer)
+      (pi-coding-agent--decorate-tables-in-region start (point-max)))))
 
 (defun pi-coding-agent--handle-compaction-success (tokens-before summary &optional timestamp)
   "Handle successful compaction: display result, reset state, notify user.
@@ -1686,11 +1705,12 @@ TIMESTAMP is optional time when compaction occurred."
   (message "Pi: Compacted from %s tokens" (pi-coding-agent--format-number (or tokens-before 0))))
 
 (defun pi-coding-agent--render-complete-message ()
-  "Finalize completed message: ensure trailing newline.
+  "Finalize completed message: ensure trailing newline, decorate tables.
 Uses message-start-marker and streaming-marker to find content.
 No explicit fontification needed — jit-lock + tree-sitter fontify
 at each redisplay cycle during streaming, and any remaining gaps
-are fontified at the redisplay after this function returns."
+are fontified at the redisplay after this function returns.
+Display-only table decoration is applied after the content is stable."
   (when (and pi-coding-agent--message-start-marker pi-coding-agent--streaming-marker)
     (let ((start (marker-position pi-coding-agent--message-start-marker))
           (end (marker-position pi-coding-agent--streaming-marker)))
@@ -1701,7 +1721,11 @@ are fontified at the redisplay after this function returns."
               (goto-char end)
               (unless (eq (char-before) ?\n)
                 (insert "\n")
-                (set-marker pi-coding-agent--streaming-marker (point))))))))))
+                (set-marker pi-coding-agent--streaming-marker (point))))))
+        (if (pi-coding-agent--chat-buffer-hidden-p)
+            (setq pi-coding-agent--table-decoration-pending t)
+          (pi-coding-agent--decorate-tables-in-region
+           start (marker-position pi-coding-agent--streaming-marker)))))))
 
 ;;;; Tool Property Restoration
 
@@ -1763,12 +1787,14 @@ Returns concatenated text from all text blocks."
 
 (defun pi-coding-agent--render-history-text (text)
   "Render TEXT as markdown content with proper isolation.
-Ensures markdown structures don't leak to subsequent content."
+Ensures markdown structures don't leak to subsequent content.
+Display-only table decoration is applied after fontification."
   (when (and text (not (string-empty-p text)))
     (let ((start (with-current-buffer (pi-coding-agent--get-chat-buffer) (point-max))))
       (pi-coding-agent--append-to-chat text)
       (with-current-buffer (pi-coding-agent--get-chat-buffer)
-        (font-lock-ensure start (point-max)))
+        (font-lock-ensure start (point-max))
+        (pi-coding-agent--decorate-tables-in-region start (point-max)))
       ;; Two trailing newlines reset any open markdown list/paragraph context
       (pi-coding-agent--append-to-chat "\n\n"))))
 
@@ -1803,9 +1829,7 @@ Tool calls are rendered with headers, output, overlays, and toggles."
            (let* ((text (pi-coding-agent--extract-message-text message))
                   (timestamp (pi-coding-agent--ms-to-time (plist-get message :timestamp))))
              (when (and text (not (string-empty-p text)))
-               (pi-coding-agent--append-to-chat
-                (concat "\n" (pi-coding-agent--make-separator "You" timestamp) "\n"
-                        text "\n"))))
+               (pi-coding-agent--display-user-message text timestamp)))
            (setq prev-role "user"))
           ("assistant"
            (when (not (equal prev-role "assistant"))
@@ -1850,6 +1874,7 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
         (unless (bolp) (insert "\n"))
         (pi-coding-agent--set-message-start-marker nil)
         (pi-coding-agent--set-streaming-marker nil)
+        (pi-coding-agent--update-hot-tail-boundary)
         (goto-char (point-max))))))
 
 (provide 'pi-coding-agent-render)

@@ -22,6 +22,17 @@
 (require 'pi-coding-agent-gui-test-utils)
 (require 'pi-coding-agent-test-common)
 
+(defun pi-coding-agent-gui-test--table-display-strings (beg end)
+  "Return ordered table overlay display strings between BEG and END."
+  (when-let ((buf (plist-get pi-coding-agent-gui-test--session :chat-buffer)))
+    (with-current-buffer buf
+      (mapcar (lambda (ov) (overlay-get ov 'display))
+              (sort (seq-filter
+                     (lambda (ov) (overlay-get ov 'pi-coding-agent-table-display))
+                     (overlays-in beg end))
+                    (lambda (left right)
+                      (< (overlay-start left) (overlay-start right))))))))
+
 ;;;; Session Tests
 
 (ert-deftest pi-coding-agent-gui-test-session-starts ()
@@ -40,6 +51,10 @@
   (pi-coding-agent-gui-test-with-fresh-session
     (:backend fake :fake-scenario "scrolling-text")
     (pi-coding-agent-gui-test-send "first turn")
+    ;; The fake stream is usually tall enough already, but large frames can make
+    ;; the buffer barely non-scrollable.  Top off with dummy lines so the test
+    ;; exercises scroll preservation rather than frame geometry.
+    (pi-coding-agent-gui-test-ensure-scrollable)
     (pi-coding-agent-gui-test-scroll-up 20)
     (should-not (pi-coding-agent-gui-test-at-end-p))
     (let ((line-before (pi-coding-agent-gui-test-top-line-number)))
@@ -74,6 +89,63 @@ buffer end so the next streamed turn still follows automatically."
     (should (pi-coding-agent-gui-test-window-point-at-end-p))
     (should (pi-coding-agent-gui-test-at-end-p))
     (should (pi-coding-agent-gui-test-chat-contains "Scroll line 24 for second turn"))))
+
+(ert-deftest pi-coding-agent-gui-test-table-resize-refreshes-hot-tail-only ()
+  "Resizing the frame rewraps hot tables only and preserves scroll position."
+  (pi-coding-agent-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "prompt-lifecycle")
+    (let* ((chat-buf (plist-get pi-coding-agent-gui-test--session :chat-buffer))
+           (frame (selected-frame))
+           (orig-width (frame-width))
+           (cold-table
+            "| Feature | Notes |\n|---------|-------|\n| Cold history | This older table was wrapped at the original wide width and should stay frozen after resize |\n")
+           (hot-table
+            "| Feature | Notes |\n|---------|-------|\n| Hot tail | This recent table should rewrap when the window narrows so the columns remain readable |\n")
+           cold-before
+           hot-before
+           cold-start
+           hot-start)
+      (unwind-protect
+          (progn
+            (with-current-buffer chat-buf
+              (let ((inhibit-read-only t))
+                (erase-buffer)
+                (insert "You · 10:00\n===========\n")
+                (setq cold-start (point))
+                (insert cold-table "\nAssistant\n=========\nRecent reply\n\nYou · 10:05\n===========\n")
+                (setq hot-start (point))
+                (insert hot-table)
+                (dotimes (i 80)
+                  (insert (format "filler line %d\n" i))))
+              (font-lock-ensure)
+              (let* ((chat-win (pi-coding-agent-gui-test-chat-window))
+                     (initial-width (window-width chat-win)))
+                (pi-coding-agent--decorate-tables-in-region
+                 (point-min) (point-max) initial-width)
+                (move-marker pi-coding-agent--hot-tail-start hot-start)
+                (setq cold-before
+                      (pi-coding-agent-gui-test--table-display-strings
+                       cold-start hot-start)
+                      hot-before
+                      (pi-coding-agent-gui-test--table-display-strings
+                       hot-start (point-max)))))
+            (redisplay)
+            (pi-coding-agent-gui-test-scroll-up 20)
+            (let ((line-before (pi-coding-agent-gui-test-top-line-number)))
+              (set-frame-size frame (- orig-width 30) (frame-height))
+              (redisplay)
+              (should (pi-coding-agent-test-wait-until
+                       (lambda ()
+                         (not (equal hot-before
+                                     (pi-coding-agent-gui-test--table-display-strings
+                                      hot-start (point-max)))))
+                       2 0.05))
+              (should (equal cold-before
+                             (pi-coding-agent-gui-test--table-display-strings
+                              cold-start hot-start)))
+              (should (= line-before (pi-coding-agent-gui-test-top-line-number)))))
+        (set-frame-size frame orig-width (frame-height))
+        (redisplay)))))
 
 ;;;; Content Tests
 

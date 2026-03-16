@@ -56,6 +56,7 @@
 (declare-function pi-coding-agent-visit-file "pi-coding-agent-render")
 (declare-function pi-coding-agent--cleanup-on-kill "pi-coding-agent-render")
 (declare-function pi-coding-agent--restore-tool-properties "pi-coding-agent-render")
+(declare-function pi-coding-agent--maybe-refresh-hot-tail-tables "pi-coding-agent-table")
 
 ;; pi-coding-agent-input.el (input buffer commands)
 (declare-function pi-coding-agent-quit "pi-coding-agent-input")
@@ -163,6 +164,14 @@ contexts.
 
 When nil (the default), only the visible text is copied."
   :type 'boolean
+  :group 'pi-coding-agent)
+
+(defcustom pi-coding-agent-hot-tail-turn-count 3
+  "How many recent headed chat turns stay hot for redisplay refreshes.
+The hot tail is the suffix of the chat buffer beginning at the Nth newest
+`You' or `Assistant' setext heading.  Resize-sensitive features refresh only
+inside that suffix; older history stays frozen until explicitly rebuilt."
+  :type 'natnum
   :group 'pi-coding-agent)
 
 ;;;; Faces
@@ -351,6 +360,26 @@ and the next line is a setext underline (three or more `=' characters)."
          (forward-line 1)
          (looking-at "^=\\{3,\\}$"))))
 
+(defvar-local pi-coding-agent--hot-tail-start nil
+  "Marker at the start of the recent hot-tail suffix.
+Tables and future redisplay-sensitive subsystems refresh only at or after
+this boundary.")
+
+(defconst pi-coding-agent--turn-heading-re
+  "^\\(?:You\\(?: · .*\\)?\\|Assistant\\)$"
+  "Regex matching headed chat turns that define the hot-tail boundary.")
+
+(defun pi-coding-agent--at-turn-heading-p ()
+  "Return non-nil if current line is a hot-tail turn heading.
+A turn heading is a `You' or `Assistant' setext heading whose next line is
+an underline of three or more `=' characters."
+  (and (save-excursion
+         (beginning-of-line)
+         (looking-at pi-coding-agent--turn-heading-re))
+       (save-excursion
+         (forward-line 1)
+         (looking-at "^=\\{3,\\}$"))))
+
 ;;;; Turn Detection
 
 (defun pi-coding-agent--collect-you-headings ()
@@ -381,6 +410,35 @@ Returns nil if point is before the first You heading."
         (setq result index))
       (setq index (1+ index)))
     result))
+
+(defun pi-coding-agent--update-hot-tail-boundary ()
+  "Move `pi-coding-agent--hot-tail-start' to the recent headed-turn suffix.
+The marker lands on the Nth newest `You' or `Assistant' heading, where N is
+`pi-coding-agent-hot-tail-turn-count'.  If there are at most N headed turns,
+all content stays hot and the marker moves to `point-min'.  A count of 0
+makes the hot region empty by moving the marker to `point-max'."
+  (let ((headings nil)
+        (count pi-coding-agent-hot-tail-turn-count))
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward pi-coding-agent--turn-heading-re nil t)
+        (let ((candidate (match-beginning 0)))
+          (save-excursion
+            (goto-char candidate)
+            (when (pi-coding-agent--at-turn-heading-p)
+              (push candidate headings))))))
+    (setq headings (nreverse headings))
+    (move-marker
+     pi-coding-agent--hot-tail-start
+     (cond
+      ((zerop count) (point-max))
+      ((<= (length headings) count) (point-min))
+      (t (nth (- (length headings) count) headings)))
+     (current-buffer))))
+
+(defun pi-coding-agent--in-hot-tail-p (pos)
+  "Return non-nil when POS is inside the hot tail."
+  (>= pos (marker-position pi-coding-agent--hot-tail-start)))
 
 ;;;; Chat Navigation
 
@@ -427,9 +485,11 @@ Returns the position of the heading line start, or nil if not found."
 ;;;; Copy Visible Text
 
 (defun pi-coding-agent--visible-text (beg end)
-  "Return visible text between BEG and END, stripping hidden markup.
+  "Return visible text between BEG and END, preserving text properties.
 Skips characters with `invisible' property matching `buffer-invisibility-spec'
-and characters with `display' property equal to the empty string."
+and characters with `display' property equal to the empty string.
+The returned string carries face properties from font-lock, which
+display overlay strings render faithfully (bold, italic, code, etc.)."
   (let ((result nil)
         (pos beg))
     (while (< pos end)
@@ -440,7 +500,7 @@ and characters with `display' property equal to the empty string."
         (cond
          ((and inv (invisible-p inv)) nil)
          ((equal disp "") nil)
-         (t (push (buffer-substring-no-properties pos next) result)))
+         (t (push (buffer-substring pos next) result)))
         (setq pos next)))
     (apply #'concat (nreverse result))))
 
@@ -451,7 +511,7 @@ text between BEG and END.  If DELETE is non-nil, also removes the region.
 Otherwise delegates to the default filter."
   (if pi-coding-agent-copy-raw-markdown
       (buffer-substring--filter beg end delete)
-    (prog1 (pi-coding-agent--visible-text beg end)
+    (prog1 (substring-no-properties (pi-coding-agent--visible-text beg end))
       (when delete (delete-region beg end)))))
 
 (define-derived-mode pi-coding-agent-chat-mode md-ts-mode "Pi-Chat"
@@ -476,6 +536,8 @@ This is a read-only buffer showing the conversation history."
   ;; Make window-point follow inserted text (like comint does).
   ;; This is key for natural scroll behavior during streaming.
   (setq-local window-point-insertion-type t)
+  ;; Recent content is hot by default in a fresh chat buffer.
+  (setq-local pi-coding-agent--hot-tail-start (copy-marker (point-min) nil))
 
   ;; Run after font-lock to undo markdown damage in tool overlays.
   (jit-lock-register #'pi-coding-agent--restore-tool-properties)
@@ -483,6 +545,8 @@ This is a read-only buffer showing the conversation history."
   ;; Compute tool-block face from current theme
   (pi-coding-agent--update-tool-block-face)
 
+  (add-hook 'window-configuration-change-hook
+            #'pi-coding-agent--maybe-refresh-hot-tail-tables nil t)
   (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-on-kill nil t))
 
 (defun pi-coding-agent-complete ()

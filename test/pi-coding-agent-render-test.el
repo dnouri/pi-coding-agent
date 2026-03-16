@@ -415,6 +415,20 @@ agent_end + next section's leading newline must not create triple newlines."
         (should (= tool-count 1))
         (should (= zero-tool-count 0))))))
 
+(ert-deftest pi-coding-agent-test-display-session-history-decorates-user-table ()
+  "User-authored tables in resumed history get display decoration too."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((messages [(:role "user"
+                      :content [(:type "text"
+                                 :text "| Feature | Status |\n|---|---|\n| Auth | Done |")]
+                      :timestamp 1704067200000)]))
+      (pi-coding-agent--display-session-history messages (current-buffer))
+      (should (> (length (seq-filter
+                          (lambda (ov) (overlay-get ov 'pi-coding-agent-table-display))
+                          (overlays-in (point-min) (point-max))))
+                 0)))))
+
 (ert-deftest pi-coding-agent-test-history-renders-multiple-tools-in-order ()
   "Multiple tool calls render with headers and output in order."
   (with-temp-buffer
@@ -4114,6 +4128,32 @@ events where the header text hasn't changed."
         (pi-coding-agent-chat-mode)
         (pi-coding-agent--prepare-and-send "/my-extension arg")))
     (should (equal prompt-sent "/my-extension arg"))))
+
+(ert-deftest pi-coding-agent-test-agent-end-updates-hot-tail-boundary ()
+  "agent_end recomputes the hot-tail boundary after finishing a turn."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((called nil))
+      (cl-letf (((symbol-function 'pi-coding-agent--update-hot-tail-boundary)
+                 (lambda ()
+                   (setq called t))))
+        (pi-coding-agent--handle-display-event '(:type "agent_end"))
+        (should called)))))
+
+(ert-deftest pi-coding-agent-test-display-session-history-updates-hot-tail-boundary ()
+  "History replay finishes by placing the hot-tail marker on the newest turn."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 1)
+          (messages [(:role "user"
+                      :content [(:type "text" :text "Question")]
+                      :timestamp 1704067200000)
+                     (:role "assistant"
+                      :content [(:type "text" :text "Answer")]
+                      :timestamp 1704067201000)]))
+      (pi-coding-agent--display-session-history messages (current-buffer))
+      (goto-char (marker-position pi-coding-agent--hot-tail-start))
+      (should (looking-at "Assistant")))))
 
 (provide 'pi-coding-agent-render-test)
 ;;; pi-coding-agent-render-test.el ends here

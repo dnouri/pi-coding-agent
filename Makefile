@@ -19,8 +19,9 @@ SELECTOR ?=
 # Example: make test VERBOSE=1
 VERBOSE ?=
 
-.PHONY: test test-unit test-core test-ui test-render test-input test-menu test-build
+.PHONY: test test-unit test-core test-ui test-render test-table test-input test-menu test-build
 .PHONY: test-integration test-integration-fake test-integration-real test-integration-ci test-integration-ci-real test-gui test-gui-ci test-all
+.PHONY: bench bench-batch
 .PHONY: check check-parens compile lint lint-checkdoc lint-package clean clean-cache help
 .PHONY: ollama-start ollama-stop ollama-status setup-pi install-hooks
 
@@ -30,6 +31,7 @@ help:
 	@echo "  make test-core        Core/RPC tests only"
 	@echo "  make test-ui          UI foundation tests only"
 	@echo "  make test-render      Render tests only"
+	@echo "  make test-table       Table decoration tests only"
 	@echo "  make test-input       Input buffer tests only"
 	@echo "  make test-menu        Menu/session tests only"
 	@echo "  make test-build       Build/dependency helper tests only"
@@ -38,6 +40,8 @@ help:
 	@echo "  make test-integration-fake Shared integration tests against fake backend only"
 	@echo "  make test-integration-real Shared integration tests against real backend only (local target starts Ollama)"
 	@echo "  make test-gui         Deterministic fake-backed GUI tests (SELECTOR=pattern; no Docker)"
+	@echo "  make bench            Table rendering benchmarks (GUI via xvfb)"
+	@echo "  make bench-batch      Table rendering benchmarks (batch, secondary lane)"
 	@echo "  make lint             Checkdoc + package-lint"
 	@echo "  make check            Compile, lint, unit tests (pre-commit)"
 	@echo "  make install-hooks    Set up git pre-commit hook"
@@ -58,7 +62,7 @@ help:
 # Requirements come from pi-coding-agent.el's Package-Requires header.
 # The helper upgrades built-in packages when Emacs ships an older version
 # than the package requires (for example transient on Emacs 29/30).
-.deps-stamp: Makefile scripts/install-deps.el scripts/pi-coding-agent-build.el
+.deps-stamp: Makefile scripts/install-deps.el scripts/pi-coding-agent-build.el pi-coding-agent.el
 	@$(BATCH) -L scripts -l scripts/install-deps.el
 	@touch $@
 
@@ -85,6 +89,7 @@ test: .deps-stamp
 		-l pi-coding-agent-core-test \
 		-l pi-coding-agent-ui-test \
 		-l pi-coding-agent-render-test \
+		-l pi-coding-agent-table-test \
 		-l pi-coding-agent-input-test \
 		-l pi-coding-agent-menu-test \
 		-l pi-coding-agent-build-test \
@@ -116,6 +121,8 @@ test-ui: .deps-stamp
 	@$(BATCH_TEST) -l pi-coding-agent-ui-test -f ert-run-tests-batch-and-exit
 test-render: .deps-stamp
 	@$(BATCH_TEST) -l pi-coding-agent-render-test -f ert-run-tests-batch-and-exit
+test-table: .deps-stamp
+	@$(BATCH_TEST) -l pi-coding-agent-table-test -f ert-run-tests-batch-and-exit
 test-input: .deps-stamp
 	@$(BATCH_TEST) -l pi-coding-agent-input-test -f ert-run-tests-batch-and-exit
 test-menu: .deps-stamp
@@ -227,6 +234,18 @@ test-gui-ci: .deps-stamp
 test-all: test test-integration test-gui
 
 # ============================================================
+# Benchmarks
+# ============================================================
+
+# Primary lane: GUI via xvfb (realistic string-width / font metrics).
+bench: .deps-stamp
+	@./bench/run-bench.sh
+
+# Secondary lane: batch mode (faster, no font engine).
+bench-batch: .deps-stamp
+	@./bench/run-bench.sh --batch
+
+# ============================================================
 # Ollama management (local development)
 # ============================================================
 
@@ -245,7 +264,7 @@ ollama-status:
 
 check-parens:
 	@echo "=== Check Parens ==="
-	@OUTPUT=$$($(BATCH) --eval '(condition-case err (dolist (f (list "scripts/pi-coding-agent-build.el" "scripts/install-deps.el" "scripts/install-ts-grammars.el" "pi-coding-agent-core.el" "pi-coding-agent-grammars.el" "pi-coding-agent-ui.el" "pi-coding-agent-render.el" "pi-coding-agent-input.el" "pi-coding-agent-menu.el" "pi-coding-agent.el")) (with-current-buffer (find-file-noselect f) (check-parens) (message "%s OK" f))) (user-error (message "FAIL: %s" (error-message-string err)) (kill-emacs 1)))' 2>&1); \
+	@OUTPUT=$$($(BATCH) --eval '(condition-case err (dolist (f (list "scripts/pi-coding-agent-build.el" "scripts/install-deps.el" "scripts/install-ts-grammars.el" "pi-coding-agent-core.el" "pi-coding-agent-grammars.el" "pi-coding-agent-ui.el" "pi-coding-agent-table.el" "pi-coding-agent-render.el" "pi-coding-agent-input.el" "pi-coding-agent-menu.el" "pi-coding-agent.el")) (with-current-buffer (find-file-noselect f) (check-parens) (message "%s OK" f))) (user-error (message "FAIL: %s" (error-message-string err)) (kill-emacs 1)))' 2>&1); \
 	echo "$$OUTPUT" | grep -E "OK$$|FAIL:"; \
 	echo "$$OUTPUT" | grep -q "FAIL:" && exit 1 || true
 
@@ -257,7 +276,7 @@ compile: .deps-stamp
 		--eval "(package-initialize)" \
 		$(LOCAL_LOAD_PATH) \
 		--eval "(setq byte-compile-error-on-warn t)" \
-		-f batch-byte-compile scripts/pi-coding-agent-build.el scripts/install-deps.el scripts/install-ts-grammars.el pi-coding-agent-core.el pi-coding-agent-grammars.el pi-coding-agent-ui.el pi-coding-agent-render.el pi-coding-agent-input.el pi-coding-agent-menu.el pi-coding-agent.el
+		-f batch-byte-compile scripts/pi-coding-agent-build.el scripts/install-deps.el scripts/install-ts-grammars.el pi-coding-agent-core.el pi-coding-agent-grammars.el pi-coding-agent-ui.el pi-coding-agent-table.el pi-coding-agent-render.el pi-coding-agent-input.el pi-coding-agent-menu.el pi-coding-agent.el
 
 lint: lint-checkdoc lint-package
 
@@ -272,6 +291,7 @@ lint-checkdoc:
 		--eval "(checkdoc-file \"pi-coding-agent-core.el\")" \
 		--eval "(checkdoc-file \"pi-coding-agent-grammars.el\")" \
 		--eval "(checkdoc-file \"pi-coding-agent-ui.el\")" \
+		--eval "(checkdoc-file \"pi-coding-agent-table.el\")" \
 		--eval "(checkdoc-file \"pi-coding-agent-render.el\")" \
 		--eval "(checkdoc-file \"pi-coding-agent-input.el\")" \
 		--eval "(checkdoc-file \"pi-coding-agent-menu.el\")" \
@@ -290,7 +310,7 @@ lint-package:
 		          (package-install 'package-lint))" \
 		--eval "(require 'package-lint)" \
 		--eval "(setq package-lint-main-file \"pi-coding-agent.el\")" \
-		-f package-lint-batch-and-exit pi-coding-agent.el pi-coding-agent-ui.el pi-coding-agent-render.el pi-coding-agent-input.el pi-coding-agent-menu.el pi-coding-agent-core.el pi-coding-agent-grammars.el
+		-f package-lint-batch-and-exit pi-coding-agent.el pi-coding-agent-ui.el pi-coding-agent-table.el pi-coding-agent-render.el pi-coding-agent-input.el pi-coding-agent-menu.el pi-coding-agent-core.el pi-coding-agent-grammars.el
 
 check: compile lint test
 
