@@ -205,6 +205,51 @@ rear-advance overlay before assistant text continues after the tool block."
       (pi-coding-agent-gui-test-send "/test-confirm")
       (should (pi-coding-agent-gui-test-chat-contains "CONFIRMED")))))
 
+;;;; Tool Toggle Tests
+
+(ert-deftest pi-coding-agent-gui-test-tool-toggle-expand-collapse-cycle ()
+  "TAB expands, collapses, and re-expands in a displayed GUI buffer.
+Regression for issue #166: collapsing from the [-] button placed cursor
+at the overlay boundary (half-open interval), making the next TAB fall
+through to `outline-cycle' instead of toggling.  Uses a standalone
+chat-mode buffer to isolate the toggle logic from RPC timing."
+  (let ((buf (get-buffer-create "*pi-gui-toggle-test*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buf)
+          (pi-coding-agent-chat-mode)
+          (pi-coding-agent--display-tool-start "read" '(:path "/tmp/test.txt"))
+          (pi-coding-agent--display-tool-end "read" '(:path "/tmp/test.txt")
+            `((:type "text"
+               :text ,(mapconcat (lambda (n) (format "Line %02d of file" n))
+                                 (number-sequence 1 20) "\n")))
+            nil nil)
+          (font-lock-ensure)
+          (redisplay)
+          ;; Initially collapsed
+          (should (string-match-p "more lines)" (buffer-string)))
+          (should-not (string-match-p "Line 20" (buffer-string)))
+          ;; Expand from the collapsed indicator
+          (goto-char (point-min))
+          (search-forward "more lines)" nil t)
+          (beginning-of-line)
+          (pi-coding-agent-toggle-tool-section)
+          (redisplay)
+          (should (string-match-p "Line 20" (buffer-string)))
+          ;; Navigate to [-] button and collapse
+          (goto-char (point-min))
+          (search-forward "[-]" nil t)
+          (beginning-of-line)
+          (pi-coding-agent-toggle-tool-section)
+          (redisplay)
+          (should (string-match-p "more lines)" (buffer-string)))
+          (should-not (string-match-p "Line 20" (buffer-string)))
+          ;; Re-expand must still work from current cursor position
+          (pi-coding-agent-toggle-tool-section)
+          (redisplay)
+          (should (string-match-p "Line 20" (buffer-string))))
+      (kill-buffer buf))))
+
 ;;;; Streaming Fontification Tests
 
 (ert-deftest pi-coding-agent-gui-test-streaming-no-fences ()

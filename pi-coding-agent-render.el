@@ -1491,9 +1491,12 @@ Works anywhere inside a tool block overlay."
         (if-let* ((btn (pi-coding-agent--find-toggle-button-in-region (car bounds) (cdr bounds))))
             (progn
               (pi-coding-agent--toggle-tool-output btn)
-              ;; Try to restore position, clamped to new block bounds
+              ;; Try to restore position, clamped to new block bounds.
+              ;; Use (1- end) because overlays-at uses half-open [start, end),
+              ;; so clamping to exactly end would place cursor outside the
+              ;; overlay, breaking the next toggle.
               (when-let* ((new-bounds (pi-coding-agent--find-tool-block-bounds)))
-                (goto-char (min original-pos (cdr new-bounds)))))
+                (goto-char (min original-pos (1- (cdr new-bounds))))))
           ;; No button found - short output, use outline-cycle
           (outline-cycle))
       ;; Not in a tool block

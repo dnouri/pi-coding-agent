@@ -1154,6 +1154,38 @@ message_start role=assistant displays the 'Assistant' header."
     (should (string-match-p "\\.\\.\\..*more lines" (buffer-string)))
     (should-not (string-match-p "L10" (buffer-string)))))
 
+(ert-deftest pi-coding-agent-test-tool-toggle-re-expand-after-collapse-from-button ()
+  "TAB re-expands after collapsing from the [-] button position.
+Regression: collapsing from the [-] button placed cursor at the overlay
+boundary where overlays-at returns nil, making the next TAB fall through
+to outline-cycle instead of toggling.  Uses enough lines so the [-]
+button position in the expanded state exceeds the collapsed overlay end."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "bash" '(:command "ls"))
+    (pi-coding-agent--display-tool-end "bash" nil
+                          '((:type "text" :text "L01\nL02\nL03\nL04\nL05\nL06\nL07\nL08\nL09\nL10\nL11\nL12\nL13\nL14\nL15"))
+                          nil nil)
+    ;; Expand
+    (goto-char (point-min))
+    (search-forward "..." nil t)
+    (backward-char 1)
+    (pi-coding-agent-toggle-tool-section)
+    (should (string-match-p "L15" (buffer-string)))
+    ;; Navigate to the [-] button (near end of expanded block)
+    (goto-char (point-min))
+    (search-forward "[-]" nil t)
+    (beginning-of-line)
+    ;; Collapse from the button position
+    (pi-coding-agent-toggle-tool-section)
+    (should (string-match-p "\\.\\.\\..*more lines" (buffer-string)))
+    ;; Verify cursor landed inside the tool block overlay, not at its boundary
+    (should (seq-find (lambda (o) (overlay-get o 'pi-coding-agent-tool-block))
+                      (overlays-at (point))))
+    ;; The critical assertion: TAB must still work to re-expand
+    (pi-coding-agent-toggle-tool-section)
+    (should (string-match-p "L15" (buffer-string)))))
+
 (ert-deftest pi-coding-agent-test-tool-toggle-expands-with-highlighting ()
   "Expanded tool output has syntax highlighting applied.
 With tree-sitter, code blocks get `font-lock-string-face' from

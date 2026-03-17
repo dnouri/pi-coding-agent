@@ -1,0 +1,16 @@
+{
+  "description": "Tool execution with long output that triggers collapse.",
+  "commands": [],
+  "prompt": {
+    "type": "tool_stream",
+    "tool_name": "read",
+    "tool_args": {
+      "path": "/tmp/fake-tool.txt"
+    },
+    "partial_result_text": "Line 01 partial content\n",
+    "result_text": "Line 01 of file\nLine 02 of file\nLine 03 of file\nLine 04 of file\nLine 05 of file\nLine 06 of file\nLine 07 of file\nLine 08 of file\nLine 09 of file\nLine 10 of file\nLine 11 of file\nLine 12 of file\nLine 13 of file\nLine 14 of file\nLine 15 of file\nLine 16 of file\nLine 17 of file\nLine 18 of file\nLine 19 of file\nLine 20 of file\n",
+    "assistant_text": "Here is the file content.",
+    "delay_ms": 30,
+    "echo_user": true
+  }
+}
