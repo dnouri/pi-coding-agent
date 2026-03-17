@@ -327,6 +327,7 @@ using the cached session file."
       (message "Pi: No session file available - cannot reload"))
      ;; Recover
      (t
+      (message "Pi: Reloading...")
       (with-current-buffer chat-buf
         ;; Kill old process if it exists (alive or dead)
         (when pi-coding-agent--process

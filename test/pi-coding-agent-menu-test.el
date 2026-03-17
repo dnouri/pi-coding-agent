@@ -458,6 +458,34 @@ Also verifies that the new session-file is stored in state for reload to work."
             (delete-process pi-coding-agent--process)))
         (kill-buffer chat-buf)))))
 
+(ert-deftest pi-coding-agent-test-reload-shows-immediate-feedback ()
+  "Reload reports progress before the async session switch finishes."
+  (let* ((shown-message nil)
+         (chat-buf (get-buffer-create "*pi-coding-agent-test-reload-feedback-chat*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--state '(:session-file "/tmp/test-session.json"))
+            (let ((dead-proc (start-process "test-dead" nil "true")))
+              (should (pi-coding-agent-test-wait-for-process-exit dead-proc))
+              (setq pi-coding-agent--process dead-proc))
+            (cl-letf (((symbol-function 'pi-coding-agent--start-process)
+                       (lambda (_dir)
+                         (start-process "test-new" nil "cat")))
+                      ((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_proc _msg _cb) nil))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (setq shown-message (apply #'format fmt args)))))
+              (pi-coding-agent-reload)
+              (should (equal shown-message "Pi: Reloading...")))))
+      (when (buffer-live-p chat-buf)
+        (with-current-buffer chat-buf
+          (when (and pi-coding-agent--process (process-live-p pi-coding-agent--process))
+            (delete-process pi-coding-agent--process)))
+        (kill-buffer chat-buf)))))
+
 (ert-deftest pi-coding-agent-test-reload-fails-without-session-file ()
   "Reload shows error when no session file in state."
   (let* ((error-shown nil)
