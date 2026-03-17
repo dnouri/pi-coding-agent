@@ -59,6 +59,7 @@ echo ""
 cat > "$RUNNER_FILE" << 'ELISP_END'
 ;; Setup
 (setq inhibit-startup-screen t)
+(setq load-prefer-newer t)
 ELISP_END
 
 cat >> "$RUNNER_FILE" << EOF

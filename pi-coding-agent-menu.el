@@ -257,6 +257,7 @@ Call this when starting a new session to ensure no stale state persists."
         pi-coding-agent--thinking-raw nil
         pi-coding-agent--line-parse-state 'line-start
         pi-coding-agent--pending-tool-overlay nil
+        pi-coding-agent--tool-block-order-counter 0
         pi-coding-agent--activity-phase "idle")
   ;; Use accessors for cross-module state
   (pi-coding-agent--set-last-usage nil)
@@ -265,7 +266,9 @@ Call this when starting a new session to ensure no stale state persists."
   (pi-coding-agent--set-message-start-marker nil)
   (pi-coding-agent--set-streaming-marker nil)
   (when pi-coding-agent--tool-args-cache
-    (clrhash pi-coding-agent--tool-args-cache)))
+    (clrhash pi-coding-agent--tool-args-cache))
+  (when pi-coding-agent--live-tool-blocks
+    (clrhash pi-coding-agent--live-tool-blocks)))
 
 (defun pi-coding-agent--clear-chat-buffer ()
   "Clear the chat buffer and display fresh startup header.

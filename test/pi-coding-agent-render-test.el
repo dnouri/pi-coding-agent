@@ -415,6 +415,33 @@ agent_end + next section's leading newline must not create triple newlines."
         (should (= tool-count 1))
         (should (= zero-tool-count 0))))))
 
+(ert-deftest pi-coding-agent-test-display-session-history-clears-stale-live-tool-state ()
+  "History rebuild clears keyed live tool state and cached execution args."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash"
+       :toolCallId "c1"
+       :args (:command "echo one")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash"
+       :toolCallId "c2"
+       :args (:command "echo two")))
+    (should (= 2 (hash-table-count pi-coding-agent--live-tool-blocks)))
+    (should (= 2 (hash-table-count pi-coding-agent--tool-args-cache)))
+    (pi-coding-agent--display-session-history
+     [(:role "assistant"
+       :content [(:type "text" :text "Reloaded history")]
+       :timestamp 1704067200000)]
+     (current-buffer))
+    (should-not pi-coding-agent--pending-tool-overlay)
+    (should (= 0 (hash-table-count pi-coding-agent--live-tool-blocks)))
+    (should (= 0 (hash-table-count pi-coding-agent--tool-args-cache)))
+    (should-not (cl-some (lambda (ov) (overlay-get ov 'pi-coding-agent-tool-block))
+                         (overlays-in (point-min) (point-max))))))
+
 (ert-deftest pi-coding-agent-test-display-session-history-decorates-user-table ()
   "User-authored tables in resumed history get display decoration too."
   (with-temp-buffer
@@ -746,7 +773,7 @@ This avoids showing both the command and its expansion."
   "Sending slash command after abort should not show duplicate Assistant headers.
 Regression test for bug where:
 1. Assistant streams, user aborts
-2. User types /fix-tests in input buffer  
+2. User types /fix-tests in input buffer
 3. Two 'Assistant' headers appear before the user message
 
 The fix: don't set assistant-header-shown to nil when sending slash commands,
@@ -764,7 +791,7 @@ since we don't display them locally. Let pi's message_start handle it."
             (setq pi-coding-agent--assistant-header-shown t)
             (let ((inhibit-read-only t))
               (insert "Assistant\n=========\nSome content...\n\n[Aborted]\n\n")))
-          
+
           ;; User sends a slash command from input buffer
           (with-current-buffer input-buf
             (pi-coding-agent-input-mode)
@@ -774,16 +801,16 @@ since we don't display them locally. Let pi's message_start handle it."
                       ((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'pi-coding-agent--send-prompt) #'ignore))
               (pi-coding-agent-send)))
-          
+
           ;; KEY ASSERTION: assistant-header-shown should still be t
           ;; because we didn't display anything locally for slash commands
           (with-current-buffer chat-buf
             (should pi-coding-agent--assistant-header-shown)
-            
+
             ;; Now simulate pi's response sequence
             ;; 1. agent_start - should NOT add header (already shown)
             (pi-coding-agent--handle-display-event '(:type "agent_start"))
-            
+
             ;; Count Assistant headers - should still be just 1
             (let ((count 0)
                   (content (buffer-string)))
@@ -793,22 +820,22 @@ since we don't display them locally. Let pi's message_start handle it."
                 (while (search-forward "Assistant\n=========" nil t)
                   (setq count (1+ count))))
               (should (= count 1)))
-            
+
             ;; 2. message_start with user role (expanded template)
             (pi-coding-agent--handle-display-event
              '(:type "message_start"
                :message (:role "user"
                          :content [(:type "text" :text "Your task is to fix tests...")]
                          :timestamp 1704067200000)))
-            
+
             ;; ISSUE #5: Verify expanded content is actually displayed
             (should (string-match-p "Your task is to fix tests" (buffer-string)))
-            
+
             ;; 3. message_start with assistant role
             (pi-coding-agent--handle-display-event
              '(:type "message_start"
                :message (:role "assistant")))
-            
+
             ;; Final count: should be exactly 2 Assistant headers
             ;; (one from aborted turn, one from new turn)
             (let ((count 0)
@@ -2308,6 +2335,54 @@ When full output is visible, line numbers must follow rendered blank lines."
       (let ((result (pi-coding-agent-test--visit-file-line 20)))
         (should (= 3 (plist-get result :line)))))))
 
+(ert-deftest pi-coding-agent-test-visit-file-uses-correct-adjacent-finalized-block ()
+  "visit-file uses the overlay and line-map for the block at point."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-tool-preview-lines 4))
+      (pi-coding-agent--display-tool-start "read" '(:path "/tmp/a.txt" :offset 10))
+      (pi-coding-agent--display-tool-end
+       "read" '(:path "/tmp/a.txt" :offset 10)
+       '((:type "text" :text "a10\na11\na12\na13\na14\na15"))
+       nil nil)
+      (pi-coding-agent--display-tool-start "read" '(:path "/tmp/b.txt" :offset 100))
+      (pi-coding-agent--display-tool-end
+       "read" '(:path "/tmp/b.txt" :offset 100)
+       '((:type "text" :text "b100\n\nb102\nb103\nb104\nb105"))
+       nil nil)
+      (goto-char (point-min))
+      (search-forward "b104")
+      (beginning-of-line)
+      (let ((result (pi-coding-agent-test--visit-file-line 200)))
+        (should (equal "/tmp/b.txt" (plist-get result :path)))
+        (should (= 104 (plist-get result :line)))))))
+
+(ert-deftest pi-coding-agent-test-toggle-tool-output-does-not-affect-adjacent-blocks ()
+  "Expanding one finalized tool block leaves the adjacent block untouched."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-tool-preview-lines 4))
+      (pi-coding-agent--display-tool-start "read" '(:path "/tmp/a.txt"))
+      (pi-coding-agent--display-tool-end
+       "read" '(:path "/tmp/a.txt")
+       '((:type "text" :text "a1\na2\na3\na4\na5\na6"))
+       nil nil)
+      (pi-coding-agent--display-tool-start "read" '(:path "/tmp/b.txt"))
+      (pi-coding-agent--display-tool-end
+       "read" '(:path "/tmp/b.txt")
+       '((:type "text" :text "b1\nb2\nb3\nb4\nb5\nb6"))
+       nil nil)
+      (goto-char (point-min))
+      (re-search-forward "\\.\\.\\. ([0-9]+ more lines)" nil t)
+      (let ((btn (button-at (match-beginning 0))))
+        (should btn)
+        (pi-coding-agent--toggle-tool-output btn))
+      (let ((content (buffer-string)))
+        (should (string-match-p "a6" content))
+        (should-not (string-match-p "b6" content))
+        (should (= 1 (pi-coding-agent-test--count-matches
+                      "\\.\\.\\. ([0-9]+ more lines)" content)))))))
+
 (ert-deftest pi-coding-agent-test-visit-file-write-ignores-offset ()
   "write tool should ignore :offset for RET line navigation."
   (with-temp-buffer
@@ -2323,6 +2398,49 @@ When full output is visible, line numbers must follow rendered blank lines."
     (beginning-of-line)
     (let ((result (pi-coding-agent-test--visit-file-line 120)))
       (should (= 2 (plist-get result :line))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-write-expanded-after-streamed-header-update ()
+  "Expanded streamed write output should still support RET line navigation."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-tool-preview-lines 2))
+      (pi-coding-agent--handle-display-event '(:type "agent_start"))
+      (pi-coding-agent--handle-display-event '(:type "message_start"))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_start" 0
+       (list (pi-coding-agent-test--toolcall "call_1" "write" nil)))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_delta" 0
+       (list (pi-coding-agent-test--toolcall
+              "call_1" "write"
+              '(:path "/tmp/out.py"
+                :content "A_LINE_1\nA_LINE_2\nA_LINE_3\nA_LINE_4\n")))
+       "x")
+      (pi-coding-agent--handle-display-event
+       '(:type "message_end" :message (:role "assistant")))
+      (pi-coding-agent--handle-display-event
+       '(:type "tool_execution_start"
+         :toolCallId "call_1"
+         :toolName "write"
+         :args (:path "/tmp/out.py"
+                :content "A_LINE_1\nA_LINE_2\nA_LINE_3\nA_LINE_4\n")))
+      (pi-coding-agent--handle-display-event
+       '(:type "tool_execution_end"
+         :toolCallId "call_1"
+         :toolName "write"
+         :result (:content [(:type "text" :text "done")])
+         :isError :json-false))
+      (goto-char (point-min))
+      (re-search-forward "\\.\\.\\. ([0-9]+ more lines)" nil t)
+      (let ((btn (button-at (match-beginning 0))))
+        (should btn)
+        (pi-coding-agent--toggle-tool-output btn))
+      (goto-char (point-min))
+      (search-forward "A_LINE_3")
+      (beginning-of-line)
+      (let ((result (pi-coding-agent-test--visit-file-line 20)))
+        (should (equal "/tmp/out.py" (plist-get result :path)))
+        (should (= 3 (plist-get result :line)))))))
 
 ;;; Visual Line Truncation Tests
 
@@ -2489,24 +2607,24 @@ Regression test: single lines should respect byte limit even with no newlines."
     ;; Simulate: message -> tool -> message sequence
     (pi-coding-agent--handle-display-event '(:type "agent_start"))
     (pi-coding-agent--handle-display-event '(:type "message_start"))
-    (pi-coding-agent--handle-display-event 
-     '(:type "message_update" 
+    (pi-coding-agent--handle-display-event
+     '(:type "message_update"
        :assistantMessageEvent (:type "text_delta" :delta "Running")))
     (pi-coding-agent--handle-display-event '(:type "message_end"))
-    
-    (pi-coding-agent--handle-display-event 
+
+    (pi-coding-agent--handle-display-event
      '(:type "tool_execution_start" :toolName "bash" :args (:command "ls")))
-    (pi-coding-agent--handle-display-event 
+    (pi-coding-agent--handle-display-event
      '(:type "tool_execution_end" :toolName "bash"
        :result (:content ((:type "text" :text "file1\nfile2")))))
-    
+
     ;; Second message should NOT clobber tool output
     (pi-coding-agent--handle-display-event '(:type "message_start"))
-    (pi-coding-agent--handle-display-event 
+    (pi-coding-agent--handle-display-event
      '(:type "message_update"
        :assistantMessageEvent (:type "text_delta" :delta "Done")))
     (pi-coding-agent--handle-display-event '(:type "message_end"))
-    
+
     ;; Tool output must still be present
     (should (string-match-p "file1" (buffer-string)))
     (should (string-match-p "file2" (buffer-string)))
@@ -2602,21 +2720,78 @@ Regression test: streaming output with no newlines should still be capped."
       ;; Should contain truncation indicator
       (should (string-match-p "earlier output\\|truncated" buffer-content)))))
 
+(ert-deftest pi-coding-agent-test-parallel-tool-execution-keeps-output-with-own-header ()
+  "Interleaved execution updates stay attached to their matching headers."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash"
+       :toolCallId "c1"
+       :args (:command "echo one")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash"
+       :toolCallId "c2"
+       :args (:command "echo two")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_update"
+       :toolCallId "c1"
+       :partialResult (:content [(:type "text" :text "alpha")])) )
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_update"
+       :toolCallId "c2"
+       :partialResult (:content [(:type "text" :text "bravo")])) )
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_end"
+       :toolName "bash"
+       :toolCallId "c1"
+       :result (:content [(:type "text" :text "final alpha")])
+       :isError nil))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_end"
+       :toolName "bash"
+       :toolCallId "c2"
+       :result (:content [(:type "text" :text "final bravo")])
+       :isError nil))
+    (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+      (should (equal content
+                     (concat "$ echo one\n"
+                             "```\nfinal alpha\n```\n\n"
+                             "$ echo two\n"
+                             "```\nfinal bravo\n```\n\n")))
+      (should (= 1 (pi-coding-agent-test--count-matches "\\$ echo one" content)))
+      (should (= 1 (pi-coding-agent-test--count-matches "\\$ echo two" content))))
+    (should (= 0 (hash-table-count pi-coding-agent--live-tool-blocks)))))
+
 ;; ── Toolcall streaming (during LLM generation) ─────────────────────
+
+(defun pi-coding-agent-test--tool-block-overlay-by-id (tool-call-id)
+  "Return the live tool block overlay for TOOL-CALL-ID, or nil."
+  (when-let* ((block (gethash tool-call-id pi-coding-agent--live-tool-blocks)))
+    (pi-coding-agent--tool-block-overlay block)))
+
+(defun pi-coding-agent-test--tool-stream-body-from-overlay (ov)
+  "Return tool overlay OV body as plain text."
+  (let ((header-end (overlay-get ov 'pi-coding-agent-header-end)))
+    (buffer-substring-no-properties header-end (overlay-end ov))))
 
 (defun pi-coding-agent-test--pending-tool-stream-body ()
   "Return pending tool overlay body as plain text."
-  (let* ((ov pi-coding-agent--pending-tool-overlay)
-         (header-end (overlay-get ov 'pi-coding-agent-header-end)))
-    (buffer-substring-no-properties header-end (overlay-end ov))))
+  (pi-coding-agent-test--tool-stream-body-from-overlay
+   pi-coding-agent--pending-tool-overlay))
 
-(defun pi-coding-agent-test--pending-tool-content-lines ()
-  "Return streamed content lines: only the code block body.
+(defun pi-coding-agent-test--tool-stream-body-by-id (tool-call-id)
+  "Return the streamed body for TOOL-CALL-ID as plain text."
+  (pi-coding-agent-test--tool-stream-body-from-overlay
+   (pi-coding-agent-test--tool-block-overlay-by-id tool-call-id)))
+
+(defun pi-coding-agent-test--tool-content-lines-from-stream (stream)
+  "Return streamed content lines extracted from STREAM.
 Strips the hidden-output indicator line, opening fence (first
 line matching ``` or ~~~), and closing fence (last such line).
 Content lines — even those starting with ``` — are preserved."
-  (let* ((stream (pi-coding-agent-test--pending-tool-stream-body))
-         (lines (split-string (string-trim-right stream "\n+") "\n"))
+  (let* ((lines (split-string (string-trim-right stream "\n+") "\n"))
          ;; Drop the indicator if present
          (lines (if (and lines (string= (car lines) "... (earlier output)"))
                     (cdr lines)
@@ -2631,6 +2806,16 @@ Content lines — even those starting with ``` — are preserved."
                    (string-prefix-p "~~~" (car (last lines)))))
       (setq lines (butlast lines)))
     lines))
+
+(defun pi-coding-agent-test--pending-tool-content-lines ()
+  "Return streamed content lines for the pending tool overlay only."
+  (pi-coding-agent-test--tool-content-lines-from-stream
+   (pi-coding-agent-test--pending-tool-stream-body)))
+
+(defun pi-coding-agent-test--tool-content-lines-by-id (tool-call-id)
+  "Return streamed content lines for TOOL-CALL-ID only."
+  (pi-coding-agent-test--tool-content-lines-from-stream
+   (pi-coding-agent-test--tool-stream-body-by-id tool-call-id)))
 
 (ert-deftest pi-coding-agent-test-toolcall-start-after-text-has-blank-line ()
   "toolcall_start after text delta without trailing newline has proper spacing."
@@ -2712,11 +2897,92 @@ authoritative args, header and overlay path are updated."
                                 'pi-coding-agent-tool-path)))))
 
 (ert-deftest pi-coding-agent-test-toolcall-start-creates-overlay ()
-  "toolcall_start in message_update creates tool overlay with header."
+  "toolcall_start in message_update creates a keyed preview overlay."
   (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
     (should (string-match-p "write /tmp/foo\\.py" (buffer-string)))
     (should pi-coding-agent--pending-tool-overlay)
-    (should (equal pi-coding-agent--streaming-tool-id "call_1"))))
+    (should (pi-coding-agent--tool-block-get "call_1"))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-replaces-header-exactly-across-multiple-updates ()
+  "Repeated header updates should not leave stale trailing characters behind."
+  (pi-coding-agent-test--with-streaming-assistant
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_start" 0
+     (list (pi-coding-agent-test--toolcall "call_1" "read" nil)))
+    (dolist (path '("/tmp/a.py" "/tmp/ab.py" "/tmp/abc.py"))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_delta" 0
+       (list (pi-coding-agent-test--toolcall "call_1" "read" (list :path path)))
+       "x"))
+    (let ((content (buffer-string)))
+      (should (string-match-p "\nread /tmp/abc\\.py\n\\'" content))
+      (should-not (string-match-p "read /tmp/abc\\.pyy+" content)))))
+
+(ert-deftest pi-coding-agent-test-toolcall-multiple-previews-appear-in-source-order ()
+  "Two streaming toolcall previews both appear in assistant source order."
+  (pi-coding-agent-test--with-streaming-assistant
+    (let ((toolcalls (list (pi-coding-agent-test--toolcall
+                            "call_1" "write" '(:path "/tmp/a.py"))
+                           (pi-coding-agent-test--toolcall
+                            "call_2" "write" '(:path "/tmp/b.py")))))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_start" 0 toolcalls)
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_start" 1 toolcalls)
+      (let ((content (buffer-string)))
+        (should (string-match-p "write /tmp/a\\.py" content))
+        (should (string-match-p "write /tmp/b\\.py" content))
+        (should (< (string-match "write /tmp/a\\.py" content)
+                   (string-match "write /tmp/b\\.py" content))))
+      (should (= 2 (hash-table-count pi-coding-agent--live-tool-blocks))))))
+
+(ert-deftest pi-coding-agent-test-toolcall-reconcile-removes-stale-preview-blocks ()
+  "Authoritative assistant toolcall content should drop stale previews."
+  (pi-coding-agent-test--with-streaming-assistant
+    (let ((toolcalls (list (pi-coding-agent-test--toolcall
+                            "call_1" "write" '(:path "/tmp/a.py"))
+                           (pi-coding-agent-test--toolcall
+                            "call_2" "write" '(:path "/tmp/b.py")))))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_start" 0 toolcalls)
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_start" 1 toolcalls)
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_delta" 0
+       (list (pi-coding-agent-test--toolcall
+              "call_1" "write" '(:path "/tmp/a.py")))
+       "x")
+      (let ((content (buffer-string)))
+        (should (string-match-p "write /tmp/a\\.py" content))
+        (should-not (string-match-p "write /tmp/b\\.py" content)))
+      (should (pi-coding-agent--tool-block-get "call_1"))
+      (should-not (pi-coding-agent--tool-block-get "call_2"))
+      (should (= 1 (hash-table-count pi-coding-agent--live-tool-blocks)))
+      (should (equal "call_1"
+                     (pi-coding-agent--tool-block-tool-call-id
+                      (pi-coding-agent--current-tool-block)))))))
+
+(ert-deftest pi-coding-agent-test-tool-preview-helper-inserts-before-later-live-block ()
+  "Earlier preview orders insert before already-live later blocks."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "write" '(:path "/tmp/b.py") "call_2" 2)
+    (pi-coding-agent--display-tool-start "write" '(:path "/tmp/a.py") "call_1" 1)
+    (let ((content (buffer-string)))
+      (should (< (string-match "write /tmp/a\\.py" content)
+                 (string-match "write /tmp/b\\.py" content))))
+    (should (= 2 (hash-table-count pi-coding-agent--live-tool-blocks)))))
+
+(ert-deftest pi-coding-agent-test-live-tool-block-ordering-stays-monotonic-after-explicit-previews ()
+  "Implicit live blocks should sort after earlier explicit preview orders."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "write" '(:path "/tmp/b.py") "call_2" 2)
+    (pi-coding-agent--display-tool-start "bash" '(:command "echo x") "call_exec")
+    (pi-coding-agent--display-tool-start "write" '(:path "/tmp/a.py") "call_1" 1)
+    (should (equal '("call_1" "call_2" "call_exec")
+                   (mapcar #'pi-coding-agent--tool-block-tool-call-id
+                           (pi-coding-agent--live-tool-blocks-in-order))))))
 
 (ert-deftest pi-coding-agent-test-toolcall-delta-streams-write-content ()
   "toolcall_delta streams args.content for write tools."
@@ -2725,6 +2991,64 @@ authoritative args, header and overlay path are updated."
      "write" '(:path "/tmp/foo.py" :content "line1\nline2\n"))
     (should (string-match-p "line1" (buffer-string)))
     (should (string-match-p "line2" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-tool-execution-update-keeps-bash-output-on-next-line-after-header-update ()
+  "Bash execution output should stay on the line after an updated header."
+  (pi-coding-agent-test--with-streaming-assistant
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_start" 0
+     (list (pi-coding-agent-test--toolcall "call_1" "bash" nil)))
+    (pi-coding-agent--handle-display-event
+     '(:type "message_end" :message (:role "assistant")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolCallId "call_1"
+       :toolName "bash"
+       :args (:command "echo hi")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_update"
+       :toolCallId "call_1"
+       :partialResult (:content [(:type "text" :text "hi\n")])) )
+    (should (string-match-p "\\$ echo hi\n```\nhi" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-streams-multiple-write-previews-independently ()
+  "Interleaved write preview deltas update only their matching blocks."
+  (pi-coding-agent-test--with-streaming-assistant
+    (let ((toolcalls (list (pi-coding-agent-test--toolcall
+                            "call_1" "write" '(:path "/tmp/a.py"))
+                           (pi-coding-agent-test--toolcall
+                            "call_2" "write" '(:path "/tmp/b.py")))))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_start" 0 toolcalls)
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_start" 1 toolcalls)
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_delta" 0
+       (list (pi-coding-agent-test--toolcall
+              "call_1" "write"
+              '(:path "/tmp/a.py" :content "print(\"a\")\n"))
+             (pi-coding-agent-test--toolcall
+              "call_2" "write" '(:path "/tmp/b.py"))))
+      (should (string-match-p "print(\\\"a\\\")"
+                              (pi-coding-agent-test--tool-stream-body-by-id
+                               "call_1")))
+      (should-not (string-match-p "print(\\\"a\\\")"
+                                  (pi-coding-agent-test--tool-stream-body-by-id
+                                   "call_2")))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_delta" 1
+       (list (pi-coding-agent-test--toolcall
+              "call_1" "write"
+              '(:path "/tmp/a.py" :content "print(\"a\")\n"))
+             (pi-coding-agent-test--toolcall
+              "call_2" "write"
+              '(:path "/tmp/b.py" :content "print(\"b\")\n"))))
+      (should (string-match-p "print(\\\"a\\\")"
+                              (pi-coding-agent-test--tool-stream-body-by-id
+                               "call_1")))
+      (should (string-match-p "print(\\\"b\\\")"
+                              (pi-coding-agent-test--tool-stream-body-by-id
+                               "call_2"))))))
 
 (ert-deftest pi-coding-agent-test-toolcall-delta-uses-fenced-code-block ()
   "Streaming write content is wrapped in a markdown fenced code block.
@@ -3001,8 +3325,8 @@ Multiple deltas should replace the preview instead of appending forever."
         (should (string-match-p "line6" body))
         (should (= 1 (pi-coding-agent-test--count-matches "line6" body)))))))
 
-(ert-deftest pi-coding-agent-test-toolcall-dedup-on-tool-execution-start ()
-  "tool_execution_start skips overlay creation when toolcall_start already created it."
+(ert-deftest pi-coding-agent-test-toolcall-execution-start-reuses-preview-block ()
+  "tool_execution_start should reuse the existing streamed preview block."
   (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
     (pi-coding-agent--handle-display-event
      '(:type "message_end" :message (:role "assistant")))
@@ -3011,7 +3335,7 @@ Multiple deltas should replace the preview instead of appending forever."
        :toolName "write" :args (:path "/tmp/foo.py" :content "final")))
     (should (= 1 (pi-coding-agent-test--count-matches
                    "write /tmp/foo\\.py" (buffer-string))))
-    (should-not pi-coding-agent--streaming-tool-id)))
+    (should (pi-coding-agent--tool-block-get "call_1"))))
 
 (ert-deftest pi-coding-agent-test-toolcall-full-event-flow ()
   "Full toolcall streaming flow produces correct final output."
@@ -3028,7 +3352,7 @@ Multiple deltas should replace the preview instead of appending forever."
                                         :content "streaming content\n"))])))
     (pi-coding-agent--handle-display-event
      '(:type "message_end" :message (:role "assistant")))
-    ;; Execution phase (dedup guard skips overlay creation)
+    ;; Execution phase reuses the streamed preview block.
     (pi-coding-agent--handle-display-event
      '(:type "tool_execution_start" :toolCallId "call_1"
        :toolName "write" :args (:path "/tmp/foo.py" :content "final content")))
@@ -3055,55 +3379,70 @@ Multiple deltas should replace the preview instead of appending forever."
     (let ((pi-coding-agent--aborted t))
       (pi-coding-agent--handle-display-event '(:type "agent_end")))
     (should-not pi-coding-agent--pending-tool-overlay)
-    (should-not pi-coding-agent--streaming-tool-id)))
+    (should (= 0 (hash-table-count pi-coding-agent--live-tool-blocks)))))
 
-(ert-deftest pi-coding-agent-test-toolcall-second-ignored-during-streaming ()
-  "Second toolcall_start is ignored while first is still streaming."
+(ert-deftest pi-coding-agent-test-abort-finalizes-all-live-tool-blocks ()
+  "Abort finalizes every live tool block and clears keyed tool state."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
-    (pi-coding-agent--handle-display-event '(:type "agent_start"))
-    (pi-coding-agent--handle-display-event '(:type "message_start"))
-    ;; First tool call starts streaming
     (pi-coding-agent--handle-display-event
-     `(:type "message_update"
-       :assistantMessageEvent (:type "toolcall_start" :contentIndex 0)
-       :message (:role "assistant"
-                 :content [(:type "toolCall" :id "call_1"
-                            :name "write" :arguments (:path "/tmp/a.py"))
-                           (:type "toolCall" :id "call_2"
-                            :name "write" :arguments (:path "/tmp/b.py"))])))
-    ;; Second tool call start — should be ignored (streaming-tool-id already set)
+     '(:type "tool_execution_start"
+       :toolName "bash"
+       :toolCallId "c1"
+       :args (:command "echo one")))
     (pi-coding-agent--handle-display-event
-     `(:type "message_update"
-       :assistantMessageEvent (:type "toolcall_start" :contentIndex 1)
-       :message (:role "assistant"
-                 :content [(:type "toolCall" :id "call_1"
-                            :name "write" :arguments (:path "/tmp/a.py"))
-                           (:type "toolCall" :id "call_2"
-                            :name "write" :arguments (:path "/tmp/b.py"))])))
-    ;; Only first tool's header appears
-    (let ((content (buffer-string)))
-      (should (string-match-p "write /tmp/a\\.py" content))
-      (should-not (string-match-p "write /tmp/b\\.py" content)))
-    ;; streaming-tool-id still tracks first tool
-    (should (equal pi-coding-agent--streaming-tool-id "call_1"))
-    ;; After tool_execution_start for first (dedup), second gets normal path
-    (pi-coding-agent--handle-display-event '(:type "message_end" :message (:role "assistant")))
-    (pi-coding-agent--handle-display-event
-     '(:type "tool_execution_start" :toolCallId "call_1"
-       :toolName "write" :args (:path "/tmp/a.py" :content "content a")))
-    (pi-coding-agent--handle-display-event
-     '(:type "tool_execution_end" :toolCallId "call_1"
-       :toolName "write" :result (:content [(:type "text" :text "wrote a")])))
-    ;; Now second tool gets created by tool_execution_start normally
-    (pi-coding-agent--handle-display-event
-     '(:type "tool_execution_start" :toolCallId "call_2"
-       :toolName "write" :args (:path "/tmp/b.py" :content "content b")))
-    (let ((content (buffer-string)))
-      (should (string-match-p "write /tmp/b\\.py" content))
-      ;; Both headers present, no duplicates
-      (should (= 1 (pi-coding-agent-test--count-matches "write /tmp/a\\.py" content)))
-      (should (= 1 (pi-coding-agent-test--count-matches "write /tmp/b\\.py" content))))))
+     '(:type "tool_execution_start"
+       :toolName "bash"
+       :toolCallId "c2"
+       :args (:command "echo two")))
+    (let* ((ov1 (pi-coding-agent-test--tool-block-overlay-by-id "c1"))
+           (ov2 (pi-coding-agent-test--tool-block-overlay-by-id "c2")))
+      (should ov1)
+      (should ov2)
+      (should (= 2 (hash-table-count pi-coding-agent--live-tool-blocks)))
+      (should (= 2 (hash-table-count pi-coding-agent--tool-args-cache)))
+      (setq pi-coding-agent--aborted t)
+      (pi-coding-agent--handle-display-event '(:type "agent_end"))
+      (should-not pi-coding-agent--pending-tool-overlay)
+      (should (= 0 (hash-table-count pi-coding-agent--live-tool-blocks)))
+      (should (= 0 (hash-table-count pi-coding-agent--tool-args-cache)))
+      (should (eq (overlay-get ov1 'face) 'pi-coding-agent-tool-block-error))
+      (should (eq (overlay-get ov2 'face) 'pi-coding-agent-tool-block-error)))))
+
+(ert-deftest pi-coding-agent-test-toolcall-second-preview-upgrades-on-execution-start ()
+  "Multiple previews survive into execution without duplicate headers."
+  (pi-coding-agent-test--with-streaming-assistant
+    (let ((toolcalls (list (pi-coding-agent-test--toolcall
+                            "call_1" "write" '(:path "/tmp/a.py"))
+                           (pi-coding-agent-test--toolcall
+                            "call_2" "write" '(:path "/tmp/b.py")))))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_start" 0 toolcalls)
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_start" 1 toolcalls)
+      (let ((content (buffer-string)))
+        (should (string-match-p "write /tmp/a\\.py" content))
+        (should (string-match-p "write /tmp/b\\.py" content))
+        (should (= 1 (pi-coding-agent-test--count-matches
+                      "write /tmp/a\\.py" content)))
+        (should (= 1 (pi-coding-agent-test--count-matches
+                      "write /tmp/b\\.py" content))))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_end" :message (:role "assistant")))
+      (pi-coding-agent--handle-display-event
+       '(:type "tool_execution_start" :toolCallId "call_1"
+         :toolName "write" :args (:path "/tmp/a.py" :content "content a")))
+      (pi-coding-agent--handle-display-event
+       '(:type "tool_execution_end" :toolCallId "call_1"
+         :toolName "write" :result (:content [(:type "text" :text "wrote a")])))
+      (pi-coding-agent--handle-display-event
+       '(:type "tool_execution_start" :toolCallId "call_2"
+         :toolName "write" :args (:path "/tmp/b.py" :content "content b")))
+      (let ((content (buffer-string)))
+        (should (= 1 (pi-coding-agent-test--count-matches
+                      "write /tmp/a\\.py" content)))
+        (should (= 1 (pi-coding-agent-test--count-matches
+                      "write /tmp/b\\.py" content)))))))
 
 (ert-deftest pi-coding-agent-test-get-tail-lines-basic ()
   "Get-tail-lines returns last N lines correctly."
@@ -3930,12 +4269,7 @@ With md-ts-mode (tree-sitter), the cost is negligible."
       (with-temp-buffer
         (pi-coding-agent-chat-mode)
         (pi-coding-agent--display-agent-start)
-        ;; Create pending tool overlay
-        (let ((inhibit-read-only t))
-          (goto-char (point-max))
-          (setq pi-coding-agent--pending-tool-overlay
-                (pi-coding-agent--tool-overlay-create "bash"))
-          (insert "$ test\n"))
+        (pi-coding-agent--display-tool-start "bash" '(:command "test"))
         (add-hook 'after-change-functions #'test-hook nil t)
         (setq hook-called nil)
         (pi-coding-agent--display-tool-update
@@ -3995,6 +4329,44 @@ invisible, or markdown face properties."
         (should-not (get-text-property pos 'invisible))
         (should (eq (get-text-property pos 'face)
                     'pi-coding-agent-tool-command))))))
+
+(ert-deftest pi-coding-agent-test-restore-tool-properties-restores-all-live-tool-headers ()
+  "restore-tool-properties repairs every overlapping live tool header."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start
+     "bash" '(:command "echo \"**alpha**\"") "c1" 0)
+    (pi-coding-agent--display-tool-start
+     "bash" '(:command "echo \"__bravo__\"") "c2" 1)
+    (font-lock-ensure (point-min) (point-max))
+    (pi-coding-agent--restore-tool-properties (point-min) (point-max))
+    (dolist (pattern '("**alpha**" "__bravo__"))
+      (goto-char (point-min))
+      (search-forward pattern)
+      (let ((pos (match-beginning 0)))
+        (should-not (get-text-property pos 'display))
+        (should-not (get-text-property pos 'invisible))
+        (should (eq (get-text-property pos 'face)
+                    'pi-coding-agent-tool-command))))))
+
+(ert-deftest pi-coding-agent-test-restore-tool-properties-repairs-finalized-tool-headers ()
+  "restore-tool-properties should also repair finalized tool headers."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start
+     "bash" '(:command "echo \"**done**\""))
+    (pi-coding-agent--display-tool-end
+     "bash" '(:command "echo \"**done**\"")
+     '((:type "text" :text "ok")) nil nil)
+    (font-lock-ensure (point-min) (point-max))
+    (pi-coding-agent--restore-tool-properties (point-min) (point-max))
+    (goto-char (point-min))
+    (search-forward "**done**")
+    (let ((pos (match-beginning 0)))
+      (should-not (get-text-property pos 'display))
+      (should-not (get-text-property pos 'invisible))
+      (should (eq (get-text-property pos 'face)
+                  'pi-coding-agent-tool-command)))))
 
 (ert-deftest pi-coding-agent-test-normal-insert-does-call-hooks ()
   "Control test: normal inserts DO trigger hooks.

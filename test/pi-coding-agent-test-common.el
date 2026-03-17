@@ -175,33 +175,57 @@ Returns non-nil if the process exits before the timeout."
             start (match-end 0)))
     count))
 
+(defmacro pi-coding-agent-test--with-streaming-assistant (&rest body)
+  "Run BODY in a temp chat buffer with an active assistant stream."
+  (declare (indent 0) (debug body))
+  `(with-temp-buffer
+     (pi-coding-agent-chat-mode)
+     (pi-coding-agent--handle-display-event '(:type "agent_start"))
+     (pi-coding-agent--handle-display-event '(:type "message_start"))
+     ,@body))
+
+(defun pi-coding-agent-test--toolcall (id tool-name args)
+  "Return a toolCall content block for ID, TOOL-NAME, and ARGS."
+  `(:type "toolCall" :id ,id :name ,tool-name :arguments ,args))
+
+(defun pi-coding-agent-test--toolcall-message-update
+    (event-type content-index toolcalls &optional delta)
+  "Return a message_update event for EVENT-TYPE over TOOLCALLS.
+CONTENT-INDEX is written into `assistantMessageEvent'.  DELTA is added
+when non-nil.  TOOLCALLS is a list of toolCall content block plists."
+  `(:type "message_update"
+    :assistantMessageEvent ,(append (list :type event-type :contentIndex content-index)
+                                    (when delta (list :delta delta)))
+    :message (:role "assistant" :content ,(vconcat toolcalls))))
+
+(defun pi-coding-agent-test--send-toolcall-message-update
+    (event-type content-index toolcalls &optional delta)
+  "Send a toolcall message update for EVENT-TYPE over TOOLCALLS.
+CONTENT-INDEX and optional DELTA are forwarded to
+`pi-coding-agent-test--toolcall-message-update'."
+  (pi-coding-agent--handle-display-event
+   (pi-coding-agent-test--toolcall-message-update
+    event-type content-index toolcalls delta)))
+
 (defmacro pi-coding-agent-test--with-toolcall (tool-name args &rest body)
   "Set up a chat buffer with a streaming tool call, then run BODY.
 Creates a temp buffer in chat mode, fires agent_start, message_start,
 and toolcall_start for TOOL-NAME with ARGS (a plist).  The tool call
 ID is \"call_1\" and contentIndex is 0."
   (declare (indent 2) (debug (sexp sexp body)))
-  `(with-temp-buffer
-     (pi-coding-agent-chat-mode)
-     (pi-coding-agent--handle-display-event '(:type "agent_start"))
-     (pi-coding-agent--handle-display-event '(:type "message_start"))
-     (pi-coding-agent--handle-display-event
-      `(:type "message_update"
-        :assistantMessageEvent (:type "toolcall_start" :contentIndex 0)
-        :message (:role "assistant"
-                  :content [(:type "toolCall" :id "call_1"
-                             :name ,,tool-name :arguments ,,args)])))
+  `(pi-coding-agent-test--with-streaming-assistant
+     (pi-coding-agent-test--send-toolcall-message-update
+      "toolcall_start" 0
+      (list (pi-coding-agent-test--toolcall "call_1" ,tool-name ,args)))
      ,@body))
 
 (defun pi-coding-agent-test--send-delta (tool-name args)
   "Send a toolcall_delta event for TOOL-NAME with ARGS.
 Uses tool call ID \"call_1\" and contentIndex 0."
-  (pi-coding-agent--handle-display-event
-   `(:type "message_update"
-     :assistantMessageEvent (:type "toolcall_delta" :contentIndex 0 :delta "x")
-     :message (:role "assistant"
-               :content [(:type "toolCall" :id "call_1"
-                          :name ,tool-name :arguments ,args)]))))
+  (pi-coding-agent-test--send-toolcall-message-update
+   "toolcall_delta" 0
+   (list (pi-coding-agent-test--toolcall "call_1" tool-name args))
+   "x"))
 
 ;;;; Mock Session
 

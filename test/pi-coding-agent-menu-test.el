@@ -98,8 +98,11 @@
           pi-coding-agent--line-parse-state 'code-fence
           pi-coding-agent--pending-tool-overlay (make-overlay 1 1)
           pi-coding-agent--activity-phase "running")
-    ;; Add entry to tool-args-cache
-    (puthash "tool-1" '(:path "/test") pi-coding-agent--tool-args-cache)
+    ;; Add entries to tool-args-cache and live tool registry
+    (puthash "tool-1" '(:path "/test-a") pi-coding-agent--tool-args-cache)
+    (puthash "tool-2" '(:path "/test-b") pi-coding-agent--tool-args-cache)
+    (puthash "tool-1" '(:tool-call-id "tool-1") pi-coding-agent--live-tool-blocks)
+    (puthash "tool-2" '(:tool-call-id "tool-2") pi-coding-agent--live-tool-blocks)
     ;; Clear the buffer
     (pi-coding-agent--clear-chat-buffer)
     ;; All session state should be reset
@@ -122,8 +125,9 @@
     (should (eq pi-coding-agent--line-parse-state 'line-start))
     (should (null pi-coding-agent--pending-tool-overlay))
     (should (equal pi-coding-agent--activity-phase "idle"))
-    ;; Tool args cache should be empty
-    (should (= 0 (hash-table-count pi-coding-agent--tool-args-cache)))))
+    ;; Tool args cache and live tool registry should be empty
+    (should (= 0 (hash-table-count pi-coding-agent--tool-args-cache)))
+    (should (= 0 (hash-table-count pi-coding-agent--live-tool-blocks)))))
 
 (ert-deftest pi-coding-agent-test-clear-chat-buffer-removes-pi-owned-render-overlays ()
   "Clearing chat buffer removes stale pi-owned tool and diff overlays."

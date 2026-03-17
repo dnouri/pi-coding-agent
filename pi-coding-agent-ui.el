@@ -529,6 +529,8 @@ This is a read-only buffer showing the conversation history."
   (setq-local filter-buffer-substring-function
               #'pi-coding-agent--filter-buffer-substring)
   (setq-local pi-coding-agent--tool-args-cache (make-hash-table :test 'equal))
+  (setq-local pi-coding-agent--live-tool-blocks (make-hash-table :test 'equal))
+  (setq-local pi-coding-agent--tool-block-order-counter 0)
   ;; Disable hl-line-mode: its post-command-hook overlay update causes
   ;; scroll oscillation in buffers with invisible text + variable heights.
   (setq-local global-hl-line-mode nil)
@@ -807,18 +809,22 @@ Used to replace raw markdown with rendered Org on message completion.")
   (setq pi-coding-agent--message-start-marker marker))
 
 (defvar-local pi-coding-agent--tool-args-cache nil
-  "Hash table mapping toolCallId to args.
-Needed because tool_execution_end events don't include args.")
+  "Hash table mapping toolCallId to authoritative execution args.
+Needed because `tool_execution_end' events do not include args.  This is
+per-turn state and is cleared on turn end, history rebuild, and session reset.")
+
+(defvar-local pi-coding-agent--live-tool-blocks nil
+  "Hash table mapping toolCallId to live tool block records.
+Concurrent preview and execution lifecycle work is keyed through this
+registry so each live block keeps its own output and metadata.")
+
+(defvar-local pi-coding-agent--tool-block-order-counter 0
+  "Monotonic counter used to stamp tool block ordering metadata.")
 
 (defvar-local pi-coding-agent--pending-tool-overlay nil
-  "Overlay for tool block currently being executed.
-Set by display-tool-start, used by display-tool-end.")
-
-(defvar-local pi-coding-agent--streaming-tool-id nil
-  "Tool call ID of overlay created via toolcall_start during LLM streaming.
-Enables dedup guard in tool_execution_start to skip overlay creation
-when the overlay was already created by the streaming event path.
-Set at toolcall_start, consumed and cleared at tool_execution_start.")
+  "Compatibility overlay slot for legacy non-keyed helper paths.
+Keyed live block helpers are authoritative for concurrent preview and
+execution; this slot remains only for older single-tool flows.")
 
 (defvar-local pi-coding-agent--assistant-header-shown nil
   "Non-nil if Assistant header has been shown for current prompt.

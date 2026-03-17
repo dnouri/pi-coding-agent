@@ -357,12 +357,13 @@ CONTENT is ignored - we use what was already streamed."
 Note: status is set to `idle' by the event handler."
   ;; Reset per-turn state for clean next turn.
   (setq pi-coding-agent--local-user-message nil)
-  (setq pi-coding-agent--streaming-tool-id nil)
   (setq pi-coding-agent--in-thinking-block nil)
   (pi-coding-agent--reset-thinking-state)
   (let ((was-aborted pi-coding-agent--aborted))
     (let ((inhibit-read-only t))
-      (pi-coding-agent--tool-overlay-finalize 'pi-coding-agent-tool-block-error)
+      (pi-coding-agent--finalize-live-tool-blocks 'pi-coding-agent-tool-block-error)
+      (when pi-coding-agent--tool-args-cache
+        (clrhash pi-coding-agent--tool-args-cache))
       ;; Abort means "stop everything" — discard queued follow-ups too
       (when pi-coding-agent--aborted
         (pi-coding-agent--with-scroll-preservation
@@ -740,39 +741,12 @@ Updates buffer-local state and renders display updates."
           (pi-coding-agent--display-thinking-delta (plist-get msg-event :delta)))
          ("thinking_end"
           (pi-coding-agent--display-thinking-end (plist-get msg-event :content)))
-         ("toolcall_start"
-          ;; LLM began generating a tool call — create overlay immediately.
-          ;; Guard: only one streaming tool at a time (sequential execution).
-          (unless pi-coding-agent--streaming-tool-id
-            (when-let* ((tool-call (pi-coding-agent--extract-tool-call
-                                    event msg-event)))
-              (pi-coding-agent--set-activity-phase "running")
-              (pi-coding-agent--display-tool-start
-               (plist-get tool-call :name)
-               (plist-get tool-call :arguments))
-              (setq pi-coding-agent--streaming-tool-id
-                    (plist-get tool-call :id)))))
-         ("toolcall_delta"
-          ;; LLM streaming tool call args — update header and stream content.
-          ;; Header updates here for responsiveness (path appears as soon as
-          ;; the LLM generates it).  Overlay path for navigation is only set
-          ;; at tool_execution_start with authoritative args.
-          (when pi-coding-agent--streaming-tool-id
-            (when-let* ((tool-call (pi-coding-agent--extract-tool-call
-                                    event msg-event)))
-              ;; Update header when path/command becomes available
-              (pi-coding-agent--display-tool-update-header
-               (plist-get tool-call :name)
-               (plist-get tool-call :arguments))
-              ;; For write: stream growing file content with syntax highlighting
-              (when (equal (plist-get tool-call :name) "write")
-                (when-let* ((args (plist-get tool-call :arguments))
-                            (file-content (plist-get args :content)))
-                  (pi-coding-agent--display-tool-streaming-text
-                   file-content pi-coding-agent-tool-preview-lines
-                   (pi-coding-agent--path-to-language
-                    (pi-coding-agent--tool-path args))))))))
-         ("toolcall_end")  ; No-op: ID must survive until tool_execution_start
+         ((or "toolcall_start" "toolcall_delta" "toolcall_end")
+          ;; Preview reconciliation follows the authoritative assistant
+          ;; message content, not a singleton streaming-tool state machine.
+          (pi-coding-agent--set-activity-phase "running")
+          (pi-coding-agent--reconcile-toolcall-previews
+           (plist-get event :message)))
          ("error"
           ;; Error during streaming (e.g., API error)
           (pi-coding-agent--display-error (plist-get msg-event :reason))))))
@@ -797,40 +771,42 @@ Updates buffer-local state and renders display updates."
      (pi-coding-agent--render-complete-message))
     ("tool_execution_start"
      (pi-coding-agent--set-activity-phase "running")
-     (let ((tool-call-id (plist-get event :toolCallId))
-           (args (plist-get event :args)))
+     (let* ((tool-call-id (plist-get event :toolCallId))
+            (args (plist-get event :args))
+            (block (pi-coding-agent--tool-block-get tool-call-id)))
        ;; Cache args for tool_execution_end (which doesn't include args)
        (when (and tool-call-id pi-coding-agent--tool-args-cache)
          (puthash tool-call-id args pi-coding-agent--tool-args-cache))
-       ;; Skip overlay creation if toolcall_start already created it
-       (if (and pi-coding-agent--streaming-tool-id
-                (equal tool-call-id pi-coding-agent--streaming-tool-id))
-           (progn
-             (setq pi-coding-agent--streaming-tool-id nil)
-             ;; Update header and path from authoritative args.
-             ;; During streaming, header shows placeholder ("...") since
-             ;; delta args may be partial.  Now we have the real args.
-             (let ((tool-name (plist-get event :toolName)))
-               (pi-coding-agent--display-tool-update-header tool-name args))
-             (when-let* ((path (pi-coding-agent--tool-path args))
-                         (ov pi-coding-agent--pending-tool-overlay))
-               (overlay-put ov 'pi-coding-agent-tool-path path)))
-         (pi-coding-agent--display-tool-start (plist-get event :toolName) args))))
+       ;; Reuse the keyed preview block when it already exists.
+       (unless block
+         (setq block (pi-coding-agent--display-tool-start
+                      (plist-get event :toolName) args tool-call-id)))
+       ;; Update header and path from authoritative args.
+       ;; During streaming, the header may show placeholders since delta
+       ;; args can be partial.  Execution start carries the real args.
+       (pi-coding-agent--display-tool-update-header
+        (plist-get event :toolName) args block)
+       (when-let* ((path (pi-coding-agent--tool-path args)))
+         (pi-coding-agent--tool-block-set-path block path))))
     ("tool_execution_end"
      (pi-coding-agent--set-activity-phase "thinking")
      (let* ((tool-call-id (plist-get event :toolCallId))
             (result (plist-get event :result))
-            ;; Retrieve cached args since tool_execution_end doesn't include them
+            (block (pi-coding-agent--tool-block-get tool-call-id))
+            ;; Retrieve cached args since tool_execution_end doesn't include args
             (args (when (and tool-call-id pi-coding-agent--tool-args-cache)
                     (prog1 (gethash tool-call-id pi-coding-agent--tool-args-cache)
                       (remhash tool-call-id pi-coding-agent--tool-args-cache)))))
        (pi-coding-agent--display-tool-end (plist-get event :toolName)
-                             args
-                             (plist-get result :content)
-                             (plist-get result :details)
-                             (plist-get event :isError))))
+                                          args
+                                          (plist-get result :content)
+                                          (plist-get result :details)
+                                          (plist-get event :isError)
+                                          block)))
     ("tool_execution_update"
-     (pi-coding-agent--display-tool-update (plist-get event :partialResult)))
+     (pi-coding-agent--display-tool-update
+      (plist-get event :partialResult)
+      (pi-coding-agent--tool-block-get (plist-get event :toolCallId))))
     ("auto_compaction_start"
      (setq pi-coding-agent--status 'compacting)
      (pi-coding-agent--set-activity-phase "compact")
@@ -946,56 +922,270 @@ Returns a plist with:
 (defun pi-coding-agent--clear-render-artifacts ()
   "Delete pi-owned render overlays in the current chat buffer.
 This removes completed/pending tool overlays and diff overlays before
-buffer reset or history rebuild, then clears the pending overlay slot so
-buffer state and overlay state stay consistent.  Tree-sitter overlays are
-left alone."
+buffer reset or history rebuild, then clears keyed live-tool state,
+cached execution args, and the compatibility pending overlay slot so
+buffer state and overlay state stay consistent.  Tree-sitter overlays
+are left alone."
   (remove-overlays (point-min) (point-max) 'pi-coding-agent-tool-block t)
   (remove-overlays (point-min) (point-max) 'pi-coding-agent-diff-overlay t)
-  (setq pi-coding-agent--pending-tool-overlay nil))
+  (setq pi-coding-agent--pending-tool-overlay nil
+        pi-coding-agent--tool-block-order-counter 0)
+  (when pi-coding-agent--tool-args-cache
+    (clrhash pi-coding-agent--tool-args-cache))
+  (when pi-coding-agent--live-tool-blocks
+    (clrhash pi-coding-agent--live-tool-blocks)))
 
-(defun pi-coding-agent--tool-overlay-create (tool-name &optional path)
-  "Create overlay for tool block TOOL-NAME at point.
-Optional PATH stores the file path for navigation.
-Returns the overlay.  The overlay uses rear-advance so it
-automatically extends when content is inserted at its end."
-  (let ((ov (make-overlay (point) (point) nil nil t)))
-    (overlay-put ov 'pi-coding-agent-tool-block t)
-    (overlay-put ov 'pi-coding-agent-tool-name tool-name)
-    (overlay-put ov 'face 'pi-coding-agent-tool-block)
-    (when path
-      (overlay-put ov 'pi-coding-agent-tool-path path))
-    ov))
+(cl-defstruct (pi-coding-agent--tool-block
+               (:constructor pi-coding-agent--make-tool-block))
+  tool-call-id
+  overlay
+  header-end
+  end-marker
+  order
+  path
+  offset
+  line-map
+  last-tail)
 
-(defun pi-coding-agent--tool-overlay-finalize (face)
-  "Finalize pending tool overlay with FACE.
-Replaces the overlay with a new one without rear-advance to prevent
-it from extending to subsequent content.  Sets pending overlay to nil."
-  (when pi-coding-agent--pending-tool-overlay
-    (let ((start (overlay-start pi-coding-agent--pending-tool-overlay))
-          (end (overlay-end pi-coding-agent--pending-tool-overlay))
-          (tool-name (overlay-get pi-coding-agent--pending-tool-overlay
-                                  'pi-coding-agent-tool-name))
-          (header-end (overlay-get pi-coding-agent--pending-tool-overlay
-                                   'pi-coding-agent-header-end))
-          (path (overlay-get pi-coding-agent--pending-tool-overlay
-                             'pi-coding-agent-tool-path))
-          (offset (overlay-get pi-coding-agent--pending-tool-overlay
-                               'pi-coding-agent-tool-offset))
-          (line-map (overlay-get pi-coding-agent--pending-tool-overlay
-                                 'pi-coding-agent-line-map)))
-      (delete-overlay pi-coding-agent--pending-tool-overlay)
-      (let ((ov (make-overlay start end nil nil nil)))  ; rear-advance=nil
-        (overlay-put ov 'pi-coding-agent-tool-block t)
-        (overlay-put ov 'pi-coding-agent-tool-name tool-name)
-        (overlay-put ov 'pi-coding-agent-header-end header-end)
-        (when path
-          (overlay-put ov 'pi-coding-agent-tool-path path))
-        (when offset
-          (overlay-put ov 'pi-coding-agent-tool-offset offset))
-        (when line-map
-          (overlay-put ov 'pi-coding-agent-line-map line-map))
-        (overlay-put ov 'face face)))
-    (setq pi-coding-agent--pending-tool-overlay nil)))
+(defun pi-coding-agent--ensure-live-tool-blocks ()
+  "Return the live tool block registry for the current buffer."
+  (or pi-coding-agent--live-tool-blocks
+      (setq pi-coding-agent--live-tool-blocks
+            (make-hash-table :test 'equal))))
+
+(defun pi-coding-agent--next-tool-block-order ()
+  "Return the next monotonically increasing live tool block order."
+  (let ((order (or pi-coding-agent--tool-block-order-counter 0)))
+    (setq pi-coding-agent--tool-block-order-counter (1+ order))
+    order))
+
+(defun pi-coding-agent--reserve-tool-block-order (&optional order)
+  "Return ORDER, or allocate the next implicit live tool block order.
+When ORDER is non-nil, advance the monotonic counter past it so later
+implicit insertions still sort after explicitly ordered preview blocks."
+  (if order
+      (progn
+        (setq pi-coding-agent--tool-block-order-counter
+              (max (or pi-coding-agent--tool-block-order-counter 0)
+                   (1+ order)))
+        order)
+    (pi-coding-agent--next-tool-block-order)))
+
+(defun pi-coding-agent--tool-block-get (tool-call-id)
+  "Return the live tool block for TOOL-CALL-ID, or nil."
+  (when (and tool-call-id pi-coding-agent--live-tool-blocks)
+    (gethash tool-call-id pi-coding-agent--live-tool-blocks)))
+
+(defun pi-coding-agent--live-tool-blocks-in-order ()
+  "Return all live tool blocks sorted by their recorded order."
+  (let (blocks)
+    (when pi-coding-agent--live-tool-blocks
+      (maphash (lambda (_tool-call-id block)
+                 (push block blocks))
+               pi-coding-agent--live-tool-blocks))
+    (sort blocks
+          (lambda (left right)
+            (< (pi-coding-agent--tool-block-order left)
+               (pi-coding-agent--tool-block-order right))))))
+
+(defun pi-coding-agent--tool-block-next-after-order (order)
+  "Return the first live tool block whose order is greater than ORDER."
+  (seq-find (lambda (block)
+              (> (pi-coding-agent--tool-block-order block) order))
+            (pi-coding-agent--live-tool-blocks-in-order)))
+
+(defun pi-coding-agent--tool-block-register (block)
+  "Register BLOCK in the keyed live registry when it has a tool call ID."
+  (when-let* ((tool-call-id (pi-coding-agent--tool-block-tool-call-id block)))
+    (puthash tool-call-id block (pi-coding-agent--ensure-live-tool-blocks)))
+  block)
+
+(defun pi-coding-agent--tool-block-unregister (block)
+  "Remove BLOCK from the keyed live registry."
+  (when-let* ((tool-call-id (pi-coding-agent--tool-block-tool-call-id block))
+              (live-blocks pi-coding-agent--live-tool-blocks))
+    (remhash tool-call-id live-blocks))
+  block)
+
+(defun pi-coding-agent--tool-block-from-overlay (overlay)
+  "Return the tool block record attached to OVERLAY, or nil."
+  (and overlay (overlay-get overlay 'pi-coding-agent-tool-block-record)))
+
+(defun pi-coding-agent--current-tool-block ()
+  "Return the compatibility current tool block, or nil.
+This is only used by legacy single-tool rendering paths that still rely
+on `pi-coding-agent--pending-tool-overlay'."
+  (pi-coding-agent--tool-block-from-overlay pi-coding-agent--pending-tool-overlay))
+
+(defun pi-coding-agent--all-live-tool-blocks ()
+  "Return all distinct live tool blocks in the current buffer.
+Includes keyed blocks from `pi-coding-agent--live-tool-blocks' and, when
+needed for compatibility, the current non-keyed pending block."
+  (let ((blocks (pi-coding-agent--live-tool-blocks-in-order))
+        (current (pi-coding-agent--current-tool-block)))
+    (if (and current (not (memq current blocks)))
+        (append blocks (list current))
+      blocks)))
+
+(defun pi-coding-agent--finalize-live-tool-blocks (face)
+  "Finalize every currently live tool block with FACE."
+  (dolist (block (pi-coding-agent--all-live-tool-blocks))
+    (pi-coding-agent--tool-block-finalize block face)))
+
+(defun pi-coding-agent--tool-block-overlays-in-region (start end)
+  "Return tool block overlays overlapping START..END in buffer order."
+  (sort (seq-filter (lambda (ov)
+                      (overlay-get ov 'pi-coding-agent-tool-block))
+                    (overlays-in start end))
+        (lambda (left right)
+          (< (overlay-start left) (overlay-start right)))))
+
+(defun pi-coding-agent--tool-block-refresh-overlay (block)
+  "Sync BLOCK metadata and bounds onto its overlay."
+  (when-let* ((ov (pi-coding-agent--tool-block-overlay block))
+              (end-marker (pi-coding-agent--tool-block-end-marker block)))
+    (move-overlay ov (overlay-start ov) (marker-position end-marker))
+    (overlay-put ov 'pi-coding-agent-tool-block-record block)
+    (overlay-put ov 'pi-coding-agent-header-end
+                 (pi-coding-agent--tool-block-header-end block))
+    (overlay-put ov 'pi-coding-agent-tool-path
+                 (pi-coding-agent--tool-block-path block))
+    (overlay-put ov 'pi-coding-agent-tool-offset
+                 (pi-coding-agent--tool-block-offset block))
+    (overlay-put ov 'pi-coding-agent-line-map
+                 (pi-coding-agent--tool-block-line-map block))
+    (overlay-put ov 'pi-coding-agent-last-tail
+                 (pi-coding-agent--tool-block-last-tail block)))
+  block)
+
+(defun pi-coding-agent--tool-block-set-path (block path)
+  "Store PATH metadata on BLOCK and its overlay."
+  (when block
+    (setf (pi-coding-agent--tool-block-path block) path)
+    (pi-coding-agent--tool-block-refresh-overlay block))
+  block)
+
+(defun pi-coding-agent--tool-block-set-offset (block offset)
+  "Store OFFSET metadata on BLOCK and its overlay."
+  (when block
+    (setf (pi-coding-agent--tool-block-offset block) offset)
+    (pi-coding-agent--tool-block-refresh-overlay block))
+  block)
+
+(defun pi-coding-agent--tool-block-set-line-map (block line-map)
+  "Store LINE-MAP metadata on BLOCK and its overlay."
+  (when block
+    (setf (pi-coding-agent--tool-block-line-map block) line-map)
+    (pi-coding-agent--tool-block-refresh-overlay block))
+  block)
+
+(defun pi-coding-agent--tool-block-set-last-tail (block last-tail)
+  "Store LAST-TAIL preview cache metadata on BLOCK and its overlay."
+  (when block
+    (setf (pi-coding-agent--tool-block-last-tail block) last-tail)
+    (pi-coding-agent--tool-block-refresh-overlay block))
+  block)
+
+(defun pi-coding-agent--tool-block-create (tool-name args &optional tool-call-id order)
+  "Insert a live tool block for TOOL-NAME with ARGS and return it.
+When TOOL-CALL-ID is non-nil, register the block in the keyed live
+registry.  ORDER records the intended block ordering metadata."
+  (let* ((block-order (pi-coding-agent--reserve-tool-block-order order))
+         (next-block (and order
+                          (pi-coding-agent--tool-block-next-after-order
+                           block-order)))
+         (header-display (pi-coding-agent--tool-header tool-name args))
+         (path (pi-coding-agent--tool-path args))
+         (block nil)
+         (inhibit-read-only t))
+    (pi-coding-agent--with-scroll-preservation
+      (save-excursion
+        (goto-char (if next-block
+                       (overlay-start (pi-coding-agent--tool-block-overlay next-block))
+                     (point-max)))
+        (pi-coding-agent--ensure-blank-line-before-block)
+        (let ((start (point)))
+          (insert header-display "\n")
+          (let* ((header-end (copy-marker (point) nil))
+                 ;; Keep the body-end marker fixed on unrelated inserts at the
+                 ;; block boundary.  Live updates move it explicitly.
+                 (end-marker (copy-marker (point) nil)))
+            ;; When inserting before an already-live later block, keep one
+            ;; blank separator after the new block without making it part of
+            ;; the tool block overlay itself.
+            (when next-block
+              (insert "\n"))
+            (let ((ov (make-overlay start (marker-position end-marker) nil nil nil)))
+              (overlay-put ov 'pi-coding-agent-tool-block t)
+              (overlay-put ov 'pi-coding-agent-tool-name tool-name)
+              (overlay-put ov 'face 'pi-coding-agent-tool-block)
+              (setq block (pi-coding-agent--make-tool-block
+                           :tool-call-id tool-call-id
+                           :overlay ov
+                           :header-end header-end
+                           :end-marker end-marker
+                           :order block-order
+                           :path path))
+              (pi-coding-agent--tool-block-refresh-overlay block))))))
+    (setq pi-coding-agent--pending-tool-overlay
+          (pi-coding-agent--tool-block-overlay block))
+    (pi-coding-agent--tool-block-register block)))
+
+(defun pi-coding-agent--tool-block-finalize (block face)
+  "Finalize BLOCK with FACE and remove it from the live keyed registry."
+  (when-let* ((block block)
+              (ov (pi-coding-agent--tool-block-overlay block)))
+    (when-let* ((end-marker (pi-coding-agent--tool-block-end-marker block)))
+      (set-marker-insertion-type end-marker nil))
+    (overlay-put ov 'face face)
+    (pi-coding-agent--tool-block-refresh-overlay block)
+    (pi-coding-agent--tool-block-unregister block)
+    (when (eq pi-coding-agent--pending-tool-overlay ov)
+      (setq pi-coding-agent--pending-tool-overlay nil)))
+  block)
+
+(defun pi-coding-agent--tool-block-delete (block)
+  "Delete BLOCK's text and overlay, then remove it from live state."
+  (when-let* ((block block)
+              (ov (pi-coding-agent--tool-block-overlay block))
+              (start (overlay-start ov))
+              (end (overlay-end ov)))
+    (let* ((previous-tool (and (> start (point-min))
+                               (seq-find (lambda (other)
+                                           (overlay-get other 'pi-coding-agent-tool-block))
+                                         (overlays-at (1- start)))))
+           (next-tool (and (< end (point-max))
+                           (seq-find (lambda (other)
+                                       (overlay-get other 'pi-coding-agent-tool-block))
+                                     (overlays-at (1+ end)))))
+           (delete-start start)
+           (delete-end end)
+           (inhibit-read-only t))
+      (cond
+       ((and next-tool (eq (char-after end) ?\n))
+        (setq delete-end (1+ end)))
+       ((and previous-tool (eq (char-before start) ?\n))
+        (setq delete-start (1- start))))
+      (pi-coding-agent--with-scroll-preservation
+        (delete-region delete-start delete-end))
+      (delete-overlay ov)
+      (when-let* ((header-end (pi-coding-agent--tool-block-header-end block)))
+        (set-marker header-end nil))
+      (when-let* ((end-marker (pi-coding-agent--tool-block-end-marker block)))
+        (set-marker end-marker nil))
+      (pi-coding-agent--tool-block-unregister block)
+      (when (eq pi-coding-agent--pending-tool-overlay ov)
+        (setq pi-coding-agent--pending-tool-overlay nil)
+        (when-let* ((last-block (car (last (pi-coding-agent--live-tool-blocks-in-order)))))
+          (setq pi-coding-agent--pending-tool-overlay
+                (pi-coding-agent--tool-block-overlay last-block))))))
+  nil)
+
+(defun pi-coding-agent--tool-overlay-finalize (face &optional block)
+  "Finalize BLOCK, or the current pending tool block, with FACE."
+  (pi-coding-agent--tool-block-finalize
+   (or block (pi-coding-agent--current-tool-block))
+   face))
 
 (defun pi-coding-agent--pretty-print-json (plist-data)
   "Return PLIST-DATA as a 2-space indented JSON string, or nil.
@@ -1053,55 +1243,93 @@ Uses `font-lock-face' to survive tree-sitter refontification."
              (concat name (propertize (concat " " json) 'font-lock-face 'pi-coding-agent-tool-command))
            name))))))
 
-(defun pi-coding-agent--display-tool-start (tool-name args)
-  "Insert tool header for TOOL-NAME with ARGS and create pending overlay.
-Records the header-end position for later content insertion."
-  (let* ((header-display (pi-coding-agent--tool-header tool-name args))
-         (path (pi-coding-agent--tool-path args))
-         (inhibit-read-only t))
-    (pi-coding-agent--with-scroll-preservation
-      (save-excursion
-        (goto-char (point-max))
-        (pi-coding-agent--ensure-blank-line-before-block)
-        ;; Create overlay at start of tool block, storing path for navigation
-        (setq pi-coding-agent--pending-tool-overlay
-              (pi-coding-agent--tool-overlay-create tool-name path))
-        (insert header-display "\n")
-        ;; Store header end position for correct deletion in updates
-        ;; (header may span multiple lines if command contains newlines)
-        (overlay-put pi-coding-agent--pending-tool-overlay
-                     'pi-coding-agent-header-end (point-marker))))))
+(defun pi-coding-agent--display-tool-start (tool-name args &optional tool-call-id order)
+  "Insert a tool header for TOOL-NAME with ARGS and return its live block.
+When TOOL-CALL-ID is non-nil, register the block in the keyed live
+registry.  ORDER records ordering metadata for future reconciliation."
+  (pi-coding-agent--tool-block-create tool-name args tool-call-id order))
 
-(defun pi-coding-agent--display-tool-update-header (tool-name args)
-  "Update the header of the pending tool overlay for TOOL-NAME with ARGS.
+(defun pi-coding-agent--display-tool-update-header (tool-name args &optional block)
+  "Update BLOCK's header for TOOL-NAME with ARGS.
+When BLOCK is nil, fall back to the current compatibility tool block.
 Replaces the header text when it has changed (e.g., when authoritative
 args arrive at tool_execution_start after streaming placeholder)."
-  (when pi-coding-agent--pending-tool-overlay
-    (let* ((new-header (pi-coding-agent--tool-header tool-name args))
-           (ov pi-coding-agent--pending-tool-overlay)
-           (ov-start (overlay-start ov))
-           (header-end (overlay-get ov 'pi-coding-agent-header-end)))
-      (when (and ov-start header-end)
-        (let ((old-header (buffer-substring-no-properties
-                           ov-start (1- (marker-position header-end)))))
+  (when-let* ((block (or block (pi-coding-agent--current-tool-block)))
+              (ov (pi-coding-agent--tool-block-overlay block))
+              (ov-start (overlay-start ov))
+              (header-end (pi-coding-agent--tool-block-header-end block)))
+    (let ((new-header (pi-coding-agent--tool-header tool-name args))
+          (header-limit (1- (marker-position header-end))))
+      (when (<= ov-start header-limit)
+        (let ((old-header (buffer-substring-no-properties ov-start header-limit)))
           (unless (string= old-header (substring-no-properties new-header))
             (let ((inhibit-read-only t))
               (pi-coding-agent--with-scroll-preservation
                 (save-excursion
                   (goto-char ov-start)
-                  (delete-region ov-start (1- (marker-position header-end)))
-                  (insert new-header))))))))))
+                  (delete-region ov-start header-limit)
+                  (insert new-header)
+                  ;; Keep HEADER-END after the preserved newline that separates
+                  ;; header and body.  The marker already tracks that boundary
+                  ;; across the delete/insert above; resetting it here would
+                  ;; move it before the newline and glue future body content to
+                  ;; the header.
+                  (pi-coding-agent--tool-block-refresh-overlay block))))))))))
 
-(defun pi-coding-agent--extract-tool-call (event msg-event)
-  "Extract toolCall from EVENT using contentIndex in MSG-EVENT.
-Returns the toolCall plist from message.content, or nil if not found."
-  (let* ((content-index (plist-get msg-event :contentIndex))
-         (content-vec (plist-get (plist-get event :message) :content))
-         (tool-call (and (vectorp content-vec)
-                         (< content-index (length content-vec))
-                         (aref content-vec content-index))))
-    (when (and tool-call (equal (plist-get tool-call :type) "toolCall"))
-      tool-call)))
+(defun pi-coding-agent--message-tool-calls (message)
+  "Return MESSAGE toolCall content blocks in assistant source order.
+Each element is a plist `(:content-index N :tool-call TOOL-CALL)'."
+  (let ((content-vec (plist-get message :content))
+        (tool-calls nil))
+    (when (vectorp content-vec)
+      (dotimes (content-index (length content-vec))
+        (let ((block (aref content-vec content-index)))
+          (when (equal (plist-get block :type) "toolCall")
+            (push (list :content-index content-index
+                        :tool-call block)
+                  tool-calls)))))
+    (nreverse tool-calls)))
+
+(defun pi-coding-agent--reconcile-toolcall-preview-block (content-index tool-call)
+  "Create or update the preview block for TOOL-CALL at CONTENT-INDEX."
+  (let* ((tool-call-id (plist-get tool-call :id))
+         (tool-name (plist-get tool-call :name))
+         (args (plist-get tool-call :arguments))
+         (block (or (pi-coding-agent--tool-block-get tool-call-id)
+                    (pi-coding-agent--display-tool-start
+                     tool-name args tool-call-id content-index))))
+    (setq pi-coding-agent--pending-tool-overlay
+          (pi-coding-agent--tool-block-overlay block))
+    (pi-coding-agent--display-tool-update-header tool-name args block)
+    (when (equal tool-name "write")
+      (let ((content-entry (and args (plist-member args :content))))
+        (when content-entry
+          (pi-coding-agent--display-tool-streaming-text
+           (or (plist-get args :content) "")
+           pi-coding-agent-tool-preview-lines
+           (pi-coding-agent--path-to-language
+            (pi-coding-agent--tool-path args))
+           block))))
+    block))
+
+(defun pi-coding-agent--prune-stale-toolcall-previews (tool-call-ids)
+  "Drop keyed live preview blocks whose IDs are absent from TOOL-CALL-IDS."
+  (dolist (block (pi-coding-agent--live-tool-blocks-in-order))
+    (when-let* ((tool-call-id (pi-coding-agent--tool-block-tool-call-id block)))
+      (unless (member tool-call-id tool-call-ids)
+        (pi-coding-agent--tool-block-delete block)))))
+
+(defun pi-coding-agent--reconcile-toolcall-previews (message)
+  "Reconcile live preview blocks from assistant MESSAGE content."
+  (let* ((entries (pi-coding-agent--message-tool-calls message))
+         (tool-call-ids (delq nil (mapcar (lambda (entry)
+                                            (plist-get (plist-get entry :tool-call) :id))
+                                          entries))))
+    (pi-coding-agent--prune-stale-toolcall-previews tool-call-ids)
+    (dolist (entry entries)
+      (pi-coding-agent--reconcile-toolcall-preview-block
+       (plist-get entry :content-index)
+       (plist-get entry :tool-call)))))
 
 (defun pi-coding-agent--extract-text-from-content (content-blocks)
   "Extract text from CONTENT-BLOCKS vector efficiently.
@@ -1162,22 +1390,20 @@ This is O(k) where k is the size of the tail, not O(n) like `split-string'."
       ;; Return tail and whether there's hidden content
       (cons (substring content pos) (> pos 0))))))
 
-(defun pi-coding-agent--tool-streaming-replace-overlay-body
-    (display-content show-hidden-indicator lang)
-  "Replace pending tool overlay body with DISPLAY-CONTENT.
+(defun pi-coding-agent--tool-block-replace-body
+    (block display-content show-hidden-indicator lang)
+  "Replace BLOCK body with DISPLAY-CONTENT.
 SHOW-HIDDEN-INDICATOR adds the collapsed-output hint line.
 LANG is passed to `pi-coding-agent--wrap-in-src-block' for fence construction."
-  (let ((inhibit-read-only t))
-    (pi-coding-agent--with-scroll-preservation
-      (save-excursion
-        (let* ((ov pi-coding-agent--pending-tool-overlay)
-               (ov-end (overlay-end ov))
-               (header-end (overlay-get ov 'pi-coding-agent-header-end)))
-          ;; Delete previous streaming content (everything after header)
-          (when (and header-end (< header-end ov-end))
-            (delete-region header-end ov-end))
-          ;; Insert new streaming content
-          (goto-char (overlay-end ov))
+  (when-let* ((block block)
+              (header-end (pi-coding-agent--tool-block-header-end block))
+              (end-marker (pi-coding-agent--tool-block-end-marker block)))
+    (let ((inhibit-read-only t))
+      (pi-coding-agent--with-scroll-preservation
+        (save-excursion
+          (goto-char (marker-position header-end))
+          (delete-region (marker-position header-end)
+                         (marker-position end-marker))
           (when show-hidden-indicator
             (insert (propertize "... (earlier output)\n"
                                 'face
@@ -1185,60 +1411,62 @@ LANG is passed to `pi-coding-agent--wrap-in-src-block' for fence construction."
           (unless (string-empty-p display-content)
             (insert (pi-coding-agent--wrap-in-src-block
                      display-content lang)
-                    "\n")))))))
+                    "\n"))
+          (set-marker end-marker (point))
+          (pi-coding-agent--tool-block-refresh-overlay block))))))
 
-(defun pi-coding-agent--display-tool-streaming-text (raw-text max-lines &optional lang)
-  "Display RAW-TEXT as streaming content in pending tool overlay.
-Shows rolling tail of output, truncated to MAX-LINES visual lines.
-Previous streaming content is replaced.
+(defun pi-coding-agent--display-tool-streaming-text
+    (raw-text max-lines &optional lang block)
+  "Display RAW-TEXT as streaming content in BLOCK.
+Shows a rolling tail truncated to MAX-LINES visual lines.
+When BLOCK is nil, fall back to the current compatibility tool block.
 
-When LANG is non-nil, wraps the tail in a markdown fenced code block
-so that `md-ts-mode' language injection handles syntax highlighting.
+When LANG is non-nil, wrap the tail in a markdown fenced code block so
+that `md-ts-mode' language injection handles syntax highlighting.
 Skips redraw when only the trailing partial line changed (the preview
 shows complete lines only)."
-  (when (and pi-coding-agent--pending-tool-overlay
-             (stringp raw-text))
-    (let* ((ov pi-coding-agent--pending-tool-overlay)
-           ;; For language-aware streaming, only show complete lines
-           ;; (exclude trailing partial line) to keep the preview
-           ;; stable across partial-token deltas.
-           (complete-text
-            (if (and lang (not (string-suffix-p "\n" raw-text)))
-                (let ((last-nl (cl-position ?\n raw-text :from-end t)))
-                  (if last-nl (substring raw-text 0 (1+ last-nl)) ""))
-              raw-text))
-           (tail-result (pi-coding-agent--get-tail-lines
-                         complete-text max-lines))
-           (tail-content (or (car tail-result) ""))
-           (has-hidden (cdr tail-result))
-           (truncation (pi-coding-agent--truncate-to-visual-lines
-                        tail-content max-lines (or (window-width) 80)))
-           (display-content
-            (string-trim-right
-             (or (plist-get truncation :content) "")
-             "\n+"))
-           (show-hidden-indicator
-            (or has-hidden
-                (> (plist-get truncation :hidden-lines) 0)))
-           (cache-key (if show-hidden-indicator
-                         (concat "H:" display-content)
-                       display-content))
-           (last-tail (overlay-get ov 'pi-coding-agent-last-tail)))
-      (unless (equal cache-key last-tail)
-        (pi-coding-agent--tool-streaming-replace-overlay-body
-         display-content show-hidden-indicator lang)
-        (overlay-put ov 'pi-coding-agent-last-tail cache-key)))))
+  (when (stringp raw-text)
+    (when-let* ((block (or block (pi-coding-agent--current-tool-block))))
+      (let* (;; For language-aware streaming, only show complete lines
+             ;; (exclude trailing partial line) to keep the preview
+             ;; stable across partial-token deltas.
+             (complete-text
+              (if (and lang (not (string-suffix-p "\n" raw-text)))
+                  (let ((last-nl (cl-position ?\n raw-text :from-end t)))
+                    (if last-nl (substring raw-text 0 (1+ last-nl)) ""))
+                raw-text))
+             (tail-result (pi-coding-agent--get-tail-lines complete-text max-lines))
+             (tail-content (or (car tail-result) ""))
+             (has-hidden (cdr tail-result))
+             (truncation (pi-coding-agent--truncate-to-visual-lines
+                          tail-content max-lines (or (window-width) 80)))
+             (display-content
+              (string-trim-right
+               (or (plist-get truncation :content) "")
+               "\n+"))
+             (show-hidden-indicator
+              (or has-hidden
+                  (> (plist-get truncation :hidden-lines) 0)))
+             (cache-key (if show-hidden-indicator
+                            (concat "H:" display-content)
+                          display-content))
+             (last-tail (pi-coding-agent--tool-block-last-tail block)))
+        (unless (equal cache-key last-tail)
+          (pi-coding-agent--tool-block-replace-body
+           block display-content show-hidden-indicator lang)
+          (pi-coding-agent--tool-block-set-last-tail block cache-key))))))
 
-(defun pi-coding-agent--display-tool-update (partial-result)
-  "Display PARTIAL-RESULT as streaming output in pending tool overlay.
-PARTIAL-RESULT has same structure as tool result: plist with :content.
-Extracts text from content blocks and delegates to
+(defun pi-coding-agent--display-tool-update (partial-result &optional block)
+  "Display PARTIAL-RESULT as streaming output in BLOCK.
+When BLOCK is nil, fall back to the current compatibility tool block.
+PARTIAL-RESULT has the same structure as a tool result plist with
+`:content'.  Extracts text from content blocks and delegates to
 `pi-coding-agent--display-tool-streaming-text'."
-  (when (and pi-coding-agent--pending-tool-overlay partial-result)
+  (when partial-result
     (let* ((content-blocks (plist-get partial-result :content))
            (raw-output (pi-coding-agent--extract-text-from-content content-blocks)))
       (pi-coding-agent--display-tool-streaming-text
-       raw-output pi-coding-agent-bash-preview-lines))))
+       raw-output pi-coding-agent-bash-preview-lines nil block))))
 
 (defun pi-coding-agent--markdown-fence-delimiter (content)
   "Return a markdown fence delimiter safe for CONTENT.
@@ -1262,14 +1490,17 @@ Returns markdown string for syntax highlighting."
   (let ((fence (pi-coding-agent--markdown-fence-delimiter content)))
     (format "%s%s\n%s\n%s" fence (or lang "") content fence)))
 
-(defun pi-coding-agent--display-tool-end (tool-name args content details is-error)
-  "Display result for TOOL-NAME and update overlay face.
+(defun pi-coding-agent--display-tool-end
+    (tool-name args content details is-error &optional block)
+  "Display result for TOOL-NAME and finalize BLOCK.
 ARGS contains tool arguments, CONTENT is a list of content blocks.
-DETAILS contains tool-specific data (e.g., diff for edit tool);
+DETAILS contains tool-specific data (e.g., a diff for the edit tool);
 for generic tools, non-nil DETAILS are rendered below the content.
 IS-ERROR indicates failure.
-Shows preview lines with expandable toggle for long output."
-  (let* ((is-error (eq t is-error))
+When BLOCK is nil, fall back to the current compatibility tool block and,
+if none exists, render the result at point without a live overlay."
+  (let* ((block (or block (pi-coding-agent--current-tool-block)))
+         (is-error (eq t is-error))
          (text-blocks (seq-filter (lambda (c) (equal (plist-get c :type) "text"))
                                   content))
          (raw-output (mapconcat (lambda (c) (or (plist-get c :text) ""))
@@ -1304,43 +1535,50 @@ Shows preview lines with expandable toggle for long output."
          (needs-collapse (> hidden-count 0))
          (inhibit-read-only t))
     (pi-coding-agent--with-scroll-preservation
-      ;; Clear any streaming content from tool_execution_update
-      (when pi-coding-agent--pending-tool-overlay
-        (let ((header-end (overlay-get pi-coding-agent--pending-tool-overlay
-                                       'pi-coding-agent-header-end))
-              (ov-end (overlay-end pi-coding-agent--pending-tool-overlay)))
-          ;; Header may span multiple lines if command contains newlines
-          (when (and header-end (< header-end ov-end))
-            (delete-region header-end ov-end))))
-      (goto-char (point-max))
-      (if needs-collapse
-          ;; Long output: show preview with toggle button
-          (let ((preview-content (plist-get truncation :content)))
-            (pi-coding-agent--insert-tool-content-with-toggle
-             preview-content display-content lang is-edit-diff hidden-count nil))
-        ;; Short output: show all without toggle
-        (pi-coding-agent--insert-rendered-tool-content
-         (string-trim-right display-content "\n+")
-         lang
-         is-edit-diff))
-      ;; Note: no [error] badge — error content in the block is sufficient,
-      ;; and the overlay face already shifts to pi-coding-agent-tool-block-error.
-      ;; Store offset for read tool (used for line number calculation)
-      (when (and (equal tool-name "read")
-                 (plist-get args :offset)
-                 pi-coding-agent--pending-tool-overlay)
-        (overlay-put pi-coding-agent--pending-tool-overlay
-                     'pi-coding-agent-tool-offset (plist-get args :offset)))
-      ;; Store line map for navigation (maps displayed line to original line)
-      (when-let* ((line-map (plist-get truncation :line-map)))
-        (when pi-coding-agent--pending-tool-overlay
-          (overlay-put pi-coding-agent--pending-tool-overlay
-                       'pi-coding-agent-line-map line-map)))
-      ;; Finalize overlay - replace with non-rear-advance version
-      (pi-coding-agent--tool-overlay-finalize
-       (if is-error 'pi-coding-agent-tool-block-error 'pi-coding-agent-tool-block))
-      ;; Add trailing newline for spacing after tool block
-      (insert "\n"))))
+      (save-excursion
+        (if block
+            (let* ((header-end (pi-coding-agent--tool-block-header-end block))
+                   (end-marker (pi-coding-agent--tool-block-end-marker block)))
+              (goto-char (marker-position header-end))
+              (delete-region (marker-position header-end)
+                             (marker-position end-marker))
+              (if needs-collapse
+                  ;; Long output: show preview with toggle button.
+                  (let ((preview-content (plist-get truncation :content)))
+                    (pi-coding-agent--insert-tool-content-with-toggle
+                     preview-content display-content lang is-edit-diff hidden-count nil))
+                ;; Short output: show all without toggle.
+                (pi-coding-agent--insert-rendered-tool-content
+                 (string-trim-right display-content "\n+")
+                 lang
+                 is-edit-diff))
+              (set-marker end-marker (point))
+              (pi-coding-agent--tool-block-refresh-overlay block)
+              ;; Note: no [error] badge — error content in the block is sufficient,
+              ;; and the overlay face already shifts to pi-coding-agent-tool-block-error.
+              (when (and (equal tool-name "read")
+                         (plist-get args :offset))
+                (pi-coding-agent--tool-block-set-offset
+                 block (plist-get args :offset)))
+              (when-let* ((line-map (plist-get truncation :line-map)))
+                (pi-coding-agent--tool-block-set-line-map block line-map))
+              (pi-coding-agent--tool-overlay-finalize
+               (if is-error 'pi-coding-agent-tool-block-error
+                 'pi-coding-agent-tool-block)
+               block)
+              (when (eobp)
+                (insert "\n")))
+          (progn
+            (goto-char (point-max))
+            (if needs-collapse
+                (let ((preview-content (plist-get truncation :content)))
+                  (pi-coding-agent--insert-tool-content-with-toggle
+                   preview-content display-content lang is-edit-diff hidden-count nil))
+              (pi-coding-agent--insert-rendered-tool-content
+               (string-trim-right display-content "\n+")
+               lang
+               is-edit-diff))
+            (insert "\n")))))))
 
 (defun pi-coding-agent--ranges-excluding-property (start end prop)
   "Return contiguous ranges in START..END where PROP is nil."
@@ -1732,32 +1970,33 @@ Display-only table decoration is applied after the content is stable."
 (defun pi-coding-agent--restore-tool-properties (beg end)
   "Restore tool header faces after tree-sitter fontification in BEG..END.
 Tree-sitter markdown applies `invisible' and `face' properties to markup
-patterns in the header (e.g., `$ echo **hello**').  This function strips
-those and restores the intended `font-lock-face' values for the header."
-  (when-let* ((ov pi-coding-agent--pending-tool-overlay)
-              (ov-start (overlay-start ov))
-              (ov-end (overlay-end ov))
-              (header-end-marker (overlay-get ov 'pi-coding-agent-header-end))
-              (header-end (marker-position header-end-marker)))
-    (when (and (< beg ov-end) (> end ov-start))
-      (let ((inhibit-read-only t))
-        ;; Header: restore face from font-lock-face (varies per span)
-        (let ((hdr-beg (max beg ov-start))
-              (hdr-end (min end header-end)))
-          (when (< hdr-beg hdr-end)
-            (remove-text-properties
-             hdr-beg hdr-end
-             '(invisible nil))
-            (let ((pos hdr-beg))
-              (while (< pos hdr-end)
-                (let* ((fl-face (get-text-property pos 'font-lock-face))
-                       (next (or (next-single-property-change
-                                  pos 'font-lock-face nil hdr-end)
-                                 hdr-end)))
-                  (when fl-face
-                    (put-text-property pos next 'face fl-face))
-                  (setq pos next))))
-            (put-text-property hdr-beg hdr-end 'fontified t)))))))
+patterns in tool headers (for example, `$ echo **hello**').  This strips
+that markdown damage and restores the intended `font-lock-face' values for
+all overlapping tool headers, live or finalized."
+  (let ((inhibit-read-only t))
+    (dolist (ov (pi-coding-agent--tool-block-overlays-in-region beg end))
+      (when-let* ((ov-start (overlay-start ov))
+                  (ov-end (overlay-end ov))
+                  (header-end-marker (overlay-get ov 'pi-coding-agent-header-end))
+                  (header-end (marker-position header-end-marker)))
+        (when (and (< beg ov-end) (> end ov-start))
+          ;; Header: restore face from font-lock-face (varies per span)
+          (let ((hdr-beg (max beg ov-start))
+                (hdr-end (min end header-end)))
+            (when (< hdr-beg hdr-end)
+              (remove-text-properties
+               hdr-beg hdr-end
+               '(invisible nil))
+              (let ((pos hdr-beg))
+                (while (< pos hdr-end)
+                  (let* ((fl-face (get-text-property pos 'font-lock-face))
+                         (next (or (next-single-property-change
+                                    pos 'font-lock-face nil hdr-end)
+                                   hdr-end)))
+                    (when fl-face
+                      (put-text-property pos next 'face fl-face))
+                    (setq pos next))))
+              (put-text-property hdr-beg hdr-end 'fontified t))))))))
 
 ;;;; History Display
 
