@@ -461,6 +461,66 @@ guard that contract until upstream offers a stable structured mapping API."
               (list (list sep-line))
               data-groups))))
 
+;;;; Font Neutralization
+
+(defconst pi-coding-agent--visual-face-attrs
+  '(:foreground :background :weight :slant :underline
+    :overline :strike-through :box :inverse-video)
+  "Face attributes preserved in table display strings.
+Font-identity attributes (:family, :foundry, :width, :height) are
+excluded so table columns align regardless of the theme's font choices.")
+
+(defun pi-coding-agent--face-visual-attr (face-val attr)
+  "Return effective ATTR from FACE-VAL, following inheritance.
+FACE-VAL may be a face name, an anonymous attribute plist, or a list
+mixing both forms.  Returns `unspecified' when the attribute is unset."
+  (cond
+   ((null face-val) 'unspecified)
+   ((symbolp face-val)
+    (if (facep face-val)
+        (face-attribute face-val attr nil t)
+      'unspecified))
+   ((and (consp face-val) (keywordp (car face-val)))
+    (or (plist-get face-val attr) 'unspecified))
+   ((listp face-val)
+    (cl-loop for f in face-val
+             for v = (pi-coding-agent--face-visual-attr f attr)
+             unless (eq v 'unspecified) return v
+             finally return 'unspecified))
+   (t 'unspecified)))
+
+(defun pi-coding-agent--visual-face-spec (face-val)
+  "Resolve FACE-VAL to an anonymous plist with only visual attributes.
+Returns nil when the face contributes no visual attributes."
+  (let (spec)
+    (dolist (attr pi-coding-agent--visual-face-attrs)
+      (let ((val (pi-coding-agent--face-visual-attr face-val attr)))
+        (unless (eq val 'unspecified)
+          (setq spec (plist-put spec attr val)))))
+    spec))
+
+(defun pi-coding-agent--neutralize-fonts (str)
+  "Return copy of STR with font-identity face attributes removed.
+Walks each `face' span, resolves the effective visual attributes
+\(foreground, weight, slant, etc.), and replaces the face with an
+anonymous spec.  Font-identity attributes (:family, :foundry, :width,
+:height) are omitted so the buffer's default font governs rendering.
+This prevents column misalignment in GUI Emacs when inline markdown
+faces like `md-ts-code' inherit from `fixed-pitch'."
+  (let ((result (copy-sequence str))
+        (pos 0)
+        (len (length str)))
+    (while (< pos len)
+      (let* ((next (next-single-property-change pos 'face result len))
+             (face-val (get-text-property pos 'face result)))
+        (when face-val
+          (let ((spec (pi-coding-agent--visual-face-spec face-val)))
+            (if spec
+                (put-text-property pos next 'face spec result)
+              (remove-text-properties pos next '(face nil) result))))
+        (setq pos next)))
+    result))
+
 ;;;; Overlay Creation
 
 (defun pi-coding-agent--decorate-table (beg end width)
@@ -498,7 +558,8 @@ blank-line spacing between a table and following text is not collapsed."
                                    (mapconcat #'identity group "\n")
                                    (if (= i (1- n)) trailing "\n")))
                      (ov (make-overlay line-beg line-end nil nil nil)))
-                (overlay-put ov 'display display-str)
+                (overlay-put ov 'display
+                             (pi-coding-agent--neutralize-fonts display-str))
                 (overlay-put ov 'pi-coding-agent-table-display t)
                 (overlay-put ov 'evaporate t))
               (forward-line 1))))

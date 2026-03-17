@@ -92,6 +92,68 @@
                 (overlays-in (point-min) (point-max)))))
       (should (>= (length ovs) 1)))))
 
+(ert-deftest pi-coding-agent-test-table-overlays-have-no-font-faces ()
+  "Table display overlays carry no font-changing face attributes.
+Inline markdown faces like `md-ts-code' inherit from `fixed-pitch', which
+changes the font family.  Display strings must use anonymous face plists
+with font-identity attributes stripped, so columns align under any GUI
+font configuration."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "| Name | Description |\n|------|-------------|\n| `react` | A **library** |\n"))
+    (font-lock-ensure)
+    (pi-coding-agent--decorate-tables-in-region (point-min) (point-max) 60)
+    (let ((ovs (seq-filter
+                (lambda (ov) (overlay-get ov 'pi-coding-agent-table-display))
+                (overlays-in (point-min) (point-max)))))
+      (should (>= (length ovs) 1))
+      (dolist (ov ovs)
+        (let* ((display-str (overlay-get ov 'display))
+               (pos 0)
+               (len (length display-str)))
+          (while (< pos len)
+            (let ((face-val (get-text-property pos 'face display-str)))
+              (when face-val
+                ;; Must be an anonymous face plist, not a symbolic face
+                ;; that could resolve to include font-changing attributes.
+                (should (consp face-val))
+                (should (keywordp (car face-val)))
+                ;; And that plist must not contain font-identity keys
+                (should-not (plist-get face-val :family))
+                (should-not (plist-get face-val :foundry))
+                (should-not (plist-get face-val :height))))
+            (setq pos (next-single-property-change pos 'face display-str len))))))))
+
+(ert-deftest pi-coding-agent-test-neutralize-fonts-strips-family ()
+  "Font-identity attributes are removed, visual attributes preserved."
+  (let* ((str (propertize "hello" 'face '(:family "Courier" :foreground "red")))
+         (result (pi-coding-agent--neutralize-fonts str)))
+    (should (equal (get-text-property 0 'face result) '(:foreground "red")))))
+
+(ert-deftest pi-coding-agent-test-neutralize-fonts-resolves-symbolic-face ()
+  "Symbolic faces are resolved; font attributes from inheritance stripped."
+  (let* ((str (propertize "code" 'face 'fixed-pitch))
+         (result (pi-coding-agent--neutralize-fonts str))
+         (face (get-text-property 0 'face result)))
+    (should-not (plist-get face :family))))
+
+(ert-deftest pi-coding-agent-test-neutralize-fonts-preserves-plain-text ()
+  "Text without face properties passes through unchanged."
+  (let ((result (pi-coding-agent--neutralize-fonts "plain")))
+    (should (equal result "plain"))
+    (should-not (get-text-property 0 'face result))))
+
+(ert-deftest pi-coding-agent-test-neutralize-fonts-multi-span ()
+  "Each face span is neutralized independently."
+  (let* ((str (concat (propertize "a" 'face '(:family "Mono" :foreground "red"))
+                      "b"
+                      (propertize "c" 'face '(:weight bold :height 140))))
+         (result (pi-coding-agent--neutralize-fonts str)))
+    (should (equal (get-text-property 0 'face result) '(:foreground "red")))
+    (should-not (get-text-property 1 'face result))
+    (should (equal (get-text-property 2 'face result) '(:weight bold)))))
+
 (ert-deftest pi-coding-agent-test-display-user-message-decorates-table ()
   "User messages with tables get display-only decoration."
   (with-temp-buffer
