@@ -174,6 +174,15 @@ inside that suffix; older history stays frozen until explicitly rebuilt."
   :type 'natnum
   :group 'pi-coding-agent)
 
+(defcustom pi-coding-agent-prettify-tables t
+  "Whether display-only markdown tables use prettier visible separators.
+When non-nil, table overlays replace raw markdown pipes and separator rows
+with Unicode box-drawing characters in the visible display.  The underlying
+buffer text stays canonical markdown, so copy, search, and session history
+still operate on the raw table source."
+  :type 'boolean
+  :group 'pi-coding-agent)
+
 ;;;; Faces
 
 (defface pi-coding-agent-timestamp

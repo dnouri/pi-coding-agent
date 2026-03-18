@@ -379,6 +379,76 @@ so visible text still needs consistent alignment across all display lines."
       (let ((widths (mapcar #'string-width (nreverse all-lines))))
         (should (= (length (delete-dups (copy-sequence widths))) 1))))))
 
+(ert-deftest pi-coding-agent-test-decorate-table-prettifies-visible-separators ()
+  "Rendered table display uses box-drawing separators instead of raw pipes."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "| Name | Value |\n|------|-------|\n| Alpha | Beta |\n"))
+    (font-lock-ensure)
+    (pi-coding-agent--decorate-tables-in-region (point-min) (point-max) 40)
+    (let ((all-display (mapconcat #'identity
+                                  (pi-coding-agent-test--table-overlay-displays-in-region
+                                   (point-min) (point-max))
+                                  "\n")))
+      ;; Rows use box-drawing verticals, not raw markdown pipes
+      (should (string-match-p "^│ " all-display))
+      (should-not (string-match-p "^| " all-display))
+      ;; Separator uses box-drawing horizontals
+      (should (string-match-p "├.*┼.*┤" all-display))
+      ;; Table content preserved
+      (should (string-match-p "Name" all-display))
+      (should (string-match-p "Alpha" all-display)))))
+
+(ert-deftest pi-coding-agent-test-decorate-table-preserves-pipes-when-prettify-off ()
+  "With prettify disabled, rendered tables use standard markdown pipes."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-prettify-tables nil)
+          (inhibit-read-only t))
+      (insert "| Name | Value |\n|------|-------|\n| Alpha | Beta |\n")
+      (font-lock-ensure)
+      (pi-coding-agent--decorate-tables-in-region (point-min) (point-max) 40)
+      (let ((all-display (mapconcat #'identity
+                                    (pi-coding-agent-test--table-overlay-displays-in-region
+                                     (point-min) (point-max))
+                                    "\n")))
+        ;; Standard markdown pipe delimiters
+        (should (string-match-p "^| " all-display))
+        ;; No box-drawing characters
+        (should-not (string-match-p "│" all-display))
+        (should-not (string-match-p "├" all-display))
+        ;; Separator uses dashes
+        (should (string-match-p "---" all-display))
+        ;; Table content preserved
+        (should (string-match-p "Name" all-display))
+        (should (string-match-p "Alpha" all-display))))))
+
+(ert-deftest pi-coding-agent-test-table-overlay-suppresses-buffer-face ()
+  "Table overlays suppress tree-sitter buffer faces without losing inline formatting.
+Tree-sitter applies `md-ts-delimiter' (shadow) to separator rows and `bold'
+to headers.  The overlay must suppress these while preserving inline markdown
+formatting (bold, italic) in the display string's text properties."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "| Name | Note |\n|------|------|\n| **bold** | text |\n"))
+    (font-lock-ensure)
+    (pi-coding-agent--decorate-tables-in-region (point-min) (point-max) 40)
+    (let ((ovs (sort (seq-filter
+                      (lambda (ov) (overlay-get ov 'pi-coding-agent-table-display))
+                      (overlays-in (point-min) (point-max)))
+                     (lambda (a b) (< (overlay-start a) (overlay-start b))))))
+      ;; Every overlay has an explicit face to block buffer face bleed-through
+      (should (cl-every (lambda (ov) (overlay-get ov 'face)) ovs))
+      ;; Separator overlay does not inherit shadow
+      (let ((sep-face (overlay-get (nth 1 ovs) 'face)))
+        (should-not (eq sep-face 'md-ts-delimiter))
+        (should-not (eq sep-face 'shadow)))
+      ;; Inline bold from **bold** survives in the data row display string
+      (should (pi-coding-agent-test--string-has-face-attr-p
+               (overlay-get (nth 2 ovs) 'display) :weight 'bold)))))
+
 (ert-deftest pi-coding-agent-test-decorate-table-hides-inline-markup-in-display ()
   "Wrapped table display hides markdown delimiters like the chat buffer does."
   (with-temp-buffer
@@ -514,6 +584,15 @@ what the parser recognizes as a `pipe_table'."
                          (overlays-in (point-min) (point-max))))
                 1))
     (should (= (pi-coding-agent-test--table-overlay-count) 0))))
+
+(defun pi-coding-agent-test--string-has-face-attr-p (str attr value)
+  "Return non-nil if STR has face ATTR equal to VALUE at any position."
+  (let ((pos 0)
+        (len (length str)))
+    (cl-loop while (< pos len)
+             for face = (get-text-property pos 'face str)
+             thereis (and (consp face) (eq (plist-get face attr) value))
+             do (setq pos (next-single-property-change pos 'face str len)))))
 
 (defun pi-coding-agent-test--table-overlay-count ()
   "Count table display overlays in the current buffer."

@@ -246,41 +246,52 @@ Returns (PREFIX . BARE), where PREFIX is everything before the first `|'."
       (md-ts--set-hide-markup t)))
   pi-coding-agent--visible-string-buffer)
 
+(defconst pi-coding-agent--markdown-inline-chars-re "[*_`~\\[]"
+  "Regexp matching characters that can start markdown inline syntax.
+Cells without any of these characters have identical visible rendering
+and can skip the fontification buffer entirely.")
+
 (defun pi-coding-agent--markdown-visible-string (markdown)
   "Return the visible chat-buffer rendering of MARKDOWN.
 This hides markdown delimiters the same way `pi-coding-agent-chat-mode'
 does, so wrapped table overlays match ordinary visible-copy semantics.
-Uses a persistent fontification buffer to avoid per-call mode setup."
-  (with-current-buffer (pi-coding-agent--visible-string-buffer)
-    (let ((inhibit-read-only t))
-      (erase-buffer)
-      (insert markdown))
-    (font-lock-ensure)
-    (pi-coding-agent--visible-text (point-min) (point-max))))
+Uses a persistent fontification buffer to avoid per-call mode setup.
+Cells with no inline syntax characters are returned as-is."
+  (if (not (string-match-p pi-coding-agent--markdown-inline-chars-re markdown))
+      markdown
+    (with-current-buffer (pi-coding-agent--visible-string-buffer)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert markdown))
+      (font-lock-ensure)
+      (pi-coding-agent--visible-text (point-min) (point-max)))))
 
 ;;;; Cell Rendering
 
 (defun pi-coding-agent--render-table-row-lines (cells col-widths aligns)
   "Render table CELLS into display lines using COL-WIDTHS and ALIGNS.
-Builds each line with a flat string accumulator to reduce intermediate
-consing: padding and cell fragments are pushed individually, then
-joined with a single `apply concat'."
+When `pi-coding-agent-prettify-tables' is non-nil, emits Unicode
+box-drawing verticals instead of markdown pipes."
   (let* ((num-cols (length col-widths))
          (padded (append cells (make-list (max 0 (- num-cols (length cells))) "")))
          (wrapped-cells
           (cl-mapcar (lambda (cell column-width)
                        (markdown-table-wrap-cell (or cell "") column-width))
                      padded col-widths))
-         (max-height (apply #'max (mapcar #'length wrapped-cells))))
+         (max-height (apply #'max (mapcar #'length wrapped-cells)))
+         (pretty pi-coding-agent-prettify-tables)
+         (delim-open  (if pretty "│ " "| "))
+         (delim-mid   (if pretty " │ " " | "))
+         (delim-close (if pretty " │" " |")))
     (cl-loop for line-index below max-height
              collect
-             (let ((acc (list "| ")))
+             (let ((acc (list delim-open)))
                (cl-loop for cell-lines in wrapped-cells
                         for column-width in col-widths
                         for align in aligns
                         for first = t then nil
                         do
-                        (unless first (push " | " acc))
+                        (unless first (push delim-mid acc))
                         (let* ((cell (or (nth line-index cell-lines) ""))
                                (empty (string-empty-p cell))
                                (pad (if empty
@@ -301,31 +312,37 @@ joined with a single `apply concat'."
                            (t
                             (push cell acc)
                             (push (make-string pad ?\s) acc)))))
-               (push " |" acc)
+               (push delim-close acc)
                (apply #'concat (nreverse acc))))))
 
 (defun pi-coding-agent--render-table-separator-line (col-widths aligns)
-  "Render the markdown separator line for COL-WIDTHS and ALIGNS."
-  (let ((parts
-         (cl-mapcar
-          (lambda (column-width align)
-            (let ((dashes (make-string (max 1 column-width) ?-)))
-              (pcase align
-                ('left
-                 (if (>= column-width 2)
-                     (concat ":" (substring dashes 1))
-                   ":"))
-                ('right
-                 (if (>= column-width 2)
-                     (concat (substring dashes 1) ":")
-                   ":"))
-                ('center
-                 (if (>= column-width 3)
-                     (concat ":" (substring dashes 2) ":")
-                   (if (>= column-width 2) "::" ":")))
-                (_ dashes))))
-          col-widths aligns)))
-    (concat "| " (mapconcat #'identity parts " | ") " |")))
+  "Render the separator line for COL-WIDTHS and ALIGNS.
+When `pi-coding-agent-prettify-tables' is non-nil, emits a box-drawing
+rule (├─┼─┤) directly; otherwise emits standard markdown syntax."
+  (if pi-coding-agent-prettify-tables
+      (concat "├─" (mapconcat (lambda (w) (make-string (max 1 w) ?─))
+                              col-widths "─┼─")
+              "─┤")
+    (let ((parts
+           (cl-mapcar
+            (lambda (column-width align)
+              (let ((dashes (make-string (max 1 column-width) ?-)))
+                (pcase align
+                  ('left
+                   (if (>= column-width 2)
+                       (concat ":" (substring dashes 1))
+                     ":"))
+                  ('right
+                   (if (>= column-width 2)
+                       (concat (substring dashes 1) ":")
+                     ":"))
+                  ('center
+                   (if (>= column-width 3)
+                       (concat ":" (substring dashes 2) ":")
+                     (if (>= column-width 2) "::" ":")))
+                  (_ dashes))))
+            col-widths aligns)))
+      (concat "| " (mapconcat #'identity parts " | ") " |"))))
 
 (defun pi-coding-agent--table-alignments (separator-line)
   "Return column alignment symbols parsed from SEPARATOR-LINE."
@@ -560,6 +577,7 @@ blank-line spacing between a table and following text is not collapsed."
                      (ov (make-overlay line-beg line-end nil nil nil)))
                 (overlay-put ov 'display
                              (pi-coding-agent--neutralize-fonts display-str))
+                (overlay-put ov 'face 'default)
                 (overlay-put ov 'pi-coding-agent-table-display t)
                 (overlay-put ov 'evaporate t))
               (forward-line 1))))
