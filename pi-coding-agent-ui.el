@@ -1064,7 +1064,11 @@ larger window when the selected one cannot be split."
         (goto-char (point-max)))
       (let ((input-height (pi-coding-agent--input-height-for-window target)))
         (setq input-win (split-window nil (- input-height) 'below))
-        (set-window-buffer input-win input-buf)))
+        (set-window-buffer input-win input-buf)
+        ;; Soft-dedicate the input window so `display-buffer' never
+        ;; targets it (magit, help, compilation, etc.).  The 'side
+        ;; value still allows `switch-to-buffer' and `C-x o'.
+        (set-window-dedicated-p input-win 'side)))
     (when (window-live-p input-win)
       (select-window input-win))))
 

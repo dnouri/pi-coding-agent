@@ -199,6 +199,22 @@ This ensures all files get code fences for consistent display."
         (pi-coding-agent-test--kill-session-buffers root)
         (delete-other-windows)))))
 
+(ert-deftest pi-coding-agent-test-display-buffers-soft-dedicates-input-window ()
+  "Input window should be soft-dedicated so `display-buffer' skips it."
+  (let ((root "/tmp/pi-coding-agent-test-dedicated/"))
+    (make-directory root t)
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil)))
+      (unwind-protect
+          (let* ((chat (pi-coding-agent--setup-session root nil))
+                 (input (buffer-local-value 'pi-coding-agent--input-buffer chat)))
+            (delete-other-windows)
+            (pi-coding-agent--display-buffers chat input)
+            (should (eq 'side (window-dedicated-p
+                               (get-buffer-window input)))))
+        (pi-coding-agent-test--kill-session-buffers root)
+        (delete-other-windows)))))
+
 (ert-deftest pi-coding-agent-test-hide-session-windows-uses-current-frame-window-list ()
   "`pi-coding-agent--hide-session-windows' should query current frame windows only."
   (let ((root "/tmp/pi-coding-agent-test-hide-frame-local/")
