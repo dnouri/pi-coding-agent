@@ -490,7 +490,6 @@ Returns the position of the heading line start, or nil if not found."
           (when (get-buffer-window) (recenter 0)))
       (message "No previous message"))))
 
-
 ;;;; Copy Visible Text
 
 (defun pi-coding-agent--visible-text (beg end)
@@ -698,8 +697,12 @@ new live processes in interactive sessions."
   "Reference to the chat buffer for this session.")
 
 (defun pi-coding-agent--set-chat-buffer (buffer)
-  "Set the chat BUFFER reference for this session."
-  (setq pi-coding-agent--chat-buffer buffer))
+  "Set the chat BUFFER reference for this session.
+In input buffers, also store BUFFER in `other-window-scroll-buffer'
+so built-in other-window scrolling commands target the linked chat."
+  (setq pi-coding-agent--chat-buffer buffer)
+  (when (derived-mode-p 'pi-coding-agent-input-mode)
+    (setq-local other-window-scroll-buffer buffer)))
 
 (defvar-local pi-coding-agent--input-buffer nil
   "Reference to the input buffer for this session.")

@@ -454,6 +454,66 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
       (should (= (point) pos))
       (should (equal shown-message "No previous message")))))
 
+(ert-deftest pi-coding-agent-test-other-window-scroll-buffer-set-locally ()
+  "Session setup stores `other-window-scroll-buffer' as input-local state."
+  (let ((root "/tmp/pi-coding-agent-test-scroll-other/")
+        (original-default (default-value 'other-window-scroll-buffer)))
+    (make-directory root t)
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
+              ((symbol-function 'pi-coding-agent--display-buffers) #'ignore))
+      (unwind-protect
+          (progn
+            (let ((default-directory root))
+              (pi-coding-agent))
+            (let ((chat (get-buffer (pi-coding-agent-test--chat-buffer-name root)))
+                  (input (get-buffer (pi-coding-agent-test--input-buffer-name root))))
+              (with-current-buffer input
+                (should (local-variable-p 'other-window-scroll-buffer))
+                (should (eq other-window-scroll-buffer chat)))
+              (should (eq (default-value 'other-window-scroll-buffer)
+                          original-default))))
+        (set-default 'other-window-scroll-buffer original-default)
+        (pi-coding-agent-test--kill-session-buffers root)))))
+
+(ert-deftest pi-coding-agent-test-other-window-for-scrolling-tracks-each-input-session ()
+  "Each input buffer scrolls its own chat buffer."
+  (let ((root-a "/tmp/pi-coding-agent-test-scroll-a/")
+        (root-b "/tmp/pi-coding-agent-test-scroll-b/")
+        (original-default (default-value 'other-window-scroll-buffer)))
+    (make-directory root-a t)
+    (make-directory root-b t)
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
+              ((symbol-function 'pi-coding-agent--display-buffers) #'ignore))
+      (unwind-protect
+          (progn
+            (let ((default-directory root-a))
+              (pi-coding-agent))
+            (let ((default-directory root-b))
+              (pi-coding-agent))
+            (let* ((chat-a (get-buffer (pi-coding-agent-test--chat-buffer-name root-a)))
+                   (input-a (get-buffer (pi-coding-agent-test--input-buffer-name root-a)))
+                   (chat-b (get-buffer (pi-coding-agent-test--chat-buffer-name root-b)))
+                   (input-b (get-buffer (pi-coding-agent-test--input-buffer-name root-b))))
+              (delete-other-windows)
+              (switch-to-buffer chat-a)
+              (let* ((chat-win-a (selected-window))
+                     (input-win-a (split-window chat-win-a -10 'below))
+                     (chat-win-b (split-window chat-win-a nil 'right))
+                     input-win-b)
+                (set-window-buffer input-win-a input-a)
+                (set-window-buffer chat-win-b chat-b)
+                (setq input-win-b (split-window chat-win-b -10 'below))
+                (set-window-buffer input-win-b input-b)
+                (select-window input-win-a)
+                (should (eq (window-buffer (other-window-for-scrolling)) chat-a))
+                (select-window input-win-b)
+                (should (eq (window-buffer (other-window-for-scrolling)) chat-b)))))
+        (set-default 'other-window-scroll-buffer original-default)
+        (pi-coding-agent-test--kill-session-buffers root-a)
+        (pi-coding-agent-test--kill-session-buffers root-b)))))
+
 ;;; Turn Detection
 
 (ert-deftest pi-coding-agent-test-turn-index-on-first-heading ()

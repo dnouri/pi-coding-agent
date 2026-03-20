@@ -37,6 +37,8 @@
 ;;   `pi-coding-agent-quit'                  Close session
 ;;   `pi-coding-agent-previous-input'        History backward (M-p)
 ;;   `pi-coding-agent-next-input'            History forward (M-n)
+;;   `pi-coding-agent-input-previous-message' Navigate previous chat message
+;;   `pi-coding-agent-input-next-message'    Navigate next chat message
 ;;   `pi-coding-agent-history-isearch-backward'  History search (C-r)
 ;;   `pi-coding-agent-queue-steering'        Steering message (C-c C-s)
 
@@ -251,6 +253,31 @@ markdown highlighting while preserving mode identity and keybindings."
   (add-hook 'post-self-insert-hook #'pi-coding-agent--maybe-complete-at nil t)
   (add-hook 'isearch-mode-hook #'pi-coding-agent--history-isearch-setup nil t)
   (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-input-on-kill nil t))
+
+;;;; Input-Buffer Chat Navigation
+
+(defun pi-coding-agent--call-in-visible-chat-window (fn)
+  "Call FN in the visible linked chat window, preserving input focus."
+  (let* ((chat-buf (pi-coding-agent--get-chat-buffer))
+         (win (and (buffer-live-p chat-buf)
+                   (get-buffer-window chat-buf))))
+    (if (window-live-p win)
+        (save-selected-window
+          (select-window win)
+          (funcall fn))
+      (user-error "No chat window visible"))))
+
+(defun pi-coding-agent-input-next-message ()
+  "Move chat to the next user message, keeping focus in input."
+  (interactive)
+  (pi-coding-agent--call-in-visible-chat-window
+   #'pi-coding-agent-next-message))
+
+(defun pi-coding-agent-input-previous-message ()
+  "Move chat to the previous user message, keeping focus in input."
+  (interactive)
+  (pi-coding-agent--call-in-visible-chat-window
+   #'pi-coding-agent-previous-message))
 
 ;;;; Sending Prompts
 

@@ -2947,5 +2947,88 @@ no spurious faces are applied to plain colon-ending lines."
     (should (eq (key-binding (kbd "TAB")) 'pi-coding-agent-complete))
     (should (eq (key-binding (kbd "C-c C-s")) 'pi-coding-agent-queue-steering))))
 
+;;; Input-Buffer Chat Navigation
+
+(ert-deftest pi-coding-agent-test-input-next-message-moves-chat ()
+  "Input-side next-message moves the linked chat and keeps focus."
+  (let ((chat-buf (generate-new-buffer "*test-chat*"))
+        (input-buf (generate-new-buffer "*test-input*")))
+    (unwind-protect
+        (progn
+          (delete-other-windows)
+          (switch-to-buffer chat-buf)
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (let ((inhibit-read-only t))
+              (pi-coding-agent-test--insert-chat-turns))
+            (pi-coding-agent--set-input-buffer input-buf)
+            (goto-char (point-min)))
+          (let ((input-win (split-window nil -10 'below)))
+            (set-window-buffer input-win input-buf)
+            (with-current-buffer input-buf
+              (pi-coding-agent-input-mode)
+              (pi-coding-agent--set-chat-buffer chat-buf))
+            (select-window input-win)
+            (pi-coding-agent-input-next-message)
+            (with-current-buffer chat-buf
+              (should (looking-at "You · 10:00")))
+            (should (eq (window-buffer (selected-window)) input-buf))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf)
+      (delete-other-windows))))
+
+(ert-deftest pi-coding-agent-test-input-previous-message-moves-linked-chat ()
+  "Input-side previous-message uses the linked chat, not scroll state."
+  (let ((chat-a (generate-new-buffer "*test-chat-a*"))
+        (chat-b (generate-new-buffer "*test-chat-b*"))
+        (input-buf (generate-new-buffer "*test-input*")))
+    (unwind-protect
+        (progn
+          (delete-other-windows)
+          (switch-to-buffer chat-a)
+          (let* ((chat-win-a (selected-window))
+                 (input-win (split-window chat-win-a -10 'below))
+                 (chat-win-b (split-window chat-win-a nil 'right)))
+            (set-window-buffer input-win input-buf)
+            (set-window-buffer chat-win-b chat-b)
+            (with-current-buffer chat-a
+              (pi-coding-agent-chat-mode)
+              (let ((inhibit-read-only t))
+                (pi-coding-agent-test--insert-chat-turns))
+              (goto-char (point-max))
+              (re-search-backward "^You · 10:10$" nil t))
+            (with-current-buffer chat-b
+              (pi-coding-agent-chat-mode)
+              (let ((inhibit-read-only t))
+                (pi-coding-agent-test--insert-chat-turns))
+              (goto-char (point-max))
+              (re-search-backward "^You · 10:10$" nil t))
+            (with-current-buffer input-buf
+              (pi-coding-agent-input-mode)
+              (pi-coding-agent--set-chat-buffer chat-a)
+              (setq-local other-window-scroll-buffer chat-b))
+            (select-window input-win)
+            (pi-coding-agent-input-previous-message)
+            (with-current-buffer chat-a
+              (should (looking-at "You · 10:05")))
+            (with-current-buffer chat-b
+              (should (looking-at "You · 10:10")))
+            (should (eq (window-buffer (selected-window)) input-buf))))
+      (kill-buffer chat-a)
+      (kill-buffer chat-b)
+      (kill-buffer input-buf)
+      (delete-other-windows))))
+
+(ert-deftest pi-coding-agent-test-input-previous-message-no-chat-window-errors ()
+  "Navigating from input without a visible linked chat signals error."
+  (let ((chat-buf (generate-new-buffer "*test-chat-hidden*")))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-input-mode)
+          (pi-coding-agent--set-chat-buffer chat-buf)
+          (should-error (pi-coding-agent-input-previous-message)
+                        :type 'user-error))
+      (kill-buffer chat-buf))))
+
 (provide 'pi-coding-agent-input-test)
 ;;; pi-coding-agent-input-test.el ends here
