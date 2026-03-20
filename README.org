@@ -346,9 +346,10 @@ and =pi-coding-agent-copy-raw-markdown= preserves fully raw markdown.
 
 Recent tables re-wrap automatically when the chat window width changes.  Older
 history stays frozen at its previous width to avoid expensive whole-buffer
-redisplay on every resize.  Customize =pi-coding-agent-hot-tail-turn-count= to
-choose how many recent =You=/=Assistant= headed turns stay live for resize
-refreshes.
+redisplay on every resize.  Tool blocks in older history also lose their
+expand/collapse buttons and syntax highlighting, keeping long sessions snappy.
+Customize =pi-coding-agent-hot-tail-turn-count= to choose how many recent
+=You=/=Assistant= headed turns stay live.
 
 A chat buffer has one active wrapped width at a time.  That matches the normal
 two-window UI, where each session shows one chat window and one input window.

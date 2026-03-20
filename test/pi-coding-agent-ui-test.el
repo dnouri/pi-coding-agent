@@ -370,6 +370,10 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
   "pi-coding-agent-copy-raw-markdown defcustom defaults to nil."
   (should (eq pi-coding-agent-copy-raw-markdown nil)))
 
+(ert-deftest pi-coding-agent-test-hot-tail-turn-count-defcustom-defaults ()
+  "Hot-tail turn count defaults to 3 headed turns."
+  (should (= 3 pi-coding-agent-hot-tail-turn-count)))
+
 (ert-deftest pi-coding-agent-test-kill-ring-save-strips-by-default ()
   "kill-ring-save strips hidden markup by default."
   (pi-coding-agent-test--with-chat-markup "Hello **bold** world"

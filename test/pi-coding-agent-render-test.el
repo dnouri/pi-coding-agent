@@ -1762,6 +1762,574 @@ Call inside `with-temp-buffer' after `pi-coding-agent-chat-mode'."
           (should (string-match-p "\\*\\*Details\\*\\*" full))
           (should (string-match-p "\"error\": \"timeout\"" full)))))))
 
+;;; Cooling Completed Tool Blocks
+
+(defun pi-coding-agent-test--count-overlays-with-prop (prop)
+  "Return count of overlays in current buffer carrying PROP."
+  (seq-count (lambda (ov) (overlay-get ov prop))
+             (overlays-in (point-min) (point-max))))
+
+(defun pi-coding-agent-test--all-tool-overlays ()
+  "Return all tool-block overlays in the current buffer."
+  (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-tool-block))
+              (overlays-in (point-min) (point-max))))
+
+(defun pi-coding-agent-test--render-completed-tool-turn
+    (tool-call-id tool-name args content &optional details)
+  "Render one completed assistant turn with a single tool result.
+TOOL-CALL-ID identifies the synthetic tool call.
+TOOL-NAME and ARGS are passed through the normal tool execution path.
+CONTENT is the tool result content list, and DETAILS is optional result
+metadata such as an edit diff.
+Synthetic turns also reset `pi-coding-agent--assistant-header-shown' so
+repeated helper calls model new prompts rather than retry attempts."
+  (setq pi-coding-agent--assistant-header-shown nil)
+  (pi-coding-agent--handle-display-event '(:type "agent_start"))
+  (pi-coding-agent--handle-display-event
+   (list :type "tool_execution_start"
+         :toolCallId tool-call-id
+         :toolName tool-name
+         :args args))
+  (pi-coding-agent--handle-display-event
+   (list :type "tool_execution_end"
+         :toolCallId tool-call-id
+         :toolName tool-name
+         :result (list :content content :details details)
+         :isError nil))
+  (pi-coding-agent--handle-display-event '(:type "agent_end")))
+
+(ert-deftest pi-coding-agent-test-cool-completed-tool-blocks-rewrites-collapsed-write-as-preview-only-bare-fence ()
+  "Cooling a collapsed write block keeps its visible preview and plain hint."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((pi-coding-agent-tool-preview-lines 3)
+           (content (concat "line1\nline2\nline3\nline4\n```python\nprint(42)\n```\n~~~~")))
+      (pi-coding-agent--display-tool-start
+       "write" `(:path "/tmp/example.py" :content ,content))
+      (pi-coding-agent--display-tool-end
+       "write" `(:path "/tmp/example.py" :content ,content)
+       '((:type "text" :text "wrote file"))
+       nil nil)
+      (should (string-match-p "```python" (buffer-string)))
+      (should (string-match-p "more lines" (buffer-string)))
+      (should-not (string-match-p "\nline4\n" (buffer-string)))
+      (pi-coding-agent--cool-completed-tool-blocks (pi-coding-agent-test--all-tool-overlays))
+      (let ((text (buffer-string)))
+        (should (string-match-p
+                 (regexp-quote
+                  (concat "write /tmp/example.py\n"
+                          "```\n"
+                          "line1\nline2\nline3\n"
+                          "```\n"
+                          "... (5 more lines)"))
+                 text))
+        (should-not (string-match-p
+                     (regexp-quote "write /tmp/example.py\n```python")
+                     text))
+        (should-not (string-match-p "\nline4\n" text))
+        (should (= 0 (pi-coding-agent-test--count-overlays-with-prop
+                      'pi-coding-agent-tool-block)))
+        (should (= 0 (pi-coding-agent-test--count-overlays-with-prop
+                      'pi-coding-agent-diff-overlay)))
+        (goto-char (point-min))
+        (should-not (next-button (point)))))))
+
+(ert-deftest pi-coding-agent-test-cool-completed-tool-blocks-removes-edit-diff-overlays ()
+  "Cooling a completed edit block removes diff overlays and hot overlay state."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-tool-preview-lines 10)
+          (diff "+ 1     alpha\n- 2     beta\n  3     gamma"))
+      (pi-coding-agent--display-tool-start "edit" '(:path "/tmp/example.py"))
+      (pi-coding-agent--display-tool-end
+       "edit" '(:path "/tmp/example.py")
+       '((:type "text" :text "done"))
+       (list :diff diff)
+       nil)
+      (should (string-match-p "```python" (buffer-string)))
+      (should (> (pi-coding-agent-test--count-overlays-with-prop
+                  'pi-coding-agent-diff-overlay)
+                 0))
+      (pi-coding-agent--cool-completed-tool-blocks (pi-coding-agent-test--all-tool-overlays))
+      (let ((text (buffer-string)))
+        (should (string-match-p
+                 (regexp-quote
+                  (concat "edit /tmp/example.py\n"
+                          "```\n"
+                          "+ 1     alpha\n- 2     beta\n  3     gamma\n"
+                          "```"))
+                 text))
+        (should-not (string-match-p "```python" text))
+        (should (= 0 (pi-coding-agent-test--count-overlays-with-prop
+                      'pi-coding-agent-tool-block)))
+        (should (= 0 (pi-coding-agent-test--count-overlays-with-prop
+                      'pi-coding-agent-diff-overlay)))
+        (goto-char (point-min))
+        (should-not (next-button (point)))))))
+
+(ert-deftest pi-coding-agent-test-cool-completed-tool-blocks-keep-plain-hint-for-collapsed-edit-preview ()
+  "Cooling a collapsed edit block keeps only preview text plus a plain hint."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-tool-preview-lines 3)
+          (diff (string-join '("+ 1     def alpha():"
+                               "- 2     def beta():"
+                               "  3     def gamma():"
+                               "+ 4     return 4"
+                               "- 5     return 5"
+                               "  6     return 6")
+                             "\n")))
+      (pi-coding-agent--display-tool-start "edit" '(:path "/tmp/example.py"))
+      (pi-coding-agent--display-tool-end
+       "edit" '(:path "/tmp/example.py")
+       '((:type "text" :text "done"))
+       (list :diff diff)
+       nil)
+      (should (string-match-p "more lines" (buffer-string)))
+      (should (> (pi-coding-agent-test--count-overlays-with-prop
+                  'pi-coding-agent-diff-overlay)
+                 0))
+      (pi-coding-agent--cool-completed-tool-blocks (pi-coding-agent-test--all-tool-overlays))
+      (let ((text (buffer-string)))
+        (should (string-match-p
+                 (regexp-quote
+                  (concat "edit /tmp/example.py\n"
+                          "```\n"
+                          "+ 1     def alpha():\n"
+                          "- 2     def beta():\n"
+                          "  3     def gamma():\n"
+                          "```\n"
+                          "... (3 more lines)"))
+                 text))
+        (should-not (string-match-p "```python" text))
+        (should-not (string-match-p "return 4" text))
+        (should (= 0 (pi-coding-agent-test--count-overlays-with-prop
+                      'pi-coding-agent-tool-block)))
+        (should (= 0 (pi-coding-agent-test--count-overlays-with-prop
+                      'pi-coding-agent-diff-overlay)))
+        (goto-char (point-min))
+        (should-not (next-button (point)))))))
+
+(ert-deftest pi-coding-agent-test-cool-completed-tool-blocks-does-not-invent-hint-for-expanded-read ()
+  "Cooling an expanded tool block keeps visible full content without a hint."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((pi-coding-agent-tool-preview-lines 3)
+           (body (string-join '("def line_one():"
+                                "    return 1"
+                                "def line_two():"
+                                "    return 2"
+                                "def line_three():"
+                                "    return 3")
+                              "\n")))
+      (pi-coding-agent--display-tool-start "read" '(:path "/tmp/example.py"))
+      (pi-coding-agent--display-tool-end
+       "read" '(:path "/tmp/example.py")
+       `((:type "text" :text ,body))
+       nil nil)
+      (goto-char (point-min))
+      (let ((button (next-button (point))))
+        (should button)
+        (pi-coding-agent--toggle-tool-output button))
+      (should (string-match-p "\\[-\\]" (buffer-string)))
+      (pi-coding-agent--cool-completed-tool-blocks (pi-coding-agent-test--all-tool-overlays))
+      (let ((text (buffer-string)))
+        (should (string-match-p
+                 (regexp-quote
+                  (concat "read /tmp/example.py\n"
+                          "```\n"
+                          body
+                          "\n```"))
+                 text))
+        (should-not (string-match-p "```python" text))
+        (should-not (string-match-p "more lines" text))
+        (goto-char (point-min))
+        (should-not (next-button (point)))))))
+
+(ert-deftest pi-coding-agent-test-cool-completed-tool-blocks-ignores-pending-tool-blocks ()
+  "Cooling should ignore pending tool blocks that have not completed yet."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "bash" '(:command "sleep 100"))
+    (let ((before (buffer-string))
+          (pending pi-coding-agent--pending-tool-overlay))
+      (pi-coding-agent--cool-completed-tool-blocks (pi-coding-agent-test--all-tool-overlays))
+      (should (equal before (buffer-string)))
+      (should (eq pending pi-coding-agent--pending-tool-overlay))
+      (should (= 1 (pi-coding-agent-test--count-overlays-with-prop
+                    'pi-coding-agent-tool-block))))))
+
+(ert-deftest pi-coding-agent-test-cool-completed-tool-blocks-can-leave-newer-blocks-hot ()
+  "Cooling can target only older completed blocks, leaving newer ones hot."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "bash" '(:command "printf old"))
+    (pi-coding-agent--display-tool-end
+     "bash" '(:command "printf old")
+     '((:type "text" :text "old"))
+     nil nil)
+    (pi-coding-agent--display-tool-start "write" '(:path "/tmp/example.py" :content "print(1)"))
+    (pi-coding-agent--display-tool-end
+     "write" '(:path "/tmp/example.py" :content "print(1)" )
+     '((:type "text" :text "done"))
+     nil nil)
+    (let* ((sorted-overlays
+            (sort (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-tool-block))
+                              (overlays-in (point-min) (point-max)))
+                  (lambda (a b) (< (overlay-start a) (overlay-start b)))))
+           (older (car sorted-overlays)))
+      (should (= 2 (length sorted-overlays)))
+      (pi-coding-agent--cool-completed-tool-blocks (list older))
+      (should (= 1 (pi-coding-agent-test--count-overlays-with-prop
+                    'pi-coding-agent-tool-block)))
+      ;; Newer write block is still hot and still carries its typed fence.
+      (should (string-match-p "```python" (buffer-string))))))
+
+(ert-deftest pi-coding-agent-test-cool-completed-tool-blocks-is-idempotent ()
+  "Cooling twice should leave the second pass with nothing more to do."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "read" '(:path "/tmp/test.py"))
+    (pi-coding-agent--display-tool-end
+     "read" '(:path "/tmp/test.py")
+     '((:type "text" :text "def hello():\n    return 1"))
+     nil nil)
+    (pi-coding-agent--cool-completed-tool-blocks (pi-coding-agent-test--all-tool-overlays))
+    (let ((after-first (buffer-string)))
+      (pi-coding-agent--cool-completed-tool-blocks (pi-coding-agent-test--all-tool-overlays))
+      (should (equal after-first (buffer-string)))
+      (should (= 0 (pi-coding-agent-test--count-overlays-with-prop
+                    'pi-coding-agent-tool-block))))))
+
+(ert-deftest pi-coding-agent-test-agent-end-cools-tool-blocks-outside-hot-tail ()
+  "agent_end cools completed tool blocks before the hot-tail boundary.
+With hot-tail-turn-count 1, only the most recent headed turn stays hot."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((pi-coding-agent-tool-preview-lines 3)
+           (pi-coding-agent-hot-tail-turn-count 1)
+           (older-content
+            (concat "line1\nline2\nline3\nline4\n```python\nprint('old')\n```")))
+      (pi-coding-agent-test--render-completed-tool-turn
+       "call-1" "write"
+       `(:path "/tmp/old.py" :content ,older-content)
+       '((:type "text" :text "done")))
+      (pi-coding-agent-test--render-completed-tool-turn
+       "call-2" "read"
+       '(:path "/tmp/new.py")
+       '((:type "text" :text "def fresh():\n    return 1")))
+      (let ((text (buffer-string)))
+        ;; Older write block was cooled into bare fence with hint
+        (should (string-match-p
+                 (regexp-quote
+                  (concat "write /tmp/old.py\n"
+                          "```\n"
+                          "line1\nline2\nline3\n"
+                          "```\n"
+                          "... (4 more lines)"))
+                 text))
+        (should-not (string-match-p "\nline4\n" text))
+        ;; Newer read block stays hot with typed fence
+        (should (string-match-p
+                 (regexp-quote
+                  (concat "read /tmp/new.py\n"
+                          "```python\n"
+                          "def fresh():\n    return 1\n"
+                          "```"))
+                 text))
+        (should (= 1 (pi-coding-agent-test--count-overlays-with-prop
+                      'pi-coding-agent-tool-block)))
+        (goto-char (point-min))
+        (should-not (next-button (point)))))))
+
+(ert-deftest pi-coding-agent-test-session-history-cools-tool-blocks-outside-hot-tail ()
+  "History rebuild cools tool blocks before the hot-tail boundary."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((pi-coding-agent-tool-preview-lines 3)
+           (pi-coding-agent-hot-tail-turn-count 1)
+           (older-content
+            (concat "line1\nline2\nline3\nline4\n```python\nprint('old')\n```"))
+           (messages
+            `[(:role "user"
+               :content [(:type "text" :text "first")])
+              (:role "assistant"
+               :content [(:type "toolCall" :id "old-call"
+                          :name "write"
+                          :arguments (:path "/tmp/old.py" :content ,older-content))])
+              (:role "toolResult" :toolCallId "old-call"
+               :toolName "write"
+               :content [(:type "text" :text "done")]
+               :isError :json-false)
+              (:role "user"
+               :content [(:type "text" :text "second")])
+              (:role "assistant"
+               :content [(:type "toolCall" :id "new-call"
+                          :name "read"
+                          :arguments (:path "/tmp/new.py"))])
+              (:role "toolResult" :toolCallId "new-call"
+               :toolName "read"
+               :content [(:type "text" :text "def recent():\n    return 2")]
+               :isError :json-false)]))
+      (pi-coding-agent--display-session-history messages (current-buffer))
+      (let ((text (buffer-string)))
+        (should (string-match-p
+                 (regexp-quote
+                  (concat "write /tmp/old.py\n"
+                          "```\n"
+                          "line1\nline2\nline3\n"
+                          "```\n"
+                          "... (4 more lines)"))
+                 text))
+        (should-not (string-match-p "\nline4\n" text))
+        (should (string-match-p
+                 (regexp-quote
+                  (concat "read /tmp/new.py\n"
+                          "```python\n"
+                          "def recent():\n    return 2\n"
+                          "```"))
+                 text))
+        (should (= 1 (pi-coding-agent-test--count-overlays-with-prop
+                      'pi-coding-agent-tool-block)))
+        (goto-char (point-min))
+        (should-not (next-button (point)))))))
+
+(ert-deftest pi-coding-agent-test-cooling-is-idempotent-when-hot-tail-unchanged ()
+  "Repeated cooling leaves content unchanged when no new blocks fall cold."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 2))
+      ;; Three turns: oldest one falls outside count-2 hot tail
+      (pi-coding-agent-test--render-completed-tool-turn
+       "call-1" "read"
+       '(:path "/tmp/one.py")
+       '((:type "text" :text "def one():\n    return 1")))
+      (pi-coding-agent-test--render-completed-tool-turn
+       "call-2" "read"
+       '(:path "/tmp/two.py")
+       '((:type "text" :text "def two():\n    return 2")))
+      (pi-coding-agent-test--render-completed-tool-turn
+       "call-3" "read"
+       '(:path "/tmp/three.py")
+       '((:type "text" :text "def three():\n    return 3")))
+      ;; First turn cooled, last two still hot
+      (should (string-match-p
+               (regexp-quote
+                (concat "read /tmp/one.py\n"
+                        "```\n"
+                        "def one():\n    return 1\n"
+                        "```"))
+               (buffer-string)))
+      (should (= 2 (pi-coding-agent-test--count-overlays-with-prop
+                    'pi-coding-agent-tool-block)))
+      ;; Running cooling again changes nothing
+      (let ((after-first (buffer-string)))
+        (pi-coding-agent--cool-completed-tool-blocks-outside-hot-tail)
+        (should (equal after-first (buffer-string)))
+        (should (= 2 (pi-coding-agent-test--count-overlays-with-prop
+                      'pi-coding-agent-tool-block)))))))
+
+(ert-deftest pi-coding-agent-test-agent-end-keeps-multi-tool-turn-hot ()
+  "All tool blocks from the newest turn stay hot together."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 1))
+      ;; Old turn
+      (pi-coding-agent-test--render-completed-tool-turn
+       "old-call" "read"
+       '(:path "/tmp/old.py")
+       '((:type "text" :text "def old():\n    return 0")))
+      ;; New turn with two tool calls
+      (setq pi-coding-agent--assistant-header-shown nil)
+      (pi-coding-agent--handle-display-event '(:type "agent_start"))
+      (pi-coding-agent--handle-display-event
+       '(:type "tool_execution_start"
+         :toolCallId "new-call-1"
+         :toolName "read"
+         :args (:path "/tmp/new-one.py")))
+      (pi-coding-agent--handle-display-event
+       '(:type "tool_execution_end"
+         :toolCallId "new-call-1"
+         :toolName "read"
+         :result (:content ((:type "text" :text "def one():\n    return 1")))
+         :isError nil))
+      (pi-coding-agent--handle-display-event
+       '(:type "tool_execution_start"
+         :toolCallId "new-call-2"
+         :toolName "read"
+         :args (:path "/tmp/new-two.py")))
+      (pi-coding-agent--handle-display-event
+       '(:type "tool_execution_end"
+         :toolCallId "new-call-2"
+         :toolName "read"
+         :result (:content ((:type "text" :text "def two():\n    return 2")))
+         :isError nil))
+      (pi-coding-agent--handle-display-event '(:type "agent_end"))
+      ;; Old turn cooled
+      (should (string-match-p
+               (regexp-quote
+                (concat "read /tmp/old.py\n"
+                        "```\n"
+                        "def old():\n    return 0\n"
+                        "```"))
+               (buffer-string)))
+      ;; Both new tool blocks stay hot with typed fences
+      (should (string-match-p "read /tmp/new-one.py\n```python" (buffer-string)))
+      (should (string-match-p "read /tmp/new-two.py\n```python" (buffer-string)))
+      (should (= 2 (pi-coding-agent-test--count-overlays-with-prop
+                    'pi-coding-agent-tool-block))))))
+
+(ert-deftest pi-coding-agent-test-cooling-skips-live-executing-blocks ()
+  "Cooling does not touch a tool block that is still executing (live)."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 1))
+      ;; Render one completed turn so the hot-tail boundary advances
+      (pi-coding-agent-test--render-completed-tool-turn
+       "old-call" "read"
+       '(:path "/tmp/old.py")
+       '((:type "text" :text "def old():\n    return 0")))
+      ;; Start a new turn with a tool execution that never completes
+      (setq pi-coding-agent--assistant-header-shown nil)
+      (pi-coding-agent--handle-display-event '(:type "agent_start"))
+      (pi-coding-agent--handle-display-event
+       '(:type "tool_execution_start"
+         :toolCallId "live-call"
+         :toolName "bash"
+         :args (:command "sleep 999")))
+      ;; The live block is in the registry and is the pending overlay
+      (should (pi-coding-agent--tool-block-get "live-call"))
+      (should pi-coding-agent--pending-tool-overlay)
+      ;; Force cooling — the live block must survive
+      (pi-coding-agent--update-hot-tail-boundary)
+      (pi-coding-agent--cool-completed-tool-blocks-outside-hot-tail)
+      ;; The live block's overlay is still present and untouched
+      (should (pi-coding-agent--tool-block-get "live-call"))
+      (should pi-coding-agent--pending-tool-overlay)
+      (should (string-match-p "sleep 999" (buffer-string))))))
+
+(ert-deftest pi-coding-agent-test-cooling-hot-block-toggle-works-after-cold-neighbor ()
+  "TAB toggle still works on a hot block after its cold neighbor was cooled."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((pi-coding-agent-tool-preview-lines 5)
+           (pi-coding-agent-hot-tail-turn-count 1)
+           (long-body (mapconcat (lambda (n) (format "line-%d" n))
+                                 (number-sequence 1 20)
+                                 "\n")))
+      ;; Turn 1 (will be cooled)
+      (pi-coding-agent-test--render-completed-tool-turn
+       "old-call" "read"
+       '(:path "/tmp/old.py")
+       (list (list :type "text" :text long-body)))
+      ;; Turn 2 (hot, collapsed with toggle)
+      (pi-coding-agent-test--render-completed-tool-turn
+       "new-call" "read"
+       '(:path "/tmp/new.py")
+       (list (list :type "text" :text long-body)))
+      (should (= 1 (pi-coding-agent-test--count-overlays-with-prop
+                    'pi-coding-agent-tool-block)))
+      ;; Expand via toggle button
+      (let* ((hot-ov (car (pi-coding-agent-test--all-tool-overlays)))
+             (btn (pi-coding-agent--find-toggle-button-in-region
+                   (overlay-start hot-ov) (overlay-end hot-ov))))
+        (should btn)
+        (pi-coding-agent--toggle-tool-output btn)
+        (should (string-match-p "line-20" (buffer-string)))
+        ;; Collapse again
+        (let* ((hot-ov2 (car (pi-coding-agent-test--all-tool-overlays)))
+               (btn2 (pi-coding-agent--find-toggle-button-in-region
+                      (overlay-start hot-ov2) (overlay-end hot-ov2))))
+          (should btn2)
+          (pi-coding-agent--toggle-tool-output btn2)
+          (should-not (string-match-p "line-20" (buffer-string))))))))
+
+(ert-deftest pi-coding-agent-test-cooling-no-buttons-in-cold-blocks ()
+  "After cooling, the cold region contains zero interactive buttons."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((pi-coding-agent-tool-preview-lines 5)
+           (pi-coding-agent-hot-tail-turn-count 1)
+           (long-body (mapconcat (lambda (n) (format "line-%d" n))
+                                 (number-sequence 1 20)
+                                 "\n")))
+      (pi-coding-agent-test--render-completed-tool-turn
+       "old-call" "read"
+       '(:path "/tmp/old.py")
+       (list (list :type "text" :text long-body)))
+      (pi-coding-agent-test--render-completed-tool-turn
+       "new-call" "read"
+       '(:path "/tmp/new.py")
+       (list (list :type "text" :text long-body)))
+      (let ((boundary (marker-position pi-coding-agent--hot-tail-start)))
+        (should (> boundary (point-min)))
+        (goto-char (point-min))
+        (let ((button-count 0))
+          (while (< (point) boundary)
+            (when (button-at (point))
+              (setq button-count (1+ button-count)))
+            (forward-char 1))
+          (should (= 0 button-count)))))))
+
+(ert-deftest pi-coding-agent-test-cooling-bash-error-cools-correctly ()
+  "An errored bash tool block cools like any other completed block."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 1)
+          (pi-coding-agent-tool-preview-lines 10)
+          (pi-coding-agent-bash-preview-lines 10))
+      ;; Turn 1: bash tool with error
+      (setq pi-coding-agent--assistant-header-shown nil)
+      (pi-coding-agent--handle-display-event '(:type "agent_start"))
+      (pi-coding-agent--handle-display-event
+       '(:type "tool_execution_start"
+         :toolCallId "call-err"
+         :toolName "bash"
+         :args (:command "false")))
+      (pi-coding-agent--handle-display-event
+       '(:type "tool_execution_end"
+         :toolCallId "call-err"
+         :toolName "bash"
+         :result (:content ((:type "text" :text "exit code 1")))
+         :isError t))
+      (pi-coding-agent--handle-display-event '(:type "agent_end"))
+      ;; Turn 2: normal read (cools turn 1)
+      (pi-coding-agent-test--render-completed-tool-turn
+       "call-ok" "read"
+       '(:path "/tmp/ok.py")
+       '((:type "text" :text "def ok():\n    return 0")))
+      (let ((text (buffer-string)))
+        (should (string-match-p
+                 (regexp-quote "$ false\n```\nexit code 1\n```")
+                 text))
+        (should (string-match-p
+                 (regexp-quote "read /tmp/ok.py\n```python")
+                 text))
+        (should (= 1 (pi-coding-agent-test--count-overlays-with-prop
+                      'pi-coding-agent-tool-block)))))))
+
+(ert-deftest pi-coding-agent-test-cooling-write-with-fence-content ()
+  "Cooling a write tool whose content contains triple backticks uses tilde fences."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 0)
+          (pi-coding-agent-tool-preview-lines 10)
+          (md-content "# README\n\n```python\nprint(42)\n```\n\nDone."))
+      (pi-coding-agent-test--render-completed-tool-turn
+       "call-md" "write"
+       `(:path "/tmp/readme.md" :content ,md-content)
+       '((:type "text" :text "wrote file")))
+      (let ((text (buffer-string)))
+        (should (string-match-p
+                 (regexp-quote
+                  (concat "write /tmp/readme.md\n"
+                          "~~~\n"
+                          "# README\n\n```python\nprint(42)\n```\n\nDone.\n"
+                          "~~~"))
+                 text))
+        (should (= 0 (pi-coding-agent-test--count-overlays-with-prop
+                      'pi-coding-agent-tool-block)))))))
+
 ;;; Diff Overlay Highlighting
 
 (ert-deftest pi-coding-agent-test-apply-diff-overlays-added-line ()
