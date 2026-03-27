@@ -335,7 +335,8 @@ Only works when streaming is in progress."
 Kills both chat and input buffers, terminates the process,
 and removes the input window (merging its space with adjacent windows).
 
-If a process is running, asks for confirmation first.  If the user
+If a process is running, asks for confirmation first unless
+`pi-coding-agent-quit-without-confirmation' is non-nil.  If the user
 cancels, the session remains intact."
   (interactive)
   (let* ((chat-buf (pi-coding-agent--get-chat-buffer))
@@ -346,6 +347,7 @@ cancels, the session remains intact."
          (input-windows nil))
     (when (and proc-live
                (process-query-on-exit-flag proc)
+               (not pi-coding-agent-quit-without-confirmation)
                (not (yes-or-no-p "Pi session has a running process; quit anyway? ")))
       (user-error "Quit cancelled"))
     ;; Disable query flag to prevent double-ask on buffer kill

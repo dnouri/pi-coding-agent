@@ -273,86 +273,82 @@ Also verifies that the new session-file is stored in state for reload to work."
     (should-not (get-buffer "*pi-coding-agent-chat:/tmp/pi-coding-agent-test-quit/*"))
     (should-not (get-buffer "*pi-coding-agent-input:/tmp/pi-coding-agent-test-quit/*"))))
 
+(defmacro pi-coding-agent-test--with-quit-confirmable-session
+    (binding-spec &rest body)
+  "Run BODY with a pi session whose live process would prompt on quit.
+BINDING-SPEC is (DIR CHAT-NAME INPUT-NAME PROC).  DIR is evaluated once."
+  (declare (indent 1) (debug t))
+  (let ((dir (nth 0 binding-spec))
+        (chat-name (nth 1 binding-spec))
+        (input-name (nth 2 binding-spec))
+        (proc (nth 3 binding-spec))
+        (dir-value (make-symbol "dir-value")))
+    `(let* ((,dir-value ,dir)
+            (,chat-name (pi-coding-agent-test--chat-buffer-name ,dir-value))
+            (,input-name (pi-coding-agent-test--input-buffer-name ,dir-value))
+            (,proc nil))
+       (make-directory ,dir-value t)
+       (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                 ((symbol-function 'pi-coding-agent--start-process)
+                  (lambda (_)
+                    (setq ,proc (start-process "pi-test-quit" nil "cat"))
+                    (set-process-query-on-exit-flag ,proc t)
+                    ,proc))
+                 ((symbol-function 'pi-coding-agent--display-buffers) #'ignore))
+         (unwind-protect
+             (progn
+               (let ((default-directory ,dir-value))
+                 (pi-coding-agent))
+               (with-current-buffer ,chat-name
+                 (set-process-buffer ,proc (current-buffer)))
+               ,@body)
+           (when (and ,proc (process-live-p ,proc))
+             (delete-process ,proc))
+           (pi-coding-agent-test--kill-session-buffers ,dir-value))))))
+
 (ert-deftest pi-coding-agent-test-quit-cancelled-preserves-session ()
   "When user cancels quit confirmation, both buffers remain intact and linked."
-  (let* ((dir "/tmp/pi-coding-agent-test-quit-cancel/")
-         (chat-name (concat "*pi-coding-agent-chat:" dir "*"))
-         (input-name (concat "*pi-coding-agent-input:" dir "*"))
-         (fake-proc nil))
-    (make-directory dir t)
-    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pi-coding-agent--start-process)
-               (lambda (_)
-                 ;; Create a real process that triggers kill confirmation
-                 (setq fake-proc (start-process "pi-test-quit" nil "cat"))
-                 (set-process-query-on-exit-flag fake-proc t)
-                 fake-proc))
-              ((symbol-function 'pi-coding-agent--display-buffers) #'ignore))
-      (unwind-protect
-          (progn
-            (let ((default-directory dir))
-              (pi-coding-agent))
-            ;; Associate process with chat buffer (as the real code does)
-            (with-current-buffer chat-name
-              (set-process-buffer fake-proc (current-buffer)))
-            ;; User says "no" to quit confirmation - expect user-error
-            (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) nil)))
-              (with-current-buffer input-name
-                (should-error (pi-coding-agent-quit) :type 'user-error)))
-            ;; Both buffers should still exist
-            (should (get-buffer chat-name))
-            (should (get-buffer input-name))
-            ;; Buffers should still be linked
-            (with-current-buffer chat-name
-              (should (eq (pi-coding-agent--get-input-buffer)
-                          (get-buffer input-name))))
-            (with-current-buffer input-name
-              (should (eq (pi-coding-agent--get-chat-buffer)
-                          (get-buffer chat-name)))))
-        ;; Cleanup
-        (when (and fake-proc (process-live-p fake-proc))
-          (delete-process fake-proc))
-        (ignore-errors (kill-buffer chat-name))
-        (ignore-errors (kill-buffer input-name))))))
+  (pi-coding-agent-test--with-quit-confirmable-session
+      ("/tmp/pi-coding-agent-test-quit-cancel/" chat-name input-name _proc)
+    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) nil)))
+      (with-current-buffer input-name
+        (should-error (pi-coding-agent-quit) :type 'user-error)))
+    (should (get-buffer chat-name))
+    (should (get-buffer input-name))
+    (with-current-buffer chat-name
+      (should (eq (pi-coding-agent--get-input-buffer)
+                  (get-buffer input-name))))
+    (with-current-buffer input-name
+      (should (eq (pi-coding-agent--get-chat-buffer)
+                  (get-buffer chat-name))))))
 
 (ert-deftest pi-coding-agent-test-quit-confirmed-kills-both ()
   "When user confirms quit, both buffers are killed without double-prompting."
-  (let* ((dir "/tmp/pi-coding-agent-test-quit-confirm/")
-         (chat-name (concat "*pi-coding-agent-chat:" dir "*"))
-         (input-name (concat "*pi-coding-agent-input:" dir "*"))
-         (fake-proc nil)
-         (prompt-count 0))
-    (make-directory dir t)
-    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
-              ((symbol-function 'pi-coding-agent--start-process)
-               (lambda (_)
-                 (setq fake-proc (start-process "pi-test-quit" nil "cat"))
-                 (set-process-query-on-exit-flag fake-proc t)
-                 fake-proc))
-              ((symbol-function 'pi-coding-agent--display-buffers) #'ignore))
-      (unwind-protect
-          (progn
-            (let ((default-directory dir))
-              (pi-coding-agent))
-            (with-current-buffer chat-name
-              (set-process-buffer fake-proc (current-buffer)))
-            ;; User says "yes" - count how many times we're asked
-            (cl-letf (((symbol-function 'yes-or-no-p)
-                       (lambda (_)
-                         (cl-incf prompt-count)
-                         t)))
-              (with-current-buffer input-name
-                (pi-coding-agent-quit)))
-            ;; Both buffers should be gone
-            (should-not (get-buffer chat-name))
-            (should-not (get-buffer input-name))
-            ;; Should only be asked once (not twice due to cross-linked hooks)
-            (should (<= prompt-count 1)))
-        ;; Cleanup
-        (when (and fake-proc (process-live-p fake-proc))
-          (delete-process fake-proc))
-        (ignore-errors (kill-buffer chat-name))
-        (ignore-errors (kill-buffer input-name))))))
+  (let ((prompt-count 0))
+    (pi-coding-agent-test--with-quit-confirmable-session
+        ("/tmp/pi-coding-agent-test-quit-confirm/" chat-name input-name _proc)
+      (cl-letf (((symbol-function 'yes-or-no-p)
+                 (lambda (_)
+                   (cl-incf prompt-count)
+                   t)))
+        (with-current-buffer input-name
+          (pi-coding-agent-quit)))
+      (should-not (get-buffer chat-name))
+      (should-not (get-buffer input-name))
+      (should (<= prompt-count 1)))))
+
+(ert-deftest pi-coding-agent-test-quit-without-confirmation-kills-both-without-prompt ()
+  "When configured, quitting a live session kills both buffers without prompting."
+  (let ((pi-coding-agent-quit-without-confirmation t))
+    (pi-coding-agent-test--with-quit-confirmable-session
+        ("/tmp/pi-coding-agent-test-quit-no-confirm/" chat-name input-name _proc)
+      (cl-letf (((symbol-function 'yes-or-no-p)
+                 (lambda (&rest _)
+                   (ert-fail "pi-coding-agent-quit prompted unexpectedly"))))
+        (with-current-buffer input-name
+          (pi-coding-agent-quit)))
+      (should-not (get-buffer chat-name))
+      (should-not (get-buffer input-name)))))
 
 (ert-deftest pi-coding-agent-test-kill-chat-kills-input ()
   "Killing chat buffer also kills input buffer."

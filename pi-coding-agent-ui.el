@@ -166,6 +166,14 @@ When nil (the default), only the visible text is copied."
   :type 'boolean
   :group 'pi-coding-agent)
 
+(defcustom pi-coding-agent-quit-without-confirmation nil
+  "Whether `pi-coding-agent-quit' skips confirmation for a live process.
+When non-nil, quitting a session never asks whether a running pi process
+should be terminated.  When nil, `pi-coding-agent-quit' prompts before
+killing a live process that still has its query-on-exit flag enabled."
+  :type 'boolean
+  :group 'pi-coding-agent)
+
 (defcustom pi-coding-agent-hot-tail-turn-count 3
   "How many recent headed chat turns stay hot for redisplay refreshes.
 The hot tail is the suffix of the chat buffer beginning at the Nth newest
