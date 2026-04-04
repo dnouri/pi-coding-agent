@@ -34,7 +34,7 @@
 ;;
 ;; Requirements:
 ;;   - Emacs 29.1 or later (tree-sitter support required)
-;;   - pi coding agent 0.52.9 or later, installed and in PATH
+;;   - pi coding agent 0.65.0 or later, installed and in PATH
 ;;   - tree-sitter grammars for markdown and markdown-inline
 ;;
 ;; pi-coding-agent uses `md-ts-mode` for its chat buffers only; loading it
