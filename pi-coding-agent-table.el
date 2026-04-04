@@ -80,14 +80,13 @@ buffers are not affected by the visibility guard."
        (null (get-buffer-window (current-buffer)))))
 
 (defun pi-coding-agent--chat-window-width ()
-  "Return the current buffer's visible chat width, or nil if hidden."
+  "Return usable character columns for the chat window, or nil if hidden.
+Excludes columns reserved by fringes such as line-number display."
   (when-let* ((window (get-buffer-window (current-buffer) nil)))
-    (window-width window)))
+    (window-max-chars-per-line window)))
 
-(defun pi-coding-agent--table-display-width ()
-  "Return the width to use for table wrapping.
-Uses the visible chat window width when available, falling back to 80
-columns for hidden or batch-rendered buffers."
+(defun pi-coding-agent--chat-display-width ()
+  "Return the usable character width of the chat window, or 80 if hidden."
   (or (pi-coding-agent--chat-window-width) 80))
 
 ;;;; Hot-Tail Resize Refresh
@@ -202,16 +201,16 @@ so the hot-tail refresh hook can catch up on visibility."
         (setq pi-coding-agent--table-decoration-pending t)
       (let* ((start (marker-position pi-coding-agent--message-start-marker))
              (end (marker-position pi-coding-agent--streaming-marker))
-             (regions (pi-coding-agent--treesit-table-regions start end))
-             (width (pi-coding-agent--table-display-width)))
-        (setq pi-coding-agent--last-table-display-width width)
+             (regions (pi-coding-agent--treesit-table-regions start end)))
         (when-let* ((last-region (car (last regions))))
-          (when (pi-coding-agent--table-has-data-row-p
-                 (car last-region) (cdr last-region))
-            (pi-coding-agent--remove-table-overlays
-             (car last-region) (cdr last-region))
-            (pi-coding-agent--decorate-table
-             (car last-region) (cdr last-region) width)))))))
+          (let ((width (pi-coding-agent--chat-display-width)))
+            (setq pi-coding-agent--last-table-display-width width)
+            (when (pi-coding-agent--table-has-data-row-p
+                   (car last-region) (cdr last-region))
+              (pi-coding-agent--remove-table-overlays
+               (car last-region) (cdr last-region))
+              (pi-coding-agent--decorate-table
+               (car last-region) (cdr last-region) width))))))))
 
 ;;;; Row Helpers
 
@@ -586,11 +585,11 @@ blank-line spacing between a table and following text is not collapsed."
 (defun pi-coding-agent--decorate-tables-in-region (beg end &optional width)
   "Decorate complete pipe tables in BEG..END with display overlays.
 WIDTH is the target display width; defaults to the value from
-`pi-coding-agent--table-display-width'.  Tables inside fenced code
+`pi-coding-agent--chat-display-width'.  Tables inside fenced code
 blocks are skipped (tree-sitter excludes them automatically), and
 header-only tables are left undecorated until they gain a data row.
 Idempotent: existing table overlays in the region are removed first."
-  (let ((width (or width (pi-coding-agent--table-display-width)))
+  (let ((width (or width (pi-coding-agent--chat-display-width)))
          ;; Defer GC during batch decoration to reduce pause frequency.
          ;; 8 MB threshold prevents inter-call GC during consecutive
          ;; decoration passes (e.g., resize sweeps).  Standard pattern

@@ -3842,7 +3842,8 @@ during streaming updates."
   (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
     (let ((pi-coding-agent-tool-preview-lines 3)
           (content (concat (make-string 36 ?x) "\nline2\nline3\n")))
-      (cl-letf (((symbol-function 'window-width) (lambda (&rest _) 10)))
+      (cl-letf (((symbol-function 'pi-coding-agent--chat-window-width)
+                 (lambda () 10)))
         (pi-coding-agent-test--send-delta
          "write" `(:path "/tmp/foo.py" :content ,content))
         (let* ((content-lines (pi-coding-agent-test--pending-tool-content-lines))
@@ -3859,7 +3860,8 @@ during streaming updates."
   (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
     (let ((pi-coding-agent-tool-preview-lines 2)
           (content "def very_long_function_name_that_wraps_many_times(arg):\nline2\n"))
-      (cl-letf (((symbol-function 'window-width) (lambda (&rest _) 10)))
+      (cl-letf (((symbol-function 'pi-coding-agent--chat-window-width)
+                 (lambda () 10)))
         (pi-coding-agent-test--send-delta
          "write" `(:path "/tmp/foo.py" :content ,content)))
       ;; Simulate jit-lock redisplay trigger

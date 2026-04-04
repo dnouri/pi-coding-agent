@@ -808,5 +808,17 @@ what the parser recognizes as a `pipe_table'."
     (pi-coding-agent--display-message-delta "| Auth | Done |\n")
     (should (>= (pi-coding-agent-test--table-overlay-count) 1))))
 
+(ert-deftest pi-coding-agent-test-chat-window-width-excludes-fringe-columns ()
+  "Chat window width reports usable character columns, not raw window width.
+When fringes like `display-line-numbers-mode' consume columns,
+`--chat-window-width' must return only the columns available for text."
+  (with-temp-buffer
+    (let ((fake-window (selected-window)))
+      (cl-letf (((symbol-function 'get-buffer-window)
+                 (lambda (&rest _) fake-window))
+                ((symbol-function 'window-max-chars-per-line)
+                 (lambda (&optional _window _face) 76)))
+        (should (= (pi-coding-agent--chat-window-width) 76))))))
+
 (provide 'pi-coding-agent-table-test)
 ;;; pi-coding-agent-table-test.el ends here

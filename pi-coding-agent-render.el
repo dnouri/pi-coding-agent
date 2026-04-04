@@ -1440,7 +1440,8 @@ shows complete lines only)."
              (tail-content (or (car tail-result) ""))
              (has-hidden (cdr tail-result))
              (truncation (pi-coding-agent--truncate-to-visual-lines
-                          tail-content max-lines (or (window-width) 80)))
+                          tail-content max-lines
+                          (pi-coding-agent--chat-display-width)))
              (display-content
               (string-trim-right
                (or (plist-get truncation :content) "")
@@ -1529,7 +1530,7 @@ if none exists, render the result at point without a live overlay."
                           ("bash" pi-coding-agent-bash-preview-lines)
                           (_ pi-coding-agent-tool-preview-lines)))
          ;; Use visual line truncation with byte limit
-         (width (or (window-width) 80))
+         (width (pi-coding-agent--chat-display-width))
          (truncation (pi-coding-agent--truncate-to-visual-lines
                       display-content preview-limit width))
          (hidden-count (plist-get truncation :hidden-lines))
