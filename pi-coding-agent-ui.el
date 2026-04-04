@@ -101,8 +101,12 @@ Some operations like model loading may need more time."
   :group 'pi-coding-agent)
 
 (defcustom pi-coding-agent-input-window-height 10
-  "Height of the input window in lines."
-  :type 'natnum
+  "Height of the input window.
+An integer specifies an absolute number of lines.
+A float between 0.0 and 1.0 (exclusive) specifies a fraction of the
+total window height, e.g. 0.3 means 30% for input."
+  :type '(choice (natnum :tag "Lines")
+                 (float :tag "Fraction (0.0–1.0)"))
   :group 'pi-coding-agent)
 
 (defcustom pi-coding-agent-separator-width 72
@@ -565,6 +569,8 @@ This is a read-only buffer showing the conversation history."
 
   (add-hook 'window-configuration-change-hook
             #'pi-coding-agent--maybe-refresh-hot-tail-tables nil t)
+  (add-hook 'window-size-change-functions
+            #'pi-coding-agent--maybe-rebalance-windows)
   (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-on-kill nil t))
 
 (defun pi-coding-agent-complete ()
@@ -964,15 +970,50 @@ Works from either chat or input buffer."
   (>= (window-total-height window)
       (* 2 window-min-height)))
 
-(defun pi-coding-agent--input-height-for-window (window)
-  "Return input pane height to use when splitting WINDOW.
-Clamps `pi-coding-agent-input-window-height' to the maximum that still
-leaves at least `window-min-height' lines for chat."
-  (let* ((window-height (window-total-height window))
-         (max-input-height (- window-height window-min-height)))
+(defun pi-coding-agent--input-height-for-window-height (total)
+  "Compute input pane height for a container of TOTAL lines.
+When `pi-coding-agent-input-window-height' is an integer, use it directly.
+When it is a float, compute the height as that fraction of TOTAL.
+In both cases, clamp the result to the range
+\[`window-min-height', TOTAL - `window-min-height']."
+  (let* ((max-input-height (- total window-min-height))
+         (raw (if (floatp pi-coding-agent-input-window-height)
+                  (round (* pi-coding-agent-input-window-height total))
+                pi-coding-agent-input-window-height)))
     (max window-min-height
-         (min pi-coding-agent-input-window-height
-              max-input-height))))
+         (min raw max-input-height))))
+
+(defun pi-coding-agent--input-height-for-window (window)
+  "Return input pane height to use when splitting WINDOW."
+  (pi-coding-agent--input-height-for-window-height
+   (window-total-height window)))
+
+(defun pi-coding-agent--rebalance-input-window (chat-win input-win)
+  "Adjust INPUT-WIN height to match the configured ratio.
+CHAT-WIN and INPUT-WIN must be a vertically stacked pair.
+Only resizes when `pi-coding-agent-input-window-height' is a float."
+  (when (and (floatp pi-coding-agent-input-window-height)
+             (window-live-p chat-win)
+             (window-live-p input-win))
+    (let* ((total (+ (window-total-height chat-win)
+                     (window-total-height input-win)))
+           (target (pi-coding-agent--input-height-for-window-height total))
+           (current (window-total-height input-win))
+           (delta (- target current)))
+      (unless (zerop delta)
+        (window-resize input-win delta nil t)))))
+
+(defun pi-coding-agent--maybe-rebalance-windows (_frame)
+  "Rebalance pi chat/input window pairs after a frame size change.
+Intended for `window-size-change-functions'."
+  (when (floatp pi-coding-agent-input-window-height)
+    (dolist (win (window-list nil 'no-mini))
+      (when-let* ((input-buf (buffer-local-value
+                              'pi-coding-agent--input-buffer
+                              (window-buffer win)))
+                  (input-win (get-buffer-window input-buf)))
+        (unless (eq win input-win)
+          (pi-coding-agent--rebalance-input-window win input-win))))))
 
 (defun pi-coding-agent--windows-by-height (&optional windows)
   "Return live WINDOWS sorted by descending height.

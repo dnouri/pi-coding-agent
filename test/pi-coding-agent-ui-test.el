@@ -1246,5 +1246,89 @@ Catches wiring bugs like requiring deleted modules."
       (should essential-called)
       (should optional-called))))
 
+;;; Input Window Height (integer and float ratio)
+
+(ert-deftest pi-coding-agent-test-input-height-integer-returns-configured-value ()
+  "Integer setting returns that many lines when window is large enough."
+  (let ((pi-coding-agent-input-window-height 10)
+        (window-min-height 4))
+    (should (= (pi-coding-agent--input-height-for-window-height 40) 10))))
+
+(ert-deftest pi-coding-agent-test-input-height-integer-clamps-to-max ()
+  "Integer setting clamps when window is too small."
+  (let ((pi-coding-agent-input-window-height 10)
+        (window-min-height 4))
+    (should (= (pi-coding-agent--input-height-for-window-height 12) 8))))
+
+(ert-deftest pi-coding-agent-test-input-height-float-computes-ratio ()
+  "Float setting computes height as fraction of total."
+  (let ((pi-coding-agent-input-window-height 0.3)
+        (window-min-height 4))
+    (should (= (pi-coding-agent--input-height-for-window-height 40) 12))))
+
+(ert-deftest pi-coding-agent-test-input-height-float-clamps-to-min ()
+  "Float setting clamps up to window-min-height for tiny ratios."
+  (let ((pi-coding-agent-input-window-height 0.05)
+        (window-min-height 4))
+    (should (= (pi-coding-agent--input-height-for-window-height 40) 4))))
+
+(ert-deftest pi-coding-agent-test-input-height-float-clamps-to-max ()
+  "Float setting clamps down to preserve chat min-height."
+  (let ((pi-coding-agent-input-window-height 0.9)
+        (window-min-height 4))
+    (should (= (pi-coding-agent--input-height-for-window-height 40) 36))))
+
+(ert-deftest pi-coding-agent-test-input-height-float-small-window ()
+  "Float ratio on a small total still respects min heights."
+  (let ((pi-coding-agent-input-window-height 0.3)
+        (window-min-height 4))
+    (should (= (pi-coding-agent--input-height-for-window-height 10) 4))))
+
+;;; Dynamic ratio rebalancing
+
+(defmacro pi-coding-agent-test-with-split-layout (&rest body)
+  "Execute BODY with a chat/input window pair.
+Binds `chat-win' and `input-win' for use in BODY."
+  (declare (indent 0) (debug t))
+  `(with-temp-buffer
+     (pi-coding-agent-chat-mode)
+     (let ((input-buf (generate-new-buffer " *test-input*")))
+       (unwind-protect
+           (progn
+             (setq-local pi-coding-agent--input-buffer input-buf)
+             (delete-other-windows)
+             (switch-to-buffer (current-buffer))
+             (let* ((input-win (split-window nil -10 'below))
+                    (chat-win (selected-window)))
+               (set-window-buffer input-win input-buf)
+               ,@body))
+         (when (buffer-live-p input-buf)
+           (kill-buffer input-buf))))))
+
+(ert-deftest pi-coding-agent-test-rebalance-adjusts-float-ratio ()
+  "Rebalance resizes input window to match float ratio."
+  (let ((pi-coding-agent-input-window-height 0.3))
+    (pi-coding-agent-test-with-split-layout
+      (pi-coding-agent--rebalance-input-window chat-win input-win)
+      (let* ((total (+ (window-total-height chat-win)
+                       (window-total-height input-win)))
+             (expected (pi-coding-agent--input-height-for-window-height total)))
+        (should (= (window-total-height input-win) expected))))))
+
+(ert-deftest pi-coding-agent-test-rebalance-skips-integer-height ()
+  "Rebalance is a no-op when height is an integer."
+  (let ((pi-coding-agent-input-window-height 10))
+    (pi-coding-agent-test-with-split-layout
+      (let ((before (window-total-height input-win)))
+        (pi-coding-agent--rebalance-input-window chat-win input-win)
+        (should (= (window-total-height input-win) before))))))
+
+(ert-deftest pi-coding-agent-test-chat-mode-adds-size-change-hook ()
+  "Chat mode installs the window-size-change rebalance hook."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (should (memq #'pi-coding-agent--maybe-rebalance-windows
+                  window-size-change-functions))))
+
 (provide 'pi-coding-agent-ui-test)
 ;;; pi-coding-agent-ui-test.el ends here
