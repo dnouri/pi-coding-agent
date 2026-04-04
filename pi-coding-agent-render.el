@@ -575,13 +575,15 @@ Shows success or final failure with raw error."
     (force-mode-line-update t)))
 
 (defun pi-coding-agent--extension-ui-unsupported (event proc)
-  "Handle unsupported method from EVENT by sending cancelled via PROC."
+  "Handle unsupported method from EVENT by warning and sending cancelled via PROC.
+See URL `https://github.com/dnouri/pi-coding-agent/issues/176'."
+  (message "Pi: extension UI method `%s' not supported in Emacs"
+           (plist-get event :method))
   (when proc
-    (pi-coding-agent--rpc-async proc
-                   (list :type "extension_ui_response"
-                         :id (plist-get event :id)
-                         :cancelled t)
-                   #'ignore)))
+    (pi-coding-agent--send-extension-ui-response
+     proc (list :type "extension_ui_response"
+                :id (plist-get event :id)
+                :cancelled t))))
 
 (defun pi-coding-agent--handle-extension-ui-request (event)
   "Handle extension_ui_request EVENT from pi.

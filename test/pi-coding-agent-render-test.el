@@ -1249,6 +1249,28 @@ since we don't display them locally. Let pi's message_start handle it."
        :message nil))
     (should (null pi-coding-agent--working-message))))
 
+(ert-deftest pi-coding-agent-test-extension-ui-unsupported-warns ()
+  "Unsupported extension_ui_request method warns via `message'.
+See https://github.com/dnouri/pi-coding-agent/issues/176."
+  (let (messages-logged response-sent)
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) messages-logged)))
+              ((symbol-function 'pi-coding-agent--send-extension-ui-response)
+               (lambda (_proc resp) (setq response-sent resp))))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (let ((pi-coding-agent--process t))
+          (pi-coding-agent--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-unknown"
+             :method "someNewFancyWidget")))))
+    ;; Should warn the user
+    (should (cl-some (lambda (m) (string-match-p "someNewFancyWidget" m))
+                     messages-logged))
+    ;; Should still send cancelled so the extension doesn't hang
+    (should response-sent)
+    (should (equal (plist-get response-sent :cancelled) t))))
+
 (ert-deftest pi-coding-agent-test-header-format-extension-status ()
   "Extension status formatter returns inline neutral status text without pipe."
   ;; Empty status returns empty string
@@ -1271,9 +1293,10 @@ since we don't display them locally. Let pi's message_start handle it."
 (ert-deftest pi-coding-agent-test-extension-ui-unknown-cancels ()
   "extension_ui_request with unknown method sends cancelled response."
   (let ((response-sent nil))
-    (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
-               (lambda (_proc msg _cb)
-                 (setq response-sent msg))))
+    (cl-letf (((symbol-function 'pi-coding-agent--send-extension-ui-response)
+               (lambda (_proc msg)
+                 (setq response-sent msg)))
+              ((symbol-function 'message) #'ignore))
       (with-temp-buffer
         (pi-coding-agent-chat-mode)
         (let ((pi-coding-agent--process t))
@@ -1291,9 +1314,10 @@ since we don't display them locally. Let pi's message_start handle it."
 (ert-deftest pi-coding-agent-test-extension-ui-editor-cancels ()
   "extension_ui_request editor method sends cancelled (not supported)."
   (let ((response-sent nil))
-    (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
-               (lambda (_proc msg _cb)
-                 (setq response-sent msg))))
+    (cl-letf (((symbol-function 'pi-coding-agent--send-extension-ui-response)
+               (lambda (_proc msg)
+                 (setq response-sent msg)))
+              ((symbol-function 'message) #'ignore))
       (with-temp-buffer
         (pi-coding-agent-chat-mode)
         (let ((pi-coding-agent--process t))
