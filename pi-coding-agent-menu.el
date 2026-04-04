@@ -273,7 +273,6 @@ Call this when starting a new session to ensure no stale state persists."
         pi-coding-agent--tool-block-order-counter 0
         pi-coding-agent--activity-phase "idle")
   ;; Use accessors for cross-module state
-  (pi-coding-agent--set-last-usage nil)
   (pi-coding-agent--clear-followup-queue)
   (pi-coding-agent--set-aborted nil)
   (pi-coding-agent--set-message-start-marker nil)
@@ -308,12 +307,9 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
                        (let* ((messages (plist-get (plist-get response :data) :messages))
                               (count (if (vectorp messages) (length messages) 0)))
                          (pi-coding-agent--display-session-history messages chat-buf)
-                         ;; Restore context usage from last assistant message
-                         ;; (ensures context % displays correctly after resume/fork)
+                         ;; Refresh header after loading history (resume/fork).
                          (when (buffer-live-p chat-buf)
                            (with-current-buffer chat-buf
-                             (pi-coding-agent--set-last-usage
-                              (pi-coding-agent--extract-last-usage messages))
                              (pi-coding-agent--refresh-header)))
                          (when callback
                            (funcall callback count))))))))

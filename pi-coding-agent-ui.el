@@ -793,32 +793,6 @@ Returns non-nil when the phase changed."
   "Cached session statistics for header-line display.
 Updated after each agent turn completes.")
 
-(defvar-local pi-coding-agent--last-usage nil
-  "Usage from last assistant message for context percentage.
-This is the per-turn usage, not cumulative - used to calculate
-how much of the context window was used in the last turn.")
-
-(defun pi-coding-agent--set-last-usage (usage)
-  "Set the last assistant message USAGE for context percentage."
-  (setq pi-coding-agent--last-usage usage))
-
-(defun pi-coding-agent--extract-last-usage (messages)
-  "Extract usage from the last non-aborted assistant message in MESSAGES.
-MESSAGES is a vector of message plists from get_messages RPC.
-Returns the usage plist, or nil if no valid assistant message found.
-Skips aborted messages as they may have incomplete usage data."
-  (when (vectorp messages)
-    (let ((i (1- (length messages)))
-          (result nil))
-      (while (and (>= i 0) (not result))
-        (let ((msg (aref messages i)))
-          (when (and (equal (plist-get msg :role) "assistant")
-                     (not (equal (plist-get msg :stopReason) "aborted"))
-                     (plist-get msg :usage))
-            (setq result (plist-get msg :usage))))
-        (setq i (1- i)))
-      result)))
-
 (defvar-local pi-coding-agent--aborted nil
   "Non-nil if the current/last request was aborted.")
 
@@ -900,9 +874,8 @@ Extracted from session_info entries when session is loaded or switched.")
 
 (defvar-local pi-coding-agent--commands nil
   "List of available commands from pi.
-Each entry is a plist with at least :name, :source, and :description.
-After normalization, commands may also carry :location and :path
-\(lifted from the wire-level sourceInfo object).
+Each entry is a plist with :name, :source, and :description.
+Optional :location (\"user\" or \"project\") and :path may be present.
 Source is \"prompt\", \"extension\", or \"skill\".")
 
 (defvar pi-coding-agent--builtin-commands
@@ -1367,44 +1340,40 @@ Removes common prefixes like \"Claude \" and suffixes like \" (latest)\"."
     map)
   "Keymap for clicking thinking level in header-line.")
 
-(defun pi-coding-agent--header-format-context (context-tokens context-window)
-  "Format context usage as percentage with color coding.
-CONTEXT-TOKENS is the tokens used, CONTEXT-WINDOW is the max.
-When CONTEXT-TOKENS is nil, usage is unknown and rendered as \"?\".
+(defun pi-coding-agent--header-format-context (percent context-window)
+  "Format context usage for header-line display.
+PERCENT is context usage (0–100), CONTEXT-WINDOW is the max tokens.
+When PERCENT is nil, usage is unknown and rendered as \"?\".
 Returns nil if CONTEXT-WINDOW is 0."
   (when (> context-window 0)
-    (if (null context-tokens)
+    (if (null percent)
         (format " ?/%s" (pi-coding-agent--format-tokens-compact context-window))
-      (let* ((pct (* (/ (float context-tokens) context-window) 100))
-             (pct-str (pi-coding-agent--header-escape-text
-                       (format " %.1f%%/%s" pct
-                               (pi-coding-agent--format-tokens-compact context-window)))))
+      (let ((pct-str (pi-coding-agent--header-escape-text
+                      (format " %.1f%%/%s" percent
+                              (pi-coding-agent--format-tokens-compact context-window)))))
         (propertize pct-str
                     'face (cond
-                           ((> pct pi-coding-agent-context-error-threshold) 'error)
-                           ((> pct pi-coding-agent-context-warning-threshold) 'warning)
+                           ((> percent pi-coding-agent-context-error-threshold) 'error)
+                           ((> percent pi-coding-agent-context-warning-threshold) 'warning)
                            (t nil)))))))
 
-(defun pi-coding-agent--header-format-stats (stats last-usage model-obj)
+(defun pi-coding-agent--header-format-stats (stats)
   "Format compact header stats from STATS.
-Shows only cumulative session cost and last-turn context usage.
-LAST-USAGE is the most recent message's token usage.
-MODEL-OBJ contains model info including context window.
+Shows cumulative session cost and server-provided context percentage.
 Returns nil if STATS is nil."
   (when stats
     (let* ((cost (or (plist-get stats :cost) 0))
-           ;; Context percentage from LAST message usage, not cumulative totals.
-           ;; After compaction, usage is unknown until the next assistant message.
-           (context-tokens (when last-usage
-                             (+ (or (plist-get last-usage :input) 0)
-                                (or (plist-get last-usage :output) 0)
-                                (or (plist-get last-usage :cacheRead) 0)
-                                (or (plist-get last-usage :cacheWrite) 0))))
-           (context-window (or (plist-get model-obj :contextWindow) 0)))
+           (ctx (plist-get stats :contextUsage))
+           (raw-tokens (and ctx (plist-get ctx :tokens)))
+           (percent (if (or (null raw-tokens)
+                            (pi-coding-agent--json-null-p raw-tokens))
+                        nil
+                      (plist-get ctx :percent)))
+           (context-window (or (and ctx (plist-get ctx :contextWindow)) 0)))
       (concat
        " │"
        (format " $%.2f" cost)
-       (pi-coding-agent--header-format-context context-tokens context-window)))))
+       (pi-coding-agent--header-format-context percent context-window)))))
 
 (defun pi-coding-agent--header-escape-text (text)
   "Escape TEXT for use in `header-line-format'."
@@ -1477,7 +1446,6 @@ Accesses state from the linked chat buffer."
                     (t nil)))
          (state (and chat-buf (buffer-local-value 'pi-coding-agent--state chat-buf)))
          (stats (and chat-buf (buffer-local-value 'pi-coding-agent--cached-stats chat-buf)))
-         (last-usage (and chat-buf (buffer-local-value 'pi-coding-agent--last-usage chat-buf)))
          (ext-status (and chat-buf (buffer-local-value 'pi-coding-agent--extension-status chat-buf)))
          (working-message (and chat-buf (buffer-local-value 'pi-coding-agent--working-message chat-buf)))
          (session-name (and chat-buf (buffer-local-value 'pi-coding-agent--session-name chat-buf)))
@@ -1497,7 +1465,7 @@ Accesses state from the linked chat buffer."
                       'face 'pi-coding-agent-activity-phase)))
     (concat
      (pi-coding-agent--header-format-identity model-short thinking activity-phase-str)
-     (pi-coding-agent--header-format-stats stats last-usage model-obj)
+     (pi-coding-agent--header-format-stats stats)
      (pi-coding-agent--header-format-context-group session-name)
      (pi-coding-agent--header-format-extension-group ext-status working-message))))
 

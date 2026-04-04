@@ -1358,93 +1358,6 @@ This ensures history loads correctly when callback runs in arbitrary context."
       (when (buffer-live-p chat-buf)
         (kill-buffer chat-buf)))))
 
-(ert-deftest pi-coding-agent-test-load-session-history-restores-context-usage ()
-  "load-session-history sets last-usage from final assistant message.
-This ensures context percentage is displayed correctly after resume/fork.
-Regression test: context showed 0% after resuming because usage wasn't extracted."
-  (let* ((chat-buf (generate-new-buffer "*pi-coding-agent-chat:test-usage/*"))
-         (rpc-callback nil)
-         ;; Simulate a Fortnite tips conversation with usage data
-         (mock-messages
-          [(:role "user"
-            :content "How do I get better at Fortnite?"
-            :timestamp 1704067200000)
-           (:role "assistant"
-            :content [(:type "text" :text "Here are some tips to improve at Fortnite:\n\n1. **Practice building** - Building is essential\n2. **Land at busy spots** - More combat practice\n3. **Watch pro players** - Learn advanced techniques")]
-            :usage (:input 150 :output 80 :cacheRead 0 :cacheWrite 50)
-            :stopReason "endTurn"
-            :timestamp 1704067260000)
-           (:role "user"
-            :content "What about aiming?"
-            :timestamp 1704067320000)
-           (:role "assistant"
-            :content [(:type "text" :text "For better aim:\n\n1. Lower your sensitivity\n2. Use aim trainers\n3. Practice tracking moving targets")]
-            :usage (:input 280 :output 120 :cacheRead 50 :cacheWrite 30)
-            :stopReason "endTurn"
-            :timestamp 1704067380000)]))
-    (unwind-protect
-        (progn
-          (with-current-buffer chat-buf
-            (pi-coding-agent-chat-mode)
-            ;; Ensure usage starts as nil
-            (should-not pi-coding-agent--last-usage))
-          ;; Mock RPC to capture callback
-          (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
-                     (lambda (_proc _cmd cb) (setq rpc-callback cb))))
-            (pi-coding-agent--load-session-history 'mock-proc nil chat-buf))
-          ;; Simulate RPC response with our mock messages
-          (funcall rpc-callback
-                   `(:success t :data (:messages ,mock-messages)))
-          ;; Verify last-usage was extracted from final assistant message
-          (with-current-buffer chat-buf
-            (should pi-coding-agent--last-usage)
-            (should (equal (plist-get pi-coding-agent--last-usage :input) 280))
-            (should (equal (plist-get pi-coding-agent--last-usage :output) 120))
-            (should (equal (plist-get pi-coding-agent--last-usage :cacheRead) 50))
-            (should (equal (plist-get pi-coding-agent--last-usage :cacheWrite) 30))))
-      (when (buffer-live-p chat-buf)
-        (kill-buffer chat-buf)))))
-
-(ert-deftest pi-coding-agent-test-load-session-history-skips-aborted-usage ()
-  "load-session-history skips aborted messages when extracting usage.
-Aborted messages may have incomplete usage data."
-  (let* ((chat-buf (generate-new-buffer "*pi-coding-agent-chat:test-aborted/*"))
-         (rpc-callback nil)
-         ;; Session where last message was aborted
-         (mock-messages
-          [(:role "user"
-            :content "Tell me about Fortnite"
-            :timestamp 1704067200000)
-           (:role "assistant"
-            :content [(:type "text" :text "Fortnite is a battle royale game...")]
-            :usage (:input 100 :output 50 :cacheRead 0 :cacheWrite 20)
-            :stopReason "endTurn"
-            :timestamp 1704067260000)
-           (:role "user"
-            :content "More details"
-            :timestamp 1704067320000)
-           (:role "assistant"
-            :content [(:type "text" :text "Well...")]
-            :usage (:input 0 :output 0 :cacheRead 0 :cacheWrite 0)
-            :stopReason "aborted"
-            :timestamp 1704067380000)]))
-    (unwind-protect
-        (progn
-          (with-current-buffer chat-buf
-            (pi-coding-agent-chat-mode))
-          (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
-                     (lambda (_proc _cmd cb) (setq rpc-callback cb))))
-            (pi-coding-agent--load-session-history 'mock-proc nil chat-buf))
-          (funcall rpc-callback
-                   `(:success t :data (:messages ,mock-messages)))
-          ;; Should use the non-aborted assistant message's usage
-          (with-current-buffer chat-buf
-            (should pi-coding-agent--last-usage)
-            (should (equal (plist-get pi-coding-agent--last-usage :input) 100))
-            (should (equal (plist-get pi-coding-agent--last-usage :output) 50))))
-      (when (buffer-live-p chat-buf)
-        (kill-buffer chat-buf)))))
-
 (ert-deftest pi-coding-agent-test-session-dir-name ()
   "Session directory name derived from project path."
   (should (equal (pi-coding-agent--session-dir-name "/home/daniel/co/pi-coding-agent")
@@ -2211,9 +2124,8 @@ Pi handles command expansion on the server side."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (setq pi-coding-agent--state '(:model (:name "claude-sonnet-4" :contextWindow 200000))
-          pi-coding-agent--cached-stats '(:tokens (:input 1000 :output 500 :cacheRead 0 :cacheWrite 0)
-                                   :cost 0.05)
-          pi-coding-agent--last-usage '(:input 100 :output 50 :cacheRead 0 :cacheWrite 0)
+          pi-coding-agent--cached-stats '(:cost 0.05
+                                   :contextUsage (:tokens 150 :contextWindow 200000 :percent 0.075))
           pi-coding-agent--session-name "My Session"
           pi-coding-agent--extension-status nil
           pi-coding-agent--working-message nil)
@@ -2230,9 +2142,8 @@ Pi handles command expansion on the server side."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (setq pi-coding-agent--state '(:model (:name "claude-sonnet-4" :contextWindow 200000))
-          pi-coding-agent--cached-stats '(:tokens (:input 1000 :output 500 :cacheRead 0 :cacheWrite 0)
-                                   :cost 0.05)
-          pi-coding-agent--last-usage '(:input 100 :output 50 :cacheRead 0 :cacheWrite 0)
+          pi-coding-agent--cached-stats '(:cost 0.05
+                                   :contextUsage (:tokens 150 :contextWindow 200000 :percent 0.075))
           pi-coding-agent--session-name "My Session"
           pi-coding-agent--extension-status '(("ext" . "Git: synced"))
           pi-coding-agent--working-message "📖 Skimming…")
@@ -2418,41 +2329,28 @@ Pi handles command expansion on the server side."
 
 (ert-deftest pi-coding-agent-test-header-format-context-returns-nil-when-no-window ()
   "Context format returns nil when context window is 0."
-  (should (null (pi-coding-agent--header-format-context 1000 0))))
+  (should (null (pi-coding-agent--header-format-context 25.0 0))))
 
 (ert-deftest pi-coding-agent-test-header-format-context-shows-percentage ()
   "Context format shows percentage and window size."
-  (let ((result (pi-coding-agent--header-format-context 50000 200000)))
+  (let ((result (pi-coding-agent--header-format-context 25.0 200000)))
     (should (string-match-p "25.0%%" result))
     (should (string-match-p "200k" result))))
 
-(ert-deftest pi-coding-agent-test-header-format-context-shows-unknown-when-tokens-missing ()
-  "Context format shows unknown usage when token count is unavailable."
+(ert-deftest pi-coding-agent-test-header-format-context-shows-unknown-when-percent-nil ()
+  "Context format shows unknown usage when percentage is unavailable."
   (let ((result (pi-coding-agent--header-format-context nil 200000)))
     (should (string-match-p "\\?/200k" result))))
 
 (ert-deftest pi-coding-agent-test-header-format-context-warning-over-70 ()
   "Context format uses warning face over 70%."
-  (let ((result (pi-coding-agent--header-format-context 150000 200000)))
+  (let ((result (pi-coding-agent--header-format-context 75.0 200000)))
     (should (eq (get-text-property 0 'face result) 'warning))))
 
 (ert-deftest pi-coding-agent-test-header-format-context-error-over-90 ()
   "Context format uses error face over 90%."
-  (let ((result (pi-coding-agent--header-format-context 190000 200000)))
+  (let ((result (pi-coding-agent--header-format-context 95.0 200000)))
     (should (eq (get-text-property 0 'face result) 'error))))
-
-(ert-deftest pi-coding-agent-test-message-end-updates-usage-for-normal-completion ()
-  "message_end with stopReason=stop updates pi-coding-agent--last-usage."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    (setq pi-coding-agent--last-usage nil)
-    (pi-coding-agent--handle-display-event
-     '(:type "message_end"
-       :message (:role "assistant"
-                 :stopReason "stop"
-                 :usage (:input 1000 :output 500 :cacheRead 200 :cacheWrite 50))))
-    (should pi-coding-agent--last-usage)
-    (should (equal (plist-get pi-coding-agent--last-usage :input) 1000))))
 
 (ert-deftest pi-coding-agent-test-message-end-refreshes-header-for-assistant ()
   "Assistant message_end refreshes header stats for fresher cost updates."
@@ -2480,74 +2378,33 @@ Pi handles command expansion on the server side."
            :message (:role "user" :content "hello"))))
       (should (= refresh-count 0)))))
 
-(ert-deftest pi-coding-agent-test-message-end-updates-usage-for-tool-use ()
-  "message_end with stopReason=toolUse updates pi-coding-agent--last-usage."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    (setq pi-coding-agent--last-usage nil)
-    (pi-coding-agent--handle-display-event
-     '(:type "message_end"
-       :message (:role "assistant"
-                 :stopReason "toolUse"
-                 :usage (:input 2000 :output 300 :cacheRead 100 :cacheWrite 25))))
-    (should pi-coding-agent--last-usage)
-    (should (equal (plist-get pi-coding-agent--last-usage :input) 2000))))
-
-(ert-deftest pi-coding-agent-test-message-end-skips-usage-for-aborted ()
-  "message_end with stopReason=aborted does NOT update pi-coding-agent--last-usage.
-This preserves the previous valid usage for context percentage display."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    ;; Set up previous valid usage
-    (setq pi-coding-agent--last-usage '(:input 5000 :output 1000 :cacheRead 500 :cacheWrite 100))
-    ;; Process an aborted message with zeroed/incomplete usage
-    (pi-coding-agent--handle-display-event
-     '(:type "message_end"
-       :message (:role "assistant"
-                 :stopReason "aborted"
-                 :usage (:input 0 :output 0 :cacheRead 0 :cacheWrite 0))))
-    ;; Should preserve previous usage, not overwrite with zeros
-    (should (equal (plist-get pi-coding-agent--last-usage :input) 5000))))
-
-(ert-deftest pi-coding-agent-test-message-end-updates-usage-for-error ()
-  "message_end with stopReason=error updates pi-coding-agent--last-usage.
-Errors still consume context, so their usage data is valid for display."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    (setq pi-coding-agent--last-usage nil)
-    (pi-coding-agent--handle-display-event
-     '(:type "message_end"
-       :message (:role "assistant"
-                 :stopReason "error"
-                 :usage (:input 3000 :output 100 :cacheRead 400 :cacheWrite 0))))
-    (should pi-coding-agent--last-usage)
-    (should (equal (plist-get pi-coding-agent--last-usage :input) 3000))))
-
 (ert-deftest pi-coding-agent-test-header-format-stats-returns-nil-when-no-stats ()
   "Stats format returns nil when stats is nil."
-  (should (null (pi-coding-agent--header-format-stats nil nil nil))))
+  (should (null (pi-coding-agent--header-format-stats nil))))
 
 (ert-deftest pi-coding-agent-test-header-format-stats-shows-cost-and-context ()
-  "Header stats format shows only cost and context usage."
-  (let* ((stats '(:tokens (:input 1000 :output 500 :cacheRead 2000 :cacheWrite 100)
-                  :cost 0.05))
-         (last-usage '(:input 3000 :output 100 :cacheRead 400 :cacheWrite 0))
-         (model-obj '(:contextWindow 200000))
-         (result (pi-coding-agent--header-format-stats stats last-usage model-obj)))
+  "Header stats shows cost and context percentage from contextUsage."
+  (let* ((stats '(:cost 0.05
+                  :contextUsage (:tokens 3500 :contextWindow 200000 :percent 1.75)))
+         (result (pi-coding-agent--header-format-stats stats)))
     (should (string-match-p "\\$0.05" result))
-    (should (string-match-p "1.8%%/200k" result))
-    (should-not (string-match-p "↑" result))
-    (should-not (string-match-p "↓" result))
-    (should-not (string-match-p "R" result))
-    (should-not (string-match-p "W" result))))
+    (should (string-match-p "1.8%%/200k" result))))
 
-(ert-deftest pi-coding-agent-test-header-format-stats-shows-unknown-context-without-usage ()
-  "Header stats show unknown context when no last assistant usage is available."
-  (let* ((stats '(:tokens (:input 1000 :output 500 :cacheRead 2000 :cacheWrite 100)
-                  :cost 0.05))
-         (model-obj '(:contextWindow 200000))
-         (result (pi-coding-agent--header-format-stats stats nil model-obj)))
+(ert-deftest pi-coding-agent-test-header-format-stats-no-context-without-context-usage ()
+  "Header stats omit context display when contextUsage is absent.
+Without contextUsage there is no context window to display against."
+  (let* ((stats '(:cost 0.05))
+         (result (pi-coding-agent--header-format-stats stats)))
     (should (string-match-p "\\$0.05" result))
+    (should-not (string-match-p "\\?" result))))
+
+(ert-deftest pi-coding-agent-test-header-format-stats-shows-unknown-when-tokens-null ()
+  "Header stats show ? for context when contextUsage.tokens is :null.
+This occurs after compaction before the next assistant message."
+  (let* ((stats '(:cost 0.12
+                  :contextUsage (:tokens :null :contextWindow 200000 :percent 0)))
+         (result (pi-coding-agent--header-format-stats stats)))
+    (should (string-match-p "\\$0.12" result))
     (should (string-match-p "\\?/200k" result))))
 
 ;;; File Reference Completion (@)

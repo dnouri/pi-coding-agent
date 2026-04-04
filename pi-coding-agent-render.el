@@ -758,16 +758,7 @@ Updates buffer-local state and renders display updates."
        ;; Display error if message ended with error (e.g., API error)
        (when (equal (plist-get message :stopReason) "error")
          (pi-coding-agent--display-error (plist-get message :errorMessage)))
-       ;; Capture usage from assistant messages for context % calculation.
-       ;; Skip aborted messages - they may have incomplete usage data and
-       ;; would reset context percentage.  Matches TUI footer.ts behavior.
-       ;; Note: error messages DO have valid usage data (tokens were consumed).
-       (when (and assistant-p
-                  (not (equal (plist-get message :stopReason) "aborted"))
-                  (plist-get message :usage))
-         (pi-coding-agent--set-last-usage (plist-get message :usage)))
-       ;; Refresh cumulative stats after each assistant message_end so
-       ;; cost and totals update without waiting for agent_end.
+       ;; Refresh header so cost and context % update promptly.
        (when assistant-p
          (pi-coding-agent--refresh-header)))
      (pi-coding-agent--render-complete-message))
@@ -2074,7 +2065,6 @@ TOKENS-BEFORE is the pre-compaction token count.
 SUMMARY is the compaction summary text.
 TIMESTAMP is optional time when compaction occurred."
   (pi-coding-agent--display-compaction-result tokens-before summary timestamp)
-  (pi-coding-agent--set-last-usage nil)
   (pi-coding-agent--refresh-header)
   (message "Pi: Compacted from %s tokens" (pi-coding-agent--format-number (or tokens-before 0))))
 

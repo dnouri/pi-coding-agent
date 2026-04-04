@@ -76,9 +76,9 @@
         (should (plist-get first-cmd :source))))))
 
 (pi-coding-agent-integration-deftest
-    (rpc-smoke-get-commands-has-location :fake-scenario "extension-confirm")
-  "`get_commands' yields a non-nil :location after sourceInfo normalization.
-Sentinel test: fails when the wire format no longer carries scope metadata."
+    (rpc-smoke-get-commands-has-source-info :fake-scenario "extension-confirm")
+  "`get_commands' carries sourceInfo with scope on the wire.
+Sentinel: fails when the wire format drops scope metadata."
   (let* ((response (pi-coding-agent-integration--rpc-until
                     proc '(:type "get_commands")
                     (lambda (candidate)

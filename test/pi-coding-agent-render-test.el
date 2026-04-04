@@ -4231,44 +4231,6 @@ a slot, so downstream consumers that skip blanks still get N content lines."
   (should (equal (pi-coding-agent--extract-text-from-content []) ""))
   (should (equal (pi-coding-agent--extract-text-from-content nil) "")))
 
-(ert-deftest pi-coding-agent-test-extract-last-usage-from-messages ()
-  "Extract-last-usage finds usage from last assistant message."
-  (let ((messages
-         [(:role "user" :content "Hi")
-          (:role "assistant"
-           :usage (:input 100 :output 50 :cacheRead 0 :cacheWrite 20)
-           :stopReason "endTurn")
-          (:role "user" :content "More")
-          (:role "assistant"
-           :usage (:input 200 :output 80 :cacheRead 20 :cacheWrite 30)
-           :stopReason "endTurn")]))
-    (let ((usage (pi-coding-agent--extract-last-usage messages)))
-      (should (equal (plist-get usage :input) 200))
-      (should (equal (plist-get usage :output) 80)))))
-
-(ert-deftest pi-coding-agent-test-extract-last-usage-skips-aborted ()
-  "Extract-last-usage skips aborted messages."
-  (let ((messages
-         [(:role "assistant"
-           :usage (:input 100 :output 50 :cacheRead 0 :cacheWrite 0)
-           :stopReason "endTurn")
-          (:role "assistant"
-           :usage (:input 0 :output 0 :cacheRead 0 :cacheWrite 0)
-           :stopReason "aborted")]))
-    (let ((usage (pi-coding-agent--extract-last-usage messages)))
-      ;; Should return the non-aborted message's usage
-      (should (equal (plist-get usage :input) 100)))))
-
-(ert-deftest pi-coding-agent-test-extract-last-usage-empty ()
-  "Extract-last-usage handles empty/nil input."
-  (should-not (pi-coding-agent--extract-last-usage []))
-  (should-not (pi-coding-agent--extract-last-usage nil)))
-
-(ert-deftest pi-coding-agent-test-extract-last-usage-no-assistant ()
-  "Extract-last-usage returns nil when no assistant messages."
-  (let ((messages [(:role "user" :content "Hi")]))
-    (should-not (pi-coding-agent--extract-last-usage messages))))
-
 (ert-deftest pi-coding-agent-test-tool-update-replaced-by-end ()
   "Tool update content is replaced by final result on tool_execution_end."
   (with-temp-buffer
@@ -4475,17 +4437,12 @@ Commands with embedded newlines should not have any lines deleted."
   "Display handler processes auto_compaction_end with successful result."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
-    ;; Set up initial usage
-    (setq pi-coding-agent--last-usage '(:input 5000 :output 1000))
-    ;; Simulate compaction end
     (pi-coding-agent--handle-display-event
      '(:type "auto_compaction_end"
        :aborted nil
        :result (:summary "Context was compacted."
                 :tokensBefore 50000
                 :timestamp 1704067200000)))
-    ;; Usage should be reset
-    (should (null pi-coding-agent--last-usage))
     ;; Should display compaction info
     (should (string-match-p "Compaction" (buffer-string)))
     (should (string-match-p "50,000" (buffer-string)))))
@@ -4495,13 +4452,10 @@ Commands with embedded newlines should not have any lines deleted."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (setq pi-coding-agent--status 'compacting)
-    (setq pi-coding-agent--last-usage '(:input 5000 :output 1000))
     (pi-coding-agent--handle-display-event
      '(:type "auto_compaction_end" :aborted t :result nil))
     ;; Status should return to idle
-    (should (eq pi-coding-agent--status 'idle))
-    ;; Usage should NOT be reset on abort
-    (should pi-coding-agent--last-usage)))
+    (should (eq pi-coding-agent--status 'idle))))
 
 (ert-deftest pi-coding-agent-test-thinking-rendered-as-blockquote ()
   "Thinking content renders as markdown blockquote."
