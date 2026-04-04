@@ -5,7 +5,7 @@
       "name": "test-message",
       "description": "Trigger fake custom extension message",
       "source": "extension",
-      "path": "test-extension.ts"
+      "sourceInfo": { "scope": "project", "path": "test-extension.ts" }
     }
   ],
   "prompt": {

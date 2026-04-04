@@ -1272,5 +1272,33 @@ Regression: when called from input buffer, state is nil → \"unknown\"."
     (should completing-read-called)
     (should (equal captured-initial "opus"))))
 
+;;; sourceInfo normalization
+
+(ert-deftest pi-coding-agent-test-normalize-command-extracts-source-info ()
+  "Normalizer lifts sourceInfo.scope and sourceInfo.path to top level."
+  (let* ((raw (list :name "fix" :source "prompt"
+                    :sourceInfo '(:scope "user" :path "/home/me/.pi/fix.md")))
+         (norm (pi-coding-agent--normalize-command raw)))
+    (should (equal (plist-get norm :location) "user"))
+    (should (equal (plist-get norm :path) "/home/me/.pi/fix.md"))
+    (should (equal (plist-get norm :name) "fix"))
+    (should-not (plist-get norm :sourceInfo))))
+
+(ert-deftest pi-coding-agent-test-normalize-command-without-source-info ()
+  "Normalizer leaves commands unchanged when sourceInfo is absent."
+  (let* ((raw '(:name "ext" :source "extension"))
+         (norm (pi-coding-agent--normalize-command raw)))
+    (should (equal (plist-get norm :name) "ext"))
+    (should-not (plist-get norm :location))
+    (should-not (plist-get norm :path))))
+
+(ert-deftest pi-coding-agent-test-normalize-command-partial-source-info ()
+  "Normalizer handles sourceInfo with scope but no path."
+  (let* ((raw '(:name "s" :source "skill"
+                :sourceInfo (:scope "project")))
+         (norm (pi-coding-agent--normalize-command raw)))
+    (should (equal (plist-get norm :location) "project"))
+    (should-not (plist-get norm :path))))
+
 (provide 'pi-coding-agent-menu-test)
 ;;; pi-coding-agent-menu-test.el ends here

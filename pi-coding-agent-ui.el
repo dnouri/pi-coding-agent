@@ -900,7 +900,9 @@ Extracted from session_info entries when session is loaded or switched.")
 
 (defvar-local pi-coding-agent--commands nil
   "List of available commands from pi.
-Each entry is a plist with :name, :description, :source.
+Each entry is a plist with at least :name, :source, and :description.
+After normalization, commands may also carry :location and :path
+\(lifted from the wire-level sourceInfo object).
 Source is \"prompt\", \"extension\", or \"skill\".")
 
 (defvar pi-coding-agent--builtin-commands

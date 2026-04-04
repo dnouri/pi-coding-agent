@@ -64,14 +64,20 @@ class SlashCommand:
     location: str | None = None
 
     def to_rpc(self) -> JsonDict:
-        """Return this command in RPC response shape."""
+        """Return this command in RPC response shape.
+
+        Emits ``sourceInfo`` with ``scope`` and ``path`` sub-fields.
+        """
         data: JsonDict = {"name": self.name, "source": self.source}
         if self.description is not None:
             data["description"] = self.description
-        if self.path is not None:
-            data["path"] = self.path
-        if self.location is not None:
-            data["location"] = self.location
+        if self.path is not None or self.location is not None:
+            source_info: JsonDict = {}
+            if self.location is not None:
+                source_info["scope"] = self.location
+            if self.path is not None:
+                source_info["path"] = self.path
+            data["sourceInfo"] = source_info
         return data
 
 
@@ -215,16 +221,16 @@ def default_scenario_dir() -> Path:
 def load_scenario(path: Path, name: str) -> Scenario:
     """Load and validate a scenario fixture from ``path``."""
     data = json.loads(path.read_text(encoding="utf-8"))
-    commands = [
-        SlashCommand(
+    commands = []
+    for item in data.get("commands", []):
+        si = item.get("sourceInfo", {})
+        commands.append(SlashCommand(
             name=item["name"],
             source=item["source"],
             description=item.get("description"),
-            path=item.get("path"),
-            location=item.get("location"),
-        )
-        for item in data.get("commands", [])
-    ]
+            path=si.get("path"),
+            location=si.get("scope"),
+        ))
     prompt_data = data["prompt"]
     prompt_type = prompt_data["type"]
     if prompt_type == "text_stream":

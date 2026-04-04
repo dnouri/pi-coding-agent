@@ -5,7 +5,7 @@
       "name": "test-confirm",
       "description": "Trigger fake extension confirm",
       "source": "extension",
-      "path": "test-extension.ts"
+      "sourceInfo": { "scope": "project", "path": "test-extension.ts" }
     }
   ],
   "prompt": {

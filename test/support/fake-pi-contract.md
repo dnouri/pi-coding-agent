@@ -159,7 +159,11 @@ Required shape:
   - `name`
   - `source`
 
-`description`, `location`, and `path` may be omitted unless a test needs them.
+`description` may be omitted unless a test needs it.  Since pi 0.62,
+command metadata lives in `sourceInfo` (with `scope` and `path` sub-fields)
+instead of the legacy top-level `location`/`path`.  The fake emits
+`sourceInfo` to match real pi.  The Emacs normalizer lifts `sourceInfo.scope`
+→ `:location` and `sourceInfo.path` → `:path` at ingestion.
 
 ### `prompt` happy path
 

@@ -5,7 +5,7 @@
       "name": "test-noop",
       "description": "Trigger fake no-op extension command",
       "source": "extension",
-      "path": "test-extension.ts"
+      "sourceInfo": { "scope": "project", "path": "test-extension.ts" }
     }
   ],
   "prompt": {

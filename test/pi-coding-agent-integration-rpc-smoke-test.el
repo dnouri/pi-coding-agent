@@ -76,6 +76,28 @@
         (should (plist-get first-cmd :source))))))
 
 (pi-coding-agent-integration-deftest
+    (rpc-smoke-get-commands-has-location :fake-scenario "extension-confirm")
+  "`get_commands' yields a non-nil :location after sourceInfo normalization.
+Sentinel test: fails when the wire format no longer carries scope metadata."
+  (let* ((response (pi-coding-agent-integration--rpc-until
+                    proc '(:type "get_commands")
+                    (lambda (candidate)
+                      (and candidate
+                           (eq (plist-get candidate :success) t)
+                           (let* ((data (plist-get candidate :data))
+                                  (cmds (plist-get data :commands)))
+                             (and (vectorp cmds) (> (length cmds) 0)))))
+                    5))
+         (data (plist-get response :data))
+         (commands (plist-get data :commands)))
+    (when (or (null commands) (= (length commands) 0))
+      (ert-skip "No commands available (real backend has no extensions)"))
+    (let* ((first-cmd (aref commands 0))
+           (source-info (plist-get first-cmd :sourceInfo)))
+      (should source-info)
+      (should (plist-get source-info :scope)))))
+
+(pi-coding-agent-integration-deftest
     (rpc-smoke-new-session-succeeds)
   "`new_session' succeeds and leaves a fresh session at zero messages."
   (let* ((before (pi-coding-agent--rpc-sync proc '(:type "get_state")
