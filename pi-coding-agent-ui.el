@@ -311,6 +311,9 @@ Background is derived from the current theme so syntax faces stay visible."
   "Face for error notifications from the server."
   :group 'pi-coding-agent)
 
+(defvar-local pi-coding-agent--input-activity-tinted nil
+  "Non-nil when the input buffer background is tinted for activity.")
+
 ;;;; Dynamic Face Computation
 
 (defun pi-coding-agent--blend-color (base target amount)
@@ -401,6 +404,37 @@ on theme changes."
 (when (boundp 'enable-theme-functions)
   (add-hook 'enable-theme-functions
             #'pi-coding-agent--update-theme-derived-faces))
+
+(defun pi-coding-agent--input-activity-bg ()
+  "Return a background color for the input buffer activity indicator.
+Blends the default background toward cornflower blue."
+  (condition-case nil
+      (let ((bg (face-background 'default nil t)))
+        (when (and bg (color-defined-p bg))
+          (let* ((dark-p (< (nth 2 (apply #'color-rgb-to-hsl
+                                          (color-name-to-rgb bg)))
+                            0.5))
+                 (amount (if dark-p 0.25 0.15))
+                 (tint   "#6495ED"))
+            (pi-coding-agent--blend-color bg tint amount))))
+    (error nil)))
+
+(defun pi-coding-agent--update-input-activity-indicator (phase)
+  "Update the input buffer background tint for PHASE.
+When PHASE is idle the background reverts to normal.  Uses
+`face-remap-set-base' so the tint covers the entire window
+including empty regions, not just text."
+  (when-let* ((input-buf pi-coding-agent--input-buffer))
+    (when (buffer-live-p input-buf)
+      (with-current-buffer input-buf
+        (if (equal phase "idle")
+            (when pi-coding-agent--input-activity-tinted
+              (face-remap-reset-base 'default)
+              (setq pi-coding-agent--input-activity-tinted nil))
+          (when-let* ((bg (pi-coding-agent--input-activity-bg)))
+            (face-remap-set-base 'default :background bg
+                                 :foreground (face-foreground 'default nil t))
+            (setq pi-coding-agent--input-activity-tinted t)))))))
 
 ;;;; Language Detection
 
@@ -1042,6 +1076,7 @@ Returns non-nil when the phase changed."
   (unless (equal pi-coding-agent--activity-phase phase)
     (setq pi-coding-agent--activity-phase phase)
     (force-mode-line-update t)
+    (pi-coding-agent--update-input-activity-indicator phase)
     t))
 
 (defvar-local pi-coding-agent--cached-stats nil
