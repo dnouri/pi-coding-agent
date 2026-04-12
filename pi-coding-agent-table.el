@@ -262,7 +262,12 @@ Cells with no inline syntax characters are returned as-is."
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert markdown))
-      (font-lock-ensure)
+      ;; Guard against treesit-query-error or other font-lock failures
+      ;; (e.g. md-ts-mode query incompatibility with tree-sitter 0.25+).
+      ;; On failure, fall back to the raw markdown string.
+      (condition-case _err
+          (font-lock-ensure)
+        (error nil))
       (pi-coding-agent--visible-text (point-min) (point-max)))))
 
 ;;;; Cell Rendering
