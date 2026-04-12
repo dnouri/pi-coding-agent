@@ -472,13 +472,19 @@ Optional INITIAL-INPUT pre-fills the completion prompt for filtering."
            (data (plist-get response :data))
            (models (plist-get data :models))
            (current-name (plist-get (plist-get state :model) :name))
+           (current-provider (plist-get (plist-get state :model) :provider))
            (current-short (and current-name
                                (pi-coding-agent--shorten-model-name current-name)))
-           ;; Build alist of (short-name . model-plist) for selection
+           (current-display (and current-short current-provider
+                                (format "%s [%s]" current-short current-provider)))
+           ;; Build alist of (display-string . model-plist) for selection
+           ;; Display includes provider for clarity
            (model-alist (mapcar (lambda (m)
-                                  (cons (pi-coding-agent--shorten-model-name
-                                         (plist-get m :name))
-                                        m))
+                                  (let ((short (pi-coding-agent--shorten-model-name
+                                               (plist-get m :name)))
+                                        (prov (plist-get m :provider)))
+                                    (cons (format "%s [%s]" short (or prov "?"))
+                                          m)))
                                 models))
            (names (mapcar #'car model-alist))
            (choice (let ((completion-ignore-case t)
@@ -497,13 +503,13 @@ Optional INITIAL-INPUT pre-fills the completion prompt for filtering."
                              nil)
                             (t (completing-read
                                 (format "Model (current: %s): "
-                                        (or current-short "unknown"))
+                                        (or current-display "unknown"))
                                 names nil t initial-input))))
                        (completing-read
                         (format "Model (current: %s): "
-                                (or current-short "unknown"))
+                                (or current-display "unknown"))
                         names nil t)))))
-      (when (and choice (not (equal choice current-short)))
+      (when (and choice (not (equal choice current-display)))
         (let* ((selected-model (cdr (assoc choice model-alist)))
                (model-id (plist-get selected-model :id))
                (provider (plist-get selected-model :provider)))
