@@ -263,9 +263,10 @@ Cells with no inline syntax characters are returned as-is."
         (erase-buffer)
         (insert markdown))
       ;; Guard against treesit-query-error or other font-lock failures
-      ;; (e.g. md-ts-mode query incompatibility with tree-sitter 0.25+).
-      ;; On failure, fall back to the raw markdown string.
-      (condition-case _err
+      ;; (e.g. md-ts-mode query incompatibility with tree-sitter 0.26+).
+      ;; On failure, fall back to the raw markdown string, but still let
+      ;; `debug-on-error' surface the original failure when requested.
+      (condition-case-unless-debug nil
           (font-lock-ensure)
         (error nil))
       (pi-coding-agent--visible-text (point-min) (point-max)))))

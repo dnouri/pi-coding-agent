@@ -2158,7 +2158,12 @@ Display-only table decoration is applied after fontification."
     (let ((start (with-current-buffer (pi-coding-agent--get-chat-buffer) (point-max))))
       (pi-coding-agent--append-to-chat text)
       (with-current-buffer (pi-coding-agent--get-chat-buffer)
-        (font-lock-ensure start (point-max))
+        ;; History replay should keep rendering even if markdown
+        ;; fontification trips over a tree-sitter/runtime mismatch.
+        ;; Preserve debugger behavior when `debug-on-error' is non-nil.
+        (condition-case-unless-debug nil
+            (font-lock-ensure start (point-max))
+          (error nil))
         (pi-coding-agent--decorate-tables-in-region start (point-max)))
       ;; Two trailing newlines reset any open markdown list/paragraph context
       (pi-coding-agent--append-to-chat "\n\n"))))

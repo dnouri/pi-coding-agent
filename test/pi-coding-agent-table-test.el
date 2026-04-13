@@ -154,6 +154,17 @@ font configuration."
     (should-not (get-text-property 1 'face result))
     (should (equal (get-text-property 2 'face result) '(:weight bold)))))
 
+(ert-deftest pi-coding-agent-test-markdown-visible-string-falls-back-on-font-lock-error ()
+  "Visible-string extraction should fall back to raw markdown on font-lock errors."
+  (unwind-protect
+      (let ((debug-on-error nil))
+        (cl-letf (((symbol-function 'font-lock-ensure)
+                   (lambda (&rest _args)
+                     (error "Broken font-lock"))))
+          (should (equal (pi-coding-agent--markdown-visible-string "`0xAF`")
+                         "`0xAF`"))))
+    (pi-coding-agent--cleanup-visible-string-buffer)))
+
 (ert-deftest pi-coding-agent-test-display-user-message-decorates-table ()
   "User messages with tables get display-only decoration."
   (with-temp-buffer
@@ -188,6 +199,24 @@ font configuration."
                 (lambda (ov) (overlay-get ov 'pi-coding-agent-table-display))
                 (overlays-in (point-min) (point-max)))))
       (should (>= (length ovs) 1)))))
+
+(ert-deftest pi-coding-agent-test-render-history-text-survives-font-lock-error ()
+  "History rendering should keep going when markdown font-lock fails."
+  (unwind-protect
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (cl-letf (((symbol-function 'font-lock-ensure)
+                   (lambda (&rest _args)
+                     (error "Broken font-lock"))))
+          (pi-coding-agent--render-history-text
+           "| Code | Notes |\n|------|-------|\n| `0xAF` | **bold** text |\n"))
+        (let ((ovs (seq-filter
+                    (lambda (ov) (overlay-get ov 'pi-coding-agent-table-display))
+                    (overlays-in (point-min) (point-max)))))
+          (should (>= (length ovs) 1))
+          (should (string-match-p "`0xAF`" (buffer-string)))
+          (should (string-suffix-p "\n\n" (buffer-string)))))
+    (pi-coding-agent--cleanup-visible-string-buffer)))
 
 (ert-deftest pi-coding-agent-test-display-compaction-decorates-table ()
   "Compaction summary with tables gets display-only decoration."
