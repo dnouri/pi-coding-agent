@@ -1259,6 +1259,136 @@ Regression: when called from input buffer, state is nil → \"unknown\"."
     (should completing-read-called)
     (should (equal captured-initial "opus"))))
 
+(ert-deftest pi-coding-agent-test-select-thinking-refreshes-state-from-server ()
+  "Thinking selector refreshes state so server clamping is visible in the UI."
+  (let (captured-prompt captured-collection rpc-commands last-message)
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (setq pi-coding-agent--process :fake-proc
+            pi-coding-agent--state '(:thinking-level "low"))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (prompt collection &rest _)
+                   (setq captured-prompt prompt
+                         captured-collection collection)
+                   "high"))
+                ((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (_proc cmd callback)
+                   (push cmd rpc-commands)
+                   (pcase (plist-get cmd :type)
+                     ("set_thinking_level"
+                      (funcall callback '(:success t :command "set_thinking_level")))
+                     ("get_state"
+                      (funcall callback
+                               '(:success t
+                                 :data (:thinkingLevel "medium"
+                                        :isStreaming nil
+                                        :isCompacting nil)))))))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq last-message (apply #'format fmt args)))))
+        (pi-coding-agent-select-thinking)
+        (should (equal (plist-get pi-coding-agent--state :thinking-level) "medium"))))
+    (should (equal captured-prompt "Thinking level (current: low): "))
+    (should (equal captured-collection
+                   '("off" "minimal" "low" "medium" "high" "xhigh")))
+    (let ((commands (nreverse rpc-commands)))
+      (should (equal (mapcar (lambda (cmd) (plist-get cmd :type)) commands)
+                     '("set_thinking_level" "get_state")))
+      (should (equal (car commands)
+                     '(:type "set_thinking_level" :level "high")))
+      (should (equal (cadr commands) '(:type "get_state"))))
+    (should (equal last-message "Pi: Thinking level: medium"))))
+
+(ert-deftest pi-coding-agent-test-select-thinking-noop-when-unchanged ()
+  "Thinking selector does not send RPC when the user picks the current level."
+  (let (rpc-called)
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (setq pi-coding-agent--process :fake-proc
+            pi-coding-agent--state '(:thinking-level "medium"))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) "medium"))
+                ((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (&rest _)
+                   (setq rpc-called t))))
+        (pi-coding-agent-select-thinking)))
+    (should-not rpc-called)))
+
+(ert-deftest pi-coding-agent-test-select-thinking-errors-without-process ()
+  "Thinking selector should fail loudly when no pi process is running."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (should-error (pi-coding-agent-select-thinking) :type 'user-error)))
+
+(ert-deftest pi-coding-agent-test-select-thinking-shows-rpc-error ()
+  "Thinking selector reports set_thinking_level RPC failures."
+  (let (rpc-commands shown-message)
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (setq pi-coding-agent--process :fake-proc
+            pi-coding-agent--state '(:thinking-level "low"))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) "high"))
+                ((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (_proc cmd callback)
+                   (push cmd rpc-commands)
+                   (funcall callback '(:success nil :error "unsupported"))))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq shown-message (apply #'format fmt args)))))
+        (pi-coding-agent-select-thinking)
+        (should (equal (plist-get pi-coding-agent--state :thinking-level) "low"))))
+    (should (equal rpc-commands
+                   '((:type "set_thinking_level" :level "high"))))
+    (should (equal shown-message
+                   "Pi: Failed to set thinking level: unsupported"))))
+
+(ert-deftest pi-coding-agent-test-select-thinking-warns-when-state-refresh-fails ()
+  "Thinking selector warns instead of guessing when state refresh fails."
+  (let (shown-message)
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (setq pi-coding-agent--process :fake-proc
+            pi-coding-agent--state '(:thinking-level "low"))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) "high"))
+                ((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (_proc cmd callback)
+                   (pcase (plist-get cmd :type)
+                     ("set_thinking_level"
+                      (funcall callback '(:success t :command "set_thinking_level")))
+                     ("get_state"
+                      (funcall callback '(:success nil :error "state unavailable"))))))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq shown-message (apply #'format fmt args)))))
+        (pi-coding-agent-select-thinking)
+        (should (equal (plist-get pi-coding-agent--state :thinking-level) "low"))))
+    (should (equal shown-message
+                   "Pi: Thinking level updated, but failed to refresh state: state unavailable"))))
+
+(ert-deftest pi-coding-agent-test-thinking-selector-uses-t-key-leaving-T-for-templates ()
+  "Main menu binds `t' to thinking selection without taking Templates `T'."
+  (let ((pi-coding-agent--commands
+         '((:name "review" :description "Code review" :source "prompt"))))
+    (unwind-protect
+        (progn
+          (pi-coding-agent--rebuild-commands-menu)
+          (transient-setup 'pi-coding-agent-menu)
+          (let ((thinking-suffix
+                 (cl-find-if (lambda (obj)
+                               (equal (oref obj key) "t"))
+                             transient--suffixes))
+                (templates-suffix
+                 (cl-find-if (lambda (obj)
+                               (equal (oref obj key) "T"))
+                             transient--suffixes)))
+            (should thinking-suffix)
+            (should (eq (oref thinking-suffix command)
+                        'pi-coding-agent-select-thinking))
+            (should templates-suffix)))
+      (ignore-errors (transient-remove-suffix 'pi-coding-agent-menu '(4))))))
+
 ;;; sourceInfo normalization
 
 (ert-deftest pi-coding-agent-test-normalize-command-extracts-source-info ()

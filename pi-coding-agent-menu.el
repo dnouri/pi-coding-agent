@@ -34,7 +34,8 @@
 ;;   `pi-coding-agent-resume-session'  Resume previous session
 ;;   `pi-coding-agent-reload'          Restart pi process
 ;;   `pi-coding-agent-select-model'    Choose model interactively
-;;   `pi-coding-agent-cycle-thinking'  Cycle thinking levels
+;;   `pi-coding-agent-select-thinking' Choose thinking level interactively
+;;   `pi-coding-agent-cycle-thinking'  Cycle thinking levels from header-line
 ;;   `pi-coding-agent-compact'         Compact conversation context
 ;;   `pi-coding-agent-fork'            Fork from previous message
 
@@ -524,6 +525,11 @@ Optional INITIAL-INPUT pre-fills the completion prompt for filtering."
                                (force-mode-line-update))
                              (message "Pi: Model set to %s" choice)))))))))
 
+(defconst pi-coding-agent--thinking-levels '("off" "minimal" "low" "medium" "high" "xhigh")
+  "Thinking levels accepted by `set_thinking_level' RPC.
+
+Unsupported levels are clamped to the current model's capabilities.")
+
 (defun pi-coding-agent-cycle-thinking ()
   "Cycle through thinking levels."
   (interactive)
@@ -538,6 +544,47 @@ Optional INITIAL-INPUT pre-fills the completion prompt for filtering."
                          (force-mode-line-update)
                          (message "Pi: Thinking level: %s"
                                   (plist-get pi-coding-agent--state :thinking-level))))))))
+
+(defun pi-coding-agent--refresh-thinking-level-state (proc chat-buf)
+  "Refresh CHAT-BUF state from PROC after a thinking-level change.
+Uses `get_state' so the UI reflects the server's actual level,
+including any model-specific clamping."
+  (pi-coding-agent--rpc-async
+   proc '(:type "get_state")
+   (lambda (response)
+     (if (plist-get response :success)
+         (let* ((data (plist-get response :data))
+                (level (or (plist-get data :thinkingLevel) "off")))
+           (pi-coding-agent--apply-state-response chat-buf response)
+           (message "Pi: Thinking level: %s" level))
+       (message "Pi: Thinking level updated, but failed to refresh state%s"
+                (if-let* ((error-text (plist-get response :error)))
+                    (format ": %s" error-text)
+                  ""))))))
+
+(defun pi-coding-agent-select-thinking ()
+  "Select a thinking level from the minibuffer."
+  (interactive)
+  (let ((proc (pi-coding-agent--get-process))
+        (chat-buf (pi-coding-agent--get-chat-buffer)))
+    (unless proc
+      (user-error "No pi process running"))
+    (unless chat-buf
+      (user-error "No pi session buffer"))
+    (let* ((state (pi-coding-agent--menu-state))
+           (current (or (plist-get state :thinking-level) "off"))
+           (choice (completing-read
+                    (format "Thinking level (current: %s): " current)
+                    pi-coding-agent--thinking-levels
+                    nil t)))
+      (unless (equal choice current)
+        (pi-coding-agent--rpc-async
+         proc (list :type "set_thinking_level" :level choice)
+         (lambda (response)
+           (if (plist-get response :success)
+               (pi-coding-agent--refresh-thinking-level-state proc chat-buf)
+             (message "Pi: Failed to set thinking level: %s"
+                      (or (plist-get response :error) "unknown error")))))))))
 
 ;;;; Session Info and Actions
 
@@ -900,7 +947,7 @@ Uses commands from pi's `get_commands' RPC."
     ("f" "fork" pi-coding-agent-fork)]]
   [["Model"
     ("m" "select" pi-coding-agent-select-model)
-    ("t" "thinking" pi-coding-agent-cycle-thinking)]
+    ("t" "thinking" pi-coding-agent-select-thinking)]
    ["Info"
     ("i" "stats" pi-coding-agent-session-stats)
     ("y" "copy last" pi-coding-agent-copy-last-message)]]

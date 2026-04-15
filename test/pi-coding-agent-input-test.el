@@ -2314,18 +2314,23 @@ Pi handles command expansion on the server side."
       (should (get-text-property 0 'mouse-face header)))))
 
 (ert-deftest pi-coding-agent-test-header-line-thinking-is-clickable ()
-  "Thinking level in header-line has click properties."
+  "Thinking level in header-line cycles on mouse click."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (setq pi-coding-agent--state '(:model (:name "test") :thinking-level "high"))
     (let* ((header (pi-coding-agent--header-line-string))
            ;; Find position of "high" in header
-           (pos (string-match "high" header)))
+           (pos (string-match "high" header))
+           (map (and pos (get-text-property pos 'local-map header))))
       (should pos)
       ;; Should have local-map at that position
-      (should (get-text-property pos 'local-map header))
+      (should map)
       ;; Should have mouse-face for highlight
-      (should (get-text-property pos 'mouse-face header)))))
+      (should (get-text-property pos 'mouse-face header))
+      (should (eq (lookup-key map [header-line mouse-1])
+                  #'pi-coding-agent-cycle-thinking))
+      (should (eq (lookup-key map [header-line mouse-2])
+                  #'pi-coding-agent-cycle-thinking)))))
 
 (ert-deftest pi-coding-agent-test-header-format-context-returns-nil-when-no-window ()
   "Context format returns nil when context window is 0."
