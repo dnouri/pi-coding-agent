@@ -73,6 +73,8 @@
 (declare-function pi-coding-agent-resume-session "pi-coding-agent-menu")
 (declare-function pi-coding-agent-select-model "pi-coding-agent-menu")
 (declare-function pi-coding-agent-cycle-thinking "pi-coding-agent-menu")
+(declare-function pi-coding-agent-select-thinking "pi-coding-agent-menu")
+(declare-function pi-coding-agent-toggle-hide-thinking "pi-coding-agent-menu")
 (declare-function pi-coding-agent-fork-at-point "pi-coding-agent-menu")
 
 ;;;; Customization Group
@@ -760,6 +762,10 @@ Used for incremental rendering: when the new rendered text extends the
 previous text, only the suffix is inserted instead of replacing the
 entire region.  Reset by `pi-coding-agent--reset-thinking-state'.")
 
+(defvar-local pi-coding-agent--hide-thinking nil
+  "When non-nil, hide thinking blocks in the chat buffer.
+Toggle with `pi-coding-agent-toggle-hide-thinking'.")
+
 (defvar-local pi-coding-agent--line-parse-state 'line-start
   "Parsing state for current line during streaming.
 Values:
@@ -1389,8 +1395,9 @@ Returns extension statuses joined with \" · \", or empty string."
                ext-status
                " · ")))
 
-(defun pi-coding-agent--header-format-identity (model-short thinking activity-phase-str)
-  "Format identity group from MODEL-SHORT, THINKING, and ACTIVITY-PHASE-STR."
+(defun pi-coding-agent--header-format-identity (model-short thinking activity-phase-str &optional hidden)
+  "Format identity group from MODEL-SHORT, THINKING, ACTIVITY-PHASE-STR.
+HIDDEN is non-nil when thinking blocks are hidden."
   (concat
    (propertize model-short
                'face 'pi-coding-agent-model-name
@@ -1400,7 +1407,7 @@ Returns extension statuses joined with \" · \", or empty string."
    (if (string-empty-p thinking)
        ""
      (concat " • "
-             (propertize thinking
+             (propertize (concat thinking (when hidden " [hidden]"))
                          'mouse-face 'highlight
                          'help-echo "mouse-1: Cycle thinking level"
                          'local-map pi-coding-agent--header-thinking-map)))
@@ -1457,6 +1464,8 @@ Accesses state from the linked chat buffer."
          (model-short (if (string-empty-p model-name) "..."
                         (pi-coding-agent--shorten-model-name model-name)))
          (thinking (or (plist-get state :thinking-level) ""))
+         (hide-thinking (and chat-buf
+                              (buffer-local-value 'pi-coding-agent--hide-thinking chat-buf)))
          (activity-phase (or (and chat-buf
                                   (buffer-local-value 'pi-coding-agent--activity-phase chat-buf))
                              "idle"))
@@ -1464,7 +1473,7 @@ Accesses state from the linked chat buffer."
           (propertize (format "%-8s" activity-phase)
                       'face 'pi-coding-agent-activity-phase)))
     (concat
-     (pi-coding-agent--header-format-identity model-short thinking activity-phase-str)
+     (pi-coding-agent--header-format-identity model-short thinking activity-phase-str hide-thinking)
      (pi-coding-agent--header-format-stats stats)
      (pi-coding-agent--header-format-context-group session-name)
      (pi-coding-agent--header-format-extension-group ext-status working-message))))

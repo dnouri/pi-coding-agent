@@ -290,49 +290,71 @@ separated from preceding content."
   "Insert opening marker for thinking block (blockquote)."
   (when pi-coding-agent--streaming-marker
     (setq pi-coding-agent--in-thinking-block t)
-    (let ((inhibit-read-only t))
-      (pi-coding-agent--with-scroll-preservation
-        (save-excursion
-          (goto-char (marker-position pi-coding-agent--streaming-marker))
-          ;; No separator needed when this is the first content in the message.
-          (when (and pi-coding-agent--message-start-marker
-                     (> (point)
-                        (marker-position pi-coding-agent--message-start-marker)))
-            (pi-coding-agent--ensure-blank-line-before-block))
-          ;; Track thinking insertion separately so it stays anchored even if
-          ;; other block types (tool headers) interleave in the same message.
-          ;; Keep insertion-type nil so inserts at this exact point happen
-          ;; after the marker (we then advance it explicitly per delta).
-          (pi-coding-agent--reset-thinking-state)
-          (setq pi-coding-agent--thinking-raw "")
-          (let ((start (point)))
-            (insert "> ")
-            (setq pi-coding-agent--thinking-start-marker
-                  (copy-marker start nil))
-            (setq pi-coding-agent--thinking-marker
-                  (copy-marker (point) nil))))))))
+    (cond
+     (pi-coding-agent--hide-thinking
+      ;; Show placeholder label when thinking is hidden
+      (let ((inhibit-read-only t))
+        (pi-coding-agent--with-scroll-preservation
+          (save-excursion
+            (goto-char (marker-position pi-coding-agent--streaming-marker))
+            (when (and pi-coding-agent--message-start-marker
+                       (> (point)
+                          (marker-position pi-coding-agent--message-start-marker)))
+              (pi-coding-agent--ensure-blank-line-before-block))
+            (insert (propertize "Thinking...\n" 'face 'italic))
+            (set-marker pi-coding-agent--streaming-marker (point))))))
+     (t
+      (let ((inhibit-read-only t))
+        (pi-coding-agent--with-scroll-preservation
+          (save-excursion
+            (goto-char (marker-position pi-coding-agent--streaming-marker))
+            ;; No separator needed when this is the first content in the message.
+            (when (and pi-coding-agent--message-start-marker
+                       (> (point)
+                          (marker-position pi-coding-agent--message-start-marker)))
+              (pi-coding-agent--ensure-blank-line-before-block))
+            ;; Track thinking insertion separately so it stays anchored even if
+            ;; other block types (tool headers) interleave in the same message.
+            ;; Keep insertion-type nil so inserts at this exact point happen
+            ;; after the marker (we then advance it explicitly per delta).
+            (pi-coding-agent--reset-thinking-state)
+            (setq pi-coding-agent--thinking-raw "")
+            (let ((start (point)))
+              (insert "> ")
+              (setq pi-coding-agent--thinking-start-marker
+                    (copy-marker start nil))
+              (setq pi-coding-agent--thinking-marker
+                    (copy-marker (point) nil))))))))))
 
 (defun pi-coding-agent--display-thinking-delta (delta)
   "Display streaming thinking DELTA in the current thinking block.
-Normalizes boundary and paragraph whitespace while streaming."
+Normalizes boundary and paragraph whitespace while streaming.
+When `pi-coding-agent--hide-thinking' is non-nil, deltas are silently
+accumulated without rendering."
   (when (and delta pi-coding-agent--streaming-marker)
-    (let ((inhibit-read-only t))
-      (if (and pi-coding-agent--thinking-start-marker
-               pi-coding-agent--thinking-marker)
-          (progn
-            (setq pi-coding-agent--thinking-raw
-                  (concat (or pi-coding-agent--thinking-raw "") delta))
-            (pi-coding-agent--with-scroll-preservation
-              (save-excursion
-                (pi-coding-agent--render-thinking-content))))
-        ;; Fallback for malformed event streams that skip thinking_start.
-        (let ((transformed (replace-regexp-in-string "\n" "\n> " delta)))
-          (pi-coding-agent--with-scroll-preservation
-            (save-excursion
-              (goto-char (pi-coding-agent--thinking-insert-position))
-              (insert transformed)
-              (when pi-coding-agent--thinking-marker
-                (set-marker pi-coding-agent--thinking-marker (point))))))))))
+    (cond
+     (pi-coding-agent--hide-thinking
+      ;; Silently accumulate without rendering
+      (setq pi-coding-agent--thinking-raw
+            (concat (or pi-coding-agent--thinking-raw "") delta)))
+     ((and pi-coding-agent--thinking-start-marker
+           pi-coding-agent--thinking-marker)
+      (let ((inhibit-read-only t))
+        (setq pi-coding-agent--thinking-raw
+              (concat (or pi-coding-agent--thinking-raw "") delta))
+        (pi-coding-agent--with-scroll-preservation
+          (save-excursion
+            (pi-coding-agent--render-thinking-content)))))
+     (t
+      ;; Fallback for malformed event streams that skip thinking_start.
+      (let ((inhibit-read-only t)
+            (transformed (replace-regexp-in-string "\n" "\n> " delta)))
+        (pi-coding-agent--with-scroll-preservation
+          (save-excursion
+            (goto-char (pi-coding-agent--thinking-insert-position))
+            (insert transformed)
+            (when pi-coding-agent--thinking-marker
+              (set-marker pi-coding-agent--thinking-marker (point))))))))))
 
 (defun pi-coding-agent--display-thinking-end (_content)
   "End thinking block (blockquote).

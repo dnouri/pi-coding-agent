@@ -122,8 +122,12 @@ from either chat or input buffer."
 (defun pi-coding-agent--menu-thinking-description ()
   "Return thinking level description for transient menu."
   (let* ((state (pi-coding-agent--menu-state))
-         (level (plist-get state :thinking-level)))
-    (format "Thinking: %s" (or level "off"))))
+         (level (plist-get state :thinking-level))
+         (chat-buf (pi-coding-agent--get-chat-buffer))
+         (hidden (and chat-buf
+                      (buffer-local-value 'pi-coding-agent--hide-thinking chat-buf))))
+    (format "Thinking: %s%s" (or level "off")
+            (if hidden " [hidden]" ""))))
 
 ;;;###autoload
 (defun pi-coding-agent-new-session ()
@@ -524,6 +528,10 @@ Optional INITIAL-INPUT pre-fills the completion prompt for filtering."
                                (force-mode-line-update))
                              (message "Pi: Model set to %s" choice)))))))))
 
+(defconst pi-coding-agent--thinking-levels '("off" "minimal" "low" "medium" "high" "xhigh")
+  "Available thinking levels for set_thinking_level RPC.
+\nNote: \"xhigh\" is only supported by OpenAI codex-max models.")
+
 (defun pi-coding-agent-cycle-thinking ()
   "Cycle through thinking levels."
   (interactive)
@@ -538,6 +546,40 @@ Optional INITIAL-INPUT pre-fills the completion prompt for filtering."
                          (force-mode-line-update)
                          (message "Pi: Thinking level: %s"
                                   (plist-get pi-coding-agent--state :thinking-level))))))))
+
+(defun pi-coding-agent-select-thinking ()
+  "Select a thinking level from a list of options."
+  (interactive)
+  (when-let* ((proc (pi-coding-agent--get-process))
+             (chat-buf (pi-coding-agent--get-chat-buffer)))
+    (let* ((state (pi-coding-agent--menu-state))
+           (current (or (plist-get state :thinking-level) "off"))
+           (choice (completing-read
+                    (format "Thinking level (current: %s): " current)
+                    pi-coding-agent--thinking-levels
+                    nil t)))
+      (unless (equal choice current)
+        (pi-coding-agent--rpc-async
+         proc (list :type "set_thinking_level" :level choice)
+         (lambda (response)
+           (when (and (plist-get response :success)
+                      (buffer-live-p chat-buf))
+             (with-current-buffer chat-buf
+               (plist-put pi-coding-agent--state :thinking-level choice)
+               (force-mode-line-update)
+               (message "Pi: Thinking level: %s" choice)))))))))
+
+(defun pi-coding-agent-toggle-hide-thinking ()
+  "Toggle display of thinking blocks in the chat buffer."
+  (interactive)
+  (when-let* ((chat-buf (pi-coding-agent--get-chat-buffer)))
+    (with-current-buffer chat-buf
+      (setq pi-coding-agent--hide-thinking (not pi-coding-agent--hide-thinking))
+      (message "Pi: Thinking blocks: %s"
+               (if pi-coding-agent--hide-thinking "hidden" "visible"))
+      ;; Reload session history to re-render with new setting
+      (when-let* ((proc (pi-coding-agent--get-process)))
+        (pi-coding-agent--load-session-history proc nil chat-buf)))))
 
 ;;;; Session Info and Actions
 
@@ -900,7 +942,9 @@ Uses commands from pi's `get_commands' RPC."
     ("f" "fork" pi-coding-agent-fork)]]
   [["Model"
     ("m" "select" pi-coding-agent-select-model)
-    ("t" "thinking" pi-coding-agent-cycle-thinking)]
+    ("t" "thinking (cycle)" pi-coding-agent-cycle-thinking)
+    ("T" "Thinking (list)" pi-coding-agent-select-thinking)
+    ("h" "hide thinking" pi-coding-agent-toggle-hide-thinking)]
    ["Info"
     ("i" "stats" pi-coding-agent-session-stats)
     ("y" "copy last" pi-coding-agent-copy-last-message)]]
