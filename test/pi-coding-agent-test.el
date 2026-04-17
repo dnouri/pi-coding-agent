@@ -83,6 +83,38 @@
                                                 (buffer-name b)))
                              (buffer-list))))))))
 
+(ert-deftest pi-coding-agent-test-dwim-reuses-saved-chat-buffer-after-write-file ()
+  "A saved chat buffer is still reused as the project session."
+  (let ((root (pi-coding-agent-test--make-temp-directory
+               "pi-coding-agent-test-dwim-write-file-"))
+        (file nil)
+        (chat nil)
+        (input nil)
+        (make-backup-files nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                  ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
+                  ((symbol-function 'pi-coding-agent--display-buffers) #'ignore)
+                  ((symbol-function 'pi-coding-agent--check-dependencies) #'ignore))
+          (setq chat (pi-coding-agent--setup-session root nil)
+                input (buffer-local-value 'pi-coding-agent--input-buffer chat)
+                file (pi-coding-agent-test--write-chat-buffer
+                      chat "pi-coding-agent-chat-dwim-" "Saved copy\n"))
+          (with-temp-buffer
+            (setq default-directory root)
+            (pi-coding-agent))
+          (should (eq (pi-coding-agent--find-session root) chat))
+          (should (eq (buffer-local-value 'pi-coding-agent--input-buffer chat)
+                      input))
+          (with-current-buffer chat
+            (should (equal (pi-coding-agent--chat-session-buffer-name)
+                           (pi-coding-agent-test--chat-buffer-name root)))
+            (should (equal (pi-coding-agent--session-directory) root))
+            (should (equal buffer-file-name file))))
+      (pi-coding-agent-test--kill-live-buffers input chat)
+      (ignore-errors (delete-file file))
+      (ignore-errors (delete-directory root t)))))
+
 (ert-deftest pi-coding-agent-test-from-chat-buffer-noop-when-both-visible ()
   "From chat, `pi-coding-agent' avoids redisplay and focuses input."
   (let ((root "/tmp/pi-coding-agent-test-chat-visible/")
@@ -280,6 +312,44 @@ must decide whether this is a no-op."
         (pi-coding-agent-test--kill-session-buffers root "my-feature")
         (pi-coding-agent-test--kill-session-buffers root)))))
 
+(ert-deftest pi-coding-agent-test-named-session-reuses-saved-chat-buffer-after-write-file ()
+  "Saving a named session keeps it distinct from the default session."
+  (let ((root (pi-coding-agent-test--make-temp-directory
+               "pi-coding-agent-test-named-write-file-"))
+        (file nil)
+        (default-chat nil)
+        (default-input nil)
+        (named-chat nil)
+        (named-input nil)
+        (make-backup-files nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                  ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
+                  ((symbol-function 'pi-coding-agent--display-buffers) #'ignore)
+                  ((symbol-function 'pi-coding-agent--check-dependencies) #'ignore))
+          (setq default-chat (pi-coding-agent--setup-session root nil)
+                default-input (buffer-local-value 'pi-coding-agent--input-buffer default-chat)
+                named-chat (pi-coding-agent--setup-session root "feature")
+                named-input (buffer-local-value 'pi-coding-agent--input-buffer named-chat)
+                file (pi-coding-agent-test--write-chat-buffer
+                      named-chat "pi-coding-agent-chat-named-"
+                      "Named session archive\n"))
+          (with-temp-buffer
+            (setq default-directory root)
+            (pi-coding-agent "feature"))
+          (should (eq (pi-coding-agent--find-session root) default-chat))
+          (should (eq (pi-coding-agent--find-session root "feature") named-chat))
+          (should-not (eq default-chat named-chat))
+          (with-current-buffer named-chat
+            (should (equal (pi-coding-agent--chat-session-buffer-name)
+                           (pi-coding-agent-test--chat-buffer-name root "feature")))
+            (should (equal (pi-coding-agent--session-directory) root))
+            (should (equal buffer-file-name file))))
+      (pi-coding-agent-test--kill-live-buffers
+       named-input named-chat default-input default-chat)
+      (ignore-errors (delete-file file))
+      (ignore-errors (delete-directory root t)))))
+
 (ert-deftest pi-coding-agent-test-new-session-with-prefix-arg ()
   "\\[universal-argument] \\[pi-coding-agent] creates a named session."
   (let ((root "/tmp/pi-coding-agent-test-named/"))
@@ -452,12 +522,158 @@ must decide whether this is a no-op."
         (should (string-prefix-p "*pi-coding-agent-chat:"
                                  (buffer-name (car (pi-coding-agent-project-buffers)))))))))
 
+(ert-deftest pi-coding-agent-test-project-buffers-finds-saved-session-after-write-file ()
+  "`pi-coding-agent-project-buffers' still finds a saved chat buffer."
+  (let ((root (pi-coding-agent-test--make-temp-directory
+               "pi-coding-agent-test-projbuf-write-file-"))
+        (file nil)
+        (chat nil)
+        (input nil)
+        (make-backup-files nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                  ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
+                  ((symbol-function 'pi-coding-agent--display-buffers) #'ignore)
+                  ((symbol-function 'pi-coding-agent--check-dependencies) #'ignore))
+          (setq chat (pi-coding-agent--setup-session root nil)
+                input (buffer-local-value 'pi-coding-agent--input-buffer chat)
+                file (pi-coding-agent-test--write-chat-buffer
+                      chat "pi-coding-agent-chat-projbuf-"))
+          (with-temp-buffer
+            (setq default-directory root)
+            (should (equal (pi-coding-agent-project-buffers)
+                           (list chat)))))
+      (pi-coding-agent-test--kill-live-buffers input chat)
+      (ignore-errors (delete-file file))
+      (ignore-errors (delete-directory root t)))))
+
+(ert-deftest pi-coding-agent-test-project-root-session-reused-after-write-file-from-subdir ()
+  "Saving from a subdir keeps the project-root session identity."
+  (let* ((root (pi-coding-agent-test--make-temp-directory
+                "pi-coding-agent-test-write-file-project-root-"))
+         (nested (expand-file-name "src/nested/" root))
+         (sibling (expand-file-name "docs/" root))
+         (file nil)
+         (chat nil)
+         (input nil)
+         (make-backup-files nil))
+    (make-directory nested t)
+    (make-directory sibling t)
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-current)
+                   (lambda (&rest _) 'mock-project))
+                  ((symbol-function 'project-root)
+                   (lambda (_project) root))
+                  ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
+                  ((symbol-function 'pi-coding-agent--check-dependencies) #'ignore)
+                  ((symbol-function 'pi-coding-agent--display-buffers) #'ignore))
+          (with-temp-buffer
+            (setq default-directory nested)
+            (pi-coding-agent)
+            (setq chat (pi-coding-agent--find-session root)
+                  input (get-buffer (pi-coding-agent-test--input-buffer-name root))))
+          (setq file (pi-coding-agent-test--write-chat-buffer
+                      chat "pi-coding-agent-chat-project-root-"
+                      "Saved from nested dir\n"))
+          (with-current-buffer chat
+            (should (equal (pi-coding-agent--chat-session-buffer-name)
+                           (pi-coding-agent-test--chat-buffer-name root)))
+            (should (equal (pi-coding-agent--session-directory) root))
+            (should (equal buffer-file-name file)))
+          (with-temp-buffer
+            (setq default-directory sibling)
+            (pi-coding-agent)
+            (should (equal (pi-coding-agent-project-buffers)
+                           (list chat))))
+          (should (eq (pi-coding-agent--find-session root) chat))
+          (should (eq (get-buffer (pi-coding-agent-test--input-buffer-name root))
+                      input)))
+      (pi-coding-agent-test--kill-live-buffers input chat)
+      (ignore-errors (delete-file file))
+      (ignore-errors (delete-directory root t)))))
+
 (ert-deftest pi-coding-agent-test-project-buffers-excludes-other-projects ()
   "`pi-coding-agent-project-buffers' returns nil for a different project."
   (pi-coding-agent-test-with-mock-session "/tmp/pi-coding-agent-test-projbuf-a/"
     (let ((default-directory "/tmp/pi-coding-agent-test-projbuf-b/"))
       (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil)))
         (should (null (pi-coding-agent-project-buffers)))))))
+
+(ert-deftest pi-coding-agent-test-toggle-finds-saved-session-after-write-file ()
+  "`pi-coding-agent-toggle' still finds a saved chat buffer."
+  (let ((root (pi-coding-agent-test--make-temp-directory
+               "pi-coding-agent-test-toggle-write-file-"))
+        (file nil)
+        (chat nil)
+        (input nil)
+        (displayed-chat nil)
+        (displayed-input nil)
+        (make-backup-files nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                  ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
+                  ((symbol-function 'pi-coding-agent--check-dependencies) #'ignore)
+                  ((symbol-function 'pi-coding-agent--display-buffers)
+                   (lambda (chat-buf input-buf)
+                     (setq displayed-chat chat-buf
+                           displayed-input input-buf))))
+          (setq chat (pi-coding-agent--setup-session root nil)
+                input (buffer-local-value 'pi-coding-agent--input-buffer chat)
+                file (pi-coding-agent-test--write-chat-buffer
+                      chat "pi-coding-agent-chat-toggle-"))
+          (with-temp-buffer
+            (setq default-directory root)
+            (pi-coding-agent-toggle))
+          (should (eq displayed-chat chat))
+          (should (eq displayed-input input)))
+      (pi-coding-agent-test--kill-live-buffers input chat)
+      (ignore-errors (delete-file file))
+      (ignore-errors (delete-directory root t)))))
+
+(ert-deftest pi-coding-agent-test-toggle-hides-and-shows-saved-session-after-write-file ()
+  "`pi-coding-agent-toggle' hides and restores a saved session."
+  (let ((root (pi-coding-agent-test--make-temp-directory
+               "pi-coding-agent-test-toggle-write-file-live-"))
+        (file nil)
+        (chat nil)
+        (input nil)
+        (make-backup-files nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                  ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
+                  ((symbol-function 'pi-coding-agent--check-dependencies) #'ignore))
+          (delete-other-windows)
+          (switch-to-buffer "*scratch*")
+          (setq default-directory root)
+          (pi-coding-agent)
+          (setq chat (pi-coding-agent--find-session root)
+                input (get-buffer (pi-coding-agent-test--input-buffer-name root)))
+          (setq file (pi-coding-agent-test--write-chat-buffer
+                      chat "pi-coding-agent-chat-toggle-live-"))
+          (with-current-buffer chat
+            (should (equal (pi-coding-agent--chat-session-buffer-name)
+                           (pi-coding-agent-test--chat-buffer-name root)))
+            (should (equal (pi-coding-agent--session-directory) root))
+            (should (equal buffer-file-name file)))
+          (should (get-buffer-window-list chat nil t))
+          (should (get-buffer-window-list input nil t))
+          (let ((non-pi (get-buffer-create "*pi-coding-agent-test-toggle-non-pi*")))
+            (with-current-buffer non-pi
+              (setq default-directory root))
+            (switch-to-buffer non-pi)
+            (pi-coding-agent-toggle)
+            (should-not (get-buffer-window-list chat nil t))
+            (should-not (get-buffer-window-list input nil t))
+            (pi-coding-agent-toggle)
+            (should (get-buffer-window-list chat nil t))
+            (should (get-buffer-window-list input nil t))
+            (with-current-buffer chat
+              (should (equal buffer-file-name file)))))
+      (pi-coding-agent-test--kill-live-buffers input chat)
+      (ignore-errors (kill-buffer "*pi-coding-agent-test-toggle-non-pi*"))
+      (ignore-errors (delete-file file))
+      (ignore-errors (delete-directory root t))
+      (delete-other-windows))))
 
 (ert-deftest pi-coding-agent-test-toggle-no-session-errors ()
   "`pi-coding-agent-toggle' signals `user-error' when no session exists."

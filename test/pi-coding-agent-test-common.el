@@ -231,7 +231,8 @@ Uses tool call ID \"call_1\" and contentIndex 0."
 
 (defmacro pi-coding-agent-test-with-mock-session (dir &rest body)
   "Execute BODY with a mocked pi session in DIR, cleaning up after.
-DIR should be a unique directory path like \"/tmp/pi-coding-agent-test-foo/\".
+DIR should be a unique directory path, typically created with
+`pi-coding-agent-test--make-temp-directory'.
 Mocks `project-current', `pi-coding-agent--start-process', and
 `pi-coding-agent--display-buffers'.
 Automatically cleans up chat and input buffers."
@@ -256,6 +257,33 @@ Automatically cleans up chat and input buffers."
   "Kill chat and input buffers for DIR and optional SESSION."
   (ignore-errors (kill-buffer (pi-coding-agent-test--chat-buffer-name dir session)))
   (ignore-errors (kill-buffer (pi-coding-agent-test--input-buffer-name dir session))))
+
+(defun pi-coding-agent-test--kill-live-buffers (&rest buffers)
+  "Kill each live buffer in BUFFERS."
+  (dolist (buf buffers)
+    (when (buffer-live-p buf)
+      (kill-buffer buf))))
+
+(defun pi-coding-agent-test--make-temp-directory (prefix)
+  "Create and return a fresh temporary directory for tests.
+PREFIX is forwarded to `make-temp-file'.  The returned path always has a
+trailing slash so it behaves like `default-directory'."
+  (file-name-as-directory (make-temp-file prefix t)))
+
+(defun pi-coding-agent-test--write-chat-buffer (chat prefix &optional appended-text)
+  "Save CHAT to a temp markdown file and return the file name.
+PREFIX is forwarded to `make-temp-file'.  When APPENDED-TEXT is non-nil,
+append it to CHAT before saving.  The temp file is created without initial
+contents so tests can verify the full write result explicitly."
+  (let ((file (make-temp-file prefix nil ".md")))
+    (delete-file file)
+    (with-current-buffer chat
+      (when appended-text
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (insert appended-text)))
+      (write-file file))
+    file))
 
 ;;;; Tree Fixtures
 

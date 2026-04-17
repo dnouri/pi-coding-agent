@@ -286,6 +286,12 @@ named session.
 Resume (=C-c C-r=) and fork (=C-c C-p f=) present a selection menu:
 pick from previous sessions or conversation messages to start from.
 
+You can save the chat buffer like any other buffer to keep a Markdown
+transcript on disk. Saving does not interrupt or replace the live pi session.
+
+If you want a shareable export instead, use HTML export (=C-c C-p e= or
+=/export=).
+
 ** 🌿 Forking and Context Management
 
 When a conversation gets long, the AI's context window fills up. The menu

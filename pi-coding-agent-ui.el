@@ -534,6 +534,45 @@ Otherwise delegates to the default filter."
     (prog1 (substring-no-properties (pi-coding-agent--visible-text beg end))
       (when delete (delete-region beg end)))))
 
+(defvar-local pi-coding-agent--canonical-buffer-name nil
+  "Stable session buffer name for this chat buffer.
+A chat buffer may also be backed by a transcript file, but session lookup
+still uses this name to find the live conversation.")
+
+(defvar-local pi-coding-agent--canonical-session-directory nil
+  "Stable session directory for this chat buffer.
+Project lookup, window toggling, and path completion use this directory even
+when the buffer is also backed by a transcript file elsewhere.")
+
+(defvar pi-coding-agent--chat-buffer)
+
+(defun pi-coding-agent--chat-session-buffer-name (&optional buffer)
+  "Return the stable session buffer name for chat BUFFER.
+Falls back to the live `buffer-name' when BUFFER has no canonical name yet."
+  (with-current-buffer (or buffer (current-buffer))
+    (or pi-coding-agent--canonical-buffer-name
+        (buffer-name))))
+
+(defun pi-coding-agent--chat-session-directory (&optional buffer)
+  "Return the stable session directory for chat BUFFER.
+Falls back to BUFFER's `default-directory' when no canonical directory is
+recorded yet."
+  (with-current-buffer (or buffer (current-buffer))
+    (or pi-coding-agent--canonical-session-directory
+        default-directory)))
+
+(defun pi-coding-agent--set-chat-session-identity (dir &optional session)
+  "Record the stable session identity for the current chat buffer.
+DIR is the session directory and SESSION is the optional named-session suffix."
+  (setq pi-coding-agent--canonical-buffer-name
+        (pi-coding-agent--buffer-name :chat dir session)
+        pi-coding-agent--canonical-session-directory dir
+        default-directory dir))
+
+(defun pi-coding-agent--restore-chat-buffer-read-only ()
+  "Restore the normal read-only contract for chat buffers after saving."
+  (setq buffer-read-only t))
+
 (define-derived-mode pi-coding-agent-chat-mode md-ts-mode "Pi-Chat"
   "Major mode for displaying pi conversation.
 Derives from `md-ts-mode' for tree-sitter syntax highlighting.
@@ -567,11 +606,15 @@ This is a read-only buffer showing the conversation history."
   ;; Compute tool-block face from current theme
   (pi-coding-agent--update-tool-block-face)
 
+  ;; Saving a transcript should not make the live chat editable.
+  (add-hook 'after-save-hook #'pi-coding-agent--restore-chat-buffer-read-only nil t)
   (add-hook 'window-configuration-change-hook
             #'pi-coding-agent--maybe-refresh-hot-tail-tables nil t)
   (add-hook 'window-size-change-functions
             #'pi-coding-agent--maybe-rebalance-windows)
   (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-on-kill nil t))
+
+(put 'pi-coding-agent-chat-mode 'mode-class 'special)
 
 (defun pi-coding-agent-complete ()
   "Complete at point, suppressing help text in the *Completions* buffer.
@@ -601,13 +644,24 @@ removing the instructional header that would otherwise appear."
 ;;;; Session Directory Detection
 
 (defun pi-coding-agent--session-directory ()
-  "Determine directory for pi session.
-Uses project root if available, otherwise `default-directory'.
+  "Determine directory for the current pi session context.
+Inside pi buffers, uses the chat buffer's stable session directory so manual
+transcript saves do not retarget the live session.  Elsewhere, uses the
+current project root when available, falling back to `default-directory'.
 Always returns an expanded absolute path (no ~ abbreviation)."
   (expand-file-name
-   (or (when-let* ((proj (project-current)))
-         (project-root proj))
-       default-directory)))
+   (cond
+    ((derived-mode-p 'pi-coding-agent-chat-mode)
+     (pi-coding-agent--chat-session-directory))
+    ((derived-mode-p 'pi-coding-agent-input-mode)
+     (if (buffer-live-p pi-coding-agent--chat-buffer)
+         (with-current-buffer pi-coding-agent--chat-buffer
+           (pi-coding-agent--chat-session-directory))
+       default-directory))
+    (t
+     (or (when-let* ((proj (project-current)))
+           (project-root proj))
+         default-directory)))))
 
 ;;;; Buffer Naming & Creation
 
@@ -625,24 +679,38 @@ Uses abbreviated directory for readability in buffer lists."
 
 (defun pi-coding-agent--find-session (dir &optional session)
   "Find existing chat buffer for DIR and SESSION.
-Returns the chat buffer or nil if not found."
-  (get-buffer (pi-coding-agent--buffer-name :chat dir session)))
+Matches the chat buffer's stable session identity, even when the buffer is
+also visiting a transcript file and therefore has a different live name."
+  (let ((target-name (pi-coding-agent--buffer-name :chat dir session)))
+    (cl-find-if
+     (lambda (buf)
+       (and (buffer-live-p buf)
+            (with-current-buffer buf
+              (and (derived-mode-p 'pi-coding-agent-chat-mode)
+                   (equal (pi-coding-agent--chat-session-buffer-name)
+                          target-name)))))
+     (buffer-list))))
 
 (defun pi-coding-agent--get-or-create-buffer (type dir &optional session)
   "Get or create buffer of TYPE for DIR and optional SESSION.
-TYPE is :chat or :input.  Returns the buffer."
+TYPE is :chat or :input.  Returns the buffer.
+Existing buffers keep their state; session metadata is refreshed explicitly
+by session setup code."
   (let* ((name (pi-coding-agent--buffer-name type dir session))
-         (existing (get-buffer name)))
-    (if existing
-        existing
-      (let ((buf (generate-new-buffer name)))
-        (with-current-buffer buf
-          ;; Keep canonical session directory for exact matching.
-          (setq default-directory dir)
-          (pcase type
-            (:chat (pi-coding-agent-chat-mode))
-            (:input (pi-coding-agent-input-mode))))
-        buf))))
+         (existing (if (eq type :chat)
+                       (pi-coding-agent--find-session dir session)
+                     (get-buffer name)))
+         (buf (or existing (generate-new-buffer name))))
+    (unless existing
+      (with-current-buffer buf
+        (pcase type
+          (:chat
+           (pi-coding-agent-chat-mode)
+           (pi-coding-agent--set-chat-session-identity dir session))
+          (:input
+           (pi-coding-agent-input-mode)
+           (setq default-directory dir)))))
+    buf))
 
 ;;;; Project Buffer Discovery
 
@@ -653,8 +721,9 @@ Returns an expanded absolute path with a trailing slash."
 
 (defun pi-coding-agent-project-buffers ()
   "Return pi chat buffers for the current project directory.
-Matches buffers by exact `default-directory', not by `buffer-name' prefix.
-Returns a list ordered by `buffer-list' recency (most recent first)."
+Matches buffers by their stable session directory, not by the live buffer name
+or transcript file location.  Returns a list ordered by `buffer-list'
+recency, with the most recent buffer first."
   (let ((target-dir (pi-coding-agent--normalize-directory
                      (pi-coding-agent--session-directory))))
     (cl-remove-if-not
@@ -662,9 +731,10 @@ Returns a list ordered by `buffer-list' recency (most recent first)."
        (and (buffer-live-p buf)
             (with-current-buffer buf
               (and (derived-mode-p 'pi-coding-agent-chat-mode)
-                   (stringp default-directory)
+                   (stringp (pi-coding-agent--chat-session-directory))
                    (string=
-                    (pi-coding-agent--normalize-directory default-directory)
+                    (pi-coding-agent--normalize-directory
+                     (pi-coding-agent--chat-session-directory))
                     target-dir)))))
      (buffer-list))))
 

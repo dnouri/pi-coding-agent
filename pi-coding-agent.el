@@ -92,7 +92,7 @@ Returns the chat buffer."
          (new-session nil))
     ;; Link buffers to each other
     (with-current-buffer chat-buf
-      (setq default-directory dir)
+      (pi-coding-agent--set-chat-session-identity dir session)
       (pi-coding-agent--set-input-buffer input-buf)
       ;; Start process if not already running
       (unless (and pi-coding-agent--process (process-live-p pi-coding-agent--process))

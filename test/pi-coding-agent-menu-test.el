@@ -191,11 +191,17 @@ Also verifies that the new session-file is stored in state for reload to work."
         (kill-buffer chat-buf)))))
 
 (ert-deftest pi-coding-agent-test-find-session-returns-existing ()
-  "pi-coding-agent--find-session returns existing chat buffer."
-  (let ((buf (generate-new-buffer "*pi-coding-agent-chat:/tmp/test-find/*")))
+  "pi-coding-agent--find-session returns an existing chat buffer."
+  (let* ((root (pi-coding-agent-test--make-temp-directory
+                "pi-coding-agent-test-find-session-"))
+         (buf (generate-new-buffer (pi-coding-agent-test--chat-buffer-name root))))
     (unwind-protect
-        (should (eq (pi-coding-agent--find-session "/tmp/test-find/" nil) buf))
-      (kill-buffer buf))))
+        (with-current-buffer buf
+          (pi-coding-agent-chat-mode)
+          (setq default-directory root)
+          (should (eq (pi-coding-agent--find-session root nil) buf)))
+      (kill-buffer buf)
+      (ignore-errors (delete-directory root t)))))
 
 (ert-deftest pi-coding-agent-test-find-session-returns-nil-when-missing ()
   "pi-coding-agent--find-session returns nil when no session exists."

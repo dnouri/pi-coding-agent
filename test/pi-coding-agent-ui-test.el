@@ -93,6 +93,10 @@ This ensures all files get code fences for consistent display."
     (should-not hl-line-mode)
     (should-not (buffer-local-value 'global-hl-line-mode (current-buffer)))))
 
+(ert-deftest pi-coding-agent-test-chat-mode-is-special-buffer-mode ()
+  "Chat mode advertises the standard special-buffer contract."
+  (should (eq (get 'pi-coding-agent-chat-mode 'mode-class) 'special)))
+
 (ert-deftest pi-coding-agent-test-chat-mode-adds-window-change-hook ()
   "pi-coding-agent-chat-mode installs the buffer-local width refresh hook."
   (with-temp-buffer
@@ -100,6 +104,78 @@ This ensures all files get code fences for consistent display."
     (should (local-variable-p 'window-configuration-change-hook))
     (should (memq #'pi-coding-agent--maybe-refresh-hot-tail-tables
                   window-configuration-change-hook))))
+
+(ert-deftest pi-coding-agent-test-chat-mode-write-file-preserves-chat-state ()
+  "`write-file' keeps chat buffers in chat mode with file backing attached."
+  (let ((file nil)
+        (root (pi-coding-agent-test--make-temp-directory
+               "pi-coding-agent-test-write-file-"))
+        (make-backup-files nil))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (setq default-directory root)
+          (setq pi-coding-agent--process 'mock-process)
+          (let ((inhibit-read-only t))
+            (insert "Assistant\n=========\n\nHello\n"))
+          (setq file (pi-coding-agent-test--write-chat-buffer
+                      (current-buffer) "pi-coding-agent-chat-write-"))
+          (should (derived-mode-p 'pi-coding-agent-chat-mode))
+          (should (eq pi-coding-agent--process 'mock-process))
+          (should (equal buffer-file-name file))
+          (should buffer-read-only))
+      (ignore-errors (delete-file file))
+      (ignore-errors (delete-directory root t)))))
+
+(ert-deftest pi-coding-agent-test-chat-mode-save-buffer-keeps-writing-to-bound-file ()
+  "Later `save-buffer' keeps writing to the same file-backed chat buffer."
+  (let ((file nil)
+        (make-backup-files nil))
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (pi-coding-agent-chat-mode)
+            (let ((inhibit-read-only t))
+              (insert "Assistant\n=========\n\nHello\n"))
+            (setq file (pi-coding-agent-test--write-chat-buffer
+                        (current-buffer) "pi-coding-agent-chat-save-"))
+            (let ((inhibit-read-only t))
+              (goto-char (point-max))
+              (insert "More\n"))
+            (save-buffer)
+            (should (derived-mode-p 'pi-coding-agent-chat-mode))
+            (should (equal buffer-file-name file))
+            (should buffer-read-only))
+          (with-temp-buffer
+            (insert-file-contents file)
+            (should (equal (buffer-string)
+                           "Assistant\n=========\n\nHello\nMore\n"))))
+      (ignore-errors (delete-file file)))))
+
+(ert-deftest pi-coding-agent-test-session-chat-write-file-preserves-canonical-name-and-directory ()
+  "Session chat buffers keep their canonical identity after `write-file'."
+  (let ((root (pi-coding-agent-test--make-temp-directory
+               "pi-coding-agent-test-write-file-session-"))
+        (file nil)
+        (chat nil)
+        (input nil)
+        (make-backup-files nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                  ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil)))
+          (setq chat (pi-coding-agent--setup-session root nil)
+                input (buffer-local-value 'pi-coding-agent--input-buffer chat))
+          (setq file (pi-coding-agent-test--write-chat-buffer
+                      chat "pi-coding-agent-chat-session-" "Saved copy\n"))
+          (with-current-buffer chat
+            (should (equal (pi-coding-agent--chat-session-buffer-name)
+                           (pi-coding-agent-test--chat-buffer-name root)))
+            (should (equal (pi-coding-agent--session-directory) root))
+            (should (equal buffer-file-name file))
+            (should buffer-read-only)))
+      (pi-coding-agent-test--kill-live-buffers input chat)
+      (ignore-errors (delete-file file))
+      (ignore-errors (delete-directory root t)))))
 
 (ert-deftest pi-coding-agent-test-input-mode-derives-from-text ()
   "pi-coding-agent-input-mode derives from text-mode, not md-ts-mode by default."
