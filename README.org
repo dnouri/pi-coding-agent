@@ -64,7 +64,7 @@ needed for markdown rendering.  That requires a C compiler (=gcc= or =cc=).
 * Requirements
 
 - Emacs 29.1 or later (with tree-sitter support)
-- [[https://pi.dev][pi coding agent]] 0.52.9 or later, installed and in PATH
+- [[https://pi.dev][pi coding agent]] 0.65.0 or later, installed and in PATH
 - pi CLI authentication via =pi --login= or provider API keys
 - A C compiler (=gcc= or =cc=) for installing tree-sitter grammars
 
