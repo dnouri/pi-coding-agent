@@ -105,6 +105,99 @@ This ensures all files get code fences for consistent display."
     (should (memq #'pi-coding-agent--maybe-refresh-hot-tail-tables
                   window-configuration-change-hook))))
 
+(ert-deftest pi-coding-agent-test-chat-mode-initializes-with-theme-derived-diff-faces ()
+  "Chat mode startup should not depend on diff-mode being loaded elsewhere."
+  (with-temp-buffer
+    (let ((debug-on-error t))
+      (pi-coding-agent-chat-mode)
+      (should (derived-mode-p 'pi-coding-agent-chat-mode)))))
+
+(ert-deftest pi-coding-agent-test-theme-diff-background-prefers-diff-face-background ()
+  "Theme-derived diff lines should reuse an existing diff background first."
+  (cl-letf (((symbol-function 'face-background)
+             (lambda (face &optional _frame _inherit)
+               (pcase face
+                 ('diff-added "#224422")
+                 ('default "#111111")
+                 (_ nil))))
+            ((symbol-function 'color-defined-p)
+             (lambda (color) (stringp color))))
+    (should (equal (pi-coding-agent--theme-diff-background
+                    'diff-added 'diff-indicator-added)
+                   "#224422"))))
+
+(ert-deftest pi-coding-agent-test-theme-diff-background-prefers-diff-face-foreground ()
+  "Theme-derived diff lines should prefer the diff face foreground before the indicator."
+  (cl-letf (((symbol-function 'face-background)
+             (lambda (face &optional _frame _inherit)
+               (pcase face
+                 ('diff-added nil)
+                 ('default "#111111")
+                 (_ nil))))
+            ((symbol-function 'face-foreground)
+             (lambda (face &optional _frame _inherit)
+               (pcase face
+                 ('diff-added "#bb3333")
+                 ('diff-indicator-added "#22aa22")
+                 (_ nil))))
+            ((symbol-function 'color-defined-p)
+             (lambda (color) (stringp color))))
+    (should (equal (pi-coding-agent--theme-diff-background
+                    'diff-added 'diff-indicator-added)
+                   (pi-coding-agent--blend-color "#111111" "#bb3333" 0.20)))))
+
+(ert-deftest pi-coding-agent-test-theme-diff-background-falls-back-to-indicator-foreground ()
+  "Theme-derived diff lines should fall back to the indicator color when needed."
+  (cl-letf (((symbol-function 'face-background)
+             (lambda (face &optional _frame _inherit)
+               (pcase face
+                 ('diff-added nil)
+                 ('default "#fefefe")
+                 (_ nil))))
+            ((symbol-function 'face-foreground)
+             (lambda (face &optional _frame _inherit)
+               (pcase face
+                 ('diff-added nil)
+                 ('diff-indicator-added "#22aa22")
+                 (_ nil))))
+            ((symbol-function 'color-defined-p)
+             (lambda (color) (stringp color))))
+    (should (equal (pi-coding-agent--theme-diff-background
+                    'diff-added 'diff-indicator-added)
+                   (pi-coding-agent--blend-color "#fefefe" "#22aa22" 0.10)))))
+
+(ert-deftest pi-coding-agent-test-update-theme-derived-faces-uses-background-only-overlays ()
+  "Theme-derived overlay faces should only contribute background tint."
+  (let (calls)
+    (cl-letf (((symbol-function 'face-background)
+               (lambda (face &optional _frame _inherit)
+                 (pcase face
+                   ('default "#111111")
+                   ('diff-added "#224422")
+                   ('diff-removed nil)
+                   (_ nil))))
+              ((symbol-function 'face-foreground)
+               (lambda (face &optional _frame _inherit)
+                 (pcase face
+                   ('diff-removed "#bb3333")
+                   ('diff-indicator-removed "#aa2222")
+                   (_ nil))))
+              ((symbol-function 'color-defined-p)
+               (lambda (color) (stringp color)))
+              ((symbol-function 'set-face-attribute)
+               (lambda (face _frame &rest args)
+                 (push (cons face args) calls))))
+      (pi-coding-agent--update-theme-derived-faces)
+      (dolist (face '(pi-coding-agent-diff-line-added
+                      pi-coding-agent-diff-line-removed
+                      pi-coding-agent-tool-block-error))
+        (let ((args (cdr (assq face calls))))
+          (should args)
+          (should (eq (plist-get args :inherit) nil))
+          (should (eq (plist-get args :foreground) 'unspecified))
+          (should (stringp (plist-get args :background)))
+          (should (eq (plist-get args :extend) t)))))))
+
 (ert-deftest pi-coding-agent-test-chat-mode-write-file-preserves-chat-state ()
   "`write-file' keeps chat buffers in chat mode with file backing attached."
   (let ((file nil)

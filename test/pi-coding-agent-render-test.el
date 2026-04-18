@@ -2371,17 +2371,23 @@ With hot-tail-turn-count 1, only the most recent headed turn stays hot."
                     (mapcar (lambda (ov) (overlay-get ov 'face)) ovs))))))
 
 (ert-deftest pi-coding-agent-test-apply-diff-overlays-removed-line ()
-  "Diff overlays should mark removed lines with diff-removed faces."
+  "Diff overlays should mark removed lines with indicator and line faces."
   (with-temp-buffer
     ;; Use actual pi format: -<space><padded-linenum><space><code>
     (insert "-12     removed line\n")
     (pi-coding-agent--apply-diff-overlays (point-min) (point-max))
     (goto-char (point-min))
-    (let ((ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
-                           (overlays-at (point)))))
-      (should ovs)
+    (let ((indicator-ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
+                                     (overlays-at (point)))))
+      (should indicator-ovs)
       (should (memq 'diff-indicator-removed
-                    (mapcar (lambda (ov) (overlay-get ov 'face)) ovs))))))
+                    (mapcar (lambda (ov) (overlay-get ov 'face)) indicator-ovs))))
+    (goto-char 9)
+    (let ((line-ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
+                                (overlays-at (point)))))
+      (should line-ovs)
+      (should (memq 'pi-coding-agent-diff-line-removed
+                    (mapcar (lambda (ov) (overlay-get ov 'face)) line-ovs))))))
 
 (ert-deftest pi-coding-agent-test-apply-diff-overlays-multiline ()
   "Diff overlays should handle multiple diff lines."
@@ -2396,7 +2402,7 @@ With hot-tail-turn-count 1, only the most recent headed turn stays hot."
       (should (= 4 (length all-ovs))))))
 
 (ert-deftest pi-coding-agent-test-apply-diff-overlays-line-background ()
-  "Diff overlays should apply background color to entire line."
+  "Diff overlays should apply the theme-derived line background face."
   (with-temp-buffer
     ;; Use actual pi format: "+ 7     def foo():"
     (insert "+ 7     def foo():\n")
@@ -2406,8 +2412,8 @@ With hot-tail-turn-count 1, only the most recent headed turn stays hot."
     (let ((ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
                            (overlays-at (point)))))
       (should ovs)
-      ;; Should have diff-added face for background
-      (should (memq 'diff-added
+      ;; Should have the syntax-preserving diff-line face for background
+      (should (memq 'pi-coding-agent-diff-line-added
                     (mapcar (lambda (ov) (overlay-get ov 'face)) ovs))))))
 
 (ert-deftest pi-coding-agent-test-edit-tool-diff-uses-overlays ()
@@ -2436,6 +2442,31 @@ With hot-tail-turn-count 1, only the most recent headed turn stays hot."
                            (overlays-at (match-beginning 0)))))
       (should (memq 'diff-indicator-added
                     (mapcar (lambda (ov) (overlay-get ov 'face)) ovs))))))
+
+(ert-deftest pi-coding-agent-test-edit-tool-diff-keeps-syntax-face-under-diff-overlay ()
+  "Edit diff overlays should not remove syntax fontification from code tokens."
+  (let ((path (expand-file-name "pi-coding-agent-edit-diff-test.py"
+                                temporary-file-directory)))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-tool-start "edit" `(:path ,path))
+      (pi-coding-agent--display-tool-end
+       "edit"
+       `(:path ,path)
+       '((:type "text" :text "Edit successful"))
+       (list :diff "+ 1     def foo():\n+ 2         return 42\n- 3     def bar():")
+       nil)
+      (font-lock-ensure (point-min) (point-max))
+      (goto-char (point-min))
+      (should (search-forward "def" nil t))
+      (let* ((pos (match-beginning 0))
+             (syntax-face (get-text-property pos 'face))
+             (diff-faces (mapcar (lambda (ov) (overlay-get ov 'face))
+                                 (seq-filter (lambda (ov)
+                                               (overlay-get ov 'pi-coding-agent-diff-overlay))
+                                             (overlays-at pos)))))
+        (should syntax-face)
+        (should (memq 'pi-coding-agent-diff-line-added diff-faces))))))
 
 ;;; File Navigation (visit-file)
 

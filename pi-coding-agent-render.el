@@ -2037,8 +2037,11 @@ For example: '+ 7     code' or '-12     code'"
                                     'diff-indicator-removed))
         (overlay-put ind-ov 'priority pi-coding-agent--diff-indicator-priority)
         (overlay-put ind-ov 'pi-coding-agent-diff-overlay t)
-        ;; Line background face - higher than tool-block but lower than indicator
-        (overlay-put line-ov 'face (if is-added 'diff-added 'diff-removed))
+        ;; Line background face - higher than tool-block but lower than indicator.
+        ;; Use theme-derived background-only faces so syntax foregrounds stay visible.
+        (overlay-put line-ov 'face (if is-added
+                                      'pi-coding-agent-diff-line-added
+                                    'pi-coding-agent-diff-line-removed))
         (overlay-put line-ov 'priority pi-coding-agent--diff-line-priority)
         (overlay-put line-ov 'pi-coding-agent-diff-overlay t)))))
 
