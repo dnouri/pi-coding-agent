@@ -746,9 +746,25 @@ Updates buffer-local state and renders display updates."
          ((or "toolcall_start" "toolcall_delta" "toolcall_end")
           ;; Preview reconciliation follows the authoritative assistant
           ;; message content, not a singleton streaming-tool state machine.
-          (pi-coding-agent--set-activity-phase "running")
-          (pi-coding-agent--reconcile-toolcall-previews
-           (plist-get event :message)))
+          ;; Debounce deltas and use simplified headers during streaming
+          ;; to avoid expensive JSON pretty-printing on every delta.
+          (let ((msg-event-type (plist-get msg-event :type)))
+            (pi-coding-agent--set-activity-phase "running")
+            (cond
+             ((equal msg-event-type "toolcall_end")
+              ;; Flush any pending debounce then reconcile with full header.
+              (pi-coding-agent--cancel-toolcall-debounce)
+              (pi-coding-agent--reconcile-toolcall-previews
+               (plist-get event :message)))
+             ((equal msg-event-type "toolcall_start")
+              ;; Create block immediately with streaming header,
+              ;; then start debounce for subsequent deltas.
+              (pi-coding-agent--cancel-toolcall-debounce)
+              (pi-coding-agent--reconcile-toolcall-previews
+               (plist-get event :message) t))
+             (t                        ; toolcall_delta
+              (pi-coding-agent--debounce-toolcall-preview
+               (plist-get event :message))))))
          ("error"
           ;; Error during streaming (e.g., API error)
           (pi-coding-agent--display-error (plist-get msg-event :reason))))))
@@ -917,9 +933,10 @@ Returns a plist with:
   "Delete pi-owned render overlays in the current chat buffer.
 This removes completed/pending tool overlays and diff overlays before
 buffer reset or history rebuild, then clears keyed live-tool state,
-cached execution args, and the compatibility pending overlay slot so
-buffer state and overlay state stay consistent.  Tree-sitter overlays
-are left alone."
+cached execution args, debounce timer, and the compatibility pending
+overlay slot so buffer state and overlay state stay consistent.
+Tree-sitter overlays are left alone."
+  (pi-coding-agent--cancel-toolcall-debounce)
   (remove-overlays (point-min) (point-max) 'pi-coding-agent-tool-block t)
   (remove-overlays (point-min) (point-max) 'pi-coding-agent-diff-overlay t)
   (setq pi-coding-agent--pending-tool-overlay nil
@@ -1080,15 +1097,17 @@ needed for compatibility, the current non-keyed pending block."
     (pi-coding-agent--tool-block-refresh-overlay block))
   block)
 
-(defun pi-coding-agent--tool-block-create (tool-name args &optional tool-call-id order)
+(defun pi-coding-agent--tool-block-create (tool-name args &optional tool-call-id order streaming)
   "Insert a live tool block for TOOL-NAME with ARGS and return it.
 When TOOL-CALL-ID is non-nil, register the block in the keyed live
-registry.  ORDER records the intended block ordering metadata."
+registry.  ORDER records the intended block ordering metadata.
+When STREAMING is non-nil, use a simplified header that skips expensive
+JSON pretty-printing for generic tools."
   (let* ((block-order (pi-coding-agent--reserve-tool-block-order order))
          (next-block (and order
                           (pi-coding-agent--tool-block-next-after-order
                            block-order)))
-         (header-display (pi-coding-agent--tool-header tool-name args))
+         (header-display (pi-coding-agent--tool-header tool-name args streaming))
          (path (pi-coding-agent--tool-path args))
          (block nil)
          (inhibit-read-only t))
@@ -1204,13 +1223,16 @@ can safely skip this region."
               'font-lock-face 'pi-coding-agent-tool-output
               'pi-coding-agent-no-fontify t))
 
-(defun pi-coding-agent--tool-header (tool-name args)
+(defun pi-coding-agent--tool-header (tool-name args &optional streaming)
   "Return propertized header for tool TOOL-NAME with ARGS.
 The tool name prefix uses `pi-coding-agent-tool-name' face and
 the arguments use `pi-coding-agent-tool-command' face.
 Built-in tools show specialized formats (e.g., \"$ cmd\" for bash).
 Generic tools show JSON args: compact when the full header fits
 within `fill-column', pretty-printed otherwise.
+When STREAMING is non-nil, skip expensive JSON pretty-printing for
+generic tools and show only the tool name.  The full header is
+restored once streaming completes or execution starts.
 Uses `font-lock-face' to survive tree-sitter refontification."
   (let ((path (pi-coding-agent--tool-path args)))
     (pcase tool-name
@@ -1222,37 +1244,42 @@ Uses `font-lock-face' to survive tree-sitter refontification."
        (concat (propertize tool-name 'font-lock-face 'pi-coding-agent-tool-name)
                (propertize (concat " " (or path "...")) 'font-lock-face 'pi-coding-agent-tool-command)))
       (_
-       (let* ((name (propertize tool-name 'font-lock-face 'pi-coding-agent-tool-name))
-              (json-pretty (pi-coding-agent--pretty-print-json args))
-              (json-compact (when json-pretty
-                              (mapconcat #'string-trim
-                                         (split-string json-pretty "\n") " ")))
-              (json (cond
-                     ((null json-pretty) nil)
-                     ((<= (+ (length tool-name) 1 (length json-compact))
-                          fill-column)
-                      json-compact)
-                     (t json-pretty))))
-         (if json
-             (concat name (propertize (concat " " json) 'font-lock-face 'pi-coding-agent-tool-command))
-           name))))))
+       (let ((name (propertize tool-name 'font-lock-face 'pi-coding-agent-tool-name)))
+         (if streaming
+             name
+           (let* ((json-pretty (pi-coding-agent--pretty-print-json args))
+                  (json-compact (when json-pretty
+                                  (mapconcat #'string-trim
+                                             (split-string json-pretty "\n") " ")))
+                  (json (cond
+                         ((null json-pretty) nil)
+                         ((<= (+ (length tool-name) 1 (length json-compact))
+                              fill-column)
+                          json-compact)
+                         (t json-pretty))))
+             (if json
+                 (concat name (propertize (concat " " json) 'font-lock-face 'pi-coding-agent-tool-command))
+               name))))))))
 
-(defun pi-coding-agent--display-tool-start (tool-name args &optional tool-call-id order)
+(defun pi-coding-agent--display-tool-start (tool-name args &optional tool-call-id order streaming)
   "Insert a tool header for TOOL-NAME with ARGS and return its live block.
 When TOOL-CALL-ID is non-nil, register the block in the keyed live
-registry.  ORDER records ordering metadata for future reconciliation."
-  (pi-coding-agent--tool-block-create tool-name args tool-call-id order))
+registry.  ORDER records ordering metadata for future reconciliation.
+When STREAMING is non-nil, use a simplified header for generic tools."
+  (pi-coding-agent--tool-block-create tool-name args tool-call-id order streaming))
 
-(defun pi-coding-agent--display-tool-update-header (tool-name args &optional block)
+(defun pi-coding-agent--display-tool-update-header (tool-name args &optional block streaming)
   "Update BLOCK's header for TOOL-NAME with ARGS.
 When BLOCK is nil, fall back to the current compatibility tool block.
 Replaces the header text when it has changed (e.g., when authoritative
-args arrive at tool_execution_start after streaming placeholder)."
+args arrive at tool_execution_start after streaming placeholder).
+When STREAMING is non-nil, use a simplified header that skips expensive
+JSON pretty-printing for generic tools."
   (when-let* ((block (or block (pi-coding-agent--current-tool-block)))
               (ov (pi-coding-agent--tool-block-overlay block))
               (ov-start (overlay-start ov))
               (header-end (pi-coding-agent--tool-block-header-end block)))
-    (let ((new-header (pi-coding-agent--tool-header tool-name args))
+    (let ((new-header (pi-coding-agent--tool-header tool-name args streaming))
           (header-limit (1- (marker-position header-end))))
       (when (<= ov-start header-limit)
         (let ((old-header (buffer-substring-no-properties ov-start header-limit)))
@@ -1284,17 +1311,20 @@ Each element is a plist `(:content-index N :tool-call TOOL-CALL)'."
                   tool-calls)))))
     (nreverse tool-calls)))
 
-(defun pi-coding-agent--reconcile-toolcall-preview-block (content-index tool-call)
-  "Create or update the preview block for TOOL-CALL at CONTENT-INDEX."
+(defun pi-coding-agent--reconcile-toolcall-preview-block (content-index tool-call &optional streaming)
+  "Create or update the preview block for TOOL-CALL at CONTENT-INDEX.
+When STREAMING is non-nil, use a simplified header that skips expensive
+JSON pretty-printing for generic tools.  The full header is shown once
+streaming completes or execution starts."
   (let* ((tool-call-id (plist-get tool-call :id))
          (tool-name (plist-get tool-call :name))
          (args (plist-get tool-call :arguments))
          (block (or (pi-coding-agent--tool-block-get tool-call-id)
                     (pi-coding-agent--display-tool-start
-                     tool-name args tool-call-id content-index))))
+                     tool-name args tool-call-id content-index streaming))))
     (setq pi-coding-agent--pending-tool-overlay
           (pi-coding-agent--tool-block-overlay block))
-    (pi-coding-agent--display-tool-update-header tool-name args block)
+    (pi-coding-agent--display-tool-update-header tool-name args block streaming)
     (when (equal tool-name "write")
       (let ((content-entry (and args (plist-member args :content))))
         (when content-entry
@@ -1313,8 +1343,10 @@ Each element is a plist `(:content-index N :tool-call TOOL-CALL)'."
       (unless (member tool-call-id tool-call-ids)
         (pi-coding-agent--tool-block-delete block)))))
 
-(defun pi-coding-agent--reconcile-toolcall-previews (message)
-  "Reconcile live preview blocks from assistant MESSAGE content."
+(defun pi-coding-agent--reconcile-toolcall-previews (message &optional streaming)
+  "Reconcile live preview blocks from assistant MESSAGE content.
+When STREAMING is non-nil, use simplified headers that skip expensive
+JSON pretty-printing for generic tools."
   (let* ((entries (pi-coding-agent--message-tool-calls message))
          (tool-call-ids (delq nil (mapcar (lambda (entry)
                                             (plist-get (plist-get entry :tool-call) :id))
@@ -1323,7 +1355,41 @@ Each element is a plist `(:content-index N :tool-call TOOL-CALL)'."
     (dolist (entry entries)
       (pi-coding-agent--reconcile-toolcall-preview-block
        (plist-get entry :content-index)
-       (plist-get entry :tool-call)))))
+       (plist-get entry :tool-call)
+       streaming))))
+
+(defconst pi-coding-agent--toolcall-debounce-interval 0.05
+  "Seconds to wait before flushing accumulated toolcall deltas.
+50 ms batches rapid deltas while keeping visible latency low.")
+
+(defun pi-coding-agent--cancel-toolcall-debounce ()
+  "Cancel any pending toolcall debounce timer and clear stored message."
+  (when pi-coding-agent--toolcall-debounce-timer
+    (cancel-timer pi-coding-agent--toolcall-debounce-timer)
+    (setq pi-coding-agent--toolcall-debounce-timer nil))
+  (setq pi-coding-agent--toolcall-debounce-message nil))
+
+(defun pi-coding-agent--flush-toolcall-debounce ()
+  "Fire the pending debounced reconciliation with streaming header.
+Called by the debounce timer.  Uses the simplified streaming header
+so JSON pretty-printing is deferred until toolcall_end or
+tool_execution_start."
+  (let ((message pi-coding-agent--toolcall-debounce-message))
+    (setq pi-coding-agent--toolcall-debounce-timer nil
+          pi-coding-agent--toolcall-debounce-message nil)
+    (when message
+      (pi-coding-agent--reconcile-toolcall-previews message t))))
+
+(defun pi-coding-agent--debounce-toolcall-preview (message)
+  "Schedule or replace a debounced reconciliation for MESSAGE.
+Cancels any pending timer and stores MESSAGE for the flush callback.
+The debounce batches rapid toolcall_delta events so the header is
+updated at most once per `pi-coding-agent--toolcall-debounce-interval'."
+  (pi-coding-agent--cancel-toolcall-debounce)
+  (setq pi-coding-agent--toolcall-debounce-message message
+        pi-coding-agent--toolcall-debounce-timer
+        (run-at-time pi-coding-agent--toolcall-debounce-interval nil
+                     #'pi-coding-agent--flush-toolcall-debounce)))
 
 (defun pi-coding-agent--extract-text-from-content (content-blocks)
   "Extract text from CONTENT-BLOCKS vector efficiently.
@@ -2077,7 +2143,9 @@ Uses message-start-marker and streaming-marker to find content.
 No explicit fontification needed — jit-lock + tree-sitter fontify
 at each redisplay cycle during streaming, and any remaining gaps
 are fontified at the redisplay after this function returns.
-Display-only table decoration is applied after the content is stable."
+Display-only table decoration is applied after the content is stable.
+Cancels any pending toolcall debounce timer since the message is done."
+  (pi-coding-agent--cancel-toolcall-debounce)
   (when (and pi-coding-agent--message-start-marker pi-coding-agent--streaming-marker)
     (let ((start (marker-position pi-coding-agent--message-start-marker))
           (end (marker-position pi-coding-agent--streaming-marker)))

@@ -3476,13 +3476,16 @@ Overlay path is only set at tool_execution_start (authoritative for navigation).
                  :content [(:type "toolCall" :id "call_1"
                             :name "read" :arguments nil)])))
     ;; Delta with path — header SHOULD update (visual feedback)
-    (pi-coding-agent--handle-display-event
-     `(:type "message_update"
-       :assistantMessageEvent (:type "toolcall_delta" :contentIndex 0 :delta "x")
-       :message (:role "assistant"
-                 :content [(:type "toolCall" :id "call_1"
-                            :name "read"
-                            :arguments (:path "/tmp/foo.py"))])))
+    (let ((delta-msg
+           '(:type "message_update"
+             :assistantMessageEvent (:type "toolcall_delta" :contentIndex 0 :delta "x")
+             :message (:role "assistant"
+                       :content [(:type "toolCall" :id "call_1"
+                                  :name "read"
+                                  :arguments (:path "/tmp/foo.py"))]))))
+      (pi-coding-agent--handle-display-event delta-msg)
+      (pi-coding-agent-test--flush-toolcall-debounce
+       (plist-get delta-msg :message)))
     ;; Header should show the real path
     (should (string-match-p "read /tmp/foo\\.py" (buffer-string)))
     ;; But overlay should NOT have path yet (deferred to tool_execution_start)
@@ -3533,10 +3536,13 @@ authoritative args, header and overlay path are updated."
      "toolcall_start" 0
      (list (pi-coding-agent-test--toolcall "call_1" "read" nil)))
     (dolist (path '("/tmp/a.py" "/tmp/ab.py" "/tmp/abc.py"))
-      (pi-coding-agent-test--send-toolcall-message-update
-       "toolcall_delta" 0
-       (list (pi-coding-agent-test--toolcall "call_1" "read" (list :path path)))
-       "x"))
+      (let ((msg (pi-coding-agent-test--toolcall-message-update
+                  "toolcall_delta" 0
+                  (list (pi-coding-agent-test--toolcall "call_1" "read" (list :path path)))
+                  "x")))
+        (pi-coding-agent--handle-display-event msg)
+        (pi-coding-agent-test--flush-toolcall-debounce
+         (plist-get msg :message))))
     (let ((content (buffer-string)))
       (should (string-match-p "\nread /tmp/abc\\.py\n\\'" content))
       (should-not (string-match-p "read /tmp/abc\\.pyy+" content)))))
@@ -3570,11 +3576,14 @@ authoritative args, header and overlay path are updated."
        "toolcall_start" 0 toolcalls)
       (pi-coding-agent-test--send-toolcall-message-update
        "toolcall_start" 1 toolcalls)
-      (pi-coding-agent-test--send-toolcall-message-update
-       "toolcall_delta" 0
-       (list (pi-coding-agent-test--toolcall
-              "call_1" "write" '(:path "/tmp/a.py")))
-       "x")
+      (let ((delta-msg (pi-coding-agent-test--toolcall-message-update
+                        "toolcall_delta" 0
+                        (list (pi-coding-agent-test--toolcall
+                               "call_1" "write" '(:path "/tmp/a.py")))
+                        "x")))
+        (pi-coding-agent--handle-display-event delta-msg)
+        (pi-coding-agent-test--flush-toolcall-debounce
+         (plist-get delta-msg :message)))
       (let ((content (buffer-string)))
         (should (string-match-p "write /tmp/a\\.py" content))
         (should-not (string-match-p "write /tmp/b\\.py" content)))
@@ -3645,27 +3654,37 @@ authoritative args, header and overlay path are updated."
        "toolcall_start" 0 toolcalls)
       (pi-coding-agent-test--send-toolcall-message-update
        "toolcall_start" 1 toolcalls)
-      (pi-coding-agent-test--send-toolcall-message-update
-       "toolcall_delta" 0
-       (list (pi-coding-agent-test--toolcall
-              "call_1" "write"
-              '(:path "/tmp/a.py" :content "print(\"a\")\n"))
-             (pi-coding-agent-test--toolcall
-              "call_2" "write" '(:path "/tmp/b.py"))))
+      (let ((delta0-msg
+             (pi-coding-agent-test--toolcall-message-update
+              "toolcall_delta" 0
+              (list (pi-coding-agent-test--toolcall
+                     "call_1" "write"
+                     '(:path "/tmp/a.py" :content "print(\"a\")\n"))
+                    (pi-coding-agent-test--toolcall
+                     "call_2" "write" '(:path "/tmp/b.py")))
+              "x")))
+        (pi-coding-agent--handle-display-event delta0-msg)
+        (pi-coding-agent-test--flush-toolcall-debounce
+         (plist-get delta0-msg :message)))
       (should (string-match-p "print(\\\"a\\\")"
                               (pi-coding-agent-test--tool-stream-body-by-id
                                "call_1")))
       (should-not (string-match-p "print(\\\"a\\\")"
                                   (pi-coding-agent-test--tool-stream-body-by-id
                                    "call_2")))
-      (pi-coding-agent-test--send-toolcall-message-update
-       "toolcall_delta" 1
-       (list (pi-coding-agent-test--toolcall
-              "call_1" "write"
-              '(:path "/tmp/a.py" :content "print(\"a\")\n"))
-             (pi-coding-agent-test--toolcall
-              "call_2" "write"
-              '(:path "/tmp/b.py" :content "print(\"b\")\n"))))
+      (let ((delta1-msg
+             (pi-coding-agent-test--toolcall-message-update
+              "toolcall_delta" 1
+              (list (pi-coding-agent-test--toolcall
+                     "call_1" "write"
+                     '(:path "/tmp/a.py" :content "print(\"a\")\n"))
+                    (pi-coding-agent-test--toolcall
+                     "call_2" "write"
+                     '(:path "/tmp/b.py" :content "print(\"b\")\n")))
+              "x")))
+        (pi-coding-agent--handle-display-event delta1-msg)
+        (pi-coding-agent-test--flush-toolcall-debounce
+         (plist-get delta1-msg :message)))
       (should (string-match-p "print(\\\"a\\\")"
                               (pi-coding-agent-test--tool-stream-body-by-id
                                "call_1")))
@@ -5105,6 +5124,142 @@ events where the header text hasn't changed."
       (pi-coding-agent--display-session-history messages (current-buffer))
       (goto-char (marker-position pi-coding-agent--hot-tail-start))
       (should (looking-at "Assistant")))))
+
+;;;; Toolcall Debounce and Streaming Header Tests
+
+(ert-deftest pi-coding-agent-test-toolcall-debounce-batches-deltas ()
+  "toolcall_delta events are debounced — the buffer is not updated immediately."
+  (pi-coding-agent-test--with-streaming-assistant
+    ;; toolcall_start creates the block immediately
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_start" 0
+     (list (pi-coding-agent-test--toolcall "call_1" "read" nil)))
+    ;; Send delta via raw handle-display-event — should NOT update yet
+    (pi-coding-agent--handle-display-event
+     `(:type "message_update"
+       :assistantMessageEvent (:type "toolcall_delta" :contentIndex 0 :delta "x")
+       :message (:role "assistant"
+                 :content [(:type "toolCall" :id "call_1" :name "read"
+                            :arguments (:path "/tmp/foo.py"))])))
+    ;; Debounce timer should be pending
+    (should pi-coding-agent--toolcall-debounce-timer)
+    ;; Buffer should NOT show the path yet (debounced)
+    (should-not (string-match-p "/tmp/foo\.py" (buffer-string)))
+    ;; Flush and verify
+    (pi-coding-agent-test--flush-toolcall-debounce
+     '(:role "assistant"
+       :content [(:type "toolCall" :id "call_1" :name "read"
+                  :arguments (:path "/tmp/foo.py"))]))
+    (should (string-match-p "/tmp/foo\.py" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-toolcall-start-is-immediate ()
+  "toolcall_start creates the tool block immediately without debounce."
+  (pi-coding-agent-test--with-streaming-assistant
+    ;; No debounce timer before toolcall_start
+    (should-not pi-coding-agent--toolcall-debounce-timer)
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_start" 0
+     (list (pi-coding-agent-test--toolcall "call_1" "bash"
+              '(:command "echo hello"))))
+    ;; Block should exist immediately — no debounce on start
+    (should (string-match-p "\\$ echo hello" (buffer-string)))
+    (should pi-coding-agent--pending-tool-overlay)
+    (should-not pi-coding-agent--toolcall-debounce-timer)))
+
+(ert-deftest pi-coding-agent-test-toolcall-end-cancels-debounce-and-shows-full-header ()
+  "toolcall_end cancels pending debounce and reconciles with full header."
+  (pi-coding-agent-test--with-streaming-assistant
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_start" 0
+     (list (pi-coding-agent-test--toolcall "call_1" "clojure_paren_repair" nil)))
+    ;; Delta with large args — debounced
+    (pi-coding-agent--handle-display-event
+     `(:type "message_update"
+       :assistantMessageEvent (:type "toolcall_delta" :contentIndex 0 :delta "x")
+       :message (:role "assistant"
+                 :content [(:type "toolCall" :id "call_1"
+                            :name "clojure_paren_repair"
+                            :arguments (:code "(defn foo [x] (let [y 1] (+ x y)))"
+                              :file "core.clj"))])))
+    (should pi-coding-agent--toolcall-debounce-timer)
+    ;; toolcall_end cancels debounce and shows full header with JSON args
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_end" 0
+     (list (pi-coding-agent-test--toolcall "call_1" "clojure_paren_repair"
+              '(:code "(defn foo [x] (let [y 1] (+ x y)))" :file "core.clj"))))
+    ;; Debounce timer should be gone
+    (should-not pi-coding-agent--toolcall-debounce-timer)
+    ;; Full header should now include JSON args (pretty-printed)
+    (should (string-match-p "core\.clj" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-toolcall-streaming-header-skips-json-for-generic-tools ()
+  "During streaming, generic tools show only the tool name without JSON args.
+Built-in tools (bash, read, write, edit) still show their compact format."
+  ;; Generic tool with streaming header — no JSON args
+  (let ((streaming-header (pi-coding-agent--tool-header "clojure_paren_repair"
+                               '(:code "(defn foo [])" :file "core.clj")
+                               t)))
+    (should (string-match-p "clojure_paren_repair" streaming-header))
+    (should-not (string-match-p "core\\.clj" streaming-header))
+    (should-not (string-match-p "code" streaming-header)))
+  ;; Same tool without streaming — full JSON header
+  (let ((full-header (pi-coding-agent--tool-header "clojure_paren_repair"
+                          '(:code "(defn foo [])" :file "core.clj"))))
+    (should (string-match-p "core\\.clj" full-header)))
+  ;; Built-in tools are unaffected by streaming flag
+  (let ((bash-header (pi-coding-agent--tool-header "bash"
+                          '(:command "ls") t)))
+    (should (string-match-p "\\$ ls" bash-header)))
+  (let ((write-header (pi-coding-agent--tool-header "write"
+                           '(:path "/tmp/foo.py") t)))
+    (should (string-match-p "write /tmp/foo\\.py" write-header))))
+
+(ert-deftest pi-coding-agent-test-toolcall-debounce-cleared-on-render-complete ()
+  "render-complete-message cancels any pending debounce timer."
+  (pi-coding-agent-test--with-streaming-assistant
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_start" 0
+     (list (pi-coding-agent-test--toolcall "call_1" "read" nil)))
+    ;; Leave a pending delta in the debounce
+    (pi-coding-agent--handle-display-event
+     `(:type "message_update"
+       :assistantMessageEvent (:type "toolcall_delta" :contentIndex 0 :delta "x")
+       :message (:role "assistant"
+                 :content [(:type "toolCall" :id "call_1" :name "read"
+                            :arguments (:path "/tmp/foo.py"))])))
+    (should pi-coding-agent--toolcall-debounce-timer)
+    ;; Simulate message_end which triggers render-complete-message
+    (pi-coding-agent--handle-display-event
+     '(:type "message_end" :message (:role "assistant")))
+    ;; Timer should be cancelled
+    (should-not pi-coding-agent--toolcall-debounce-timer)))
+
+(ert-deftest pi-coding-agent-test-toolcall-debounce-cleared-on-clear-artifacts ()
+  "clear-render-artifacts cancels any pending debounce timer."
+  (pi-coding-agent-test--with-streaming-assistant
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_start" 0
+     (list (pi-coding-agent-test--toolcall "call_1" "read" nil)))
+    (pi-coding-agent--handle-display-event
+     `(:type "message_update"
+       :assistantMessageEvent (:type "toolcall_delta" :contentIndex 0 :delta "x")
+       :message (:role "assistant"
+                 :content [(:type "toolCall" :id "call_1" :name "read"
+                            :arguments (:path "/tmp/foo.py"))])))
+    (should pi-coding-agent--toolcall-debounce-timer)
+    (pi-coding-agent--clear-render-artifacts)
+    (should-not pi-coding-agent--toolcall-debounce-timer)))
+
+(ert-deftest pi-coding-agent-test-send-delta-flushes-debounce ()
+  "The test helper send-delta automatically flushes the debounce."
+  (pi-coding-agent-test--with-toolcall "write" '(:path "/tmp/foo.py")
+    ;; send-delta flushes automatically — content should appear immediately
+    (pi-coding-agent-test--send-delta
+     "write" '(:path "/tmp/foo.py" :content "hello\n"))
+    ;; No pending timer — send-delta already flushed
+    (should-not pi-coding-agent--toolcall-debounce-timer)
+    ;; Content should be visible
+    (should (string-match-p "hello" (buffer-string)))))
 
 (provide 'pi-coding-agent-render-test)
 ;;; pi-coding-agent-render-test.el ends here

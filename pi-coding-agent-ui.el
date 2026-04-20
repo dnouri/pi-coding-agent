@@ -965,6 +965,16 @@ registry so each live block keeps its own output and metadata.")
 Keyed live block helpers are authoritative for concurrent preview and
 execution; this slot remains only for older single-tool flows.")
 
+(defvar-local pi-coding-agent--toolcall-debounce-timer nil
+  "Timer for debounced toolcall preview reconciliation during streaming.
+When non-nil, a timer is pending that will flush the accumulated
+message through `pi-coding-agent--reconcile-toolcall-previews'")
+
+(defvar-local pi-coding-agent--toolcall-debounce-message nil
+  "Pending message for debounced toolcall preview reconciliation.
+Accumulated across `toolcall_delta' events and consumed when the
+debounce timer fires or on `toolcall_end'.")
+
 (defvar-local pi-coding-agent--assistant-header-shown nil
   "Non-nil if Assistant header has been shown for current prompt.
 Used to avoid duplicate headers during retry sequences.")

@@ -219,13 +219,34 @@ ID is \"call_1\" and contentIndex is 0."
       (list (pi-coding-agent-test--toolcall "call_1" ,tool-name ,args)))
      ,@body))
 
+(defvar pi-coding-agent-test--last-delta-message nil
+  "Last message sent via `pi-coding-agent-test--send-delta'.
+Used internally to flush the debounce timer in tests.")
+
 (defun pi-coding-agent-test--send-delta (tool-name args)
   "Send a toolcall_delta event for TOOL-NAME with ARGS.
-Uses tool call ID \"call_1\" and contentIndex 0."
-  (pi-coding-agent-test--send-toolcall-message-update
-   "toolcall_delta" 0
-   (list (pi-coding-agent-test--toolcall "call_1" tool-name args))
-   "x"))
+Uses tool call ID \"call_1\" and contentIndex 0.
+Immediately flushes the debounce timer so tests observe the effect."
+  (let ((msg (pi-coding-agent-test--toolcall-message-update
+              "toolcall_delta" 0
+              (list (pi-coding-agent-test--toolcall "call_1" tool-name args))
+              "x")))
+    (setq pi-coding-agent-test--last-delta-message msg)
+    (pi-coding-agent--handle-display-event msg))
+  ;; Flush debounce timer so tests see the effect immediately.
+  (when pi-coding-agent--toolcall-debounce-timer
+    (pi-coding-agent--cancel-toolcall-debounce)
+    (when-let* ((msg pi-coding-agent-test--last-delta-message))
+      (pi-coding-agent--reconcile-toolcall-previews
+       (plist-get msg :message) t))))
+
+(defun pi-coding-agent-test--flush-toolcall-debounce (message)
+  "Flush any pending toolcall debounce timer, reconciling with MESSAGE.
+For use in tests that send toolcall_delta events directly via
+`pi-coding-agent--handle-display-event' instead of `--send-delta'."
+  (when pi-coding-agent--toolcall-debounce-timer
+    (pi-coding-agent--cancel-toolcall-debounce)
+    (pi-coding-agent--reconcile-toolcall-previews message t)))
 
 ;;;; Mock Session
 
