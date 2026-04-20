@@ -46,6 +46,13 @@
   (let ((result (pi-coding-agent--parse-json-line "{\"isStreaming\":false}")))
     (should (eq (plist-get result :isStreaming) :false))))
 
+(ert-deftest pi-coding-agent-test-json-false-p-accepts-both-sentinels ()
+  "JSON false helper accepts both parser and encoder sentinels."
+  (should (pi-coding-agent--json-false-p :false))
+  (should (pi-coding-agent--json-false-p :json-false))
+  (should-not (pi-coding-agent--json-false-p nil))
+  (should-not (pi-coding-agent--json-false-p t)))
+
 (ert-deftest pi-coding-agent-test-parse-json-unicode ()
   "Unicode content is preserved correctly."
   (let ((result (pi-coding-agent--parse-json-line "{\"msg\":\"Hello 世界 🌍\"}")))

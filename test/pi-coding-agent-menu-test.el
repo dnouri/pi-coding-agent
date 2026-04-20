@@ -153,17 +153,19 @@ This tests that the async callback properly captures the chat buffer reference,
 not relying on current buffer context which may change before callback executes.
 Also verifies that the new session-file is stored in state for reload to work."
   (let ((chat-buf (generate-new-buffer "*pi-coding-agent-chat:/tmp/test-new-session/*"))
-        (captured-callback nil))
+        (captured-callback nil)
+        (proc (start-process "test-new-session-state" nil "cat")))
     (unwind-protect
         (progn
           ;; Set up chat buffer with content and old state
           (with-current-buffer chat-buf
             (pi-coding-agent-chat-mode)
-            (setq pi-coding-agent--state '(:session-file "/tmp/old-session.jsonl"))
+            (setq pi-coding-agent--process proc
+                  pi-coding-agent--state '(:session-file "/tmp/old-session.jsonl"))
             (let ((inhibit-read-only t))
               (insert "Existing conversation content\nMore content here")))
           ;; Mock the RPC to capture the new_session callback and handle get_state
-          (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+          (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () proc))
                     ((symbol-function 'pi-coding-agent--get-chat-buffer) (lambda () chat-buf))
                     ((symbol-function 'pi-coding-agent--rpc-async)
                      (lambda (_proc cmd cb)
@@ -187,6 +189,8 @@ Also verifies that the new session-file is stored in state for reload to work."
             ;; Verify state was updated with new session file (the actual bug fix)
             (should (equal (plist-get pi-coding-agent--state :session-file)
                            "/tmp/new-session.jsonl"))))
+      (when (and proc (process-live-p proc))
+        (delete-process proc))
       (when (buffer-live-p chat-buf)
         (kill-buffer chat-buf)))))
 
@@ -366,7 +370,7 @@ BINDING-SPEC is (DIR CHAT-NAME INPUT-NAME PROC).  DIR is evaluated once."
 ;;; Chat Navigation
 
 (ert-deftest pi-coding-agent-test-chat-has-navigation-keys ()
-  "Chat mode has n/p for navigation, TAB for folding, f for fork."
+  "Chat mode has n/p for navigation, TAB for at-point toggles, f for fork."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (should (eq (key-binding "n") 'pi-coding-agent-next-message))
@@ -495,6 +499,219 @@ BINDING-SPEC is (DIR CHAT-NAME INPUT-NAME PROC).  DIR is evaluated once."
                            (setq error-shown t)))))
               (pi-coding-agent-reload)
               (should error-shown))))
+      (when (buffer-live-p chat-buf)
+        (kill-buffer chat-buf)))))
+
+(ert-deftest pi-coding-agent-test-reload-rebuilds-session-history ()
+  "Reload replays current session history, including thinking and tool output."
+  (let* ((chat-buf (get-buffer-create "*pi-coding-agent-test-reload-history-chat*"))
+         (rpc-calls nil)
+         (messages [(:role "user"
+                     :content [(:type "text" :text "How should reload behave?")]
+                     :timestamp 1704067200000)
+                    (:role "assistant"
+                     :content [(:type "text" :text "Answer first.")
+                               (:type "thinking" :thinking "Need to double-check.")
+                               (:type "toolCall" :id "tc1"
+                                :name "read"
+                                :arguments (:path "foo.el"))]
+                     :timestamp 1704067201000)
+                    (:role "toolResult" :toolCallId "tc1"
+                     :toolName "read"
+                     :content [(:type "text" :text "(defun foo ())")]
+                     :isError :json-false
+                     :timestamp 1704067202000)])
+         (new-proc nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--thinking-display 'visible
+                  pi-coding-agent--state '(:session-file "test-session.jsonl"
+                                           :model (:name "test-model")))
+            (let ((inhibit-read-only t))
+              (insert "STALE CONTENT\n"))
+            (let ((dead-proc (start-process "test-reload-history-dead" nil "true")))
+              (should (pi-coding-agent-test-wait-for-process-exit dead-proc))
+              (setq pi-coding-agent--process dead-proc)))
+          (cl-letf (((symbol-function 'pi-coding-agent--start-process)
+                     (lambda (_dir)
+                       (setq new-proc (start-process "test-reload-history-new" nil "cat"))
+                       new-proc))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc cmd cb)
+                       (push (plist-get cmd :type) rpc-calls)
+                       (pcase (plist-get cmd :type)
+                         ("switch_session"
+                          (funcall cb '(:success t :data (:cancelled :false))))
+                         ("get_state"
+                          (funcall cb '(:success t
+                                        :data (:model (:name "reloaded-model")
+                                               :thinkingLevel "medium"
+                                               :isStreaming :json-false
+                                               :isCompacting :json-false
+                                               :sessionId "reload-session"
+                                               :sessionFile "test-session.jsonl"
+                                               :messageCount 3
+                                               :pendingMessageCount 0))))
+                         ("get_messages"
+                          (funcall cb (list :success t :data (list :messages messages))))
+                         ("get_commands"
+                          (funcall cb '(:success t :data (:commands []))))
+                         (_ (ert-fail (format "Unexpected RPC during reload test: %S" cmd))))))
+                    ((symbol-function 'pi-coding-agent--update-session-name-from-file) #'ignore)
+                    ((symbol-function 'pi-coding-agent--refresh-header) #'ignore)
+                    ((symbol-function 'pi-coding-agent--rebuild-commands-menu) #'ignore)
+                    ((symbol-function 'message) #'ignore))
+            (with-current-buffer chat-buf
+              (pi-coding-agent-reload)))
+          (with-current-buffer chat-buf
+            (let ((text (buffer-string)))
+              (should-not (string-match-p "STALE CONTENT" text))
+              (should (string-match-p "How should reload behave\\?" text))
+              (should (string-match-p "Answer first\\." text))
+              (should (string-match-p "> Need to double-check\\." text))
+              (should (string-match-p "read foo\\.el" text))
+              (should (string-match-p "(defun foo ())" text))))
+          (should (member "get_messages" rpc-calls)))
+      (when (and new-proc (process-live-p new-proc))
+        (delete-process new-proc))
+      (when (buffer-live-p chat-buf)
+        (with-current-buffer chat-buf
+          (when (and pi-coding-agent--process (process-live-p pi-coding-agent--process))
+            (delete-process pi-coding-agent--process)))
+        (kill-buffer chat-buf)))))
+
+(ert-deftest pi-coding-agent-test-load-session-history-ignores-stale-older-response ()
+  "Only the newest in-flight history request may rebuild the chat buffer."
+  (let* ((chat-buf (get-buffer-create "*pi-coding-agent-test-history-load-generation*"))
+         (callbacks nil)
+         (proc (start-process "test-history-load-generation" nil "cat")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--process proc))
+          (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc cmd cb)
+                       (should (equal (plist-get cmd :type) "get_messages"))
+                       (push cb callbacks)))
+                    ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
+            (pi-coding-agent--load-session-history proc nil chat-buf)
+            (pi-coding-agent--load-session-history proc nil chat-buf))
+          (should (= 2 (length callbacks)))
+          (let ((newer (car callbacks))
+                (older (cadr callbacks))
+                (newer-messages [(:role "assistant"
+                                  :content [(:type "text" :text "Newer history")]
+                                  :timestamp 1704067200000)])
+                (older-messages [(:role "assistant"
+                                  :content [(:type "text" :text "Older history")]
+                                  :timestamp 1704067201000)]))
+            (funcall newer (list :success t :data (list :messages newer-messages)))
+            (with-current-buffer chat-buf
+              (should (string-match-p "Newer history" (buffer-string)))
+              (should-not (string-match-p "Older history" (buffer-string))))
+            (funcall older (list :success t :data (list :messages older-messages)))
+            (with-current-buffer chat-buf
+              (should (string-match-p "Newer history" (buffer-string)))
+              (should-not (string-match-p "Older history" (buffer-string))))))
+      (when (and proc (process-live-p proc))
+        (delete-process proc))
+      (when (buffer-live-p chat-buf)
+        (kill-buffer chat-buf)))))
+
+(ert-deftest pi-coding-agent-test-reset-session-state-keeps-history-load-generation-monotonic ()
+  "Resetting session state must not let old history callbacks collide with new ones."
+  (let* ((chat-buf (get-buffer-create "*pi-coding-agent-test-history-reset-generation*"))
+         (callbacks nil)
+         (proc (start-process "test-history-reset-generation" nil "cat")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--process proc))
+          (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc cmd cb)
+                       (should (equal (plist-get cmd :type) "get_messages"))
+                       (push cb callbacks)))
+                    ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
+            (pi-coding-agent--load-session-history proc nil chat-buf)
+            (with-current-buffer chat-buf
+              (pi-coding-agent--reset-session-state)
+              (setq pi-coding-agent--process proc))
+            (pi-coding-agent--load-session-history proc nil chat-buf))
+          (should (= 2 (length callbacks)))
+          (let ((newer (car callbacks))
+                (older (cadr callbacks)))
+            (funcall newer '(:success t :data (:messages [(:role "assistant"
+                                                   :content [(:type "text" :text "New session history")]
+                                                   :timestamp 1704067200000)])))
+            (with-current-buffer chat-buf
+              (should (string-match-p "New session history" (buffer-string))))
+            (funcall older '(:success t :data (:messages [(:role "assistant"
+                                                   :content [(:type "text" :text "Old session history")]
+                                                   :timestamp 1704067201000)])))
+            (with-current-buffer chat-buf
+              (should (string-match-p "New session history" (buffer-string)))
+              (should-not (string-match-p "Old session history" (buffer-string))))))
+      (when (and proc (process-live-p proc))
+        (delete-process proc))
+      (when (buffer-live-p chat-buf)
+        (kill-buffer chat-buf)))))
+
+(ert-deftest pi-coding-agent-test-refresh-session-state-ignores-stale-older-response ()
+  "Only the newest async get_state refresh may update the chat buffer state."
+  (let* ((chat-buf (get-buffer-create "*pi-coding-agent-test-refresh-session-state*"))
+         (callbacks nil)
+         (proc (start-process "test-refresh-session-state" nil "cat")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--process proc))
+          (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc cmd cb)
+                       (should (equal (plist-get cmd :type) "get_state"))
+                       (push cb callbacks)))
+                    ((symbol-function 'pi-coding-agent--update-session-name-from-file) #'ignore)
+                    ((symbol-function 'force-mode-line-update) #'ignore))
+            (pi-coding-agent--refresh-session-state proc chat-buf)
+            (pi-coding-agent--refresh-session-state proc chat-buf))
+          (should (= 2 (length callbacks)))
+          (let ((newer (car callbacks))
+                (older (cadr callbacks))
+                (newer-response
+                 '(:success t :data (:model (:name "new")
+                                    :thinkingLevel "medium"
+                                    :isStreaming :json-false
+                                    :isCompacting :json-false
+                                    :sessionId "new-session"
+                                    :sessionFile "new-session.jsonl"
+                                    :messageCount 3
+                                    :pendingMessageCount 0)))
+                (older-response
+                 '(:success t :data (:model (:name "old")
+                                    :thinkingLevel "low"
+                                    :isStreaming :json-false
+                                    :isCompacting :json-false
+                                    :sessionId "old-session"
+                                    :sessionFile "old-session.jsonl"
+                                    :messageCount 1
+                                    :pendingMessageCount 0))))
+            (funcall older older-response)
+            (with-current-buffer chat-buf
+              (should-not pi-coding-agent--state))
+            (funcall newer newer-response)
+            (with-current-buffer chat-buf
+              (should (equal (plist-get pi-coding-agent--state :session-file)
+                             "new-session.jsonl")))
+            (funcall older older-response)
+            (with-current-buffer chat-buf
+              (should (equal (plist-get pi-coding-agent--state :session-file)
+                             "new-session.jsonl")))))
+      (when (and proc (process-live-p proc))
+        (delete-process proc))
       (when (buffer-live-p chat-buf)
         (kill-buffer chat-buf)))))
 
@@ -643,8 +860,8 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
     (unwind-protect
         (progn
           (pi-coding-agent--rebuild-commands-menu)
-          (should (transient-get-suffix 'pi-coding-agent-menu '(4))))
-      (ignore-errors (transient-remove-suffix 'pi-coding-agent-menu '(4))))))
+          (should (transient-get-suffix 'pi-coding-agent-menu '(3))))
+      (ignore-errors (transient-remove-suffix 'pi-coding-agent-menu '(3))))))
 
 (defun pi-coding-agent-test--suffix-key-bound-p (key)
   "Return non-nil if KEY is bound in current transient suffixes."
@@ -795,6 +1012,228 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
           (should (equal shown-message
                          "Pi: Process died - try M-x pi-coding-agent-reload or C-c C-p R")))
       (kill-buffer chat-buf))))
+
+(defun pi-coding-agent-test--seed-stale-session-rebuild-state (chat-buf stale-text)
+  "Seed CHAT-BUF with stale state so a session rebuild must replace it.
+STALE-TEXT is inserted into the buffer and also mirrored into the canonical
+message cache so tests can prove both rendered and cached session state were
+replaced by the resumed or forked history."
+  (with-current-buffer chat-buf
+    (setq pi-coding-agent--process 'mock-proc
+          pi-coding-agent--state '(:session-id "old-session-id"
+                                   :session-file "/tmp/old-session.jsonl"))
+    (pi-coding-agent--set-canonical-messages
+     [(:role "assistant"
+       :content [(:type "text" :text "Old canonical history")]
+       :timestamp 1704067200000)])
+    (let ((inhibit-read-only t))
+      (insert stale-text "\n"))
+    (let ((tool-ov (make-overlay 1 6 nil nil nil)))
+      (overlay-put tool-ov 'pi-coding-agent-tool-block t)
+      (setq pi-coding-agent--pending-tool-overlay tool-ov))
+    (puthash "old-tool" '(:path "/tmp/old.el") pi-coding-agent--tool-args-cache)
+    (puthash "old-tool" '(:tool-call-id "old-tool") pi-coding-agent--live-tool-blocks)))
+
+(defun pi-coding-agent-test--assert-clean-session-rebuild
+    (chat-buf expected-messages stale-text)
+  "Assert CHAT-BUF was rebuilt from EXPECTED-MESSAGES and cleared STALE-TEXT."
+  (with-current-buffer chat-buf
+    (should (equal pi-coding-agent--canonical-messages expected-messages))
+    (should-not (string-match-p (regexp-quote stale-text) (buffer-string)))
+    (should-not pi-coding-agent--pending-tool-overlay)
+    (should (= 0 (hash-table-count pi-coding-agent--tool-args-cache)))
+    (should (= 0 (hash-table-count pi-coding-agent--live-tool-blocks)))
+    (should-not (cl-some (lambda (ov)
+                           (overlay-get ov 'pi-coding-agent-tool-block))
+                         (overlays-in (point-min) (point-max))))))
+
+(ert-deftest pi-coding-agent-test-resume-session-from-input-switches-session-and-rebuilds-history ()
+  "Resuming from the input buffer refreshes the linked chat and session state."
+  (let ((dir "/tmp/pi-coding-agent-test-resume-happy/")
+        (shown-message nil)
+        (rpc-calls nil))
+    (pi-coding-agent-test-with-mock-session dir
+      (let* ((chat-buf (get-buffer (pi-coding-agent-test--chat-buffer-name dir)))
+             (input-buf (get-buffer (pi-coding-agent-test--input-buffer-name dir)))
+             (target-session "/tmp/resume-target.jsonl")
+             (messages [(:role "assistant"
+                         :content [(:type "text" :text "Resumed history")]
+                         :timestamp 1704067200000)]))
+        (pi-coding-agent-test--seed-stale-session-rebuild-state
+         chat-buf "STALE RESUME CONTENT")
+        (cl-letf (((symbol-function 'pi-coding-agent--session-directory)
+                   (lambda () dir))
+                  ((symbol-function 'pi-coding-agent--list-sessions)
+                   (lambda (_dir) (list target-session)))
+                  ((symbol-function 'pi-coding-agent--format-session-choice)
+                   (lambda (_path)
+                     (cons "Resume target" target-session)))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) "Resume target"))
+                  ((symbol-function 'pi-coding-agent--rpc-async)
+                   (lambda (_proc cmd cb)
+                     (push (plist-get cmd :type) rpc-calls)
+                     (pcase (plist-get cmd :type)
+                       ("switch_session"
+                        (should (equal (plist-get cmd :sessionPath)
+                                       target-session))
+                        (funcall cb '(:success t :data (:cancelled :false))))
+                       ("get_state"
+                        (funcall cb '(:success t
+                                      :data (:model (:name "resumed-model")
+                                             :thinkingLevel "medium"
+                                             :isStreaming :json-false
+                                             :isCompacting :json-false
+                                             :sessionId "resumed-session-id"
+                                             :sessionFile "/tmp/resumed.jsonl"
+                                             :messageCount 1
+                                             :pendingMessageCount 0))))
+                       ("get_messages"
+                        (funcall cb (list :success t :data (list :messages messages))))
+                       (_
+                        (ert-fail (format "Unexpected RPC during resume test: %S"
+                                          cmd))))))
+                  ((symbol-function 'pi-coding-agent--update-session-name-from-file)
+                   #'ignore)
+                  ((symbol-function 'pi-coding-agent--refresh-header) #'ignore)
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (setq shown-message (apply #'format fmt args)))))
+          (with-current-buffer input-buf
+            (pi-coding-agent-resume-session)))
+        (with-current-buffer chat-buf
+          (should (equal (plist-get pi-coding-agent--state :session-id)
+                         "resumed-session-id"))
+          (should (equal (plist-get pi-coding-agent--state :session-file)
+                         "/tmp/resumed.jsonl"))
+          (should (string-match-p "Resumed history" (buffer-string))))
+        (pi-coding-agent-test--assert-clean-session-rebuild
+         chat-buf messages "STALE RESUME CONTENT")
+        (should (equal (nreverse rpc-calls)
+                       '("switch_session" "get_state" "get_messages")))
+        (should (equal shown-message "Pi: Resumed session (1 messages)"))))))
+
+(ert-deftest pi-coding-agent-test-fork-from-input-switches-session-rebuilds-history-and-prefills-input ()
+  "Forking from the input buffer rebuilds chat history and prefills input."
+  (let ((dir "/tmp/pi-coding-agent-test-fork-happy/")
+        (shown-message nil)
+        (rpc-calls nil))
+    (pi-coding-agent-test-with-mock-session dir
+      (let* ((chat-buf (get-buffer (pi-coding-agent-test--chat-buffer-name dir)))
+             (input-buf (get-buffer (pi-coding-agent-test--input-buffer-name dir)))
+             (fork-messages [(:entryId "u1" :text "First question")
+                             (:entryId "u2" :text "Second question")])
+             (selected-choice
+              (pi-coding-agent--format-fork-message
+               '(:entryId "u2" :text "Second question") 1))
+             (messages [(:role "user"
+                         :content [(:type "text" :text "Second question")]
+                         :timestamp 1704067200000)
+                        (:role "assistant"
+                         :content [(:type "text" :text "Forked answer")]
+                         :timestamp 1704067201000)]))
+        (pi-coding-agent-test--seed-stale-session-rebuild-state
+         chat-buf "STALE FORK CONTENT")
+        (with-current-buffer input-buf
+          (insert "old input text"))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (&rest _) selected-choice))
+                  ((symbol-function 'pi-coding-agent--rpc-async)
+                   (lambda (_proc cmd cb)
+                     (push (plist-get cmd :type) rpc-calls)
+                     (pcase (plist-get cmd :type)
+                       ("get_fork_messages"
+                        (funcall cb (list :success t :data
+                                          (list :messages fork-messages))))
+                       ("fork"
+                        (should (equal (plist-get cmd :entryId) "u2"))
+                        (funcall cb '(:success t :data (:text "Second question"))))
+                       ("get_state"
+                        (funcall cb '(:success t
+                                      :data (:model (:name "forked-model")
+                                             :thinkingLevel "high"
+                                             :isStreaming :json-false
+                                             :isCompacting :json-false
+                                             :sessionId "forked-session-id"
+                                             :sessionFile "/tmp/forked.jsonl"
+                                             :messageCount 2
+                                             :pendingMessageCount 0))))
+                       ("get_messages"
+                        (funcall cb (list :success t :data (list :messages messages))))
+                       (_
+                        (ert-fail (format "Unexpected RPC during fork test: %S"
+                                          cmd))))))
+                  ((symbol-function 'pi-coding-agent--update-session-name-from-file)
+                   #'ignore)
+                  ((symbol-function 'pi-coding-agent--refresh-header) #'ignore)
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (setq shown-message (apply #'format fmt args)))))
+          (with-current-buffer input-buf
+            (pi-coding-agent-fork)))
+        (with-current-buffer chat-buf
+          (should (equal (plist-get pi-coding-agent--state :session-id)
+                         "forked-session-id"))
+          (should (equal (plist-get pi-coding-agent--state :session-file)
+                         "/tmp/forked.jsonl"))
+          (should (string-match-p "Second question" (buffer-string)))
+          (should (string-match-p "Forked answer" (buffer-string))))
+        (with-current-buffer input-buf
+          (should (equal (buffer-string) "Second question")))
+        (pi-coding-agent-test--assert-clean-session-rebuild
+         chat-buf messages "STALE FORK CONTENT")
+        (should (equal (nreverse rpc-calls)
+                       '("get_fork_messages" "fork" "get_state" "get_messages")))
+        (should (equal shown-message
+                       "Pi: Branched to new session (2 messages)"))))))
+
+(ert-deftest pi-coding-agent-test-resume-session-skips-while-streaming ()
+  "Resume refuses to switch sessions while the current chat is busy."
+  (let ((shown-message nil)
+        (listed-sessions nil))
+    (pi-coding-agent-test-with-mock-session "/tmp/pi-coding-agent-test-resume-streaming/"
+      (let ((chat-buf (get-buffer (pi-coding-agent-test--chat-buffer-name
+                                   "/tmp/pi-coding-agent-test-resume-streaming/"))))
+        (with-current-buffer chat-buf
+          (setq pi-coding-agent--status 'streaming))
+        (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                  ((symbol-function 'pi-coding-agent--session-directory)
+                   (lambda () "/tmp/pi-coding-agent-test-resume-streaming/"))
+                  ((symbol-function 'pi-coding-agent--list-sessions)
+                   (lambda (_dir)
+                     (setq listed-sessions t)
+                     '("/tmp/pi-coding-agent-test-resume-streaming/session.jsonl")))
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (setq shown-message (apply #'format fmt args)))))
+          (with-current-buffer chat-buf
+            (pi-coding-agent-resume-session)))))
+    (should-not listed-sessions)
+    (should (equal shown-message
+                   "Pi: Cannot resume while streaming"))))
+
+(ert-deftest pi-coding-agent-test-fork-waits-for-local-user-echo ()
+  "Fork refuses to switch sessions while a local prompt is awaiting echo."
+  (let ((shown-message nil)
+        (rpc-called nil))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (setq pi-coding-agent--status 'idle
+            pi-coding-agent--process 'mock-proc
+            pi-coding-agent--local-user-message "Hello")
+      (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                 (lambda () (current-buffer)))
+                ((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (&rest _args)
+                   (setq rpc-called t)))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq shown-message (apply #'format fmt args)))))
+        (pi-coding-agent-fork)))
+    (should-not rpc-called)
+    (should (equal shown-message
+                   "Pi: Wait for pi to echo your prompt before you fork"))))
 
 ;;; Fork at Point
 
@@ -1108,25 +1547,293 @@ The tree is built iteratively to avoid recursion in test setup."
 ;;;; State Reading from Input Buffer
 
 (ert-deftest pi-coding-agent-test-menu-model-description-from-input-buffer ()
-  "Menu model description reads state from chat buffer, not current buffer.
-Regression: when called from input buffer, state is nil → \"unknown\"."
-  (pi-coding-agent-test-with-mock-session "/tmp/pi-coding-agent-test-state/"
-    (let ((chat-buf (get-buffer (pi-coding-agent-test--chat-buffer-name
-                                 "/tmp/pi-coding-agent-test-state/")))
-          (input-buf (get-buffer (pi-coding-agent-test--input-buffer-name
-                                  "/tmp/pi-coding-agent-test-state/"))))
-      ;; Set state in chat buffer (where it lives)
-      (with-current-buffer chat-buf
-        (setq pi-coding-agent--state
-              '(:model (:name "Claude Opus 4.6" :id "claude-opus-4-6"
-                        :provider "anthropic")
-                :thinking-level "high")))
-      ;; Call from input buffer (where cursor normally is)
-      (with-current-buffer input-buf
-        (should (string-match-p "Opus 4.6"
-                                (pi-coding-agent--menu-model-description)))
-        (should (string-match-p "high"
-                                (pi-coding-agent--menu-thinking-description)))))))
+  "Menu descriptions and display rows read state from the linked chat buffer."
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (pi-coding-agent-test-with-mock-session "/tmp/pi-coding-agent-test-state/"
+      (let ((chat-buf (get-buffer (pi-coding-agent-test--chat-buffer-name
+                                   "/tmp/pi-coding-agent-test-state/")))
+            (input-buf (get-buffer (pi-coding-agent-test--input-buffer-name
+                                    "/tmp/pi-coding-agent-test-state/"))))
+        ;; Set state in chat buffer (where it lives)
+        (with-current-buffer chat-buf
+          (setq pi-coding-agent--state
+                '(:model (:name "Claude Opus 4.6" :id "claude-opus-4-6"
+                          :provider "anthropic")
+                  :thinking-level "high")
+                pi-coding-agent--thinking-display 'hidden))
+        ;; Call from input buffer (where cursor normally is)
+        (with-current-buffer input-buf
+          (should (string-match-p "Opus 4.6"
+                                  (pi-coding-agent--menu-model-description)))
+          (should (string-match-p "high"
+                                  (pi-coding-agent--menu-thinking-description)))
+          (should (equal 'hidden
+                         (pi-coding-agent--menu-current-thinking-display-mode)))
+          (should (equal 'visible
+                         (pi-coding-agent--menu-default-thinking-display-mode)))
+          (should (equal "Model: Opus 4.6 • Thinking: high"
+                         (pi-coding-agent--menu-description))))))))
+
+(ert-deftest pi-coding-agent-test-toggle-default-thinking-display-affects-new-chats-only ()
+  "Toggling the new-chat default leaves existing chat buffers alone."
+  (let ((pi-coding-agent-thinking-display 'hidden)
+        shown-message)
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (should (eq pi-coding-agent--thinking-display 'hidden))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq shown-message (apply #'format fmt args)))))
+        (pi-coding-agent-toggle-default-thinking-display))
+      (should (eq pi-coding-agent--thinking-display 'hidden))
+      (should (eq pi-coding-agent-thinking-display 'visible)))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (should (eq pi-coding-agent--thinking-display 'visible)))
+    (should (equal shown-message
+                   "Pi: New chat buffers will show completed thinking by default"))))
+
+(defun pi-coding-agent-test--menu-collapsed-thinking-stub (text)
+  "Return the hidden stub shown for completed thinking TEXT."
+  (pi-coding-agent--thinking-hidden-stub
+   (pi-coding-agent--thinking-normalize-text text)))
+
+(defun pi-coding-agent-test--menu-history-with-two-thinking-blocks ()
+  "Return history with two completed thinking blocks and plain assistant text."
+  [(:role "assistant"
+    :content [(:type "text" :text "Answer first.")
+              (:type "thinking" :thinking "Need to double-check.")
+              (:type "text" :text "Final answer.")]
+    :timestamp 1704067200000)
+   (:role "assistant"
+    :content [(:type "text" :text "Another answer.")
+              (:type "thinking" :thinking "Second thought.")
+              (:type "text" :text "Done.")]
+    :timestamp 1704067201000)])
+
+(defun pi-coding-agent-test--menu-history-with-thinking-and-tool ()
+  "Return history with completed thinking and a long tool block."
+  [(:role "assistant"
+    :content [(:type "text" :text "Answer first.")
+              (:type "thinking"
+               :thinking "Need to double-check.\n\nSecond paragraph.")
+              (:type "text" :text "Final answer.")
+              (:type "toolCall" :id "call_1"
+               :name "read"
+               :arguments (:path "example.txt"))]
+    :timestamp 1704067200000)
+   (:role "toolResult" :toolCallId "call_1"
+    :toolName "read"
+    :content [(:type "text"
+               :text "L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\nL11\nL12")]
+    :isError :json-false
+    :timestamp 1704067201000)])
+
+(ert-deftest pi-coding-agent-test-toggle-thinking-display-from-input-buffer-updates-linked-chat ()
+  "Toggling from the input buffer updates the linked chat buffer."
+  (let ((pi-coding-agent-thinking-display 'visible)
+        shown-message)
+    (pi-coding-agent-test-with-mock-session "/tmp/pi-coding-agent-test-toggle-linked-chat/"
+      (let ((chat-buf (get-buffer (pi-coding-agent-test--chat-buffer-name
+                                   "/tmp/pi-coding-agent-test-toggle-linked-chat/")))
+            (input-buf (get-buffer (pi-coding-agent-test--input-buffer-name
+                                    "/tmp/pi-coding-agent-test-toggle-linked-chat/"))))
+        (with-current-buffer chat-buf
+          (setq pi-coding-agent--thinking-display 'hidden)
+          (pi-coding-agent--display-session-history
+           [(:role "assistant"
+             :content [(:type "text" :text "Answer first.")
+                       (:type "thinking" :thinking "Need to double-check.")]
+             :timestamp 1704067200000)]
+           (current-buffer)))
+        (with-current-buffer input-buf
+          (cl-letf (((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (setq shown-message (apply #'format fmt args)))))
+            (pi-coding-agent-toggle-thinking-display)))
+        (with-current-buffer chat-buf
+          (let ((text (buffer-string)))
+            (should (eq pi-coding-agent--thinking-display 'visible))
+            (should (string-match-p "^> Need to double-check\\.$" text))
+            (should-not (string-match-p
+                         (regexp-quote
+                          (pi-coding-agent-test--menu-collapsed-thinking-stub
+                           "Need to double-check."))
+                         text))))))
+    (should (equal shown-message
+                   "Pi: This chat now shows completed thinking"))))
+
+(ert-deftest pi-coding-agent-test-toggle-thinking-display-overrides-per-block-states ()
+  "Whole-buffer toggles apply one display mode to every completed thinking block."
+  (let ((pi-coding-agent-thinking-display 'hidden)
+        shown-message)
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-session-history
+       (pi-coding-agent-test--menu-history-with-two-thinking-blocks)
+       (current-buffer))
+      (goto-char (point-min))
+      (search-forward (pi-coding-agent-test--menu-collapsed-thinking-stub
+                       "Need to double-check."))
+      (beginning-of-line)
+      (pi-coding-agent-toggle-tool-section)
+      (let ((text (buffer-string)))
+        (should (string-match-p "^> Need to double-check\\.$" text))
+        (should (string-match-p
+                 (regexp-quote
+                  (pi-coding-agent-test--menu-collapsed-thinking-stub
+                   "Second thought."))
+                 text)))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq shown-message (apply #'format fmt args)))))
+        (pi-coding-agent-toggle-thinking-display))
+      (let ((text (buffer-string)))
+        (should (eq pi-coding-agent--thinking-display 'visible))
+        (should (string-match-p "^> Need to double-check\\.$" text))
+        (should (string-match-p "^> Second thought\\.$" text))
+        (should-not (string-match-p
+                     (regexp-quote
+                      (pi-coding-agent-test--menu-collapsed-thinking-stub
+                       "Need to double-check."))
+                     text))
+        (should-not (string-match-p
+                     (regexp-quote
+                      (pi-coding-agent-test--menu-collapsed-thinking-stub
+                       "Second thought."))
+                     text)))
+      (pi-coding-agent-toggle-thinking-display)
+      (let ((text (buffer-string)))
+        (should (eq pi-coding-agent--thinking-display 'hidden))
+        (should (string-match-p
+                 (regexp-quote
+                  (pi-coding-agent-test--menu-collapsed-thinking-stub
+                   "Need to double-check."))
+                 text))
+        (should (string-match-p
+                 (regexp-quote
+                  (pi-coding-agent-test--menu-collapsed-thinking-stub
+                   "Second thought."))
+                 text))
+        (should-not (string-match-p "^> Need to double-check\\.$" text))
+        (should-not (string-match-p "^> Second thought\\.$" text))))
+    (should (equal shown-message
+                   "Pi: This chat now shows completed thinking"))))
+
+(ert-deftest pi-coding-agent-test-toggle-thinking-display-without-canonical-messages-leaves-buffer-alone ()
+  "Without canonical messages, toggling updates only future completed-thinking rendering."
+  (let ((pi-coding-agent-thinking-display 'visible)
+        shown-message)
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (setq pi-coding-agent--status 'idle)
+      (let ((inhibit-read-only t))
+        (insert "Keep existing buffer text\n"))
+      (let ((before (buffer-string)))
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (setq shown-message (apply #'format fmt args)))))
+          (pi-coding-agent-toggle-thinking-display))
+        (should (eq pi-coding-agent--thinking-display 'hidden))
+        (should (equal before (buffer-string)))))
+    (should (equal shown-message
+                   "Pi: This chat now hides completed thinking"))))
+
+(ert-deftest pi-coding-agent-test-toggle-thinking-display-keeps-local-user-message-visible ()
+  "Thinking-display toggles keep a pending local user echo visible."
+  (let ((pi-coding-agent-thinking-display 'visible)
+        shown-message)
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (setq pi-coding-agent--status 'idle
+            pi-coding-agent--local-user-message "Hello"
+            pi-coding-agent--canonical-messages
+            [(:role "assistant"
+              :content [(:type "thinking" :thinking "Need to double-check.")]
+              :timestamp 1704067200000)])
+      (pi-coding-agent--display-user-message "Hello")
+      (let ((before (buffer-string)))
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (setq shown-message (apply #'format fmt args)))))
+          (pi-coding-agent-toggle-thinking-display))
+        (should (eq pi-coding-agent--thinking-display 'hidden))
+        (should (equal before (buffer-string)))
+        (pi-coding-agent--handle-display-event
+         '(:type "message_start"
+           :message (:role "user"
+                     :content [(:type "text" :text "Hello")]
+                     :timestamp 1704067201000)))
+        (should (equal before (buffer-string)))
+        (should-not pi-coding-agent--local-user-message)))
+    (should (equal shown-message
+                   "Pi: This chat now hides completed thinking"))))
+
+(ert-deftest pi-coding-agent-test-toggle-thinking-display-keeps-live-custom-message-visible ()
+  "Whole-buffer thinking toggles must not delete live custom messages."
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-session-history
+       [(:role "assistant"
+         :content [(:type "text" :text "Answer first.")
+                   (:type "thinking" :thinking "Need to double-check.")]
+         :timestamp 1704067200000)]
+       (current-buffer))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_start"
+         :message (:role "custom" :display t :content "Extension note: keep me")))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_end"
+         :message (:role "custom" :display t :content "Extension note: keep me")))
+      (pi-coding-agent-toggle-thinking-display)
+      (let ((text (buffer-string)))
+        (should (eq pi-coding-agent--thinking-display 'hidden))
+        (should (string-match-p "Answer first\\." text))
+        (should (string-match-p "Extension note: keep me" text))
+        (should (string-match-p
+                 (regexp-quote
+                  (pi-coding-agent-test--menu-collapsed-thinking-stub
+                   "Need to double-check."))
+                 text))))))
+
+(ert-deftest pi-coding-agent-test-toggle-thinking-display-preserves-expanded-tool-block ()
+  "Whole-buffer thinking toggles must not reset expanded tool output."
+  (let ((pi-coding-agent-thinking-display 'hidden))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-session-history
+       (pi-coding-agent-test--menu-history-with-thinking-and-tool)
+       (current-buffer))
+      (goto-char (point-min))
+      (let ((button (next-button (point-min))))
+        (should button)
+        (pi-coding-agent--toggle-tool-output button))
+      (should (string-match-p "L12" (buffer-string)))
+      (should (string-match-p "\\[-\\]" (buffer-string)))
+      (pi-coding-agent-toggle-thinking-display)
+      (let ((text (buffer-string)))
+        (should (string-match-p "L12" text))
+        (should (string-match-p "\\[-\\]" text))
+        (should-not (string-match-p "\\.\\.\\. ([0-9]+ more lines)" text))))))
+
+(ert-deftest pi-coding-agent-test-rerender-tail-window-p-keeps-lower-tail-view-following ()
+  "A lower-window tail view should stay in tail-following mode on rerender."
+  (should (pi-coding-agent--rerender-tail-window-p 10 99 100 18 30))
+  (should (pi-coding-agent--rerender-tail-window-p 99 50 100 5 30))
+  (should-not (pi-coding-agent--rerender-tail-window-p 10 50 100 18 30)))
+
+(ert-deftest pi-coding-agent-test-rerender-tail-window-p-keeps-mid-buffer-context-when-tall-window-shows-tail ()
+  "A tall window showing the tail should not outrank an in-view mid-buffer point."
+  (should-not (pi-coding-agent--rerender-tail-window-p 60 199 200 10 36)))
+
+(ert-deftest pi-coding-agent-test-clamp-rerender-point-row-pushes-point-lower-when-tail-shrinks ()
+  "Shrinking the tail should move point lower so the rerendered window stays filled."
+  (should (= 12 (pi-coding-agent--clamp-rerender-point-row 3 40 8 20))))
+
+(ert-deftest pi-coding-agent-test-clamp-rerender-point-row-falls-back-when-buffer-too-short ()
+  "When the whole buffer is shorter than the window, preserve the highest visible row."
+  (should (= 5 (pi-coding-agent--clamp-rerender-point-row 10 5 8 20))))
 
 (ert-deftest pi-coding-agent-test-menu-model-description-uses-short-name ()
   "Menu model description shows shortened name, not full \"Claude Opus 4.6\"."
@@ -1374,7 +2081,7 @@ Regression: when called from input buffer, state is nil → \"unknown\"."
                    "Pi: Thinking level updated, but failed to refresh state: state unavailable"))))
 
 (ert-deftest pi-coding-agent-test-thinking-selector-uses-t-key-leaving-T-for-templates ()
-  "Main menu binds `t' to thinking selection without taking Templates `T'."
+  "Main menu keeps `t', `h', and `H' free without taking Templates `T'."
   (let ((pi-coding-agent--commands
          '((:name "review" :description "Code review" :source "prompt"))))
     (unwind-protect
@@ -1385,6 +2092,14 @@ Regression: when called from input buffer, state is nil → \"unknown\"."
                  (cl-find-if (lambda (obj)
                                (equal (oref obj key) "t"))
                              transient--suffixes))
+                (chat-display-suffix
+                 (cl-find-if (lambda (obj)
+                               (equal (oref obj key) "h"))
+                             transient--suffixes))
+                (default-display-suffix
+                 (cl-find-if (lambda (obj)
+                               (equal (oref obj key) "H"))
+                             transient--suffixes))
                 (templates-suffix
                  (cl-find-if (lambda (obj)
                                (equal (oref obj key) "T"))
@@ -1392,8 +2107,14 @@ Regression: when called from input buffer, state is nil → \"unknown\"."
             (should thinking-suffix)
             (should (eq (oref thinking-suffix command)
                         'pi-coding-agent-select-thinking))
+            (should chat-display-suffix)
+            (should (equal "This chat"
+                           (transient-format-description chat-display-suffix)))
+            (should default-display-suffix)
+            (should (equal "New chat default"
+                           (transient-format-description default-display-suffix)))
             (should templates-suffix)))
-      (ignore-errors (transient-remove-suffix 'pi-coding-agent-menu '(4))))))
+      (ignore-errors (transient-remove-suffix 'pi-coding-agent-menu '(3))))))
 
 ;;; sourceInfo normalization
 

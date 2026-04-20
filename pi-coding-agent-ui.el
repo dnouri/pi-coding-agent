@@ -187,6 +187,32 @@ inside that suffix; older history stays frozen until explicitly rebuilt."
   :type 'natnum
   :group 'pi-coding-agent)
 
+(defcustom pi-coding-agent-thinking-display 'hidden
+  "Default display mode for completed assistant thinking in new chat buffers.
+New chat buffers copy this user preference into a buffer-local session value.
+Later per-buffer toggles affect only that chat buffer; they do not change this
+user option.
+
+Allowed values are:
+- `visible'  Keep completed thinking expanded as blockquote markdown.
+- `hidden'   Collapse completed thinking to a short stub line.
+
+Live streaming thinking is always shown while the assistant is still working.
+Per-block TAB toggles are temporary local overrides and are cleared by buffer
+rebuilds, reloads, or whole-chat display-mode changes."
+  :type '(choice (const :tag "Visible" visible)
+                 (const :tag "Hidden" hidden))
+  :group 'pi-coding-agent)
+
+(defcustom pi-coding-agent-thinking-hidden-preview t
+  "Whether hidden completed thinking should preview its first line.
+When non-nil, collapsed completed thinking shows the first non-empty trimmed
+line when the normalized thinking spans more than one line, is at least
+3 characters long, and shorter than 72 characters. Otherwise the hidden block
+falls back to a generic line-count label."
+  :type 'boolean
+  :group 'pi-coding-agent)
+
 (defcustom pi-coding-agent-prettify-tables t
   "Whether display-only markdown tables use prettier visible separators.
 When non-nil, table overlays replace raw markdown pipes and separator rows
@@ -656,9 +682,13 @@ This is a read-only buffer showing the conversation history."
   ;; Strip hidden markup from copy operations (M-w, C-w)
   (setq-local filter-buffer-substring-function
               #'pi-coding-agent--filter-buffer-substring)
+  (setq-local pi-coding-agent--thinking-display pi-coding-agent-thinking-display)
   (setq-local pi-coding-agent--tool-args-cache (make-hash-table :test 'equal))
   (setq-local pi-coding-agent--live-tool-blocks (make-hash-table :test 'equal))
   (setq-local pi-coding-agent--tool-block-order-counter 0)
+  (setq-local pi-coding-agent--thinking-block-order-counter 0)
+  (setq-local pi-coding-agent--history-load-generation 0)
+  (setq-local pi-coding-agent--session-transition-generation 0)
   ;; Disable hl-line-mode: its post-command-hook overlay update causes
   ;; scroll oscillation in buffers with invisible text + variable heights.
   (setq-local global-hl-line-mode nil)
@@ -864,6 +894,74 @@ so built-in other-window scrolling commands target the linked chat."
   "Set the input BUFFER reference for this session."
   (setq pi-coding-agent--input-buffer buffer))
 
+(defvar-local pi-coding-agent--thinking-display nil
+  "Completed-thinking display mode for this chat buffer.
+One of the symbols `visible' or `hidden'. Live streaming thinking is always
+shown while the assistant is still working; this mode is applied when a
+thinking block completes and whenever completed thinking is redisplayed later.
+Temporary per-block TAB toggles do not change this buffer-local preference.")
+
+(defun pi-coding-agent--set-thinking-display (mode)
+  "Set completed-thinking display MODE for the current chat buffer."
+  (setq pi-coding-agent--thinking-display mode))
+
+(defun pi-coding-agent--thinking-display-mode ()
+  "Return the active completed-thinking display mode for this chat buffer."
+  (or pi-coding-agent--thinking-display
+      pi-coding-agent-thinking-display
+      'visible))
+
+(defvar-local pi-coding-agent--canonical-messages nil
+  "Canonical session messages cached for idle history rebuilds.
+This is updated from successful history loads and completed agent turns.  It is
+used when the buffer needs a canonical transcript again, such as reload,
+resume, fork, or explicit history rerenders, so the buffer does not have to
+parse rendered text back into message structure.")
+
+(defun pi-coding-agent--set-canonical-messages (messages)
+  "Set canonical session MESSAGES for the current chat buffer."
+  (setq pi-coding-agent--canonical-messages messages))
+
+(defvar-local pi-coding-agent--history-load-generation 0
+  "Monotonic generation number for in-flight canonical history loads.
+Each new history request or local outbound send bumps this counter so stale
+callbacks cannot rebuild the chat buffer over newer session state.")
+
+(defun pi-coding-agent--set-history-load-generation (generation)
+  "Set canonical history-load GENERATION for the current chat buffer."
+  (setq pi-coding-agent--history-load-generation generation))
+
+(defun pi-coding-agent--invalidate-history-loads ()
+  "Invalidate pending canonical history requests and return the new generation."
+  (let ((next (1+ (or pi-coding-agent--history-load-generation 0))))
+    (pi-coding-agent--set-history-load-generation next)
+    next))
+
+(defvar-local pi-coding-agent--session-transition-generation 0
+  "Monotonic generation for async session-transition callbacks.
+Each session switch, fork, or reset bumps this counter so stale `get_state'
+callbacks cannot apply older session identity or header state over a newer
+session view.")
+
+(defun pi-coding-agent--set-session-transition-generation (generation)
+  "Set session-transition GENERATION for the current chat buffer."
+  (setq pi-coding-agent--session-transition-generation generation))
+
+(defun pi-coding-agent--begin-session-transition ()
+  "Invalidate pending session-transition callbacks and return the new generation."
+  (let ((next (1+ (or pi-coding-agent--session-transition-generation 0))))
+    (pi-coding-agent--set-session-transition-generation next)
+    next))
+
+(defun pi-coding-agent--session-transition-current-p (chat-buf proc generation)
+  "Return non-nil when CHAT-BUF still expects PROC at GENERATION.
+This keeps async session-transition callbacks from older switches, forks, or
+resets from overwriting the current chat buffer state."
+  (and (buffer-live-p chat-buf)
+       (with-current-buffer chat-buf
+         (and (eq pi-coding-agent--process proc)
+              (= generation pi-coding-agent--session-transition-generation)))))
+
 (defvar-local pi-coding-agent--streaming-marker nil
   "Marker for current streaming insertion point.")
 
@@ -960,6 +1058,9 @@ registry so each live block keeps its own output and metadata.")
 (defvar-local pi-coding-agent--tool-block-order-counter 0
   "Monotonic counter used to stamp tool block ordering metadata.")
 
+(defvar-local pi-coding-agent--thinking-block-order-counter 0
+  "Monotonic counter used to stamp completed thinking block metadata.")
+
 (defvar-local pi-coding-agent--pending-tool-overlay nil
   "Compatibility overlay slot for legacy non-keyed helper paths.
 Keyed live block helpers are authoritative for concurrent preview and
@@ -999,6 +1100,13 @@ Cleared when we receive message_start role=user from pi.
 When nil and we receive message_start role=user, we display it.
 When set but different from pi's message, we display pi's version
 \(e.g., expanded template).")
+
+(defun pi-coding-agent--canonical-rerender-safe-p ()
+  "Return non-nil when the chat buffer may rebuild from canonical messages.
+A locally displayed user prompt awaiting pi's echo is newer than the cached
+canonical history, so rebuilding now would erase that visible turn."
+  (and (eq pi-coding-agent--status 'idle)
+       (null pi-coding-agent--local-user-message)))
 
 (defvar-local pi-coding-agent--extension-status nil
   "Alist of extension status messages for header-line display.
