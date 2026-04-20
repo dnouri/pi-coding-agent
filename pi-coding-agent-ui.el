@@ -46,6 +46,7 @@
 (require 'md-ts-mode)
 (require 'pi-coding-agent-grammars)
 (require 'color)
+(require 'diff-mode)
 
 
 ;; Forward declarations: keymaps bind functions defined in other modules.
@@ -224,8 +225,21 @@ Subtle blue-tinted background derived from the current theme."
   :group 'pi-coding-agent)
 
 (defface pi-coding-agent-tool-block-error
-  '((t :inherit diff-removed :extend t))
-  "Face for tool blocks after failed completion."
+  '((t :extend t))
+  "Face for tool blocks after failed completion.
+Background is derived from the current theme so syntax faces stay visible."
+  :group 'pi-coding-agent)
+
+(defface pi-coding-agent-diff-line-added
+  '((t :extend t))
+  "Face for added edit-diff lines.
+Background is derived from the current theme so syntax faces stay visible."
+  :group 'pi-coding-agent)
+
+(defface pi-coding-agent-diff-line-removed
+  '((t :extend t))
+  "Face for removed edit-diff lines.
+Background is derived from the current theme so syntax faces stay visible."
   :group 'pi-coding-agent)
 
 (defface pi-coding-agent-collapsed-indicator
@@ -265,29 +279,84 @@ Returns a hex color string.  AMOUNT of 0.0 returns BASE unchanged;
                     (color-name-to-rgb base)
                     (color-name-to-rgb target))))
 
-(defun pi-coding-agent--update-tool-block-face (&rest _)
-  "Set `pi-coding-agent-tool-block' background from theme.
-Blends the default background slightly toward blue, producing a
-subtle tint that works with any theme.  Called from mode setup and
+(defun pi-coding-agent--dark-color-p (color)
+  "Return non-nil when COLOR has low lightness."
+  (< (nth 2 (apply #'color-rgb-to-hsl (color-name-to-rgb color))) 0.5))
+
+(defun pi-coding-agent--theme-face-background (face)
+  "Return FACE background color from the current theme, or nil."
+  (let ((bg (face-background face nil t)))
+    (and bg (color-defined-p bg) bg)))
+
+(defun pi-coding-agent--theme-face-foreground (face)
+  "Return FACE foreground color from the current theme, or nil."
+  (let ((fg (face-foreground face nil t)))
+    (and fg (color-defined-p fg) fg)))
+
+(defun pi-coding-agent--theme-diff-background (diff-face indicator-face)
+  "Return a syntax-friendly line background derived from DIFF-FACE.
+Prefer DIFF-FACE's own background.  If the theme only colors diff
+foregrounds, blend the default background toward DIFF-FACE's foreground,
+falling back to INDICATOR-FACE when needed."
+  (or (pi-coding-agent--theme-face-background diff-face)
+      (when-let* ((bg (pi-coding-agent--theme-face-background 'default))
+                  (tint (or (pi-coding-agent--theme-face-foreground diff-face)
+                            (pi-coding-agent--theme-face-foreground indicator-face))))
+        (pi-coding-agent--blend-color
+         bg tint (if (pi-coding-agent--dark-color-p bg) 0.20 0.10)))))
+
+(defun pi-coding-agent--set-face-background-only (face background)
+  "Set FACE to contribute only BACKGROUND so syntax foregrounds stay visible."
+  (set-face-attribute face nil
+                      :inherit nil
+                      :foreground 'unspecified
+                      :background (or background 'unspecified)
+                      :extend t))
+
+(defun pi-coding-agent--update-tool-block-face ()
+  "Set `pi-coding-agent-tool-block' background from theme."
+  (when-let* ((bg (pi-coding-agent--theme-face-background 'default)))
+    (let* ((dark-p (pi-coding-agent--dark-color-p bg))
+           (tint (if dark-p "#5555cc" "#3333aa"))
+           (amount (if dark-p 0.12 0.08)))
+      (set-face-attribute
+       'pi-coding-agent-tool-block nil
+       :background
+       (pi-coding-agent--blend-color bg tint amount)))))
+
+(defun pi-coding-agent--update-tool-block-error-face ()
+  "Set `pi-coding-agent-tool-block-error' background from theme."
+  (pi-coding-agent--set-face-background-only
+   'pi-coding-agent-tool-block-error
+   (pi-coding-agent--theme-diff-background
+    'diff-removed 'diff-indicator-removed)))
+
+(defun pi-coding-agent--update-edit-diff-faces ()
+  "Set edit-diff line faces from the current theme."
+  (pi-coding-agent--set-face-background-only
+   'pi-coding-agent-diff-line-added
+   (pi-coding-agent--theme-diff-background
+    'diff-added 'diff-indicator-added))
+  (pi-coding-agent--set-face-background-only
+   'pi-coding-agent-diff-line-removed
+   (pi-coding-agent--theme-diff-background
+    'diff-removed 'diff-indicator-removed)))
+
+(defun pi-coding-agent--update-theme-derived-faces (&rest _)
+  "Set internal faces derived from the current theme.
+Updates tool blocks plus edit-diff overlays.  Called from mode setup and
 on theme changes."
-  (condition-case nil
-      (let ((bg (face-background 'default nil t)))
-        (when (and bg (color-defined-p bg))
-          (let* ((dark-p (< (nth 2 (apply #'color-rgb-to-hsl
-                                          (color-name-to-rgb bg)))
-                            0.5))
-                 (tint (if dark-p "#5555cc" "#3333aa"))
-                 (amount (if dark-p 0.12 0.08)))
-            (set-face-attribute
-             'pi-coding-agent-tool-block nil
-             :background
-             (pi-coding-agent--blend-color bg tint amount)))))
-    (error nil)))
+  (dolist (update '(pi-coding-agent--update-tool-block-face
+                    pi-coding-agent--update-tool-block-error-face
+                    pi-coding-agent--update-edit-diff-faces))
+    (condition-case-unless-debug nil
+        (funcall update)
+      (error nil))))
 
 ;; Recompute when theme changes (Emacs 29+)
 (when (boundp 'enable-theme-functions)
   (add-hook 'enable-theme-functions
-            #'pi-coding-agent--update-tool-block-face))
+            #'pi-coding-agent--update-theme-derived-faces))
 
 ;;;; Language Detection
 
@@ -603,8 +672,8 @@ This is a read-only buffer showing the conversation history."
   ;; Run after font-lock to undo markdown damage in tool overlays.
   (jit-lock-register #'pi-coding-agent--restore-tool-properties)
 
-  ;; Compute tool-block face from current theme
-  (pi-coding-agent--update-tool-block-face)
+  ;; Compute theme-derived faces used by chat overlays.
+  (pi-coding-agent--update-theme-derived-faces)
 
   ;; Saving a transcript should not make the live chat editable.
   (add-hook 'after-save-hook #'pi-coding-agent--restore-chat-buffer-read-only nil t)
