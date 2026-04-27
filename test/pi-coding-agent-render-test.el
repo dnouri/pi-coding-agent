@@ -1930,12 +1930,12 @@ See https://github.com/dnouri/pi-coding-agent/issues/176."
 
 (ert-deftest pi-coding-agent-test-builtin-tools-unaffected-by-generic-header ()
   "Built-in tools still use their specialized header formats."
-  ;; bash: still "$ command"
-  (let ((header (pi-coding-agent--tool-header "bash" '(:command "ls -la"))))
+  (let ((header (pi-coding-agent--tool-header
+                 "bash" '(:command "ls -la") 'streaming)))
     (should (string-prefix-p "$ " (substring-no-properties header))))
-  ;; read/write/edit: still "tool path"
   (dolist (tool '("read" "write" "edit"))
-    (let ((header (pi-coding-agent--tool-header tool '(:path "foo.txt"))))
+    (let ((header (pi-coding-agent--tool-header
+                   tool '(:path "foo.txt") 'streaming)))
       (should (string-prefix-p (concat tool " foo.txt")
                                (substring-no-properties header))))))
 
@@ -3867,6 +3867,14 @@ Regression test: streaming output with no newlines should still be capped."
   (when-let* ((block (gethash tool-call-id pi-coding-agent--live-tool-blocks)))
     (pi-coding-agent--tool-block-overlay block)))
 
+(defun pi-coding-agent-test--tool-header-by-id (tool-call-id)
+  "Return the plain header text for TOOL-CALL-ID."
+  (when-let* ((ov (pi-coding-agent-test--tool-block-overlay-by-id tool-call-id))
+              (header-end (overlay-get ov 'pi-coding-agent-header-end)))
+    (buffer-substring-no-properties
+     (overlay-start ov)
+     (1- (marker-position header-end)))))
+
 (defun pi-coding-agent-test--tool-stream-body-from-overlay (ov)
   "Return tool overlay OV body as plain text."
   (let ((header-end (overlay-get ov 'pi-coding-agent-header-end)))
@@ -3991,6 +3999,129 @@ authoritative args, header and overlay path are updated."
     (should (equal "/tmp/foo.py"
                    (overlay-get pi-coding-agent--pending-tool-overlay
                                 'pi-coding-agent-tool-path)))))
+
+(ert-deftest pi-coding-agent-test-generic-toolcall-streaming-skips-json ()
+  "Generic streaming previews show only the tool name."
+  (pi-coding-agent-test--with-streaming-assistant
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_start" 0
+     (list (pi-coding-agent-test--toolcall
+            "call_1" "subagent" '(:agent "worker" :task "initial"))))
+    (dolist (task '("one" "two" "three"))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_delta" 0
+       (list (pi-coding-agent-test--toolcall
+              "call_1" "subagent"
+              (list :agent "worker"
+                    :task task
+                    :payload (make-string 32 ?x))))
+       "x"))
+    (should (equal "subagent"
+                   (pi-coding-agent-test--tool-header-by-id "call_1")))))
+
+(ert-deftest pi-coding-agent-test-generic-toolcall-end-restores-json-header ()
+  "toolcall_end restores the full generic JSON header synchronously."
+  (pi-coding-agent-test--with-streaming-assistant
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_start" 0
+     (list (pi-coding-agent-test--toolcall
+            "call_1" "subagent" '(:agent "worker" :task "initial"))))
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_delta" 0
+     (list (pi-coding-agent-test--toolcall
+            "call_1" "subagent" '(:agent "worker" :task "final")))
+     "x")
+    (let ((before (buffer-substring-no-properties (point-min) (point-max))))
+      (should (equal "subagent"
+                     (pi-coding-agent-test--tool-header-by-id "call_1")))
+      (should-not (string-match-p "\"task\"" before)))
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_end" 0
+     (list (pi-coding-agent-test--toolcall
+            "call_1" "subagent" '(:agent "worker" :task "final"))))
+    (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+      (should (= 1 (pi-coding-agent-test--count-matches
+                    "^subagent" content)))
+      (should (string-match-p
+               "\"agent\": \"worker\""
+               (pi-coding-agent-test--tool-header-by-id "call_1")))
+      (should (string-match-p
+               "\"task\": \"final\""
+               (pi-coding-agent-test--tool-header-by-id "call_1"))))))
+
+(ert-deftest pi-coding-agent-test-generic-toolcall-execution-start-restores-json-header ()
+  "tool_execution_start restores authoritative generic JSON args."
+  (pi-coding-agent-test--with-streaming-assistant
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_start" 0
+     (list (pi-coding-agent-test--toolcall
+            "call_1" "custom_generic_tool" nil)))
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_delta" 0
+     (list (pi-coding-agent-test--toolcall
+            "call_1" "custom_generic_tool"
+            '(:agent "worker" :task "streaming")))
+     "x")
+    (let ((before (buffer-substring-no-properties (point-min) (point-max))))
+      (should (equal "custom_generic_tool"
+                     (pi-coding-agent-test--tool-header-by-id "call_1")))
+      (should-not (string-match-p "\"task\"" before)))
+    (pi-coding-agent--handle-display-event
+     '(:type "message_end" :message (:role "assistant")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolCallId "call_1"
+       :toolName "custom_generic_tool"
+       :args (:agent "worker" :task "authoritative")))
+    (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+      (should (string-match-p
+               "\"agent\": \"worker\""
+               (pi-coding-agent-test--tool-header-by-id "call_1")))
+      (should (string-match-p
+               "\"task\": \"authoritative\""
+               (pi-coding-agent-test--tool-header-by-id "call_1")))
+      (should (= 1 (pi-coding-agent-test--count-matches
+                    "^custom_generic_tool" content))))))
+
+(ert-deftest pi-coding-agent-test-generic-toolcall-end-finalizes-only-matching-preview ()
+  "toolcall_end finalizes only its content block's generic header."
+  (pi-coding-agent-test--with-streaming-assistant
+    (let ((toolcalls (list (pi-coding-agent-test--toolcall
+                            "call_1" "subagent"
+                            '(:agent "worker" :task "one"))
+                           (pi-coding-agent-test--toolcall
+                            "call_2" "custom_generic_tool"
+                            '(:agent "worker" :task "two")))))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_start" 0 toolcalls)
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_start" 1 toolcalls)
+      (should (equal "subagent"
+                     (pi-coding-agent-test--tool-header-by-id "call_1")))
+      (should (equal "custom_generic_tool"
+                     (pi-coding-agent-test--tool-header-by-id "call_2")))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_end" 0 toolcalls)
+      (should (string-match-p
+               "\"task\": \"one\""
+               (pi-coding-agent-test--tool-header-by-id "call_1")))
+      (should (equal "custom_generic_tool"
+                     (pi-coding-agent-test--tool-header-by-id "call_2")))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_delta" 1 toolcalls "x")
+      (should (string-match-p
+               "\"task\": \"one\""
+               (pi-coding-agent-test--tool-header-by-id "call_1")))
+      (should (equal "custom_generic_tool"
+                     (pi-coding-agent-test--tool-header-by-id "call_2")))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_end" 1 toolcalls)
+      (should (string-match-p
+               "\"task\": \"one\""
+               (pi-coding-agent-test--tool-header-by-id "call_1")))
+      (should (string-match-p
+               "\"task\": \"two\""
+               (pi-coding-agent-test--tool-header-by-id "call_2"))))))
 
 (ert-deftest pi-coding-agent-test-toolcall-start-creates-overlay ()
   "toolcall_start in message_update creates a keyed preview overlay."

@@ -181,7 +181,8 @@ Returns non-nil if the process exits before the timeout."
   `(with-temp-buffer
      (pi-coding-agent-chat-mode)
      (pi-coding-agent--handle-display-event '(:type "agent_start"))
-     (pi-coding-agent--handle-display-event '(:type "message_start"))
+     (pi-coding-agent--handle-display-event
+      '(:type "message_start" :message (:role "assistant")))
      ,@body))
 
 (defun pi-coding-agent-test--toolcall (id tool-name args)
