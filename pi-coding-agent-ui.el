@@ -1725,7 +1725,7 @@ Accesses state from the linked chat buffer."
     (let ((input-buf (buffer-local-value 'pi-coding-agent--input-buffer chat-buf)))
       (pi-coding-agent--rpc-async proc '(:type "get_session_stats")
                      (lambda (response)
-                       (when (plist-get response :success)
+                       (when (eq (plist-get response :success) t)
                          (when (buffer-live-p chat-buf)
                            (with-current-buffer chat-buf
                              (setq pi-coding-agent--cached-stats (plist-get response :data))))
@@ -1739,7 +1739,7 @@ Accesses state from the linked chat buffer."
   "Apply get_state RESPONSE to CHAT-BUF.
 Updates buffer-local state variables and refreshes mode-line.
 Safely handles dead buffers by checking liveness first."
-  (when (and (plist-get response :success)
+  (when (and (eq (plist-get response :success) t)
              (buffer-live-p chat-buf))
     (with-current-buffer chat-buf
       (let ((new-state (pi-coding-agent--extract-state-from-response response)))

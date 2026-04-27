@@ -603,31 +603,143 @@ Display is handled by the display handler, not by state updates."
 
 ;;;; Executable Customization Tests
 
-(defun pi-coding-agent-test--capture-process-command (executable extra-args)
-  "Return the command list that `--start-process' would pass to make-process.
-Mocks `make-process' to capture :command, binding
+(defun pi-coding-agent-test--capture-process-launch (executable extra-args)
+  "Return the launch plist that `--start-process' passes to make-process.
+Mocks `make-process' to capture :command and :stderr, binding
 `pi-coding-agent-executable' to EXECUTABLE and
 `pi-coding-agent-extra-args' to EXTRA-ARGS."
   (let ((pi-coding-agent-executable executable)
         (pi-coding-agent-extra-args extra-args)
-        (captured nil))
-    (cl-letf (((symbol-function 'make-process)
-               (lambda (&rest args)
-                 (setq captured (plist-get args :command))
-                 nil)))
-      (ignore-errors (pi-coding-agent--start-process "/tmp/")))
-    captured))
+        (captured nil)
+        (dummy-proc (start-process "pi-coding-agent-capture" nil "cat")))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'make-process)
+                     (lambda (&rest args)
+                       (setq captured (list :command (plist-get args :command)
+                                            :stderr (plist-get args :stderr)))
+                       dummy-proc)))
+            (ignore-errors (pi-coding-agent--start-process "/tmp/")))
+          captured)
+      (when-let* ((stderr-buf (plist-get captured :stderr)))
+        (when (buffer-live-p stderr-buf)
+          (kill-buffer stderr-buf)))
+      (when (process-live-p dummy-proc)
+        (delete-process dummy-proc)))))
 
 (ert-deftest pi-coding-agent-test-start-process-uses-custom-executable ()
   "start-process builds command from `pi-coding-agent-executable'."
-  (should (equal (pi-coding-agent-test--capture-process-command '("npx" "pi") nil)
+  (should (equal (plist-get (pi-coding-agent-test--capture-process-launch '("npx" "pi") nil)
+                            :command)
                  '("npx" "pi" "--mode" "rpc"))))
 
 (ert-deftest pi-coding-agent-test-start-process-custom-executable-with-extra-args ()
   "start-process combines custom executable and extra-args."
-  (should (equal (pi-coding-agent-test--capture-process-command
-                  '("npx" "pi") '("-e" "/path/to/ext.ts"))
+  (should (equal (plist-get (pi-coding-agent-test--capture-process-launch
+                             '("npx" "pi") '("-e" "/path/to/ext.ts"))
+                            :command)
                  '("npx" "pi" "--mode" "rpc" "-e" "/path/to/ext.ts"))))
+
+(ert-deftest pi-coding-agent-test-start-process-captures-stderr-separately ()
+  "start-process routes stderr away from the JSON-RPC stdout pipe."
+  (let ((launch (pi-coding-agent-test--capture-process-launch '("pi") nil)))
+    (should (bufferp (plist-get launch :stderr)))))
+
+(ert-deftest pi-coding-agent-test-start-process-disables-stderr-query ()
+  "start-process disables kill prompts for Emacs's stderr pipe process."
+  (let ((pi-coding-agent-executable '("sh" "-c" "sleep 5"))
+        (pi-coding-agent-extra-args nil)
+        (proc nil))
+    (unwind-protect
+        (progn
+          (setq proc (pi-coding-agent--start-process "/tmp/"))
+          (let* ((stderr-buf (process-get proc 'pi-coding-agent-stderr-buf))
+                 (stderr-proc (and stderr-buf (get-buffer-process stderr-buf))))
+            (should (process-live-p proc))
+            (should (buffer-live-p stderr-buf))
+            (should stderr-proc)
+            (should-not (process-query-on-exit-flag stderr-proc))))
+      (when (processp proc)
+        (pi-coding-agent--cleanup-process-stderr-buffer proc)
+        (when (process-live-p proc)
+          (delete-process proc))))))
+
+(ert-deftest pi-coding-agent-test-cleanup-stderr-buffer-kills-stderr-process ()
+  "stderr cleanup kills Emacs's stderr pipe process before killing its buffer."
+  (let* ((stderr-buf (generate-new-buffer " *pi-coding-agent-test-stderr-cleanup*"))
+         (proc (make-process :name "pi-coding-agent-cleanup-stderr"
+                             :command '("sh" "-c" "sleep 5")
+                             :connection-type 'pipe
+                             :stderr stderr-buf)))
+    (unwind-protect
+        (let ((stderr-proc (get-buffer-process stderr-buf))
+              (asked nil))
+          (should stderr-proc)
+          (should (process-query-on-exit-flag stderr-proc))
+          (process-put proc 'pi-coding-agent-stderr-buf stderr-buf)
+          (cl-letf (((symbol-function 'yes-or-no-p)
+                     (lambda (&rest _)
+                       (setq asked t)
+                       (error "stderr cleanup should not prompt"))))
+            (pi-coding-agent--cleanup-process-stderr-buffer proc))
+          (should-not asked)
+          (should-not (buffer-live-p stderr-buf))
+          (should-not (process-live-p stderr-proc)))
+      (when (buffer-live-p stderr-buf)
+        (kill-buffer stderr-buf))
+      (when (process-live-p proc)
+        (delete-process proc)))))
+
+(ert-deftest pi-coding-agent-test-process-exit-includes-stderr-excerpt ()
+  "Process exit errors include stderr when available."
+  (let ((fake-proc (start-process "pi-coding-agent-exit" nil "cat"))
+        (stderr-buf (generate-new-buffer " *pi-coding-agent-test-stderr*"))
+        (response nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer stderr-buf
+            (insert "/tmp/undici.js:245\n"
+                    "InvalidArgumentError: Invalid URL protocol: the URL must start with `http:` or `https:`.\n"
+                    "    at parseURL (/tmp/undici.js:245:11)\n"
+                    "Node.js v24.9.0\n"))
+          (process-put fake-proc 'pi-coding-agent-stderr-buf stderr-buf)
+          (puthash "req_1" (lambda (r) (setq response r))
+                   (pi-coding-agent--get-pending-requests fake-proc))
+          (pi-coding-agent--handle-process-exit fake-proc "exited abnormally with code 1")
+          (should (equal (plist-get response :error)
+                         "Process exited: exited abnormally with code 1"))
+          (should (string-match-p "Invalid URL protocol"
+                                  (plist-get response :stderr)))
+          (should-not (buffer-live-p stderr-buf)))
+      (when (buffer-live-p stderr-buf)
+        (kill-buffer stderr-buf))
+      (when (process-live-p fake-proc)
+        (delete-process fake-proc)))))
+
+(ert-deftest pi-coding-agent-test-process-exit-truncates-long-stderr ()
+  "Long stderr excerpts keep the beginning and end without growing unbounded."
+  (let ((fake-proc (start-process "pi-coding-agent-exit-long" nil "cat"))
+        (stderr-buf (generate-new-buffer " *pi-coding-agent-test-stderr-long*"))
+        (response nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer stderr-buf
+            (insert "START InvalidArgumentError: Invalid URL protocol\n")
+            (insert (make-string 5000 ?x))
+            (insert "\nEND Node.js v24.9.0\n"))
+          (process-put fake-proc 'pi-coding-agent-stderr-buf stderr-buf)
+          (puthash "req_2" (lambda (r) (setq response r))
+                   (pi-coding-agent--get-pending-requests fake-proc))
+          (pi-coding-agent--handle-process-exit fake-proc "exited abnormally with code 1")
+          (let ((stderr (plist-get response :stderr)))
+            (should (string-match-p "START InvalidArgumentError" stderr))
+            (should (string-match-p "stderr truncated" stderr))
+            (should (string-match-p "END Node.js" stderr))
+            (should (< (length stderr) 4100))))
+      (when (buffer-live-p stderr-buf)
+        (kill-buffer stderr-buf))
+      (when (process-live-p fake-proc)
+        (delete-process fake-proc)))))
 
 ;;;; Process Filter Tests
 

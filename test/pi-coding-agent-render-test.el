@@ -1434,6 +1434,18 @@ since we don't display them locally. Let pi's message_start handle it."
     (should (string-match-p "Error:" (buffer-string)))
     (should (string-match-p "unknown" (buffer-string)))))
 
+(ert-deftest pi-coding-agent-test-display-startup-error ()
+  "Startup failures should show the error and stderr excerpt."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-startup-error
+     "Process exited: exited abnormally with code 1"
+     "InvalidArgumentError: Invalid URL protocol")
+    (should (string-match-p "failed to start" (buffer-string)))
+    (should (string-match-p "exited abnormally" (buffer-string)))
+    (should (string-match-p "InvalidArgumentError" (buffer-string)))
+    (should (string-match-p "stderr" (buffer-string)))))
+
 (ert-deftest pi-coding-agent-test-display-extension-error ()
   "extension_error event shows extension name and error."
   (with-temp-buffer

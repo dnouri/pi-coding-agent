@@ -642,6 +642,22 @@ Shows success or final failure with raw error."
                             'face 'pi-coding-agent-error-notice)
            "\n")))
 
+(defun pi-coding-agent--display-startup-error (error-msg &optional stderr)
+  "Display a pi startup ERROR-MSG and optional STDERR."
+  (pi-coding-agent--append-to-chat
+   (concat "\n"
+           (propertize "✗ pi failed to start"
+                       'face 'pi-coding-agent-error-notice)
+           "\n\n"
+           (or error-msg "unknown error")
+           (when stderr
+             (concat "\n\n"
+                     (propertize "stderr:" 'face 'pi-coding-agent-retry-notice)
+                     "\n```text\n"
+                     stderr
+                     (unless (string-suffix-p "\n" stderr) "\n")
+                     "```\n")))))
+
 (defun pi-coding-agent--display-extension-error (event)
   "Display extension error from extension_error EVENT."
   (let* ((extension-path (plist-get event :extensionPath))

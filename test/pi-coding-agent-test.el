@@ -115,6 +115,34 @@
       (ignore-errors (delete-file file))
       (ignore-errors (delete-directory root t)))))
 
+(ert-deftest pi-coding-agent-test-setup-session-shows-startup-error-from-initial-state-request ()
+  "Initial startup failure should be rendered into the chat buffer."
+  (let ((root (pi-coding-agent-test--make-temp-directory
+               "pi-coding-agent-test-startup-error-"))
+        (proc (start-process "pi-coding-agent-startup-error" nil "cat"))
+        (chat nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                  ((symbol-function 'pi-coding-agent--start-process) (lambda (_) proc))
+                  ((symbol-function 'pi-coding-agent--fetch-commands) (lambda (&rest _) nil))
+                  ((symbol-function 'pi-coding-agent--rpc-async)
+                   (lambda (_proc cmd callback)
+                     (should (equal (plist-get cmd :type) "get_state"))
+                     (funcall callback
+                              '(:type "response"
+                                :command "get_state"
+                                :success :false
+                                :error "Process exited: exited abnormally with code 1"
+                                :stderr "InvalidArgumentError: Invalid URL protocol")))))
+          (setq chat (pi-coding-agent--setup-session root nil))
+          (should (buffer-live-p chat))
+          (with-current-buffer chat
+            (should (string-match-p "failed to start" (buffer-string)))
+            (should (string-match-p "Invalid URL protocol" (buffer-string)))))
+      (when (process-live-p proc)
+        (delete-process proc))
+      (pi-coding-agent-test--kill-session-buffers root))))
+
 (ert-deftest pi-coding-agent-test-from-chat-buffer-noop-when-both-visible ()
   "From chat, `pi-coding-agent' avoids redisplay and focuses input."
   (let ((root "/tmp/pi-coding-agent-test-chat-visible/")

@@ -110,13 +110,19 @@ Returns the chat buffer."
                 (proc pi-coding-agent--process))  ; Capture for closures
             (pi-coding-agent--rpc-async proc '(:type "get_state")
               (lambda (response)
-                (pi-coding-agent--apply-state-response buf response)
-                ;; Check if no model available and warn user
-                (when (and (plist-get response :success)
-                           (buffer-live-p buf))
-                  (with-current-buffer buf
-                    (unless (plist-get pi-coding-agent--state :model)
-                      (pi-coding-agent--display-no-model-warning))))))
+                (if (eq (plist-get response :success) t)
+                    (progn
+                      (pi-coding-agent--apply-state-response buf response)
+                      ;; Check if no model available and warn user
+                      (when (buffer-live-p buf)
+                        (with-current-buffer buf
+                          (unless (plist-get pi-coding-agent--state :model)
+                            (pi-coding-agent--display-no-model-warning)))))
+                  (when (buffer-live-p buf)
+                    (with-current-buffer buf
+                      (pi-coding-agent--display-startup-error
+                       (plist-get response :error)
+                       (plist-get response :stderr)))))))
             ;; Fetch commands via RPC (independent of get_state)
             (pi-coding-agent--fetch-commands proc
               (lambda (commands)
