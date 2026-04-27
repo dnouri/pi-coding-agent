@@ -271,8 +271,10 @@ Verification is needed when:
           pi-coding-agent--state-verify-interval)))
 
 (defun pi-coding-agent--json-false-p (value)
-  "Return t if VALUE represents JSON false."
-  (eq value :false))
+  "Return t if VALUE represents JSON false.
+`json-parse-string' yields `:false', while older helpers and tests may still
+use `:json-false'.  Treat both as falsey JSON sentinels."
+  (memq value '(:false :json-false)))
 
 (defun pi-coding-agent--json-null-p (value)
   "Return t if VALUE represents JSON null.
@@ -281,7 +283,7 @@ Verification is needed when:
 
 (defun pi-coding-agent--normalize-boolean (value)
   "Convert JSON boolean VALUE to Elisp boolean.
-JSON true (t) stays t, JSON false (:false) becomes nil."
+JSON true (t) stays t, and either supported false sentinel becomes nil."
   (if (pi-coding-agent--json-false-p value) nil value))
 
 (defun pi-coding-agent--normalize-string-or-null (value)

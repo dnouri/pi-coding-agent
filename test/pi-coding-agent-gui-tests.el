@@ -33,6 +33,89 @@
                     (lambda (left right)
                       (< (overlay-start left) (overlay-start right))))))))
 
+(defun pi-coding-agent-gui-test--thinking-scroll-lines (prefix count)
+  "Return COUNT newline-separated lines starting with PREFIX."
+  (mapconcat (lambda (n) (format "%s %02d" prefix n))
+             (number-sequence 1 count)
+             "\n"))
+
+(defun pi-coding-agent-gui-test--thinking-scroll-messages ()
+  "Return canonical history that exercises thinking-display scroll behavior."
+  (vector
+   (list :role "user"
+         :content (vector (list :type "text" :text "Question one"))
+         :timestamp 1704067200000)
+   (list :role "assistant"
+         :content (vector (list :type "text"
+                                :text (concat
+                                       (pi-coding-agent-gui-test--thinking-scroll-lines
+                                        "Earlier assistant line" 18)
+                                       "\n\nShort bridge.")))
+         :timestamp 1704067200500)
+   (list :role "user"
+         :content (vector (list :type "text" :text "Question two"))
+         :timestamp 1704067200800)
+   (list :role "assistant"
+         :content (vector
+                   (list :type "text"
+                         :text "Prelude line A\nPrelude line B\nPrelude line C")
+                   (list :type "thinking"
+                         :thinking (concat
+                                    (pi-coding-agent-gui-test--thinking-scroll-lines
+                                     "Thinking detail" 30)
+                                    "\n\nConclusion thought"))
+                   (list :type "text"
+                         :text (concat "\n"
+                                       (pi-coding-agent-gui-test--thinking-scroll-lines
+                                        "Final answer line" 12))))
+         :timestamp 1704067201000)))
+
+(defun pi-coding-agent-gui-test--thinking-scroll-hidden-stub ()
+  "Return the collapsed thinking stub used by the scroll-history fixture."
+  (pi-coding-agent--thinking-hidden-stub
+   (pi-coding-agent--thinking-normalize-text
+    (concat
+     (pi-coding-agent-gui-test--thinking-scroll-lines
+      "Thinking detail" 30)
+     "\n\nConclusion thought"))))
+
+(defun pi-coding-agent-gui-test--render-thinking-scroll-history (buffer display-mode)
+  "Render scroll-regression history into BUFFER using DISPLAY-MODE."
+  (with-current-buffer buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--status 'idle
+          pi-coding-agent--thinking-display display-mode
+          pi-coding-agent--canonical-messages
+          (pi-coding-agent-gui-test--thinking-scroll-messages))
+    (pi-coding-agent--display-session-history pi-coding-agent--canonical-messages
+                                              buffer)
+    (font-lock-ensure)
+    (redisplay)))
+
+(defun pi-coding-agent-gui-test--window-visible-screen-lines (window)
+  "Return how many screen lines WINDOW currently shows from buffer text."
+  (count-screen-lines (window-start window) (window-end window t) nil window))
+
+(defun pi-coding-agent-gui-test--window-point-row (window)
+  "Return WINDOW point's screen-line row within the current viewport."
+  (count-screen-lines (window-start window) (window-point window) nil window))
+
+(defun pi-coding-agent-gui-test--window-current-line (window)
+  "Return WINDOW point's current line without text properties."
+  (with-selected-window window
+    (buffer-substring-no-properties (line-beginning-position)
+                                    (line-end-position))))
+
+(defun pi-coding-agent-gui-test--window-thinking-block-order (window)
+  "Return the completed-thinking block order at WINDOW point, or nil."
+  (with-selected-window window
+    (pi-coding-agent--thinking-block-at-pos (point))))
+
+(defun pi-coding-agent-gui-test--window-substantially-filled-p (window)
+  "Return non-nil when WINDOW shows nearly a full body of buffer text."
+  (>= (pi-coding-agent-gui-test--window-visible-screen-lines window)
+      (- (window-body-height window) 2)))
+
 ;;;; Session Tests
 
 (ert-deftest pi-coding-agent-gui-test-session-starts ()
@@ -89,6 +172,162 @@ buffer end so the next streamed turn still follows automatically."
     (should (pi-coding-agent-gui-test-window-point-at-end-p))
     (should (pi-coding-agent-gui-test-at-end-p))
     (should (pi-coding-agent-gui-test-chat-contains "Scroll line 24 for second turn"))))
+
+(ert-deftest pi-coding-agent-gui-test-thinking-display-toggle-keeps-tail-filled ()
+  "Toggling completed thinking keeps a tail-following chat window filled.
+After the toggle, a new streamed turn should still auto-scroll from the tail."
+  (let ((buf (get-buffer-create "*pi-gui-thinking-tail*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buf)
+          (pi-coding-agent-gui-test--render-thinking-scroll-history buf 'visible)
+          (let ((win (selected-window)))
+            (goto-char (point-max))
+            (recenter -1)
+            (redisplay)
+            (should (>= (window-point win) (1- (point-max))))
+            (should (pi-coding-agent-gui-test--window-substantially-filled-p win))
+            (pi-coding-agent-toggle-thinking-display)
+            (redisplay)
+            (should (string-match-p
+                     (regexp-quote
+                      (pi-coding-agent-gui-test--thinking-scroll-hidden-stub))
+                     (buffer-string)))
+            (should (>= (window-point win) (1- (point-max))))
+            (should (>= (window-end win t) (1- (point-max))))
+            (should (pi-coding-agent-gui-test--window-substantially-filled-p win))
+            (pi-coding-agent--display-agent-start)
+            (pi-coding-agent--display-message-delta "Streaming tail line 01\n")
+            (redisplay)
+            (should (>= (window-point win) (1- (point-max))))
+            (should (>= (window-end win t) (1- (point-max))))
+            (pi-coding-agent--display-message-delta "Streaming tail line 02\n")
+            (pi-coding-agent--display-agent-end)
+            (redisplay)
+            (should (>= (window-point win) (1- (point-max))))
+            (should (>= (window-end win t) (1- (point-max))))
+            (should (string-match-p "Streaming tail line 02" (buffer-string)))))
+      (kill-buffer buf))))
+
+(ert-deftest pi-coding-agent-gui-test-thinking-display-toggle-keeps-context-window-usable ()
+  "Toggling completed thinking keeps a non-tail chat window usable.
+Point should stay on the same logical thinking block and the window should
+remain substantially filled even when the collapsed tail is shorter."
+  (let ((buf (get-buffer-create "*pi-gui-thinking-context*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buf)
+          (pi-coding-agent-gui-test--render-thinking-scroll-history buf 'visible)
+          (let ((win (selected-window))
+                block-before)
+            (goto-char (point-min))
+            (should (search-forward "Thinking detail 25" nil t))
+            (beginning-of-line)
+            (recenter 10)
+            (redisplay)
+            (setq block-before
+                  (pi-coding-agent-gui-test--window-thinking-block-order win))
+            (should block-before)
+            (should (pi-coding-agent-gui-test--window-substantially-filled-p win))
+            (should (equal "> Thinking detail 25"
+                           (pi-coding-agent-gui-test--window-current-line win)))
+            (pi-coding-agent-toggle-thinking-display)
+            (redisplay)
+            (should (string-match-p
+                     (regexp-quote
+                      (pi-coding-agent-gui-test--thinking-scroll-hidden-stub))
+                     (buffer-string)))
+            (should (equal (pi-coding-agent-gui-test--thinking-scroll-hidden-stub)
+                           (pi-coding-agent-gui-test--window-current-line win)))
+            (should (equal block-before
+                           (pi-coding-agent-gui-test--window-thinking-block-order win)))
+            (should (pi-coding-agent-gui-test--window-substantially-filled-p win))))
+      (kill-buffer buf))))
+
+(ert-deftest pi-coding-agent-gui-test-thinking-display-toggle-expands-same-block-from-hidden-stub ()
+  "Expanding a hidden thinking stub restores the same logical block.
+Point should land back on the same completed-thinking block rather than an
+unrelated raw offset in the conversation."
+  (let ((buf (get-buffer-create "*pi-gui-thinking-expand*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buf)
+          (pi-coding-agent-gui-test--render-thinking-scroll-history buf 'hidden)
+          (let ((win (selected-window))
+                block-before)
+            (goto-char (point-min))
+            (should (search-forward
+                     (pi-coding-agent-gui-test--thinking-scroll-hidden-stub)
+                     nil t))
+            (beginning-of-line)
+            (recenter 10)
+            (redisplay)
+            (setq block-before
+                  (pi-coding-agent-gui-test--window-thinking-block-order win))
+            (should block-before)
+            (should (equal (pi-coding-agent-gui-test--thinking-scroll-hidden-stub)
+                           (pi-coding-agent-gui-test--window-current-line win)))
+            (pi-coding-agent-toggle-thinking-display)
+            (redisplay)
+            (should (string-match-p "Thinking detail 25" (buffer-string)))
+            (should (equal block-before
+                           (pi-coding-agent-gui-test--window-thinking-block-order win)))
+            (should (string-match-p
+                     "^> Thinking detail [0-9][0-9]$"
+                     (pi-coding-agent-gui-test--window-current-line win)))
+            (should (pi-coding-agent-gui-test--window-substantially-filled-p win))))
+      (kill-buffer buf))))
+
+(ert-deftest pi-coding-agent-gui-test-thinking-display-toggle-restores-each-visible-window ()
+  "Toggling completed thinking preserves each visible window's own context.
+The tail window should stay at the end, while the context window keeps its
+logical block and should not start following later streamed output."
+  (let ((buf (get-buffer-create "*pi-gui-thinking-multi-window*")))
+    (unwind-protect
+        (progn
+          (delete-other-windows)
+          (switch-to-buffer buf)
+          (pi-coding-agent-gui-test--render-thinking-scroll-history buf 'visible)
+          (let* ((tail-win (selected-window))
+                 (context-win (split-window-below)))
+            (set-window-buffer context-win buf)
+            (with-selected-window tail-win
+              (goto-char (point-max))
+              (recenter -1)
+              (redisplay))
+            (with-selected-window context-win
+              (goto-char (point-min))
+              (should (search-forward "Thinking detail 25" nil t))
+              (beginning-of-line)
+              (recenter 8)
+              (redisplay))
+            (let ((context-line-before
+                   (pi-coding-agent-gui-test--window-current-line context-win))
+                  context-start-after-toggle)
+              (with-selected-window tail-win
+                (pi-coding-agent-toggle-thinking-display))
+              (redisplay)
+              (should (eq (selected-window) tail-win))
+              (should (>= (window-point tail-win) (1- (with-current-buffer buf (point-max)))))
+              (should (>= (window-end tail-win t)
+                          (1- (with-current-buffer buf (point-max)))))
+              (should (pi-coding-agent-gui-test--window-substantially-filled-p tail-win))
+              (should (equal "> Thinking detail 25" context-line-before))
+              (should (equal (pi-coding-agent-gui-test--thinking-scroll-hidden-stub)
+                             (pi-coding-agent-gui-test--window-current-line context-win)))
+              (should (pi-coding-agent-gui-test--window-substantially-filled-p context-win))
+              (setq context-start-after-toggle (window-start context-win))
+              (with-current-buffer buf
+                (pi-coding-agent--display-agent-start)
+                (pi-coding-agent--display-message-delta "Dual window tail line\n"))
+              (redisplay)
+              (should (>= (window-point tail-win) (1- (with-current-buffer buf (point-max)))))
+              (should (>= (window-end tail-win t)
+                          (1- (with-current-buffer buf (point-max)))))
+              (should (= context-start-after-toggle (window-start context-win)))
+              (should (equal (pi-coding-agent-gui-test--thinking-scroll-hidden-stub)
+                             (pi-coding-agent-gui-test--window-current-line context-win))))))
+      (kill-buffer buf))))
 
 (ert-deftest pi-coding-agent-gui-test-table-resize-refreshes-hot-tail-only ()
   "Resizing the frame rewraps hot tables only and preserves scroll position."

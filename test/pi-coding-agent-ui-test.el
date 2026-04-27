@@ -112,6 +112,37 @@ This ensures all files get code fences for consistent display."
       (pi-coding-agent-chat-mode)
       (should (derived-mode-p 'pi-coding-agent-chat-mode)))))
 
+(ert-deftest pi-coding-agent-test-thinking-display-default-is-hidden ()
+  "Package default keeps completed thinking collapsed in new chat buffers."
+  (should (eq (default-value 'pi-coding-agent-thinking-display) 'hidden)))
+
+(ert-deftest pi-coding-agent-test-chat-mode-initializes-thinking-display-from-default ()
+  "New chat buffers inherit the configured completed-thinking display default."
+  (let ((pi-coding-agent-thinking-display 'hidden))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (should (eq pi-coding-agent--thinking-display 'hidden)))))
+
+(ert-deftest pi-coding-agent-test-thinking-display-override-is-buffer-local ()
+  "Changing one chat buffer's thinking display leaves others and the default alone."
+  (let ((pi-coding-agent-thinking-display 'visible)
+        (buf-a (generate-new-buffer " *pi-thinking-display-a*"))
+        (buf-b (generate-new-buffer " *pi-thinking-display-b*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf-a
+            (pi-coding-agent-chat-mode)
+            (pi-coding-agent--set-thinking-display 'hidden))
+          (with-current-buffer buf-b
+            (pi-coding-agent-chat-mode))
+          (should (eq pi-coding-agent-thinking-display 'visible))
+          (should (eq (buffer-local-value 'pi-coding-agent--thinking-display buf-a) 'hidden))
+          (should (eq (buffer-local-value 'pi-coding-agent--thinking-display buf-b) 'visible)))
+      (when (buffer-live-p buf-a)
+        (kill-buffer buf-a))
+      (when (buffer-live-p buf-b)
+        (kill-buffer buf-b)))))
+
 (ert-deftest pi-coding-agent-test-theme-diff-background-prefers-diff-face-background ()
   "Theme-derived diff lines should reuse an existing diff background first."
   (cl-letf (((symbol-function 'face-background)

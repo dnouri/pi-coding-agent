@@ -54,6 +54,7 @@ needed for markdown rendering.  That requires a C compiler (=gcc= or =cc=).
 - Live streaming output as bash commands and tool operations run
 - Tree-sitter-powered markdown rendering and syntax-highlighted code blocks
 - Display-only wrapping for markdown pipe tables, with raw buffer text kept canonical
+- Configurable completed-thinking display, with per-block TAB expand/collapse
 - Collapsible tool output with smart preview (expand with TAB)
 - Click the model name or thinking level to change them
 - Rich header line: activity phase, session name, extension status
@@ -214,14 +215,19 @@ For multiple sessions in the same directory, use
 | =TAB=         | input   | Complete paths, @files, /commands |
 | =@=           | input   | File reference (search)           |
 | =n= / =p=     | chat    | Navigate messages                 |
-| =TAB=         | chat    | Toggle section                    |
+| =TAB=         | chat    | Toggle thinking/tool section or fold turn |
 | =S-TAB=       | chat    | Cycle all folds                   |
 | =RET=         | chat    | Visit file at point (other window)|
 | =f=           | chat    | Fork from point                   |
 | =q=           | chat    | Quit session                      |
 
 Press =C-c C-p= to access the full menu with model selection, thinking level,
-session management (new, resume, fork, export), statistics, and custom commands.
+completed-thinking settings for this chat and for future chat buffers, session
+management (new, resume, fork, export), statistics, and custom commands.
+
+Completed thinking is collapsed by default. Press =TAB= on a completed-thinking
+line to expand that block, use =C-c C-p h= for this chat, or =C-c C-p H= for
+future chat buffers in the current Emacs session.
 
 * Tips & Tricks
 
@@ -257,6 +263,30 @@ prompts, prefill the input buffer, and show status text.
 Rich TUI-specific extension UI is not supported in Emacs yet: custom
 widgets, custom editor components, custom headers/footers, and other
 component-based views are unavailable or fall back.
+
+** 🧠 Completed thinking
+
+New chat buffers inherit the user option =pi-coding-agent-thinking-display=,
+which controls how completed assistant thinking is shown. The default is
+=hidden=: live thinking still streams while the assistant is working, then it
+collapses when that thinking block finishes. Use =C-c C-p h= to switch this
+chat, or =C-c C-p H= to change the default for future chat buffers in the
+current Emacs session. To make that default stick across restarts, set
+=pi-coding-agent-thinking-display= in your init file or via
+=M-x customize-option=.
+
+When thinking is hidden, the collapsed line shows either a short preview from
+the first non-empty thinking line, such as
+=> Thinking: Crafting response style… (11 more lines)=, or a generic fallback
+like => Thinking hidden… (12 lines)=. Set
+=pi-coding-agent-thinking-hidden-preview= to =nil= if you prefer the generic
+form every time.
+
+Press =TAB= inside completed thinking to toggle that block locally. In
+=hidden= mode, the collapsed line expands to the full completed thinking;
+inside expanded thinking, =TAB= collapses it back again. These per-block
+toggles are temporary: a rebuild, reload, or display-mode change recomputes
+each block from the current buffer display mode.
 
 ** 🔧 Tool Output
 
@@ -327,6 +357,8 @@ Example configuration with =use-package=:
   (pi-coding-agent-context-error-threshold 90)    ; Critical when context exceeds this %
   (pi-coding-agent-visit-file-other-window t)     ; RET opens file in other window (nil for same)
   (pi-coding-agent-hot-tail-turn-count 3)         ; Recent headed turns that re-wrap on resize
+  ;; (pi-coding-agent-thinking-display 'visible)      ; Expand completed thinking by default
+  ;; (pi-coding-agent-thinking-hidden-preview nil)    ; Always use generic "Thinking hidden…" stubs
   ;; (pi-coding-agent-copy-raw-markdown t)            ; Keep raw markdown on copy (default: strip hidden markup)
   ;; (pi-coding-agent-input-markdown-highlighting t)  ; tree-sitter markdown highlighting in input buffer
   )

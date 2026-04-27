@@ -126,6 +126,49 @@ from either chat or input buffer."
          (level (plist-get state :thinking-level)))
     (format "Thinking: %s" (or level "off"))))
 
+(defun pi-coding-agent--menu-description ()
+  "Return the transient menu summary line."
+  (concat (pi-coding-agent--menu-model-description) " • "
+          (pi-coding-agent--menu-thinking-description)))
+
+(defun pi-coding-agent--menu-default-thinking-display-mode ()
+  "Return the completed-thinking display mode used for new chat buffers."
+  pi-coding-agent-thinking-display)
+
+(defun pi-coding-agent--menu-current-thinking-display-mode ()
+  "Return the completed-thinking display mode for the linked chat buffer."
+  (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+    (if (and chat-buf (buffer-live-p chat-buf))
+        (with-current-buffer chat-buf
+          (pi-coding-agent--thinking-display-mode))
+      (pi-coding-agent--menu-default-thinking-display-mode))))
+
+(defun pi-coding-agent--next-thinking-display-mode (mode)
+  "Return the thinking-display mode after MODE in the visible/hidden cycle."
+  (if (eq mode 'hidden) 'visible 'hidden))
+
+(defclass pi-coding-agent--thinking-display-setting (transient-variable)
+  ((getter :initarg :getter)
+   (setter :initarg :setter))
+  "Transient row that shows and changes a thinking-display mode.")
+
+(cl-defmethod transient-init-value ((obj pi-coding-agent--thinking-display-setting))
+  "Initialize OBJ from its current thinking-display getter."
+  (oset obj value (funcall (oref obj getter))))
+
+(cl-defmethod transient-infix-read ((obj pi-coding-agent--thinking-display-setting))
+  "Return the next visible/hidden thinking-display value for OBJ."
+  (pi-coding-agent--next-thinking-display-mode (oref obj value)))
+
+(cl-defmethod transient-infix-set ((obj pi-coding-agent--thinking-display-setting) value)
+  "Set OBJ to VALUE using its configured thinking-display setter."
+  (funcall (oref obj setter) value)
+  (oset obj value value))
+
+(cl-defmethod transient-format-value ((obj pi-coding-agent--thinking-display-setting))
+  "Format OBJ's current thinking-display value for the transient menu."
+  (propertize (symbol-name (oref obj value)) 'face 'transient-value))
+
 ;;;###autoload
 (defun pi-coding-agent-new-session ()
   "Start a new pi session (reset)."
@@ -142,10 +185,7 @@ from either chat or input buffer."
                              (with-current-buffer chat-buf
                                (pi-coding-agent--clear-chat-buffer)
                                (pi-coding-agent--refresh-header))
-                             ;; Refresh state to get new session-file
-                             (pi-coding-agent--rpc-async proc '(:type "get_state")
-                               (lambda (resp)
-                                 (pi-coding-agent--apply-state-response chat-buf resp)))
+                             (pi-coding-agent--refresh-session-state proc chat-buf)
                              (message "Pi: New session started"))
                          (message "Pi: New session cancelled")))))))
 
@@ -272,10 +312,13 @@ Call this when starting a new session to ensure no stale state persists."
         pi-coding-agent--line-parse-state 'line-start
         pi-coding-agent--pending-tool-overlay nil
         pi-coding-agent--tool-block-order-counter 0
+        pi-coding-agent--thinking-block-order-counter 0
         pi-coding-agent--activity-phase "idle")
+  (pi-coding-agent--invalidate-history-loads)
   ;; Use accessors for cross-module state
   (pi-coding-agent--clear-followup-queue)
   (pi-coding-agent--set-aborted nil)
+  (pi-coding-agent--set-canonical-messages nil)
   (pi-coding-agent--set-message-start-marker nil)
   (pi-coding-agent--set-streaming-marker nil)
   (when pi-coding-agent--tool-args-cache
@@ -302,26 +345,76 @@ Calls CALLBACK with message count when done.
 CHAT-BUF is the target buffer; if nil, uses `pi-coding-agent--get-chat-buffer'.
 Note: When called from async callbacks, pass CHAT-BUF explicitly."
   (let ((chat-buf (or chat-buf (pi-coding-agent--get-chat-buffer))))
-    (pi-coding-agent--rpc-async proc '(:type "get_messages")
-                   (lambda (response)
-                     (when (plist-get response :success)
-                       (let* ((messages (plist-get (plist-get response :data) :messages))
-                              (count (if (vectorp messages) (length messages) 0)))
-                         (pi-coding-agent--display-session-history messages chat-buf)
-                         ;; Refresh header after loading history (resume/fork).
-                         (when (buffer-live-p chat-buf)
-                           (with-current-buffer chat-buf
-                             (pi-coding-agent--refresh-header)))
-                         (when callback
-                           (funcall callback count))))))))
+    (when (and chat-buf (buffer-live-p chat-buf))
+      (with-current-buffer chat-buf
+        (let ((generation (pi-coding-agent--invalidate-history-loads)))
+          (pi-coding-agent--rpc-async proc '(:type "get_messages")
+                         (lambda (response)
+                           (when (and (plist-get response :success)
+                                      (buffer-live-p chat-buf))
+                             (with-current-buffer chat-buf
+                               (when (and (eq pi-coding-agent--process proc)
+                                          (= generation
+                                             pi-coding-agent--history-load-generation)
+                                          (pi-coding-agent--canonical-rerender-safe-p))
+                                 (let* ((messages (plist-get (plist-get response :data)
+                                                             :messages))
+                                        (count (if (vectorp messages)
+                                                   (length messages)
+                                                 0)))
+                                   (pi-coding-agent--display-session-history
+                                    messages chat-buf)
+                                   ;; Refresh header after loading history (resume/fork).
+                                   (pi-coding-agent--refresh-header)
+                                   (when callback
+                                     (funcall callback count)))))))))))))
+
+(defun pi-coding-agent--session-transition-ready-p (chat-buf action)
+  "Return non-nil when CHAT-BUF may ACTION another session.
+ACTION should be a short verb such as resume or fork for user messages."
+  (with-current-buffer chat-buf
+    (cond
+     ((not (eq pi-coding-agent--status 'idle))
+      (message "Pi: Cannot %s while streaming" action)
+      nil)
+     (pi-coding-agent--local-user-message
+      (message "Pi: Wait for pi to echo your prompt before you %s" action)
+      nil)
+     (t t))))
+
+(defun pi-coding-agent--refresh-session-state (proc chat-buf &optional session-file)
+  "Refresh session state for CHAT-BUF from PROC.
+SESSION-FILE seeds the session-name cache when it is already known from the
+switching action itself.  Stale callbacks from older session transitions are
+ignored so they cannot overwrite the active session identity."
+  (when (buffer-live-p chat-buf)
+    (with-current-buffer chat-buf
+      (pi-coding-agent--set-canonical-messages nil)
+      (when session-file
+        (pi-coding-agent--update-session-name-from-file session-file))
+      (let ((generation (pi-coding-agent--begin-session-transition)))
+        (pi-coding-agent--rpc-async proc '(:type "get_state")
+          (lambda (response)
+            (when (and (plist-get response :success)
+                       (pi-coding-agent--session-transition-current-p
+                        chat-buf proc generation))
+              (pi-coding-agent--apply-state-response chat-buf response)
+              (when (buffer-live-p chat-buf)
+                (with-current-buffer chat-buf
+                  (when-let* ((current-session-file
+                               (plist-get pi-coding-agent--state :session-file)))
+                    (pi-coding-agent--update-session-name-from-file
+                     current-session-file))
+                  (force-mode-line-update t))))))))))
 
 ;;;###autoload
 (defun pi-coding-agent-reload ()
   "Reload the current session by restarting the pi process.
 Useful for reloading extensions, skills, prompts, and themes after
 editing them, or when the pi process has died or become unresponsive.
-Kills any existing process and starts fresh, then resumes the session
-using the cached session file."
+Kills any existing process, starts fresh, switches back to the cached
+session file, refreshes session state and commands, and rebuilds the
+chat buffer from session history."
   (interactive)
   (let* ((chat-buf (pi-coding-agent--get-chat-buffer))
          (session-file (and chat-buf
@@ -329,24 +422,18 @@ using the cached session file."
                             (plist-get (buffer-local-value 'pi-coding-agent--state chat-buf)
                                        :session-file))))
     (cond
-     ;; No chat buffer
      ((not chat-buf)
       (message "Pi: No session to reload"))
-     ;; No session file cached
      ((not session-file)
       (message "Pi: No session file available - cannot reload"))
-     ;; Recover
      (t
       (message "Pi: Reloading...")
       (with-current-buffer chat-buf
-        ;; Kill old process if it exists (alive or dead)
         (when pi-coding-agent--process
           (pi-coding-agent--unregister-display-handler pi-coding-agent--process)
           (when (process-live-p pi-coding-agent--process)
             (delete-process pi-coding-agent--process)))
-        ;; Reset status to idle (in case we were stuck in streaming)
         (setq pi-coding-agent--status 'idle)
-        ;; Start new process
         (let* ((dir (pi-coding-agent--session-directory))
                (new-proc (pi-coding-agent--start-process dir)))
           (pi-coding-agent--set-process new-proc)
@@ -354,75 +441,66 @@ using the cached session file."
             (set-process-buffer new-proc chat-buf)
             (process-put new-proc 'pi-coding-agent-chat-buffer chat-buf)
             (pi-coding-agent--register-display-handler new-proc)
-            ;; Switch to the saved session
-            (pi-coding-agent--rpc-async new-proc
-                           (list :type "switch_session" :sessionPath session-file)
-                           (lambda (response)
-                             (if (plist-get response :success)
-                                 (progn
-                                   ;; Update session name cache
-                                   (when (buffer-live-p chat-buf)
-                                     (with-current-buffer chat-buf
-                                       (pi-coding-agent--update-session-name-from-file session-file)))
-                                   ;; Reload state
-                                   (pi-coding-agent--rpc-async new-proc '(:type "get_state")
-                                     (lambda (resp)
-                                       (pi-coding-agent--apply-state-response chat-buf resp)))
-                                   ;; Reload commands (extensions, templates, skills may have changed)
-                                   (pi-coding-agent--fetch-commands new-proc
-                                     (lambda (commands)
-                                       (when (buffer-live-p chat-buf)
-                                         (with-current-buffer chat-buf
-                                           (pi-coding-agent--set-commands commands)
-                                           (pi-coding-agent--rebuild-commands-menu)))))
-                                   (message "Pi: Session reloaded"))
-                               (message "Pi: Failed to reload - %s"
-                                        (or (plist-get response :error) "unknown error"))))))))))))
+            (pi-coding-agent--rpc-async
+             new-proc
+             (list :type "switch_session" :sessionPath session-file)
+             (lambda (response)
+               (if (plist-get response :success)
+                   (progn
+                     (pi-coding-agent--refresh-session-state
+                      new-proc chat-buf session-file)
+                     (pi-coding-agent--load-session-history
+                      new-proc
+                      (lambda (_count)
+                        (message "Pi: Session reloaded"))
+                      chat-buf)
+                     (pi-coding-agent--fetch-commands
+                      new-proc
+                      (lambda (commands)
+                        (when (buffer-live-p chat-buf)
+                          (with-current-buffer chat-buf
+                            (pi-coding-agent--set-commands commands)
+                            (pi-coding-agent--rebuild-commands-menu))))))
+                 (message "Pi: Failed to reload - %s"
+                          (or (plist-get response :error) "unknown error"))))))))))))
 
 (defun pi-coding-agent-resume-session ()
   "Resume a previous pi session from the current project."
   (interactive)
   (when-let* ((proc (pi-coding-agent--get-process))
-             (dir (pi-coding-agent--session-directory)))
-    (let ((sessions (pi-coding-agent--list-sessions dir)))
-      (if (null sessions)
-          (message "Pi: No previous sessions found")
-        (let* ((choices (mapcar #'pi-coding-agent--format-session-choice sessions))
-               (choice-strings (mapcar #'car choices))
-               ;; Use completion table with metadata to preserve our sort order
-               ;; (completing-read normally re-sorts alphabetically)
-               (choice (completing-read "Resume session: "
-                                        (lambda (string pred action)
-                                          (if (eq action 'metadata)
-                                              '(metadata (display-sort-function . identity))
-                                            (complete-with-action action choice-strings string pred)))
-                                        nil t))
-               (selected-path (cdr (assoc choice choices)))
-               ;; Capture chat buffer before async call
-               (chat-buf (pi-coding-agent--get-chat-buffer)))
-          (when selected-path
-            (pi-coding-agent--rpc-async proc (list :type "switch_session"
-                                      :sessionPath selected-path)
-                           (lambda (response)
-                             (let* ((data (plist-get response :data))
-                                    (cancelled (plist-get data :cancelled)))
-                               (if (and (plist-get response :success)
-                                        (pi-coding-agent--json-false-p cancelled))
-                                   (progn
-                                     ;; Update session name cache
-                                     (when (buffer-live-p chat-buf)
-                                       (with-current-buffer chat-buf
-                                         (pi-coding-agent--update-session-name-from-file selected-path)))
-                                     ;; Refresh state to get new session-file
-                                     (pi-coding-agent--rpc-async proc '(:type "get_state")
-                                       (lambda (resp)
-                                         (pi-coding-agent--apply-state-response chat-buf resp)))
-                                     (pi-coding-agent--load-session-history
-                                      proc
-                                      (lambda (count)
-                                        (message "Pi: Resumed session (%d messages)" count))
-                                      chat-buf))
-                                 (message "Pi: Failed to resume session")))))))))))
+              (dir (pi-coding-agent--session-directory))
+              (chat-buf (pi-coding-agent--get-chat-buffer)))
+    (when (pi-coding-agent--session-transition-ready-p chat-buf "resume")
+      (let ((sessions (pi-coding-agent--list-sessions dir)))
+        (if (null sessions)
+            (message "Pi: No previous sessions found")
+          (let* ((choices (mapcar #'pi-coding-agent--format-session-choice sessions))
+                 (choice-strings (mapcar #'car choices))
+                 (choice (completing-read "Resume session: "
+                                          (lambda (string pred action)
+                                            (if (eq action 'metadata)
+                                                '(metadata (display-sort-function . identity))
+                                              (complete-with-action action choice-strings string pred)))
+                                          nil t))
+                 (selected-path (cdr (assoc choice choices))))
+            (when selected-path
+              (pi-coding-agent--rpc-async
+               proc
+               (list :type "switch_session" :sessionPath selected-path)
+               (lambda (response)
+                 (let* ((data (plist-get response :data))
+                        (cancelled (plist-get data :cancelled)))
+                   (if (and (plist-get response :success)
+                            (pi-coding-agent--json-false-p cancelled))
+                       (progn
+                         (pi-coding-agent--refresh-session-state
+                          proc chat-buf selected-path)
+                         (pi-coding-agent--load-session-history
+                          proc
+                          (lambda (count)
+                            (message "Pi: Resumed session (%d messages)" count))
+                          chat-buf))
+                     (message "Pi: Failed to resume session"))))))))))))
 
 ;;;; Model and Thinking
 
@@ -585,6 +663,43 @@ including any model-specific clamping."
                (pi-coding-agent--refresh-thinking-level-state proc chat-buf)
              (message "Pi: Failed to set thinking level: %s"
                       (or (plist-get response :error) "unknown error")))))))))
+
+(defun pi-coding-agent-toggle-thinking-display ()
+  "Toggle completed-thinking display for the current chat buffer."
+  (interactive)
+  (pi-coding-agent--set-chat-thinking-display
+   (pi-coding-agent--next-thinking-display-mode
+    (pi-coding-agent--menu-current-thinking-display-mode))))
+
+(defun pi-coding-agent--set-default-thinking-display (mode)
+  "Set MODE as the default completed-thinking display for new chat buffers."
+  (setq pi-coding-agent-thinking-display mode)
+  (message "Pi: New chat buffers will %s completed thinking by default"
+           (if (eq mode 'hidden) "hide" "show")))
+
+(defun pi-coding-agent-toggle-default-thinking-display ()
+  "Toggle the completed-thinking display default for new chat buffers.
+This changes the live default for future chat buffers in the current Emacs
+session.  Persist it with Customize or your init file if you want it to stick
+across restarts."
+  (interactive)
+  (pi-coding-agent--set-default-thinking-display
+   (pi-coding-agent--next-thinking-display-mode
+    (pi-coding-agent--menu-default-thinking-display-mode))))
+
+(transient-define-infix pi-coding-agent-menu-chat-thinking-display ()
+  :class 'pi-coding-agent--thinking-display-setting
+  :key "h"
+  :description "This chat"
+  :getter #'pi-coding-agent--menu-current-thinking-display-mode
+  :setter #'pi-coding-agent--set-chat-thinking-display)
+
+(transient-define-infix pi-coding-agent-menu-default-thinking-display ()
+  :class 'pi-coding-agent--thinking-display-setting
+  :key "H"
+  :description "New chat default"
+  :getter #'pi-coding-agent--menu-default-thinking-display-mode
+  :setter #'pi-coding-agent--set-default-thinking-display)
 
 ;;;; Session Info and Actions
 
@@ -777,17 +892,19 @@ INDEX is the display index (1-based) for the message."
   "Fork conversation from a previous user message.
 Shows a selector of user messages and creates a fork from the selected one."
   (interactive)
-  (when-let* ((proc (pi-coding-agent--get-process)))
-    (pi-coding-agent--rpc-async proc '(:type "get_fork_messages")
-                   (lambda (response)
-                     (if (plist-get response :success)
-                         (let* ((data (plist-get response :data))
-                                (messages (plist-get data :messages)))
-                           ;; Note: messages is a vector from JSON, use seq-empty-p not null
-                           (if (seq-empty-p messages)
-                               (message "Pi: No messages to fork from")
-                             (pi-coding-agent--show-fork-selector proc messages)))
-                       (message "Pi: Failed to get fork messages"))))))
+  (when-let* ((proc (pi-coding-agent--get-process))
+              (chat-buf (pi-coding-agent--get-chat-buffer)))
+    (when (pi-coding-agent--session-transition-ready-p chat-buf "fork")
+      (pi-coding-agent--rpc-async proc '(:type "get_fork_messages")
+                     (lambda (response)
+                       (if (plist-get response :success)
+                           (let* ((data (plist-get response :data))
+                                  (messages (plist-get data :messages)))
+                             ;; Note: messages is a vector from JSON, use seq-empty-p not null
+                             (if (seq-empty-p messages)
+                                 (message "Pi: No messages to fork from")
+                               (pi-coding-agent--show-fork-selector proc messages)))
+                         (message "Pi: Failed to get fork messages")))))))
 
 (defun pi-coding-agent--resolve-fork-entry (response ordinal heading-count)
   "Resolve a fork entry ID from get_fork_messages RESPONSE.
@@ -817,8 +934,7 @@ a preview, then forks.  Only works when the session is idle."
       (let* ((headings (pi-coding-agent--collect-you-headings))
              (ordinal (pi-coding-agent--user-turn-index-at-point headings)))
         (cond
-         ((not (eq pi-coding-agent--status 'idle))
-          (message "Pi: Cannot fork while streaming"))
+         ((not (pi-coding-agent--session-transition-ready-p chat-buf "fork")))
          ((not ordinal)
           (message "Pi: No user message at point"))
          (t
@@ -854,10 +970,7 @@ Captures chat and input buffers at call time (before the async RPC)."
         (if (plist-get response :success)
             (let* ((data (plist-get response :data))
                    (text (plist-get data :text)))
-              ;; Refresh state to get new session-file
-              (pi-coding-agent--rpc-async proc '(:type "get_state")
-                (lambda (resp)
-                  (pi-coding-agent--apply-state-response chat-buf resp)))
+              (pi-coding-agent--refresh-session-state proc chat-buf)
               ;; Reload and display the forked session
               (pi-coding-agent--load-session-history
                proc
@@ -931,9 +1044,7 @@ Uses commands from pi's `get_commands' RPC."
 
 (transient-define-prefix pi-coding-agent-menu ()
   "Pi coding agent menu."
-  [:description
-   (lambda () (concat (pi-coding-agent--menu-model-description) " • "
-                      (pi-coding-agent--menu-thinking-description)))
+  [:description #'pi-coding-agent--menu-description
    :class transient-row]
   [["Session"
     ("n" "new" pi-coding-agent-new-session)
@@ -944,17 +1055,20 @@ Uses commands from pi's `get_commands' RPC."
     ("Q" "quit" pi-coding-agent-quit)]
    ["Context"
     ("c" "compact" pi-coding-agent-compact)
-    ("f" "fork" pi-coding-agent-fork)]]
+    ("f" "fork" pi-coding-agent-fork)]
+   ["Actions"
+    ("RET" "send" pi-coding-agent-send)
+    ("s" "steer" pi-coding-agent-queue-steering)
+    ("k" "abort" pi-coding-agent-abort)]]
   [["Model"
     ("m" "select" pi-coding-agent-select-model)
     ("t" "thinking" pi-coding-agent-select-thinking)]
+   ["Completed thinking"
+    (pi-coding-agent-menu-chat-thinking-display)
+    (pi-coding-agent-menu-default-thinking-display)]
    ["Info"
     ("i" "stats" pi-coding-agent-session-stats)
-    ("y" "copy last" pi-coding-agent-copy-last-message)]]
-  [["Actions"
-    ("RET" "send" pi-coding-agent-send)
-    ("s" "steer" pi-coding-agent-queue-steering)
-    ("k" "abort" pi-coding-agent-abort)]])
+    ("y" "copy last" pi-coding-agent-copy-last-message)]])
 
 (defun pi-coding-agent-refresh-commands ()
   "Refresh commands from pi via RPC."
@@ -1145,8 +1259,8 @@ Sections are displayed side-by-side to use horizontal space."
          (templates (pi-coding-agent--commands-by-source "prompt"))
          (columns '())
          (key 1))
-    ;; Remove existing command group (index 4 if it exists)
-    (ignore-errors (transient-remove-suffix 'pi-coding-agent-menu '(4)))
+    ;; Remove existing command group (index 3 if it exists)
+    (ignore-errors (transient-remove-suffix 'pi-coding-agent-menu '(3)))
     ;; Build columns in display order: extensions, skills, templates
     ;; Keys are assigned sequentially across all categories
     (when extensions
@@ -1164,9 +1278,9 @@ Sections are displayed side-by-side to use horizontal space."
              "Templates" templates key 3 "T" 'pi-coding-agent-templates-menu)
             columns)
       (setq key (+ key (min 3 (length templates)))))
-    ;; Add all columns as a single transient-columns group after Actions (index 3)
+    ;; Add all columns as a single transient-columns group after the static rows.
     (when columns
-      (transient-append-suffix 'pi-coding-agent-menu '(3)
+      (transient-append-suffix 'pi-coding-agent-menu '(2)
         (apply #'vector (nreverse columns))))))
 
 (defun pi-coding-agent--build-command-section (title commands start-key max-shown more-key more-menu)

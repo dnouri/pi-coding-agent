@@ -61,7 +61,7 @@
 ;;
 ;;   Chat buffer:
 ;;     n / p          Navigate messages
-;;     TAB            Toggle tool output
+;;     TAB            Toggle completed thinking/tool section or fold turn
 ;;     RET            Visit file at point (from tool blocks)
 ;;     C-c C-p        Open menu
 ;;
@@ -73,7 +73,8 @@
 ;;       C-c C-s  queues steering (interrupts after current tool)
 ;;
 ;; Press C-c C-p for the full transient menu with model selection,
-;; thinking level, session management, and custom commands.
+;; thinking level, completed-thinking controls, session management,
+;; and custom commands.
 ;;
 ;; See README.org for more documentation.
 

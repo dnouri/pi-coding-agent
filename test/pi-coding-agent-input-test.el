@@ -1312,20 +1312,25 @@ JSON arrays are parsed as vectors, and (null []) is nil, not t.
 The fork code must use seq-empty-p or length check."
   (let ((rpc-called nil)
         (message-shown nil))
-    (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
-              ((symbol-function 'pi-coding-agent--rpc-async)
-               (lambda (_proc cmd cb)
-                 (setq rpc-called t)
-                 ;; Simulate response with empty vector (no messages to fork from)
-                 (funcall cb '(:success t :data (:messages [])))))
-              ((symbol-function 'message)
-               (lambda (fmt &rest args)
-                 (when (string-match-p "No messages" fmt)
-                   (setq message-shown t)))))
-      (pi-coding-agent-fork)
-      (should rpc-called)
-      ;; Should show "No messages to fork from", not call completing-read
-      (should message-shown))))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (setq pi-coding-agent--status 'idle)
+      (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                 (lambda () (current-buffer)))
+                ((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (_proc cmd cb)
+                   (setq rpc-called t)
+                   ;; Simulate response with empty vector (no messages to fork from)
+                   (funcall cb '(:success t :data (:messages [])))))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (when (string-match-p "No messages" fmt)
+                     (setq message-shown t)))))
+        (pi-coding-agent-fork)
+        (should rpc-called)
+        ;; Should show "No messages to fork from", not call completing-read
+        (should message-shown)))))
 
 (ert-deftest pi-coding-agent-test-format-fork-message-handles-nil-text ()
   "Format fork message handles nil text gracefully."
@@ -1338,16 +1343,18 @@ The fork code must use seq-empty-p or length check."
   "load-session-history uses provided chat buffer, not current buffer context.
 This ensures history loads correctly when callback runs in arbitrary context."
   (let* ((chat-buf (generate-new-buffer "*pi-coding-agent-chat:test-history/*"))
-         (rpc-callback nil))
+         (rpc-callback nil)
+         (proc (start-process "test-history-load-provided-buffer" nil "cat")))
     (unwind-protect
         (progn
           (with-current-buffer chat-buf
-            (pi-coding-agent-chat-mode))
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--process proc))
           ;; Mock RPC to capture callback
           (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
                      (lambda (_proc _cmd cb) (setq rpc-callback cb))))
             ;; Call with explicit buffer
-            (pi-coding-agent--load-session-history 'mock-proc nil chat-buf))
+            (pi-coding-agent--load-session-history proc nil chat-buf))
           ;; Simulate callback from different buffer context
           (with-temp-buffer
             (funcall rpc-callback
@@ -1355,6 +1362,8 @@ This ensures history loads correctly when callback runs in arbitrary context."
           ;; Chat buffer should have been updated (has startup header)
           (with-current-buffer chat-buf
             (should (string-match-p "C-c C-c" (buffer-string)))))
+      (when (and proc (process-live-p proc))
+        (delete-process proc))
       (when (buffer-live-p chat-buf)
         (kill-buffer chat-buf)))))
 
