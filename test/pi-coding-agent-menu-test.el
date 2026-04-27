@@ -863,6 +863,52 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
           (should (transient-get-suffix 'pi-coding-agent-menu '(3))))
       (ignore-errors (transient-remove-suffix 'pi-coding-agent-menu '(3))))))
 
+(defmacro pi-coding-agent-test--with-transient-suffixes (menu &rest body)
+  "Initialize MENU suffixes without displaying a Transient, then run BODY.
+These tests assert menu structure only.  Avoid `transient-setup' here so
+batch unit tests do not exercise terminal/input setup; the real command
+path is covered separately."
+  (declare (indent 1) (debug (form body)))
+  `(let (transient--prefix
+         transient--layout
+         transient--suffixes
+         transient--refreshp
+         (transient--editp nil))
+     (transient--init-objects ,menu nil nil)
+     ,@body))
+
+(ert-deftest pi-coding-agent-test-menu-command-binds-text-conversion-vars-on-emacs-29 ()
+  "Pi Transient commands tolerate affected Transient builds on Emacs 29.
+Some newer Transient builds can run an Emacs 30-only text-conversion path
+while setting up a prefix.  On Emacs 29 these symbols are normally
+unbound; invoking the real pi menu commands should bind them only for the
+`transient-setup' call."
+  (skip-unless (< emacs-major-version 30))
+  (skip-unless (not (boundp 'text-conversion-style)))
+  (skip-unless (not (boundp 'overriding-text-conversion-style)))
+  (let ((called nil))
+    (cl-letf (((symbol-function 'transient-setup)
+               (lambda (name &rest _args)
+                 (push name called)
+                 (unless (boundp 'text-conversion-style)
+                   (signal 'void-variable '(text-conversion-style)))
+                 (unless (boundp 'overriding-text-conversion-style)
+                   (signal 'void-variable '(overriding-text-conversion-style)))
+                 (should-not (symbol-value 'text-conversion-style))
+                 (should-not (symbol-value 'overriding-text-conversion-style)))))
+      (dolist (menu '(pi-coding-agent-menu
+                      pi-coding-agent-templates-menu
+                      pi-coding-agent-extensions-menu
+                      pi-coding-agent-skills-menu))
+        (funcall menu)))
+    (should (equal (nreverse called)
+                   '(pi-coding-agent-menu
+                     pi-coding-agent-templates-menu
+                     pi-coding-agent-extensions-menu
+                     pi-coding-agent-skills-menu)))
+    (should-not (boundp 'text-conversion-style))
+    (should-not (boundp 'overriding-text-conversion-style))))
+
 (defun pi-coding-agent-test--suffix-key-bound-p (key)
   "Return non-nil if KEY is bound in current transient suffixes."
   (cl-find-if (lambda (obj) (equal (oref obj key) key))
@@ -874,14 +920,14 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
     (dolist (menu '(pi-coding-agent-templates-menu
                     pi-coding-agent-extensions-menu
                     pi-coding-agent-skills-menu))
-      (transient-setup menu))))
+      (pi-coding-agent-test--with-transient-suffixes menu))))
 
 (ert-deftest pi-coding-agent-test-templates-menu-shows-run-keys ()
   "Templates submenu binds letter keys to commands."
   (let ((pi-coding-agent--commands
          '((:name "test-tmpl" :description "A template" :source "prompt"))))
-    (transient-setup 'pi-coding-agent-templates-menu)
-    (should (pi-coding-agent-test--suffix-key-bound-p "a"))))
+    (pi-coding-agent-test--with-transient-suffixes 'pi-coding-agent-templates-menu
+      (should (pi-coding-agent-test--suffix-key-bound-p "a")))))
 
 (ert-deftest pi-coding-agent-test-templates-menu-shows-edit-keys ()
   "Templates submenu binds uppercase letter keys to edit file paths."
@@ -890,15 +936,15 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
             :source "prompt" :path "/tmp/uncle-bob.md" :location "user")
            (:name "fix-tests" :description "Fix tests"
             :source "prompt" :path "/tmp/fix-tests.md" :location "project"))))
-    (transient-setup 'pi-coding-agent-templates-menu)
-    (should (pi-coding-agent-test--suffix-key-bound-p "a"))
-    (should (pi-coding-agent-test--suffix-key-bound-p "A"))))
+    (pi-coding-agent-test--with-transient-suffixes 'pi-coding-agent-templates-menu
+      (should (pi-coding-agent-test--suffix-key-bound-p "a"))
+      (should (pi-coding-agent-test--suffix-key-bound-p "A")))))
 
 (ert-deftest pi-coding-agent-test-stats-uses-i-key-not-S ()
   "Stats is bound to `i' so it doesn't conflict with Skills `S' key."
-  (transient-setup 'pi-coding-agent-menu)
-  (should (pi-coding-agent-test--suffix-key-bound-p "i"))
-  (should-not (pi-coding-agent-test--suffix-key-bound-p "S")))
+  (pi-coding-agent-test--with-transient-suffixes 'pi-coding-agent-menu
+    (should (pi-coding-agent-test--suffix-key-bound-p "i"))
+    (should-not (pi-coding-agent-test--suffix-key-bound-p "S"))))
 
 (ert-deftest pi-coding-agent-test-submenu-handles-more-than-9-commands ()
   "Submenu with 13 skills uses letter keys without crashing."
@@ -908,11 +954,10 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
                                 :description (format "Skill number %d" i)
                                 :source "skill"
                                 :location "user"))))
-    ;; Should not signal an error
-    (transient-setup 'pi-coding-agent-skills-menu)
-    ;; First and last should be bound
-    (should (pi-coding-agent-test--suffix-key-bound-p "a"))
-    (should (pi-coding-agent-test--suffix-key-bound-p "m"))))
+    (pi-coding-agent-test--with-transient-suffixes 'pi-coding-agent-skills-menu
+      ;; First and last should be bound.
+      (should (pi-coding-agent-test--suffix-key-bound-p "a"))
+      (should (pi-coding-agent-test--suffix-key-bound-p "m")))))
 
 (ert-deftest pi-coding-agent-test-submenu-run-and-edit-keys-correspond ()
   "Run key `a' and edit key `A' refer to the same command."
@@ -921,12 +966,12 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
             :location "user" :path "/tmp/alpha.md")
            (:name "beta" :description "Second" :source "skill"
             :location "user" :path "/tmp/beta.md"))))
-    (transient-setup 'pi-coding-agent-skills-menu)
-    ;; Run keys a, b and edit keys A, B should all be bound
-    (should (pi-coding-agent-test--suffix-key-bound-p "a"))
-    (should (pi-coding-agent-test--suffix-key-bound-p "b"))
-    (should (pi-coding-agent-test--suffix-key-bound-p "A"))
-    (should (pi-coding-agent-test--suffix-key-bound-p "B"))))
+    (pi-coding-agent-test--with-transient-suffixes 'pi-coding-agent-skills-menu
+      ;; Run keys a, b and edit keys A, B should all be bound.
+      (should (pi-coding-agent-test--suffix-key-bound-p "a"))
+      (should (pi-coding-agent-test--suffix-key-bound-p "b"))
+      (should (pi-coding-agent-test--suffix-key-bound-p "A"))
+      (should (pi-coding-agent-test--suffix-key-bound-p "B")))))
 
 ;;; Manual Compaction
 
@@ -2087,33 +2132,33 @@ The tree is built iteratively to avoid recursion in test setup."
     (unwind-protect
         (progn
           (pi-coding-agent--rebuild-commands-menu)
-          (transient-setup 'pi-coding-agent-menu)
-          (let ((thinking-suffix
-                 (cl-find-if (lambda (obj)
-                               (equal (oref obj key) "t"))
-                             transient--suffixes))
-                (chat-display-suffix
-                 (cl-find-if (lambda (obj)
-                               (equal (oref obj key) "h"))
-                             transient--suffixes))
-                (default-display-suffix
-                 (cl-find-if (lambda (obj)
-                               (equal (oref obj key) "H"))
-                             transient--suffixes))
-                (templates-suffix
-                 (cl-find-if (lambda (obj)
-                               (equal (oref obj key) "T"))
-                             transient--suffixes)))
-            (should thinking-suffix)
-            (should (eq (oref thinking-suffix command)
-                        'pi-coding-agent-select-thinking))
-            (should chat-display-suffix)
-            (should (equal "This chat"
-                           (transient-format-description chat-display-suffix)))
-            (should default-display-suffix)
-            (should (equal "New chat default"
-                           (transient-format-description default-display-suffix)))
-            (should templates-suffix)))
+          (pi-coding-agent-test--with-transient-suffixes 'pi-coding-agent-menu
+            (let ((thinking-suffix
+                   (cl-find-if (lambda (obj)
+                                 (equal (oref obj key) "t"))
+                               transient--suffixes))
+                  (chat-display-suffix
+                   (cl-find-if (lambda (obj)
+                                 (equal (oref obj key) "h"))
+                               transient--suffixes))
+                  (default-display-suffix
+                   (cl-find-if (lambda (obj)
+                                 (equal (oref obj key) "H"))
+                               transient--suffixes))
+                  (templates-suffix
+                   (cl-find-if (lambda (obj)
+                                 (equal (oref obj key) "T"))
+                               transient--suffixes)))
+              (should thinking-suffix)
+              (should (eq (oref thinking-suffix command)
+                          'pi-coding-agent-select-thinking))
+              (should chat-display-suffix)
+              (should (equal "This chat"
+                             (transient-format-description chat-display-suffix)))
+              (should default-display-suffix)
+              (should (equal "New chat default"
+                             (transient-format-description default-display-suffix)))
+              (should templates-suffix))))
       (ignore-errors (transient-remove-suffix 'pi-coding-agent-menu '(3))))))
 
 ;;; sourceInfo normalization

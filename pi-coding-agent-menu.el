@@ -1042,6 +1042,19 @@ Uses commands from pi's `get_commands' RPC."
 
 ;;;; Transient Menu
 
+(defun pi-coding-agent--transient-setup (name &rest args)
+  "Call `transient-setup' with NAME and ARGS for pi menus on Emacs 29.
+Some newer Transient builds can run their Emacs 30 text-conversion
+suspension path on Emacs 29, where `text-conversion-style' and
+`overriding-text-conversion-style' do not exist.  Bind those symbols only
+while setting up pi's Transient menus; Emacs 29 has no text-conversion
+state to preserve, so nil is the correct compatibility value."
+  (if (< emacs-major-version 30)
+      (cl-progv '(text-conversion-style overriding-text-conversion-style)
+          '(nil nil)
+        (apply #'transient-setup name args))
+    (apply #'transient-setup name args)))
+
 (transient-define-prefix pi-coding-agent-menu ()
   "Pi coding agent menu."
   [:description #'pi-coding-agent--menu-description
@@ -1068,7 +1081,9 @@ Uses commands from pi's `get_commands' RPC."
     (pi-coding-agent-menu-default-thinking-display)]
    ["Info"
     ("i" "stats" pi-coding-agent-session-stats)
-    ("y" "copy last" pi-coding-agent-copy-last-message)]])
+    ("y" "copy last" pi-coding-agent-copy-last-message)]]
+  (interactive)
+  (pi-coding-agent--transient-setup 'pi-coding-agent-menu))
 
 (defun pi-coding-agent-refresh-commands ()
   "Refresh commands from pi via RPC."
@@ -1215,7 +1230,9 @@ Press letter to run, Shift+letter to edit source file."
    :setup-children
    (lambda (_)
      (pi-coding-agent--make-edit-columns
-      'pi-coding-agent-templates-menu "prompt"))])
+      'pi-coding-agent-templates-menu "prompt"))]
+  (interactive)
+  (pi-coding-agent--transient-setup 'pi-coding-agent-templates-menu))
 
 (transient-define-prefix pi-coding-agent-extensions-menu ()
   "All extension commands.
@@ -1230,7 +1247,9 @@ Press letter to run, Shift+letter to edit source file."
    :setup-children
    (lambda (_)
      (pi-coding-agent--make-edit-columns
-      'pi-coding-agent-extensions-menu "extension"))])
+      'pi-coding-agent-extensions-menu "extension"))]
+  (interactive)
+  (pi-coding-agent--transient-setup 'pi-coding-agent-extensions-menu))
 
 (transient-define-prefix pi-coding-agent-skills-menu ()
   "All available skills.
@@ -1245,7 +1264,9 @@ Press letter to run, Shift+letter to edit source file."
    :setup-children
    (lambda (_)
      (pi-coding-agent--make-edit-columns
-      'pi-coding-agent-skills-menu "skill"))])
+      'pi-coding-agent-skills-menu "skill"))]
+  (interactive)
+  (pi-coding-agent--transient-setup 'pi-coding-agent-skills-menu))
 
 ;;;; Main Menu Command Sections
 
