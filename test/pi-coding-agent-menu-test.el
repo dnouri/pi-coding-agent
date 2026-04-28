@@ -1817,24 +1817,6 @@ The tree is built iteratively to avoid recursion in test setup."
         (should (string-match-p "\\[-\\]" text))
         (should-not (string-match-p "\\.\\.\\. ([0-9]+ more lines)" text))))))
 
-(ert-deftest pi-coding-agent-test-rerender-tail-window-p-keeps-lower-tail-view-following ()
-  "A lower-window tail view should stay in tail-following mode on rerender."
-  (should (pi-coding-agent--rerender-tail-window-p 10 99 100 18 30))
-  (should (pi-coding-agent--rerender-tail-window-p 99 50 100 5 30))
-  (should-not (pi-coding-agent--rerender-tail-window-p 10 50 100 18 30)))
-
-(ert-deftest pi-coding-agent-test-rerender-tail-window-p-keeps-mid-buffer-context-when-tall-window-shows-tail ()
-  "A tall window showing the tail should not outrank an in-view mid-buffer point."
-  (should-not (pi-coding-agent--rerender-tail-window-p 60 199 200 10 36)))
-
-(ert-deftest pi-coding-agent-test-clamp-rerender-point-row-pushes-point-lower-when-tail-shrinks ()
-  "Shrinking the tail should move point lower so the rerendered window stays filled."
-  (should (= 12 (pi-coding-agent--clamp-rerender-point-row 3 40 8 20))))
-
-(ert-deftest pi-coding-agent-test-clamp-rerender-point-row-falls-back-when-buffer-too-short ()
-  "When the whole buffer is shorter than the window, preserve the highest visible row."
-  (should (= 5 (pi-coding-agent--clamp-rerender-point-row 10 5 8 20))))
-
 (ert-deftest pi-coding-agent-test-menu-model-description-uses-short-name ()
   "Menu model description shows shortened name, not full \"Claude Opus 4.6\"."
   (pi-coding-agent-test-with-mock-session "/tmp/pi-coding-agent-test-short/"

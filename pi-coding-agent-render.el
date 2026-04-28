@@ -447,6 +447,21 @@ separated from preceding content."
         pi-coding-agent--thinking-raw nil
         pi-coding-agent--thinking-prev-rendered nil))
 
+(defmacro pi-coding-agent--with-window-rewrite-preservation (&rest body)
+  "Execute BODY and keep chat windows useful after a large rewrite.
+This is for rewrites that can delete the text under `window-start', such as
+collapsing a long thinking block or rebuilding canonical history.  Tail views
+stay at the new tail; non-tail views keep their point and approximate row,
+clamped so the window remains filled when possible."
+  (declare (indent 0) (debug t))
+  `(let ((buffer (current-buffer))
+         (saved-windows (pi-coding-agent--capture-window-rewrite-states))
+         result)
+     (unwind-protect
+         (setq result (progn ,@body))
+       (pi-coding-agent--restore-window-rewrite-states buffer saved-windows))
+     result))
+
 (defun pi-coding-agent--display-thinking-start ()
   "Insert opening marker for thinking block (blockquote)."
   (when pi-coding-agent--streaming-marker
@@ -499,21 +514,42 @@ Normalizes boundary and paragraph whitespace while streaming."
   "End thinking block (blockquote).
 CONTENT is ignored - we use what was already streamed."
   (when pi-coding-agent--streaming-marker
-    (setq pi-coding-agent--in-thinking-block nil)
-    (let ((inhibit-read-only t))
-      (pi-coding-agent--with-scroll-preservation
-        (save-excursion
-          (if (and pi-coding-agent--thinking-start-marker
-                   pi-coding-agent--thinking-marker)
-              (when (pi-coding-agent--replace-thinking-region
-                     (pi-coding-agent--completed-thinking-rendered-text
-                      pi-coding-agent--thinking-raw))
-                (goto-char (pi-coding-agent--thinking-insert-position))
-                (pi-coding-agent--ensure-blank-line-separator))
-            ;; Fallback for malformed event streams that skip thinking_start.
-            (goto-char (pi-coding-agent--thinking-insert-position))
-            (pi-coding-agent--ensure-blank-line-separator))
-          (pi-coding-agent--reset-thinking-state))))))
+    (let* ((buffer (current-buffer))
+           (saved-windows (pi-coding-agent--capture-window-rewrite-states))
+           (old-point-max (point-max))
+           (rewrite-start (and (markerp pi-coding-agent--thinking-start-marker)
+                               (marker-position pi-coding-agent--thinking-start-marker)))
+           (rewrite-end (and (markerp pi-coding-agent--thinking-marker)
+                             (marker-position pi-coding-agent--thinking-marker))))
+      (unwind-protect
+          (progn
+            (setq pi-coding-agent--in-thinking-block nil)
+            (let ((inhibit-read-only t))
+              (pi-coding-agent--with-scroll-preservation
+                (save-excursion
+                  (if (and pi-coding-agent--thinking-start-marker
+                           pi-coding-agent--thinking-marker)
+                      (when (pi-coding-agent--replace-thinking-region
+                             (pi-coding-agent--completed-thinking-rendered-text
+                              pi-coding-agent--thinking-raw))
+                        (goto-char (pi-coding-agent--thinking-insert-position))
+                        (pi-coding-agent--ensure-blank-line-separator))
+                    ;; Fallback for malformed event streams that skip thinking_start.
+                    (goto-char (pi-coding-agent--thinking-insert-position))
+                    (pi-coding-agent--ensure-blank-line-separator))
+                  (pi-coding-agent--reset-thinking-state)))))
+        (pi-coding-agent--restore-window-rewrite-states
+         buffer
+         saved-windows
+         (when (and rewrite-start rewrite-end)
+           (let ((replacements
+                  (list (list rewrite-start
+                              rewrite-end
+                              (with-current-buffer buffer
+                                (- (point-max) old-point-max))))))
+             (lambda (pos)
+               (pi-coding-agent--adjust-pos-after-region-replacements
+                pos replacements)))))))))
 
 (defun pi-coding-agent--display-agent-end ()
   "Finalize agent turn: normalize whitespace, handle abort, process queue.
@@ -1875,15 +1911,6 @@ Preserves window scroll position during the toggle."
                   (set-window-start win block-start t)
                   (set-window-point win block-start))))))))))
 
-(defun pi-coding-agent--adjust-pos-after-region-replacement
-    (pos start end delta)
-  "Return POS adjusted after replacing [START, END) by DELTA chars.
-Returns nil when POS was inside the replaced region itself."
-  (cond
-   ((< pos start) pos)
-   ((>= pos end) (+ pos delta))
-   (t nil)))
-
 (defun pi-coding-agent--replace-thinking-block-region (start end rendered)
   "Replace completed-thinking text in START..END with RENDERED.
 Returns the new bounds as (START . NEW-END)."
@@ -1901,31 +1928,22 @@ Returns the new bounds as (START . NEW-END)."
 
 (defun pi-coding-agent--replace-thinking-block (block rendered)
   "Replace completed thinking BLOCK with RENDERED text.
-Preserves window positions outside the rewritten block and clamps windows that
-were looking into the block back to the same local section.  Returns the new
-block bounds as (START . END)."
+Returns the new block bounds as (START . END) and preserves useful window
+context after the rewrite."
   (let* ((start (plist-get block :start))
          (end (plist-get block :end))
-         (saved-windows
-          (mapcar (lambda (w)
-                    (list w (window-start w) (window-point w)))
-                  (get-buffer-window-list (current-buffer) nil t)))
+         (buffer (current-buffer))
+         (saved-windows (pi-coding-agent--capture-window-rewrite-states))
          (new-bounds (pi-coding-agent--replace-thinking-block-region
                       start end rendered))
-         (new-end (cdr new-bounds)))
-    (let ((delta (- new-end end)))
-      (dolist (win-state saved-windows)
-        (let ((win (nth 0 win-state))
-              (old-start (nth 1 win-state))
-              (old-point (nth 2 win-state)))
-          (when (window-live-p win)
-            (let ((new-start (pi-coding-agent--adjust-pos-after-region-replacement
-                              old-start start end delta))
-                  (new-point (pi-coding-agent--adjust-pos-after-region-replacement
-                              old-point start end delta)))
-              (set-window-start win (or new-start start) t)
-              (set-window-point win
-                                (min (or new-point start) (point-max))))))))
+         (delta (- (cdr new-bounds) end)))
+    (pi-coding-agent--restore-window-rewrite-states
+     buffer
+     saved-windows
+     (let ((replacements (list (list start end delta))))
+       (lambda (pos)
+         (pi-coding-agent--adjust-pos-after-region-replacements
+          pos replacements))))
     new-bounds))
 
 (defun pi-coding-agent--completed-thinking-blocks ()
@@ -1944,9 +1962,11 @@ block bounds as (START . END)."
 
 (defun pi-coding-agent--apply-thinking-display-to-completed-blocks (display)
   "Rewrite every completed thinking block in the current buffer for DISPLAY.
-DISPLAY is either `visible' or `hidden'.  Returns non-nil when at least one
-completed thinking block changed.  Unrelated buffer content is left alone."
-  (let ((changed nil))
+DISPLAY is either `visible' or `hidden'.  Returns replacement records when at
+least one completed thinking block changed, otherwise nil.  Unrelated buffer
+content is left alone.  Each replacement record is (START END DELTA), using
+coordinates from before the rewrites."
+  (let (replacements)
     (save-excursion
       (dolist (block (nreverse (pi-coding-agent--completed-thinking-blocks)))
         (unless (eq (plist-get block :display) display)
@@ -1955,12 +1975,13 @@ completed thinking block changed.  Unrelated buffer content is left alone."
                         (plist-get block :normalized)
                         (plist-get block :order)
                         display)))
-            (pi-coding-agent--replace-thinking-block-region
-             (plist-get block :start)
-             (plist-get block :end)
-             rendered)
-            (setq changed t)))))
-    changed))
+            (let* ((start (plist-get block :start))
+                   (end (plist-get block :end))
+                   (new-bounds (pi-coding-agent--replace-thinking-block-region
+                                start end rendered)))
+              (push (list start end (- (cdr new-bounds) end))
+                    replacements))))))
+    replacements))
 
 (defun pi-coding-agent--toggle-thinking-block-at-point ()
   "Toggle the completed-thinking block at point.
@@ -2574,26 +2595,27 @@ RESULTS maps toolCallId strings to matching toolResult messages."
                 block (gethash (plist-get block :id) results))))))
         (flush-text))))))
 
-(defun pi-coding-agent--rerender-tail-window-p
+(defun pi-coding-agent--rewrite-tail-window-p
     (window-point window-end point-max point-row body-height)
-  "Return non-nil when WINDOW-POINT or WINDOW-END should follow the rebuilt tail.
-An exact WINDOW-POINT at POINT-MAX is always tail-following.  A WINDOW-END that
+  "Return non-nil when WINDOW-POINT or WINDOW-END should follow a rewritten tail.
+A WINDOW-POINT at or just before POINT-MAX is tail-following.  A WINDOW-END that
 merely reaches POINT-MAX counts only when POINT-ROW already sits in the lower
 half of BODY-HEIGHT, so tall windows inspecting mid-buffer context do not get
 misclassified as tail-following just because they can also see the tail."
   (or (>= window-point (1- point-max))
       (and (>= window-end (1- point-max))
+           (< point-row (max 1 body-height))
            (>= point-row (/ (max 1 body-height) 2)))))
 
-(defun pi-coding-agent--clamp-rerender-point-row (saved-row above-lines tail-lines body-height)
-  "Clamp SAVED-ROW for a rerendered window with ABOVE-LINES and TAIL-LINES.
+(defun pi-coding-agent--clamp-rewrite-point-row (saved-row above-lines tail-lines body-height)
+  "Clamp SAVED-ROW after a buffer rewrite.
 ABOVE-LINES counts screen lines before point, TAIL-LINES counts screen lines
 from point through the tail, and BODY-HEIGHT is the window body height in
 screen lines.
 
 When the whole buffer is shorter than the window, preserving a full window is
-impossible, so the row falls back to the highest still-visible row. Otherwise,
-clamp the row so the tail still fills the window after the rerender."
+impossible, so the row falls back to the highest still-visible row.  Otherwise,
+clamp the row so the tail still fills the window after the rewrite."
   (let* ((max-row (min (max 0 (1- body-height)) above-lines))
          (total-lines (+ above-lines tail-lines)))
     (if (< total-lines body-height)
@@ -2601,9 +2623,20 @@ clamp the row so the tail still fills the window after the rerender."
       (let ((min-row (max 0 (- body-height tail-lines))))
         (max min-row (min saved-row max-row))))))
 
-(defun pi-coding-agent--capture-rerender-window-state (window point-max)
-  "Return the saved rerender state for WINDOW before a rebuild.
-POINT-MAX is the old buffer end before the rerender begins."
+(defun pi-coding-agent--live-thinking-start-at-pos (pos)
+  "Return active thinking block start when POS is inside live thinking."
+  (when (and (markerp pi-coding-agent--thinking-start-marker)
+             (markerp pi-coding-agent--thinking-marker)
+             (marker-position pi-coding-agent--thinking-start-marker)
+             (marker-position pi-coding-agent--thinking-marker))
+    (let ((start (marker-position pi-coding-agent--thinking-start-marker))
+          (end (marker-position pi-coding-agent--thinking-marker)))
+      (when (and (<= start pos) (< pos end))
+        start))))
+
+(defun pi-coding-agent--capture-window-rewrite-state (window point-max)
+  "Return saved WINDOW state before a buffer rewrite.
+POINT-MAX is the old buffer end before the rewrite begins."
   (let* ((point (window-point window))
          (body-height (max 1 (window-body-height window)))
          (row (count-screen-lines (window-start window)
@@ -2611,68 +2644,131 @@ POINT-MAX is the old buffer end before the rerender begins."
                                   nil
                                   window)))
     (list :window window
-          :tail-p (pi-coding-agent--rerender-tail-window-p
+          :tail-p (pi-coding-agent--rewrite-tail-window-p
                    point
                    (window-end window t)
                    point-max
                    row
                    body-height)
+          :start (window-start window)
           :point point
           :thinking-block (pi-coding-agent--thinking-block-at-pos point)
+          :live-thinking-start (pi-coding-agent--live-thinking-start-at-pos point)
           :row row)))
 
-(defun pi-coding-agent--resolve-rerender-point (window-state)
-  "Return the best restored point for WINDOW-STATE after a rerender.
-When point was inside a completed thinking block, prefer the same logical block
-in the rebuilt buffer. Otherwise fall back to the saved numeric point clamped
-into the rebuilt buffer."
+(defun pi-coding-agent--capture-window-rewrite-states ()
+  "Return saved rewrite states for visible windows showing the current buffer."
+  (let ((old-point-max (point-max))
+        (buffer (current-buffer)))
+    (mapcar (lambda (win)
+              (pi-coding-agent--capture-window-rewrite-state win old-point-max))
+            (get-buffer-window-list buffer nil t))))
+
+(defun pi-coding-agent--adjust-pos-after-region-replacements
+    (pos replacements)
+  "Return POS adjusted after REPLACEMENTS, or nil when POS was deleted.
+Each entry in REPLACEMENTS is (START END DELTA), using coordinates from before
+any replacement was applied."
+  (let ((total-delta 0))
+    (catch 'deleted
+      (dolist (replacement replacements (+ pos total-delta))
+        (pcase-let ((`(,start ,end ,delta) replacement))
+          (cond
+           ((and (<= start pos) (< pos end))
+            (throw 'deleted nil))
+           ((>= pos end)
+            (setq total-delta (+ total-delta delta)))))))))
+
+(defun pi-coding-agent--map-window-rewrite-pos (pos map-position fallback)
+  "Map old POS through MAP-POSITION, or return FALLBACK when POS was deleted."
+  (if map-position
+      (or (funcall map-position pos) fallback)
+    (min pos (point-max))))
+
+(defun pi-coding-agent--resolve-window-rewrite-point
+    (window-state &optional map-position)
+  "Return the best restored point for WINDOW-STATE after a buffer rewrite.
+When point was inside a completed or live thinking block, prefer the rewritten
+block start.  Otherwise map the saved numeric point through MAP-POSITION when
+provided, or clamp it into the rewritten buffer."
   (or (pi-coding-agent--thinking-block-start
        (plist-get window-state :thinking-block))
-      (min (plist-get window-state :point) (point-max))))
+      (plist-get window-state :live-thinking-start)
+      (pi-coding-agent--map-window-rewrite-pos
+       (plist-get window-state :point)
+       map-position
+       (min (plist-get window-state :point) (point-max)))))
 
-(defun pi-coding-agent--restore-rerender-window-state (window-state)
-  "Restore WINDOW-STATE after a canonical-history rerender.
-Tail-following windows stay pinned to the rebuilt tail. Other windows restore
-point, then recenter to a clamped screen-line row so the window stays filled
-when possible instead of showing a mostly blank tail view."
+(defun pi-coding-agent--window-start-fills-window-p
+    (start point-max body-height window)
+  "Return non-nil when START still fills WINDOW after a rewrite.
+A filled view leaves at most one blank row in BODY-HEIGHT after POINT-MAX.
+Preserving the user's viewport is better than scrolling to command point when
+the old start remains useful."
+  (>= (count-screen-lines start point-max nil window)
+      (1- body-height)))
+
+(defun pi-coding-agent--restore-window-rewrite-state
+    (window-state &optional map-position)
+  "Restore WINDOW-STATE after a large buffer rewrite.
+Tail-following windows stay pinned to the rewritten tail.  Other windows
+restore point, then recenter to a clamped screen-line row so the window stays
+filled when possible instead of showing a mostly blank tail view.
+MAP-POSITION, when non-nil, maps old buffer positions to new ones and returns
+nil for positions deleted by the rewrite."
   (let ((win (plist-get window-state :window)))
     (when (and (window-live-p win)
                (eq (window-buffer win) (current-buffer)))
       (with-selected-window win
         (let* ((point-max (point-max))
-               (point (pi-coding-agent--resolve-rerender-point window-state)))
+               (point (pi-coding-agent--resolve-window-rewrite-point
+                       window-state map-position)))
           (if (plist-get window-state :tail-p)
               (progn
                 (goto-char point-max)
                 (recenter -1))
             (goto-char point)
             (let* ((body-height (max 1 (window-body-height win)))
-                   (above-lines (count-screen-lines (point-min) point nil win))
-                   (tail-lines (max 1 (count-screen-lines point point-max nil win)))
-                   (row (pi-coding-agent--clamp-rerender-point-row
-                         (plist-get window-state :row)
-                         above-lines
-                         tail-lines
-                         body-height)))
-              (recenter row))))))))
+                   (saved-start
+                    (pi-coding-agent--map-window-rewrite-pos
+                     (plist-get window-state :start)
+                     map-position
+                     point)))
+              (if (pi-coding-agent--window-start-fills-window-p
+                   saved-start point-max body-height win)
+                  (progn
+                    (set-window-start win saved-start t)
+                    (set-window-point win (max point saved-start)))
+                (let* ((above-lines (count-screen-lines (point-min) point nil win))
+                       (tail-lines (max 1 (count-screen-lines point point-max nil win)))
+                       (row (pi-coding-agent--clamp-rewrite-point-row
+                             (plist-get window-state :row)
+                             above-lines
+                             tail-lines
+                             body-height)))
+                  (recenter row))))))))))
+
+(defun pi-coding-agent--restore-window-rewrite-states
+    (buffer window-states &optional map-position)
+  "Restore WINDOW-STATES for BUFFER after a large rewrite.
+MAP-POSITION is passed to `pi-coding-agent--restore-window-rewrite-state'."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (save-selected-window
+        (dolist (window-state window-states)
+          (pi-coding-agent--restore-window-rewrite-state
+           window-state map-position))))))
 
 (defun pi-coding-agent--rerender-canonical-history ()
   "Rebuild the current chat buffer from cached canonical messages.
-Visible chat windows keep useful context after the rerender: windows already at
+Visible chat windows keep useful context after the rewrite: windows already at
 or showing the tail stay at the rebuilt tail, while other windows restore point
 and approximately the same screen-line row, clamped so the window stays filled
 when possible."
-  (let* ((messages pi-coding-agent--canonical-messages)
-         (old-point-max (point-max))
-         (saved-windows
-          (mapcar (lambda (win)
-                    (pi-coding-agent--capture-rerender-window-state win old-point-max))
-                  (get-buffer-window-list (current-buffer) nil t))))
+  (let ((messages pi-coding-agent--canonical-messages))
     (when (vectorp messages)
-      (pi-coding-agent--display-session-history messages (current-buffer))
-      (save-selected-window
-        (dolist (win-state saved-windows)
-          (pi-coding-agent--restore-rerender-window-state win-state))))))
+      (pi-coding-agent--with-window-rewrite-preservation
+        (pi-coding-agent--display-session-history messages (current-buffer))))))
 
 (defun pi-coding-agent--set-chat-thinking-display (mode)
   "Set completed-thinking display MODE for the current chat buffer.
@@ -2684,17 +2780,18 @@ assistant is still working, and MODE is used when that block completes."
     (unless chat-buf
       (user-error "No pi session buffer"))
     (with-current-buffer chat-buf
-      (let* ((old-point-max (point-max))
-             (saved-windows
-              (mapcar (lambda (win)
-                        (pi-coding-agent--capture-rerender-window-state
-                         win old-point-max))
-                      (get-buffer-window-list (current-buffer) nil t))))
-        (pi-coding-agent--set-thinking-display mode)
-        (when (pi-coding-agent--apply-thinking-display-to-completed-blocks mode)
-          (save-selected-window
-            (dolist (win-state saved-windows)
-              (pi-coding-agent--restore-rerender-window-state win-state))))))
+      (pi-coding-agent--set-thinking-display mode)
+      (let ((buffer (current-buffer))
+            (saved-windows (pi-coding-agent--capture-window-rewrite-states)))
+        (when-let* ((replacements
+                     (pi-coding-agent--apply-thinking-display-to-completed-blocks
+                      mode)))
+          (pi-coding-agent--restore-window-rewrite-states
+           buffer
+           saved-windows
+           (lambda (pos)
+             (pi-coding-agent--adjust-pos-after-region-replacements
+              pos replacements))))))
     (message "Pi: This chat now %s completed thinking"
              (if (eq mode 'hidden) "hides" "shows"))))
 

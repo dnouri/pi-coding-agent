@@ -665,6 +665,68 @@ agent_end + next section's leading newline must not create triple newlines."
   (pi-coding-agent--thinking-hidden-stub
    (pi-coding-agent--thinking-normalize-text text)))
 
+(defun pi-coding-agent-test--long-thinking-text (&optional count)
+  "Return COUNT lines of long thinking text."
+  (mapconcat (lambda (n)
+               (format "thinking line %03d: %s" n (make-string 40 ?x)))
+             (number-sequence 1 (or count 120))
+             "\n"))
+
+(defun pi-coding-agent-test--tail-screen-lines (window)
+  "Return screen lines from WINDOW start through buffer end."
+  (with-current-buffer (window-buffer window)
+    (max 0 (count-screen-lines (window-start window)
+                               (point-max)
+                               nil
+                               window))))
+
+(defun pi-coding-agent-test--window-mostly-filled-p (window)
+  "Return non-nil when WINDOW has at most one blank row after buffer end."
+  (>= (pi-coding-agent-test--tail-screen-lines window)
+      (1- (window-body-height window))))
+
+(defun pi-coding-agent-test--window-shows-tail-p (window)
+  "Return non-nil when WINDOW shows the current buffer tail."
+  (with-current-buffer (window-buffer window)
+    (>= (window-end window t) (point-max))))
+
+(defun pi-coding-agent-test--window-start-line (window)
+  "Return visible text on WINDOW's start line."
+  (with-current-buffer (window-buffer window)
+    (save-excursion
+      (goto-char (window-start window))
+      (buffer-substring-no-properties
+       (line-beginning-position)
+       (line-end-position)))))
+
+(defun pi-coding-agent-test--setup-long-live-thinking (buffer display)
+  "Populate BUFFER with history and a long live thinking block using DISPLAY."
+  (with-current-buffer buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--thinking-display display)
+    (let ((inhibit-read-only t))
+      (dotimes (i 80)
+        (insert (format "previous history line %03d\n" (1+ i)))))
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-thinking-start)
+    (pi-coding-agent--display-thinking-delta
+     (pi-coding-agent-test--long-thinking-text))))
+
+(defmacro pi-coding-agent-test--with-long-live-thinking-buffer (spec &rest body)
+  "Run BODY with a buffer containing long live thinking.
+SPEC has the form (BUFFER DISPLAY).  BUFFER is bound to the temporary buffer,
+and DISPLAY controls how completed thinking is rendered."
+  (declare (indent 1) (debug t))
+  (let ((buffer (car spec))
+        (display (cadr spec)))
+    `(let ((,buffer (generate-new-buffer " *pi-long-live-thinking*")))
+       (unwind-protect
+           (progn
+             (pi-coding-agent-test--setup-long-live-thinking ,buffer ,display)
+             ,@body)
+         (when (buffer-live-p ,buffer)
+           (kill-buffer ,buffer))))))
+
 (ert-deftest pi-coding-agent-test-tab-expands-completed-thinking-stub ()
   "TAB on a hidden completed-thinking stub expands that block."
   (let ((pi-coding-agent-thinking-display 'hidden))
@@ -780,6 +842,133 @@ agent_end + next section's leading newline must not create triple newlines."
                 (beginning-of-line)
                 (pi-coding-agent-toggle-tool-section)
                 (should (= (window-start win) start-before))))))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+(ert-deftest pi-coding-agent-test-hidden-thinking-end-keeps-tail-window-filled ()
+  "Collapsing long live thinking keeps a tail-following window filled."
+  (let ((pi-coding-agent-thinking-display 'hidden))
+    (pi-coding-agent-test--with-long-live-thinking-buffer (buf 'hidden)
+      (let ((win (display-buffer buf)))
+        (with-selected-window win
+          (goto-char (point-max))
+          (recenter -1)
+          (should (pi-coding-agent-test--window-mostly-filled-p win))
+          (pi-coding-agent--display-thinking-end "")
+          (should (pi-coding-agent-test--window-shows-tail-p win))
+          (should (pi-coding-agent-test--window-mostly-filled-p win)))))))
+
+(ert-deftest pi-coding-agent-test-thinking-tab-collapse-keeps-tail-window-filled ()
+  "Collapsing completed thinking with TAB keeps a tail view filled."
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (pi-coding-agent-test--with-long-live-thinking-buffer (buf 'visible)
+      (with-current-buffer buf
+        (pi-coding-agent--display-thinking-end ""))
+      (let ((win (display-buffer buf)))
+        (with-selected-window win
+          (goto-char (point-max))
+          (recenter -1)
+          (should (pi-coding-agent-test--window-mostly-filled-p win))
+          (search-backward "thinking line 120")
+          (pi-coding-agent-toggle-tool-section)
+          (should (pi-coding-agent-test--window-shows-tail-p win))
+          (should (pi-coding-agent-test--window-mostly-filled-p win)))))))
+
+(ert-deftest pi-coding-agent-test-tab-collapse-preserves-window-after-thinking-block ()
+  "Collapsing thinking keeps other windows anchored after the replaced block."
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (pi-coding-agent-test--with-long-live-thinking-buffer (buf 'visible)
+      (save-window-excursion
+        (with-current-buffer buf
+          (pi-coding-agent--display-thinking-end "")
+          (let ((inhibit-read-only t))
+            (goto-char (point-max))
+            (dotimes (i 120)
+              (insert (format "after line %03d\n" (1+ i))))))
+        (let* ((reader (display-buffer buf))
+               (toggle (split-window reader nil 'right)))
+          (set-window-buffer toggle buf)
+          (with-selected-window reader
+            (goto-char (point-min))
+            (search-forward "after line 050")
+            (beginning-of-line)
+            (set-window-start reader (point) t)
+            (set-window-point reader (point)))
+          (let ((start-line-before
+                 (pi-coding-agent-test--window-start-line reader)))
+            (with-selected-window toggle
+              (goto-char (point-min))
+              (search-forward "thinking line 120")
+              (pi-coding-agent-toggle-tool-section))
+            (should (equal (pi-coding-agent-test--window-start-line reader)
+                           start-line-before))))))))
+
+(ert-deftest pi-coding-agent-test-live-thinking-end-keeps-inspected-block-visible ()
+  "Collapsing live thinking maps an inspected live block to its completed stub."
+  (let ((pi-coding-agent-thinking-display 'hidden))
+    (pi-coding-agent-test--with-long-live-thinking-buffer (buf 'hidden)
+      (let ((win (display-buffer buf)))
+        (with-selected-window win
+          (goto-char (point-min))
+          (search-forward "thinking line 060")
+          (beginning-of-line)
+          (recenter 0)
+          (pi-coding-agent--display-thinking-end "")
+          (let ((visible (buffer-substring-no-properties
+                          (window-start win)
+                          (window-end win t))))
+            (should (string-match-p "Thinking:" visible))
+            (should (pi-coding-agent-test--window-mostly-filled-p win))))))))
+
+(ert-deftest pi-coding-agent-test-chat-thinking-display-preserves-window-after-earlier-block ()
+  "Whole-chat thinking display changes keep later reading windows anchored."
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (pi-coding-agent-test--with-long-live-thinking-buffer (buf 'visible)
+      (with-current-buffer buf
+        (pi-coding-agent--display-thinking-end "")
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (dotimes (i 120)
+            (insert (format "after line %03d\n" (1+ i))))))
+      (let ((win (display-buffer buf)))
+        (with-selected-window win
+          (goto-char (point-min))
+          (search-forward "after line 050")
+          (beginning-of-line)
+          (set-window-start win (point) t)
+          (set-window-point win (point)))
+        (let ((start-line-before
+               (pi-coding-agent-test--window-start-line win)))
+          (with-current-buffer buf
+            (cl-letf (((symbol-function 'message) #'ignore))
+              (pi-coding-agent--set-chat-thinking-display 'hidden)))
+          (should (equal (pi-coding-agent-test--window-start-line win)
+                         start-line-before)))))))
+
+(ert-deftest pi-coding-agent-test-chat-thinking-display-noop-preserves-window-start ()
+  "A no-op whole-chat thinking display change does not move the viewport."
+  (let ((pi-coding-agent-thinking-display 'hidden)
+        (buf (generate-new-buffer " *pi-thinking-display-noop-scroll*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--thinking-display 'hidden)
+            (let ((inhibit-read-only t))
+              (dotimes (i 120)
+                (insert (format "plain line %03d\n" (1+ i))))))
+          (let ((win (display-buffer buf)))
+            (with-selected-window win
+              (goto-char (point-min))
+              (search-forward "plain line 050")
+              (beginning-of-line)
+              (set-window-start win (point) t)
+              (set-window-point win (point)))
+            (let ((start-before (window-start win)))
+              (with-current-buffer buf
+                (cl-letf (((symbol-function 'message) #'ignore))
+                  (pi-coding-agent--set-chat-thinking-display 'hidden)))
+              (should (= (window-start win) start-before)))))
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
 
@@ -1081,6 +1270,28 @@ agent_end + next section's leading newline must not create triple newlines."
     ;; Mock window-point to return position before end
     (cl-letf (((symbol-function 'window-point) (lambda (_w) 1)))
       (should-not (pi-coding-agent--window-following-p 'mock-window)))))
+
+(ert-deftest pi-coding-agent-test-rewrite-tail-window-p-keeps-lower-tail-view-following ()
+  "A lower-window tail view should stay in tail-following mode after a rewrite."
+  (should (pi-coding-agent--rewrite-tail-window-p 10 99 100 18 30))
+  (should (pi-coding-agent--rewrite-tail-window-p 99 50 100 5 30))
+  (should-not (pi-coding-agent--rewrite-tail-window-p 10 50 100 18 30)))
+
+(ert-deftest pi-coding-agent-test-rewrite-tail-window-p-keeps-mid-buffer-context-when-tall-window-shows-tail ()
+  "A tall window showing the tail should not outrank an in-view mid-buffer point."
+  (should-not (pi-coding-agent--rewrite-tail-window-p 60 199 200 10 36)))
+
+(ert-deftest pi-coding-agent-test-rewrite-tail-window-p-ignores-offscreen-point ()
+  "A stale tail-reaching window end should not make an offscreen point follow."
+  (should-not (pi-coding-agent--rewrite-tail-window-p 60 199 200 14 11)))
+
+(ert-deftest pi-coding-agent-test-clamp-rewrite-point-row-pushes-point-lower-when-tail-shrinks ()
+  "Shrinking the tail should move point lower so the rewritten window stays filled."
+  (should (= 12 (pi-coding-agent--clamp-rewrite-point-row 3 40 8 20))))
+
+(ert-deftest pi-coding-agent-test-clamp-rewrite-point-row-falls-back-when-buffer-too-short ()
+  "When the whole buffer is shorter than the window, preserve the highest visible row."
+  (should (= 5 (pi-coding-agent--clamp-rewrite-point-row 10 5 8 20))))
 
 ;;; Pandoc Conversion
 
