@@ -790,16 +790,36 @@ Shows success or final failure with raw error."
     (setq pi-coding-agent--working-message msg)
     (force-mode-line-update t)))
 
+(defconst pi-coding-agent--extension-ui-fire-and-forget-methods
+  '("notify" "setStatus" "setWidget" "setTitle" "set_editor_text"
+    "setWorkingMessage")
+  "Extension UI methods that do not expect RPC responses.")
+
+(defun pi-coding-agent--extension-ui-response-required-p (method)
+  "Return non-nil when unsupported extension UI METHOD may expect a response."
+  (not (member method pi-coding-agent--extension-ui-fire-and-forget-methods)))
+
+(defun pi-coding-agent--extension-ui-warn-unsupported-once (method)
+  "Warn at most once per pi session for unsupported extension UI METHOD."
+  (when (pi-coding-agent--record-unsupported-extension-ui-warning method)
+    (message "Pi: extension UI method `%s' not supported in Emacs" method)))
+
 (defun pi-coding-agent--extension-ui-unsupported (event proc)
-  "Handle unsupported method from EVENT by warning and sending cancelled via PROC.
+  "Handle unsupported method from EVENT, using PROC to cancel when needed.
+Warn at most once per method in a pi session.
+Dialog-like methods receive a cancelled response so extensions do not hang;
+fire-and-forget methods are only warned because they do not expect responses.
 See URL `https://github.com/dnouri/pi-coding-agent/issues/176'."
-  (message "Pi: extension UI method `%s' not supported in Emacs"
-           (plist-get event :method))
-  (when proc
-    (pi-coding-agent--send-extension-ui-response
-     proc (list :type "extension_ui_response"
-                :id (plist-get event :id)
-                :cancelled t))))
+  (let ((method (plist-get event :method))
+        (id (plist-get event :id)))
+    (pi-coding-agent--extension-ui-warn-unsupported-once method)
+    (when (and proc
+               id
+               (pi-coding-agent--extension-ui-response-required-p method))
+      (pi-coding-agent--send-extension-ui-response
+       proc (list :type "extension_ui_response"
+                  :id id
+                  :cancelled t)))))
 
 (defun pi-coding-agent--handle-extension-ui-request (event)
   "Handle extension_ui_request EVENT from pi.

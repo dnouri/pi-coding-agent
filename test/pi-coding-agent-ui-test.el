@@ -1446,6 +1446,60 @@ Catches wiring bugs like requiring deleted modules."
       (should essential-called)
       (should optional-called))))
 
+;;; State response
+
+(ert-deftest pi-coding-agent-test-apply-state-response-preserves-extension-ui-warnings-without-session-change ()
+  "Applying state keeps unsupported UI warnings within the same pi session."
+  (let ((chat-buf (generate-new-buffer "*test-state-same-session*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--state nil
+                  pi-coding-agent--unsupported-extension-ui-methods-warned
+                  '("setWidget")))
+          (pi-coding-agent--apply-state-response
+           chat-buf
+           '(:success t :data (:isStreaming :false
+                               :sessionId "new-session"
+                               :sessionFile "/tmp/new.jsonl")))
+          (with-current-buffer chat-buf
+            (should (equal pi-coding-agent--unsupported-extension-ui-methods-warned
+                           '("setWidget"))))
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--unsupported-extension-ui-methods-warned
+                  '("setWidget")))
+          (pi-coding-agent--apply-state-response
+           chat-buf
+           '(:success t :data (:isStreaming :false
+                               :sessionId "new-session"
+                               :sessionFile "/tmp/newer.jsonl")))
+          (with-current-buffer chat-buf
+            (should (equal pi-coding-agent--unsupported-extension-ui-methods-warned
+                           '("setWidget")))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-apply-state-response-resets-extension-ui-warnings-on-session-change ()
+  "Applying state clears unsupported UI warnings when the pi session changes."
+  (let ((chat-buf (generate-new-buffer "*test-state-session-change*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--state '(:session-id "old-session")
+                  pi-coding-agent--unsupported-extension-ui-methods-warned
+                  '("setWidget")))
+          (pi-coding-agent--apply-state-response
+           chat-buf
+           '(:success t :data (:isStreaming :false
+                               :sessionId "new-session"
+                               :sessionFile "/tmp/new.jsonl")))
+          (with-current-buffer chat-buf
+            (should (equal (plist-get pi-coding-agent--state :session-id)
+                           "new-session"))
+            (should (null pi-coding-agent--unsupported-extension-ui-methods-warned))))
+      (kill-buffer chat-buf))))
+
 ;;; Input Window Height (integer and float ratio)
 
 (ert-deftest pi-coding-agent-test-input-height-integer-returns-configured-value ()

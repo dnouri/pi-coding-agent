@@ -1115,6 +1115,20 @@ Keys are extension identifiers (strings), values are status text.")
 (defvar-local pi-coding-agent--working-message nil
   "Transient extension working message for header-line display.")
 
+(defvar-local pi-coding-agent--unsupported-extension-ui-methods-warned nil
+  "Unsupported extension UI method names already warned for this pi session.")
+
+(defun pi-coding-agent--record-unsupported-extension-ui-warning (method)
+  "Record an unsupported extension UI warning for METHOD.
+Return non-nil when METHOD had not already been warned for this pi session."
+  (unless (member method pi-coding-agent--unsupported-extension-ui-methods-warned)
+    (push method pi-coding-agent--unsupported-extension-ui-methods-warned)
+    t))
+
+(defun pi-coding-agent--clear-unsupported-extension-ui-warnings ()
+  "Forget unsupported extension UI warnings for the current pi session."
+  (setq pi-coding-agent--unsupported-extension-ui-methods-warned nil))
+
 (defvar-local pi-coding-agent--session-name nil
   "Cached session name for header-line display.
 Extracted from session_info entries when session is loaded or switched.")
@@ -1742,7 +1756,13 @@ Safely handles dead buffers by checking liveness first."
   (when (and (eq (plist-get response :success) t)
              (buffer-live-p chat-buf))
     (with-current-buffer chat-buf
-      (let ((new-state (pi-coding-agent--extract-state-from-response response)))
+      (let* ((old-session-id (plist-get pi-coding-agent--state :session-id))
+             (new-state (pi-coding-agent--extract-state-from-response response))
+             (new-session-id (plist-get new-state :session-id)))
+        (when (and old-session-id
+                   new-session-id
+                   (not (equal old-session-id new-session-id)))
+          (pi-coding-agent--clear-unsupported-extension-ui-warnings))
         (setq pi-coding-agent--status (plist-get new-state :status)
               pi-coding-agent--state new-state))
       (force-mode-line-update t))))

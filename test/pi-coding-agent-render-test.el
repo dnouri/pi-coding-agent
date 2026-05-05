@@ -1936,9 +1936,13 @@ since we don't display them locally. Let pi's message_start handle it."
 (ert-deftest pi-coding-agent-test-extension-ui-unsupported-warns ()
   "Unsupported extension_ui_request method warns via `message'.
 See https://github.com/dnouri/pi-coding-agent/issues/176."
-  (let (messages-logged response-sent)
+  (let (warnings-logged response-sent)
     (cl-letf (((symbol-function 'message)
-               (lambda (fmt &rest args) (push (apply #'format fmt args) messages-logged)))
+               (lambda (fmt &rest args)
+                 (when fmt
+                   (let ((msg (apply #'format fmt args)))
+                     (when (string-match-p "extension UI method" msg)
+                       (push msg warnings-logged))))))
               ((symbol-function 'pi-coding-agent--send-extension-ui-response)
                (lambda (_proc resp) (setq response-sent resp))))
       (with-temp-buffer
@@ -1948,12 +1952,87 @@ See https://github.com/dnouri/pi-coding-agent/issues/176."
            '(:type "extension_ui_request"
              :id "req-unknown"
              :method "someNewFancyWidget")))))
-    ;; Should warn the user
     (should (cl-some (lambda (m) (string-match-p "someNewFancyWidget" m))
-                     messages-logged))
-    ;; Should still send cancelled so the extension doesn't hang
+                     warnings-logged))
+    ;; Unknown methods may be future dialogs, so they are cancelled.
     (should response-sent)
-    (should (equal (plist-get response-sent :cancelled) t))))
+    (should (eq (plist-get response-sent :cancelled) t))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-unsupported-warns-once-per-method ()
+  "Repeated unsupported extension_ui_request methods warn once per method."
+  (let (warnings-logged responses-sent)
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (when fmt
+                     (let ((msg (apply #'format fmt args)))
+                       (when (string-match-p "extension UI method" msg)
+                         (push msg warnings-logged))))))
+                ((symbol-function 'pi-coding-agent--send-extension-ui-response)
+                 (lambda (_proc resp) (push resp responses-sent))))
+        (let ((pi-coding-agent--process t))
+          (pi-coding-agent--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-widget-1"
+             :method "setWidget"
+             :widgetKey "my-ext"
+             :widgetLines ["Line 1"]))
+          (pi-coding-agent--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-widget-2"
+             :method "setWidget"
+             :widgetKey "my-ext"
+             :widgetLines ["Line 2"]))
+          (pi-coding-agent--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-title"
+             :method "setTitle"
+             :title "pi - project")))))
+    (should (= (length warnings-logged) 2))
+    (should (= 1 (cl-count-if (lambda (m) (string-match-p "setWidget" m))
+                              warnings-logged)))
+    (should (= 1 (cl-count-if (lambda (m) (string-match-p "setTitle" m))
+                              warnings-logged)))
+    ;; setWidget and setTitle are fire-and-forget RPC methods.
+    (should (null responses-sent))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-unsupported-warnings-are-buffer-local ()
+  "Unsupported extension UI warning dedupe is isolated by chat buffer."
+  (let ((buf-a (generate-new-buffer "*test-extension-ui-a*"))
+        (buf-b (generate-new-buffer "*test-extension-ui-b*"))
+        warnings-logged)
+    (unwind-protect
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (when fmt
+                       (let ((msg (apply #'format fmt args)))
+                         (when (string-match-p "extension UI method" msg)
+                           (push msg warnings-logged))))))
+                  ((symbol-function 'pi-coding-agent--send-extension-ui-response)
+                   #'ignore))
+          (dolist (buf (list buf-a buf-b))
+            (with-current-buffer buf
+              (pi-coding-agent-chat-mode)
+              (let ((pi-coding-agent--process t))
+                (pi-coding-agent--handle-extension-ui-request
+                 '(:type "extension_ui_request"
+                   :id "req-widget"
+                   :method "setWidget"
+                   :widgetKey "my-ext"
+                   :widgetLines ["Line 1"])))))
+          (with-current-buffer buf-a
+            (let ((pi-coding-agent--process t))
+              (pi-coding-agent--handle-extension-ui-request
+               '(:type "extension_ui_request"
+                 :id "req-widget-again"
+                 :method "setWidget"
+                 :widgetKey "my-ext"
+                 :widgetLines ["Line 2"]))))
+          (should (= 2 (cl-count-if (lambda (m) (string-match-p "setWidget" m))
+                                    warnings-logged))))
+      (when (buffer-live-p buf-a) (kill-buffer buf-a))
+      (when (buffer-live-p buf-b) (kill-buffer buf-b)))))
 
 (ert-deftest pi-coding-agent-test-header-format-extension-status ()
   "Extension status formatter returns inline neutral status text without pipe."
@@ -1987,9 +2066,7 @@ See https://github.com/dnouri/pi-coding-agent/issues/176."
           (pi-coding-agent--handle-extension-ui-request
            '(:type "extension_ui_request"
              :id "req-9"
-             :method "setWidget"
-             :widgetKey "my-ext"
-             :widgetLines ["Line 1"])))
+             :method "someNewFancyWidget")))
         (should response-sent)
         (should (equal (plist-get response-sent :type) "extension_ui_response"))
         (should (equal (plist-get response-sent :id) "req-9"))
