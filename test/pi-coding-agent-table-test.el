@@ -838,6 +838,30 @@ what the parser recognizes as a `pipe_table'."
     (pi-coding-agent--display-message-delta "| Auth | Done |\n")
     (should (>= (pi-coding-agent-test--table-overlay-count) 1))))
 
+(ert-deftest pi-coding-agent-test-chat-buffer-hidden-p-sees-visible-window-on-other-frame ()
+  "A chat buffer visible on another frame is not hidden."
+  (with-temp-buffer
+    (let ((noninteractive nil)
+          (calls nil))
+      (cl-letf (((symbol-function 'get-buffer-window)
+                 (lambda (buffer &optional all-frames)
+                   (should (eq buffer (current-buffer)))
+                   (push all-frames calls)
+                   (cond
+                    ((null all-frames) nil)
+                    ((eq all-frames 'visible) 'other-frame-window)
+                    (t (error "Unexpected all-frames value: %S" all-frames))))))
+        (should-not (pi-coding-agent--chat-buffer-hidden-p))
+        (should (equal (nreverse calls) '(nil visible)))))))
+
+(ert-deftest pi-coding-agent-test-chat-buffer-hidden-p-returns-nil-in-batch-without-window ()
+  "Batch tests using windowless temp buffers are not treated as hidden."
+  (with-temp-buffer
+    (let ((noninteractive t))
+      (cl-letf (((symbol-function 'get-buffer-window)
+                 (lambda (&rest _args) nil)))
+        (should-not (pi-coding-agent--chat-buffer-hidden-p))))))
+
 (ert-deftest pi-coding-agent-test-chat-window-width-excludes-fringe-columns ()
   "Chat window width reports usable character columns, not raw window width.
 When fringes like `display-line-numbers-mode' consume columns,
@@ -849,6 +873,46 @@ When fringes like `display-line-numbers-mode' consume columns,
                 ((symbol-function 'window-max-chars-per-line)
                  (lambda (&optional _window _face) 76)))
         (should (= (pi-coding-agent--chat-window-width) 76))))))
+
+(ert-deftest pi-coding-agent-test-chat-window-width-falls-back-to-visible-window-on-other-frame ()
+  "Chat window width uses another visible frame when selected frame lacks chat."
+  (with-temp-buffer
+    (let ((calls nil))
+      (cl-letf (((symbol-function 'get-buffer-window)
+                 (lambda (buffer &optional all-frames)
+                   (should (eq buffer (current-buffer)))
+                   (push all-frames calls)
+                   (cond
+                    ((null all-frames) nil)
+                    ((eq all-frames 'visible) 'other-frame-window)
+                    (t (error "Unexpected all-frames value: %S" all-frames)))))
+                ((symbol-function 'window-max-chars-per-line)
+                 (lambda (window &optional _face)
+                   (should (eq window 'other-frame-window))
+                   64)))
+        (should (= (pi-coding-agent--chat-window-width) 64))
+        (should (equal (nreverse calls) '(nil visible)))))))
+
+(ert-deftest pi-coding-agent-test-chat-window-width-prefers-selected-frame-window ()
+  "Chat window width keeps selected-frame preference when chat is visible there."
+  (with-temp-buffer
+    (let ((calls nil))
+      (cl-letf (((symbol-function 'get-buffer-window)
+                 (lambda (buffer &optional all-frames)
+                   (should (eq buffer (current-buffer)))
+                   (push all-frames calls)
+                   (cond
+                    ((null all-frames) 'selected-frame-window)
+                    ((eq all-frames 'visible) 'other-frame-window)
+                    (t (error "Unexpected all-frames value: %S" all-frames)))))
+                ((symbol-function 'window-max-chars-per-line)
+                 (lambda (window &optional _face)
+                   (pcase window
+                     ('selected-frame-window 90)
+                     ('other-frame-window 50)
+                     (_ (error "Unexpected window: %S" window))))))
+        (should (= (pi-coding-agent--chat-window-width) 90))
+        (should (equal (nreverse calls) '(nil)))))))
 
 (provide 'pi-coding-agent-table-test)
 ;;; pi-coding-agent-table-test.el ends here

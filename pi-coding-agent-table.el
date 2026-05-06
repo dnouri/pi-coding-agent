@@ -72,17 +72,24 @@ fontification when the same cell content reappears at different widths.")
 
 ;;;; Visibility and Width
 
+(defun pi-coding-agent--chat-display-window ()
+  "Return a visible window showing the current chat buffer.
+Prefer a window on the selected frame, then fall back to any
+visible frame."
+  (or (get-buffer-window (current-buffer) nil)
+      (get-buffer-window (current-buffer) 'visible)))
+
 (defun pi-coding-agent--chat-buffer-hidden-p ()
   "Return non-nil when the current chat buffer has no visible window.
 Returns nil in batch mode so unit tests that use windowless temp
 buffers are not affected by the visibility guard."
   (and (not noninteractive)
-       (null (get-buffer-window (current-buffer)))))
+       (null (pi-coding-agent--chat-display-window))))
 
 (defun pi-coding-agent--chat-window-width ()
   "Return usable character columns for the chat window, or nil if hidden.
 Excludes columns reserved by fringes such as line-number display."
-  (when-let* ((window (get-buffer-window (current-buffer) nil)))
+  (when-let* ((window (pi-coding-agent--chat-display-window)))
     (window-max-chars-per-line window)))
 
 (defun pi-coding-agent--chat-display-width ()
