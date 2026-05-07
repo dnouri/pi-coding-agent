@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Quality checks for pi-coding-agent - run before commits
 #
 # Usage:

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # scripts/ollama.sh - Manage Ollama Docker container for testing
 #
 # This script provides isolated Ollama setup for pi.el integration tests.

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # run-bench.sh - Run pi-coding-agent table rendering benchmarks
 #
 # Usage:

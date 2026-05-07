@@ -72,7 +72,7 @@ deps: .deps-stamp
 # Unit tests
 # ============================================================
 
-SHELL = /bin/bash
+SHELL = bash
 MAKE_SELECTOR = $(if $(SELECTOR),SELECTOR='$(SELECTOR)',)
 GUI_SELECTOR_ARG = $(if $(SELECTOR),$(SELECTOR),)
 

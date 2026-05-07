@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # run-gui-tests.sh - Run the deterministic fake-backed GUI ERT suite
 #
 # No Docker, Ollama, or real pi install is required.  The suite still uses a
