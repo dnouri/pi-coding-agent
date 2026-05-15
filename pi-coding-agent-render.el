@@ -1329,7 +1329,8 @@ are left alone."
   path
   offset
   line-map
-  last-tail)
+  last-tail
+  image-blocks)
 
 (defun pi-coding-agent--ensure-live-tool-blocks ()
   "Return the live tool block registry for the current buffer."
@@ -1469,6 +1470,67 @@ needed for compatibility, the current non-keyed pending block."
     (setf (pi-coding-agent--tool-block-last-tail block) last-tail)
     (pi-coding-agent--tool-block-refresh-overlay block))
   block)
+
+(defun pi-coding-agent--tool-block-set-image-blocks (block image-blocks)
+  "Store IMAGE-BLOCKS on BLOCK for re-insertion after toggle."
+  (when block
+    (setf (pi-coding-agent--tool-block-image-blocks block) image-blocks))
+  block)
+
+(defun pi-coding-agent--mime-to-image-type (mime-type)
+  "Convert MIME-TYPE string to Emacs image type symbol.
+Returns nil for unsupported types."
+  (pcase mime-type
+    ((or "image/jpeg" "image/jpg") 'jpeg)
+    ("image/png" 'png)
+    ("image/gif" 'gif)
+    ("image/webp" 'webp)
+    (_ nil)))
+
+(defun pi-coding-agent--insert-inline-image (data mime-type)
+  "Insert inline image decoded from base64 DATA with MIME-TYPE.
+In GUI Emacs with the required image type support, decodes DATA and
+inserts a scaled image via `insert-image'.  Otherwise inserts a text
+placeholder.  Returns non-nil if a graphical image was inserted."
+  (condition-case nil
+      (let* ((type (pi-coding-agent--mime-to-image-type mime-type))
+             (gui-p (and type
+                        (display-images-p)
+                        (image-type-available-p type)))
+             (raw (base64-decode-string data)))
+        (if (and gui-p (> (length raw) 0))
+            (let ((img (create-image raw type t
+                         :max-width (truncate
+                                     (* 0.9 (max 400 (window-pixel-width))))
+                         :max-height (truncate
+                                      (* 0.5 (max 300 (window-pixel-height)))))))
+              (insert-image img "[image]")
+              t)
+          (insert (propertize
+                   (format "[Image: %s, %s]"
+                           (or mime-type "unknown")
+                           (file-size-human-readable (length raw)))
+                   'face 'pi-coding-agent-tool-header
+                   'pi-coding-agent-no-fontify t))
+          nil))
+    (error
+     (insert (propertize
+              (format "[Image: %s, decode error]" (or mime-type "unknown"))
+              'face 'pi-coding-agent-tool-header
+              'pi-coding-agent-no-fontify t))
+     nil)))
+
+(defun pi-coding-agent--insert-tool-images (content)
+  "Insert inline images from CONTENT blocks at point.
+CONTENT is a sequence of content block plists.  Only blocks with
+:type \"image\" are processed.  A newline is inserted before each image."
+  (seq-doseq (block content)
+    (when (equal (plist-get block :type) "image")
+      (let ((data (plist-get block :data))
+            (mime (plist-get block :mimeType)))
+        (when (and data (> (length data) 0))
+          (insert "\n")
+          (pi-coding-agent--insert-inline-image data mime))))))
 
 (defun pi-coding-agent--tool-block-create
     (tool-name args &optional tool-call-id order preview-state)
@@ -1964,6 +2026,9 @@ if none exists, render the result at point without a live overlay."
                  (string-trim-right display-content "\n+")
                  lang
                  is-edit-diff))
+              ;; Insert any image content blocks after text
+              (pi-coding-agent--insert-tool-images content)
+              (pi-coding-agent--tool-block-set-image-blocks block content)
               (set-marker end-marker (point))
               (pi-coding-agent--tool-block-refresh-overlay block)
               ;; Note: no [error] badge — error content in the block is sufficient,
@@ -1990,6 +2055,8 @@ if none exists, render the result at point without a live overlay."
                (string-trim-right display-content "\n+")
                lang
                is-edit-diff))
+            ;; Insert any image content blocks after text
+            (pi-coding-agent--insert-tool-images content)
             (insert "\n")))))))
 
 (defun pi-coding-agent--ranges-excluding-property (start end prop)
@@ -2054,6 +2121,10 @@ Preserves window scroll position during the toggle."
           ;; Toggle: if currently expanded, show collapsed (and vice versa)
           (pi-coding-agent--insert-tool-content-with-toggle
            preview-content full-content lang is-edit-diff hidden-count (not expanded))
+          ;; Re-insert any image blocks stored on the tool block struct
+          (when-let* ((block (pi-coding-agent--tool-block-from-overlay ov))
+                      (img-content (pi-coding-agent--tool-block-image-blocks block)))
+            (pi-coding-agent--insert-tool-images img-content))
           ;; Ensure fontification of inserted content (JIT font-lock is lazy)
           ;; while excluding metadata-like details payload.
           (pi-coding-agent--font-lock-ensure-excluding-property
