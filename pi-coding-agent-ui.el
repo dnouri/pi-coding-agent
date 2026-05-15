@@ -439,6 +439,19 @@ Returns \"text\" for unrecognized extensions to ensure consistent fencing."
       (or (cdr (assoc ext pi-coding-agent--extension-language-alist))
           "text"))))
 
+(defun pi-coding-agent-browse-url-at-point ()
+  "Browse the markdown link URL at or near point."
+  (interactive)
+  (let* ((pos (point))
+         (line (buffer-substring-no-properties
+                (line-beginning-position) (line-end-position)))
+         ;; Find the link text nearest to point on this line
+         (url (when (string-match "(\\(https?://[^)]+\\))" line)
+                (match-string 1 line))))
+    (if url
+        (browse-url url)
+      (user-error "No URL found on this line"))))
+
 ;;;; Major Modes
 
 (defvar pi-coding-agent-chat-mode-map
@@ -452,6 +465,7 @@ Returns \"text\" for unrecognized extensions to ensure consistent fencing."
     (define-key map (kbd "<tab>") #'pi-coding-agent-toggle-tool-section)
     (define-key map (kbd "RET") #'pi-coding-agent-visit-file)
     (define-key map (kbd "<return>") #'pi-coding-agent-visit-file)
+    (define-key map (kbd "C-c C-o") #'pi-coding-agent-browse-url-at-point)
     map)
   "Keymap for `pi-coding-agent-chat-mode'.")
 
