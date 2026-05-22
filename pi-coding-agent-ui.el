@@ -171,6 +171,13 @@ When nil (the default), only the visible text is copied."
   :type 'boolean
   :group 'pi-coding-agent)
 
+(defcustom pi-coding-agent-extension-status-faces nil
+  "Alist mapping extension status keys to faces in the header line.
+Keys are extension status keys as strings.  Values are face symbols or face
+attribute plists accepted by `propertize'."
+  :type '(alist :key-type string :value-type sexp)
+  :group 'pi-coding-agent)
+
 (defcustom pi-coding-agent-quit-without-confirmation nil
   "Whether `pi-coding-agent-quit' skips confirmation for a live process.
 When non-nil, quitting a session never asks whether a running pi process
@@ -1646,7 +1653,12 @@ Returns extension statuses joined with \" · \", or empty string."
   (if (null ext-status)
       ""
     (mapconcat (lambda (pair)
-                 (pi-coding-agent--header-escape-text (cdr pair)))
+                 (let* ((key (car pair))
+                        (text (pi-coding-agent--header-escape-text (cdr pair)))
+                        (face (cdr (assoc key pi-coding-agent-extension-status-faces))))
+                   (if face
+                       (propertize text 'face face)
+                     text)))
                ext-status
                " · ")))
 
