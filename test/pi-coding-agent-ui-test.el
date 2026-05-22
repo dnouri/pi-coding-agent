@@ -692,6 +692,19 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
   "Hot-tail turn count defaults to 3 headed turns."
   (should (= 3 pi-coding-agent-hot-tail-turn-count)))
 
+(ert-deftest pi-coding-agent-test-extension-status-faces-propertize-by-key ()
+  "Extension status faces are applied by status key."
+  (let ((pi-coding-agent-extension-status-faces
+         '(("mempalace" . (:foreground "#c6a0f6")))))
+    (let ((result (pi-coding-agent--header-format-extension-status
+                   '(("solveit-mode" . "⚡ concise")
+                     ("mempalace" . "⌂ MemPalace · Global")))))
+      (should (equal (substring-no-properties result)
+                     "⚡ concise · ⌂ MemPalace · Global"))
+      (should-not (get-text-property 0 'face result))
+      (should (equal (get-text-property (string-match-p "⌂" result) 'face result)
+                     '(:foreground "#c6a0f6"))))))
+
 (ert-deftest pi-coding-agent-test-kill-ring-save-strips-by-default ()
   "kill-ring-save strips hidden markup by default."
   (pi-coding-agent-test--with-chat-markup "Hello **bold** world"
