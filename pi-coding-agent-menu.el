@@ -1058,18 +1058,29 @@ MESSAGES is a vector of plists from get_fork_messages."
 
 ;;;; Custom Commands
 
+(defun pi-coding-agent-run-command (name &optional args)
+  "Run a pi slash command NAME with optional ARGS.
+This is useful for binding extension, skill, or prompt commands from Emacs Lisp."
+  (interactive
+   (list (completing-read "Pi command: "
+                          (mapcar (lambda (cmd) (plist-get cmd :name))
+                                  pi-coding-agent--commands)
+                          nil t)
+         (read-string "Args: ")))
+  (when-let* ((chat-buf (pi-coding-agent--get-chat-buffer)))
+    (let ((full-command (if (or (null args) (string-empty-p args))
+                            (format "/%s" name)
+                          (format "/%s %s" name args))))
+      (with-current-buffer chat-buf
+        (pi-coding-agent--prepare-and-send full-command)))))
+
 (defun pi-coding-agent--run-custom-command (cmd)
   "Execute custom command CMD.
 Always prompts for arguments - user can press Enter if none needed.
 Sends the literal /command text to pi, which handles expansion."
-  (when-let* ((chat-buf (pi-coding-agent--get-chat-buffer)))
-    (let* ((name (plist-get cmd :name))
-           (args-string (read-string (format "/%s: " name)))
-           (full-command (if (string-empty-p args-string)
-                             (format "/%s" name)
-                           (format "/%s %s" name args-string))))
-      (with-current-buffer chat-buf
-        (pi-coding-agent--prepare-and-send full-command)))))
+  (let* ((name (plist-get cmd :name))
+         (args-string (read-string (format "/%s: " name))))
+    (pi-coding-agent-run-command name args-string)))
 
 (defun pi-coding-agent-run-custom-command ()
   "Select and run a custom command.
