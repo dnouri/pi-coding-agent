@@ -5151,12 +5151,12 @@ a slot, so downstream consumers that skip blanks still get N content lines."
                    "hello world"))))
 
 (ert-deftest pi-coding-agent-test-extract-text-from-content-multiple-blocks ()
-  "Extract-text-from-content concatenates multiple text blocks."
+  "Extract-text-from-content renders mixed text and image blocks."
   (let ((blocks [(:type "text" :text "hello ")
                  (:type "image" :data "...")
                  (:type "text" :text "world")]))
     (should (equal (pi-coding-agent--extract-text-from-content blocks)
-                   "hello world"))))
+                   "hello \n[image]\nworld"))))
 
 (ert-deftest pi-coding-agent-test-extract-text-from-content-empty ()
   "Extract-text-from-content handles empty input."
