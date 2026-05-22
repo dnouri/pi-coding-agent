@@ -44,6 +44,7 @@
 (require 'pi-coding-agent-table)
 (require 'cl-lib)
 (require 'ansi-color)
+(require 'image)
 
 ;; Forward references for functions in other modules
 (declare-function pi-coding-agent-compact "pi-coding-agent-menu" (&optional custom-instructions))
@@ -1597,21 +1598,85 @@ streaming state changed."
        event-type
        event-content-index))))
 
+(defun pi-coding-agent--image-type-from-mime (mime-type)
+  "Return an Emacs image type symbol for MIME-TYPE."
+  (pcase mime-type
+    ("image/png" 'png)
+    ((or "image/jpeg" "image/jpg") 'jpeg)
+    ("image/gif" 'gif)
+    ("image/webp" 'webp)
+    ("image/svg+xml" 'svg)))
+
+(defun pi-coding-agent--image-block-display (block)
+  "Return an image display object for image content BLOCK, or nil."
+  (when (display-images-p)
+    (let* ((mime-type (plist-get block :mimeType))
+           (image-type (pi-coding-agent--image-type-from-mime mime-type))
+           (data (plist-get block :data)))
+      (when (and image-type
+                 (image-type-available-p image-type)
+                 data)
+        (condition-case nil
+            (create-image (base64-decode-string data) image-type t
+                          :max-width pi-coding-agent-image-preview-max-width)
+          (error nil))))))
+
+(defun pi-coding-agent--render-image-content-block (block)
+  "Return a display string for image content BLOCK."
+  (let ((fallback (format "[image%s]"
+                          (if-let* ((mime-type (or (plist-get block :mimeType)
+                                                   (plist-get block :mime-type))))
+                              (format ": %s" mime-type)
+                            ""))))
+    (if-let* ((image (pi-coding-agent--image-block-display block)))
+        (propertize fallback
+                    'display image
+                    'rear-nonsticky t
+                    'help-echo fallback)
+      fallback)))
+
+(defun pi-coding-agent--file-image-display (path)
+  "Return an image display object for local image PATH, or nil."
+  (when (and (stringp path)
+             (file-readable-p path)
+             (display-images-p)
+             (image-supported-file-p path))
+    (condition-case nil
+        (create-image path nil nil
+                      :max-width pi-coding-agent-image-preview-max-width)
+      (error nil))))
+
+(defun pi-coding-agent--render-file-image (path)
+  "Return a display string for local image PATH."
+  (let* ((mime-type (when-let* ((image-type (image-supported-file-p path)))
+                      (pcase image-type
+                        ('svg "image/svg+xml")
+                        (_ (format "image/%s" image-type)))))
+         (fallback (format "[image%s]"
+                           (if mime-type (format ": %s" mime-type) ""))))
+    (if-let* ((image (pi-coding-agent--file-image-display path)))
+        (propertize fallback
+                    'display image
+                    'rear-nonsticky t
+                    'help-echo fallback)
+      fallback)))
+
 (defun pi-coding-agent--extract-text-from-content (content-blocks)
-  "Extract text from CONTENT-BLOCKS vector efficiently.
-Returns the concatenated text from all text blocks.
-Optimized for the common case of a single text block."
+  "Extract displayable content from CONTENT-BLOCKS vector.
+Text blocks are concatenated as text; image blocks are rendered inline when
+Emacs can display them, otherwise a textual placeholder is used."
   (if (and (vectorp content-blocks) (> (length content-blocks) 0))
       (let ((first-block (aref content-blocks 0)))
         (if (and (= (length content-blocks) 1)
                  (equal (plist-get first-block :type) "text"))
             ;; Fast path: single text block (common case)
             (or (plist-get first-block :text) "")
-          ;; Slow path: multiple blocks, need to filter and concat
+          ;; Slow path: multiple blocks, render supported block types.
           (mapconcat (lambda (c)
-                       (if (equal (plist-get c :type) "text")
-                           (or (plist-get c :text) "")
-                         ""))
+                       (pcase (plist-get c :type)
+                         ("text" (or (plist-get c :text) ""))
+                         ("image" (concat "\n" (pi-coding-agent--render-image-content-block c) "\n"))
+                         (_ "")))
                      content-blocks "")))
     ""))
 
@@ -1779,12 +1844,18 @@ if none exists, render the result at point without a live overlay."
          (is-edit-diff (and (equal tool-name "edit")
                             (not is-error)
                             (plist-get details :diff)))
+         (image-read-content
+          (when (equal tool-name "read")
+            (when-let* ((path (pi-coding-agent--tool-path args))
+                        ((pi-coding-agent--file-image-display path)))
+              (concat raw-output "\n" (pi-coding-agent--render-file-image path)))))
          (display-content
           (ansi-color-filter-apply
            (pcase tool-name
              ("edit" (or (plist-get details :diff) raw-output))
              ("write" (or (plist-get args :content) raw-output))
-             ((or "bash" "read") raw-output)
+             ("bash" raw-output)
+             ("read" (or image-read-content raw-output))
              (_ (if-let* ((details-json
                           (pi-coding-agent--pretty-print-json details)))
                     (concat raw-output "\n\n"
@@ -1799,7 +1870,8 @@ if none exists, render the result at point without a live overlay."
          (truncation (pi-coding-agent--truncate-to-visual-lines
                       display-content preview-limit width))
          (hidden-count (plist-get truncation :hidden-lines))
-         (needs-collapse (> hidden-count 0))
+         (needs-collapse (and (not image-read-content)
+                              (> hidden-count 0)))
          (inhibit-read-only t))
     (pi-coding-agent--with-scroll-preservation
       (save-excursion
