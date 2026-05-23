@@ -635,6 +635,40 @@ Does nothing if queue is empty.  Messages are processed in FIFO order."
   (when-let* ((text (pi-coding-agent--dequeue-followup)))
     (pi-coding-agent--prepare-and-send text)))
 
+(defun pi-coding-agent--compaction-event-result (event)
+  "Return the successful compaction result from EVENT, or nil."
+  (let ((result (plist-get event :result)))
+    (unless (or (null result)
+                (pi-coding-agent--json-null-p result))
+      result)))
+
+(defun pi-coding-agent--display-compaction-failure (error-message)
+  "Display failed compaction ERROR-MESSAGE without changing the queue."
+  (let ((error-text (or (pi-coding-agent--normalize-string-or-null error-message)
+                        "unknown error")))
+    (pi-coding-agent--display-error (format "Compaction failed: %s" error-text))
+    (message "Pi: Compaction failed: %s" error-text)))
+
+(defun pi-coding-agent--handle-compaction-end-event (event)
+  "Handle canonical compaction_end EVENT as one explicit outcome."
+  (let ((result (pi-coding-agent--compaction-event-result event)))
+    (setq pi-coding-agent--status 'idle)
+    (pi-coding-agent--set-activity-phase "idle")
+    (cond
+     ((pi-coding-agent--normalize-boolean (plist-get event :aborted))
+      (message "Pi: Compaction cancelled")
+      ;; Clear queue on abort (user wanted to stop).
+      (pi-coding-agent--clear-followup-queue))
+     (result
+      (pi-coding-agent--handle-compaction-success
+       (plist-get result :tokensBefore)
+       (plist-get result :summary)
+       (pi-coding-agent--ms-to-time (plist-get result :timestamp)))
+      (pi-coding-agent--process-followup-queue))
+     (t
+      (pi-coding-agent--display-compaction-failure
+       (plist-get event :errorMessage))))))
+
 (defun pi-coding-agent--display-retry-start (event)
   "Display retry notice from auto_retry_start EVENT.
 Shows attempt number, delay, and raw error message."
@@ -1042,27 +1076,14 @@ Updates buffer-local state and renders display updates."
      (pi-coding-agent--display-tool-update
       (plist-get event :partialResult)
       (pi-coding-agent--tool-block-get (plist-get event :toolCallId))))
-    ((or "compaction_start" "auto_compaction_start")
+    ("compaction_start"
      (setq pi-coding-agent--status 'compacting)
      (pi-coding-agent--set-activity-phase "compact")
      (let ((reason (plist-get event :reason)))
        (message "Pi: %sCompacting... (C-c C-k to cancel)"
                 (if (equal reason "overflow") "Context overflow, " ""))))
-    ((or "compaction_end" "auto_compaction_end")
-     (setq pi-coding-agent--status 'idle)
-     (pi-coding-agent--set-activity-phase "idle")
-     (if (pi-coding-agent--normalize-boolean (plist-get event :aborted))
-         (progn
-           (message "Pi: Compaction cancelled")
-           ;; Clear queue on abort (user wanted to stop)
-           (pi-coding-agent--clear-followup-queue))
-       (when-let* ((result (plist-get event :result)))
-         (pi-coding-agent--handle-compaction-success
-          (plist-get result :tokensBefore)
-          (plist-get result :summary)
-          (pi-coding-agent--ms-to-time (plist-get result :timestamp))))
-       ;; Process followup queue after successful compaction
-       (pi-coding-agent--process-followup-queue)))
+    ("compaction_end"
+     (pi-coding-agent--handle-compaction-end-event event))
     ("agent_end"
      (pi-coding-agent--set-canonical-messages
       (plist-get pi-coding-agent--state :messages))

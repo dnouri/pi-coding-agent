@@ -46,6 +46,11 @@
   (let ((result (pi-coding-agent--parse-json-line "{\"isStreaming\":false}")))
     (should (eq (plist-get result :isStreaming) :false))))
 
+(ert-deftest pi-coding-agent-test-parse-json-null ()
+  "JSON null parses to :null, not nil."
+  (let ((result (pi-coding-agent--parse-json-line "{\"result\":null}")))
+    (should (eq (plist-get result :result) :null))))
+
 (ert-deftest pi-coding-agent-test-json-false-p-accepts-both-sentinels ()
   "JSON false helper accepts both parser and encoder sentinels."
   (should (pi-coding-agent--json-false-p :false))
@@ -403,15 +408,6 @@ Display is handled by the display handler, not by state updates."
   (let ((pi-coding-agent--status 'compacting)
         (pi-coding-agent--state nil))
     (pi-coding-agent--update-state-from-event '(:type "compaction_end" :reason "threshold" :aborted :false))
-    (should (eq pi-coding-agent--status 'idle))))
-
-(ert-deftest pi-coding-agent-test-event-auto-compaction-aliases-supported ()
-  "Legacy auto_compaction_* events remain supported."
-  (let ((pi-coding-agent--status 'idle)
-        (pi-coding-agent--state nil))
-    (pi-coding-agent--update-state-from-event '(:type "auto_compaction_start" :reason "threshold"))
-    (should (eq pi-coding-agent--status 'compacting))
-    (pi-coding-agent--update-state-from-event '(:type "auto_compaction_end" :reason "threshold" :aborted :false))
     (should (eq pi-coding-agent--status 'idle))))
 
 (ert-deftest pi-coding-agent-test-ensure-active-tools-from-nil ()

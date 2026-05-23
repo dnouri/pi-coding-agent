@@ -802,23 +802,19 @@ Shows PID, status, and session file."
                (or (and session-file (file-name-nondirectory session-file)) "none"))))))
 
 (defun pi-coding-agent--handle-manual-compaction-response (chat-buf response)
-  "Handle manual compaction RESPONSE for CHAT-BUF.
-Restores idle state, renders success details, and drains queued follow-ups."
+  "Handle manual compact command RESPONSE for CHAT-BUF.
+Canonical compaction events render success, failure, and queue effects.
+This callback reports only command-level failure seen before any end event."
   (when (buffer-live-p chat-buf)
     (with-current-buffer chat-buf
-      (setq pi-coding-agent--status 'idle)
-      (pi-coding-agent--set-activity-phase "idle")
-      (if (plist-get response :success)
-          (let ((data (plist-get response :data)))
-            (pi-coding-agent--handle-compaction-success
-             (plist-get data :tokensBefore)
-             (plist-get data :summary)
-             (current-time)))
-        (message "Pi: Compact failed%s"
-                 (if-let* ((error-text (plist-get response :error)))
-                     (format ": %s" error-text)
-                   "")))
-      (pi-coding-agent--process-followup-queue))))
+      (unless (eq (plist-get response :success) t)
+        (when (eq pi-coding-agent--status 'compacting)
+          (setq pi-coding-agent--status 'idle)
+          (pi-coding-agent--set-activity-phase "idle")
+          (message "Pi: Compact failed%s"
+                   (if-let* ((error-text (plist-get response :error)))
+                       (format ": %s" error-text)
+                     "")))))))
 
 (defun pi-coding-agent-compact (&optional custom-instructions)
   "Compact conversation context to reduce token usage.

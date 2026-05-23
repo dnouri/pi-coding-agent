@@ -293,8 +293,8 @@ This is the single source of truth for session activity state.
 Status transitions are driven by events from pi:
 - `idle' -> `streaming' on agent_start
 - `streaming' -> `idle' on agent_end
-- `idle' -> `compacting' on compaction_start/auto_compaction_start
-- `compacting' -> `idle' on compaction_end/auto_compaction_end")
+- `idle' -> `compacting' on compaction_start
+- `compacting' -> `idle' on compaction_end")
 
 (defvar-local pi-coding-agent--state nil
   "Current state of the pi session (buffer-local in chat buffer).
@@ -366,10 +366,10 @@ Sets status to `streaming' on agent_start, `idle' on agent_end."
        (pi-coding-agent--handle-tool-update event))
       ("tool_execution_end"
        (pi-coding-agent--handle-tool-end event))
-      ((or "compaction_start" "auto_compaction_start")
+      ("compaction_start"
        (setq pi-coding-agent--status 'compacting)
        (setq pi-coding-agent--state-timestamp (float-time)))
-      ((or "compaction_end" "auto_compaction_end")
+      ("compaction_end"
        (setq pi-coding-agent--status 'idle)
        (setq pi-coding-agent--state-timestamp (float-time)))
       ("auto_retry_start"

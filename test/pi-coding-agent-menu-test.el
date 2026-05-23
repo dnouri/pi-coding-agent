@@ -932,12 +932,57 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
 
 ;;; Manual Compaction
 
-(ert-deftest pi-coding-agent-test-compact-sets-status-and-processes-queued-followup ()
-  "Manual compact marks session compacting and drains local follow-up queue on success."
+(ert-deftest pi-coding-agent-test-manual-compact-event-and-response-render-once ()
+  "Manual compact success is rendered from compaction_end, not the RPC response."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-compact-render-once*"))
+        (compact-callback nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle)
+            (setq pi-coding-agent--followup-queue nil))
+          (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                     (lambda () 'mock-proc))
+                    ((symbol-function 'process-live-p)
+                     (lambda (_proc) t))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc cmd cb)
+                       (when (equal (plist-get cmd :type) "compact")
+                         (setq compact-callback cb))))
+                    ((symbol-function 'message) #'ignore))
+            (with-current-buffer chat-buf
+              (pi-coding-agent-compact)
+              (pi-coding-agent--handle-display-event
+               '(:type "compaction_start" :reason "manual"))
+              (pi-coding-agent--handle-display-event
+               '(:type "compaction_end"
+                 :reason "manual"
+                 :aborted :false
+                 :willRetry :false
+                 :result (:tokensBefore 1234
+                          :summary "Unique manual compaction summary"
+                          :firstKeptEntryId "entry-1"
+                          :details nil))))
+            (should (functionp compact-callback))
+            (funcall compact-callback
+                     '(:success t
+                       :data (:tokensBefore 1234
+                              :summary "Unique manual compaction summary"
+                              :firstKeptEntryId "entry-1"
+                              :details nil)))
+            (with-current-buffer chat-buf
+              (should (= 1 (pi-coding-agent-test--count-matches
+                            "Unique manual compaction summary"
+                            (buffer-string)))))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-compact-completion-event-processes-queued-followup ()
+  "Manual compact queues local input until the compaction_end success event."
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-compact-status*"))
         (input-buf (get-buffer-create "*pi-coding-agent-test-compact-status-input*"))
         (compact-callback nil)
-        (prepared-text nil)
+        (prepared-texts nil)
         (prompt-sent nil))
     (unwind-protect
         (progn
@@ -961,7 +1006,7 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
                          (setq prompt-sent t))))
                     ((symbol-function 'pi-coding-agent--handle-compaction-success) #'ignore)
                     ((symbol-function 'pi-coding-agent--prepare-and-send)
-                     (lambda (text) (setq prepared-text text)))
+                     (lambda (text) (push text prepared-texts)))
                     ((symbol-function 'message) #'ignore))
             (with-current-buffer chat-buf
               (pi-coding-agent-compact)
@@ -976,15 +1021,50 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
               (should-not prompt-sent)
               (should (equal pi-coding-agent--followup-queue '("queued during compaction"))))
 
-            (should (functionp compact-callback))
-            (funcall compact-callback '(:success t :data (:tokensBefore 1234 :summary "Done")))
-
             (with-current-buffer chat-buf
+              (pi-coding-agent--handle-display-event
+               '(:type "compaction_end"
+                 :reason "manual"
+                 :aborted :false
+                 :willRetry :false
+                 :result (:tokensBefore 1234
+                          :summary "Done"
+                          :firstKeptEntryId "entry-1"
+                          :details nil)))
               (should (eq pi-coding-agent--status 'idle))
               (should (null pi-coding-agent--followup-queue)))
-            (should (equal prepared-text "queued during compaction"))))
+            (should (equal (reverse prepared-texts) '("queued during compaction")))
+
+            (should (functionp compact-callback))
+            (funcall compact-callback
+                     '(:success t :data (:tokensBefore 1234 :summary "Done")))
+            (should (equal (reverse prepared-texts) '("queued during compaction")))))
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-compact-response-failure-reports-without-event ()
+  "A failed compact RPC response reports plumbing failure when no event ended it."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-compact-response-failure*"))
+        (shown-message nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'compacting)
+            (pi-coding-agent--set-activity-phase "compact"))
+          (cl-letf (((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (setq shown-message (apply #'format fmt args)))))
+            (pi-coding-agent--handle-manual-compaction-response
+             chat-buf
+             '(:success :false :error "transport failed before compaction event")))
+          (with-current-buffer chat-buf
+            (should (eq pi-coding-agent--status 'idle))
+            (should (equal pi-coding-agent--activity-phase "idle"))
+            (should-not (string-match-p "Compacted from" (buffer-string))))
+          (should (equal shown-message
+                         "Pi: Compact failed: transport failed before compaction event")))
+      (kill-buffer chat-buf))))
 
 (ert-deftest pi-coding-agent-test-compact-dead-process-keeps-idle ()
   "Manual compact should not transition state when process is dead."

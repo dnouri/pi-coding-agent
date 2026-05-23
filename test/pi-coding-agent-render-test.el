@@ -5357,18 +5357,47 @@ Commands with embedded newlines should not have any lines deleted."
     (should (eq pi-coding-agent--status 'compacting))))
 
 (ert-deftest pi-coding-agent-test-display-handler-handles-compaction-end ()
-  "Display handler processes compaction_end with successful result."
+  "Display handler processes compaction_end with current Pi result shape."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (pi-coding-agent--handle-display-event
      '(:type "compaction_end"
-       :aborted nil
+       :reason "threshold"
+       :aborted :false
+       :willRetry :false
        :result (:summary "Context was compacted."
                 :tokensBefore 50000
-                :timestamp 1704067200000)))
+                :firstKeptEntryId "entry-1"
+                :details nil)))
     ;; Should display compaction info
     (should (string-match-p "Compaction" (buffer-string)))
     (should (string-match-p "50,000" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-display-handler-shows-compaction-failure ()
+  "Failed compaction_end events show the error and keep queued follow-ups."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((sent-text nil)
+          (shown-message nil))
+      (setq pi-coding-agent--status 'compacting)
+      (setq pi-coding-agent--followup-queue '("queued after recovery"))
+      (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
+                 (lambda (text) (setq sent-text text)))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq shown-message (apply #'format fmt args)))))
+        (pi-coding-agent--handle-display-event
+         '(:type "compaction_end"
+           :reason "threshold"
+           :aborted :false
+           :result :null
+           :errorMessage "quota exceeded during compaction")))
+      (should (string-match-p "quota exceeded during compaction" (buffer-string)))
+      (should (equal shown-message
+                     "Pi: Compaction failed: quota exceeded during compaction"))
+      (should-not (string-match-p "Compacted from" (buffer-string)))
+      (should (equal pi-coding-agent--followup-queue '("queued after recovery")))
+      (should (null sent-text)))))
 
 (ert-deftest pi-coding-agent-test-display-handler-handles-compaction-aborted ()
   "Display handler processes compaction_end when aborted."
@@ -5378,15 +5407,6 @@ Commands with embedded newlines should not have any lines deleted."
     (pi-coding-agent--handle-display-event
      '(:type "compaction_end" :aborted t :result nil))
     ;; Status should return to idle
-    (should (eq pi-coding-agent--status 'idle))))
-
-(ert-deftest pi-coding-agent-test-display-handler-handles-auto-compaction-aliases ()
-  "Display handler keeps legacy auto_compaction_* event aliases working."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    (pi-coding-agent--handle-display-event '(:type "auto_compaction_start" :reason "threshold"))
-    (should (eq pi-coding-agent--status 'compacting))
-    (pi-coding-agent--handle-display-event '(:type "auto_compaction_end" :aborted t :result nil))
     (should (eq pi-coding-agent--status 'idle))))
 
 (ert-deftest pi-coding-agent-test-thinking-rendered-as-blockquote ()

@@ -160,7 +160,7 @@ class SessionState:
     session_id: str = ""
     session_file: str = ""
     session_name: str | None = None
-    auto_compaction_enabled: bool = False
+    auto_compact_enabled: bool = False
     message_count: int = 0
     pending_message_count: int = 0
 
@@ -175,7 +175,7 @@ class SessionState:
             "followUpMode": self.follow_up_mode,
             "sessionFile": self.session_file,
             "sessionId": self.session_id,
-            "autoCompactionEnabled": self.auto_compaction_enabled,
+            "autoCompactionEnabled": self.auto_compact_enabled,
             "messageCount": self.message_count,
             "pendingMessageCount": self.pending_message_count,
         }
