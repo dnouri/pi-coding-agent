@@ -458,7 +458,7 @@ Display is handled by the display handler, not by state updates."
     (should (eq pi-coding-agent--status 'idle))))
 
 (ert-deftest pi-coding-agent-test-event-compaction-preserves-prompt-preflight-sending ()
-  "Compaction during prompt preflight returns to sending, not false idle."
+  "Successful compaction during prompt preflight resumes that prompt."
   (let ((pi-coding-agent--status 'sending)
         (pi-coding-agent--pre-compaction-status nil)
         (pi-coding-agent--state nil))
@@ -473,6 +473,39 @@ Display is handled by the display handler, not by state updates."
        :willRetry :false
        :result (:tokensBefore 1000 :summary "Summary")))
     (should (eq pi-coding-agent--status 'sending))
+    (should (null pi-coding-agent--pre-compaction-status))))
+
+(ert-deftest pi-coding-agent-test-event-failed-compaction-does-not-resume-preflight-sending ()
+  "Failed compaction during prompt preflight settles instead of faking retry."
+  (let ((pi-coding-agent--status 'sending)
+        (pi-coding-agent--pre-compaction-status nil)
+        (pi-coding-agent--state nil))
+    (pi-coding-agent--update-state-from-event
+     '(:type "compaction_start" :reason "threshold"))
+    (pi-coding-agent--update-state-from-event
+     '(:type "compaction_end"
+       :reason "threshold"
+       :aborted :false
+       :willRetry :false
+       :result :null
+       :errorMessage "quota exceeded"))
+    (should (eq pi-coding-agent--status 'idle))
+    (should (null pi-coding-agent--pre-compaction-status))))
+
+(ert-deftest pi-coding-agent-test-event-aborted-compaction-does-not-resume-preflight-sending ()
+  "Aborted compaction during prompt preflight is stop-everything, not sending."
+  (let ((pi-coding-agent--status 'sending)
+        (pi-coding-agent--pre-compaction-status nil)
+        (pi-coding-agent--state nil))
+    (pi-coding-agent--update-state-from-event
+     '(:type "compaction_start" :reason "threshold"))
+    (pi-coding-agent--update-state-from-event
+     '(:type "compaction_end"
+       :reason "threshold"
+       :aborted t
+       :willRetry :false
+       :result nil))
+    (should (eq pi-coding-agent--status 'idle))
     (should (null pi-coding-agent--pre-compaction-status))))
 
 (ert-deftest pi-coding-agent-test-ensure-active-tools-from-nil ()

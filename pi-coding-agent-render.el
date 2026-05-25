@@ -567,6 +567,7 @@ follow-up as a fresh prompt.")
   "Return non-nil when a queued follow-up may become the next prompt."
   (and pi-coding-agent--followup-queue
        (eq pi-coding-agent--status 'idle)
+       (not (pi-coding-agent--prompt-start-wait-active-p))
        (null pi-coding-agent--local-user-message)))
 
 (defun pi-coding-agent--drain-followup-queue-if-idle (buffer)
@@ -652,8 +653,8 @@ local transcript display.  Regular text is displayed after prompt preflight
 accepts it.
 When QUEUED is non-nil, TEXT is the oldest local follow-up and is removed
 from the queue only after prompt preflight succeeds.
-Must be called with chat buffer current.
-Status transitions are handled by pi events (agent_start, agent_end)."
+Must be called with chat buffer current.  Pi events own streaming/idle turn
+transitions; prompt submission marks the local pre-event window as busy."
   (pi-coding-agent--invalidate-history-loads)
   (cond
    ;; Built-in slash commands are interactive client actions, not durable queued
@@ -699,10 +700,12 @@ Status transitions are handled by pi events (agent_start, agent_end)."
      #'pi-coding-agent--schedule-followup-queue-processing))))
 
 (defun pi-coding-agent--process-followup-queue ()
-  "Send the oldest follow-up message without dropping it before acceptance.
-Does nothing if queue is empty.  Messages are processed in FIFO order."
-  (when-let* ((text (pi-coding-agent--peek-followup)))
-    (pi-coding-agent--prepare-and-send text 'queued)))
+  "Send the oldest follow-up only when it is safe to become the next prompt.
+Messages are processed in FIFO order and dropped only after preflight accepts
+them."
+  (when (pi-coding-agent--ready-to-drain-followups-p)
+    (when-let* ((text (pi-coding-agent--peek-followup)))
+      (pi-coding-agent--prepare-and-send text 'queued))))
 
 (defun pi-coding-agent--display-compaction-failure (error-message)
   "Display failed compaction ERROR-MESSAGE without changing the queue."
@@ -711,6 +714,13 @@ Does nothing if queue is empty.  Messages are processed in FIFO order."
     (pi-coding-agent--display-error (format "Compaction failed: %s" error-text))
     (message "Pi: Compaction failed: %s" error-text)))
 
+(defun pi-coding-agent--post-compaction-activity-phase ()
+  "Return activity phase after a compaction_end event."
+  (if (or (eq pi-coding-agent--status 'sending)
+          (pi-coding-agent--prompt-start-wait-active-p))
+      "thinking"
+    "idle"))
+
 (defun pi-coding-agent--handle-compaction-end-event (event)
   "Display canonical compaction_end EVENT and manage follow-up queues.
 Status transitions are handled by `pi-coding-agent--update-state-from-event'."
@@ -718,7 +728,7 @@ Status transitions are handled by `pi-coding-agent--update-state-from-event'."
     (cond
      ((pi-coding-agent--normalize-boolean (plist-get event :aborted))
       (pi-coding-agent--set-activity-phase
-       (if (eq pi-coding-agent--status 'sending) "thinking" "idle"))
+       (pi-coding-agent--post-compaction-activity-phase))
       (message "Pi: Compaction cancelled")
       ;; Clear queue on abort (user wanted to stop).
       (pi-coding-agent--clear-followup-queue))
@@ -737,9 +747,13 @@ Status transitions are handled by `pi-coding-agent--update-state-from-event'."
         (pi-coding-agent--schedule-followup-queue-processing)))
      (t
       (pi-coding-agent--set-activity-phase
-       (if (eq pi-coding-agent--status 'sending) "thinking" "idle"))
+       (pi-coding-agent--post-compaction-activity-phase))
       (pi-coding-agent--display-compaction-failure
        (plist-get event :errorMessage))
+      ;; During prompt preflight, Pi reports compaction failure before the
+      ;; prompt RPC failure that owns the original prompt text.  Restore local
+      ;; follow-ups now; the prompt callback clears the wait and restores the
+      ;; direct prompt if Pi rejects it.
       (pi-coding-agent--restore-followup-queue-to-input)))))
 
 (defun pi-coding-agent--display-retry-start (event)

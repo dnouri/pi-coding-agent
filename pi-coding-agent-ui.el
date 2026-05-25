@@ -1074,9 +1074,10 @@ Used to avoid duplicate headers during retry sequences.")
 (defvar-local pi-coding-agent--followup-queue nil
   "List of follow-up messages queued while agent is busy.
 Messages are added when the user sends while streaming, compacting, or
-waiting for an automatic retry to start.  The oldest message is popped
-and sent as a normal prompt after agent_end or successful non-retry
-compaction.  This is simpler than using pi's RPC follow_up command.")
+waiting for local prompt preflight, post-run drain, or automatic retry.  The
+oldest message is sent after the session settles, and dropped only after
+prompt preflight accepts it.  This is simpler than using pi's RPC follow_up
+command.")
 
 (defun pi-coding-agent--push-followup (message)
   "Push MESSAGE onto the follow-up queue."
@@ -1153,12 +1154,21 @@ When nil and we receive message_start role=user, we display it.
 When set but different from pi's message, we display pi's version
 \(e.g., expanded template).")
 
+(defvar-local pi-coding-agent--prompt-start-wait-active nil
+  "Non-nil while a prompt is waiting for response, agent_start, or fallback.")
+
+(defun pi-coding-agent--prompt-start-wait-active-p ()
+  "Return non-nil when local prompt preflight still owns the next turn."
+  (and pi-coding-agent--prompt-start-wait-active t))
+
 (defun pi-coding-agent--session-busy-p (&optional chat-buf)
   "Return non-nil when CHAT-BUF has active or locally pending work.
 When CHAT-BUF is nil, inspect the current buffer.  This includes Pi-owned
-activity from `pi-coding-agent--status' and Emacs-owned follow-up drain timers."
+activity from `pi-coding-agent--status' and Emacs-owned prompt preflight and
+follow-up drain waits."
   (with-current-buffer (or chat-buf (current-buffer))
     (or (memq pi-coding-agent--status '(sending streaming compacting))
+        (pi-coding-agent--prompt-start-wait-active-p)
         (pi-coding-agent--followup-drain-pending-p))))
 
 (defun pi-coding-agent--canonical-rerender-safe-p ()
@@ -1166,6 +1176,7 @@ activity from `pi-coding-agent--status' and Emacs-owned follow-up drain timers."
 A locally displayed user prompt awaiting pi's echo is newer than the cached
 canonical history, so rebuilding now would erase that visible turn."
   (and (eq pi-coding-agent--status 'idle)
+       (not (pi-coding-agent--prompt-start-wait-active-p))
        (not (pi-coding-agent--followup-drain-pending-p))
        (null pi-coding-agent--local-user-message)))
 
@@ -1867,6 +1878,14 @@ Accesses state from the linked chat buffer."
                              (with-selected-window win
                                (force-mode-line-update))))))))))
 
+(defun pi-coding-agent--merge-state-response-status (remote-status)
+  "Return status after merging REMOTE-STATUS with local pending work."
+  (if (and (eq remote-status 'idle)
+           (pi-coding-agent--prompt-start-wait-active-p)
+           (memq pi-coding-agent--status '(sending streaming compacting)))
+      pi-coding-agent--status
+    remote-status))
+
 (defun pi-coding-agent--apply-state-response (chat-buf response)
   "Apply get_state RESPONSE to CHAT-BUF.
 Updates buffer-local state variables and refreshes mode-line.
@@ -1881,8 +1900,12 @@ Safely handles dead buffers by checking liveness first."
                    new-session-id
                    (not (equal old-session-id new-session-id)))
           (pi-coding-agent--clear-unsupported-extension-ui-warnings))
-        (setq pi-coding-agent--status (plist-get new-state :status)
-              pi-coding-agent--state new-state))
+        (let ((new-status
+               (pi-coding-agent--merge-state-response-status
+                (plist-get new-state :status))))
+          (plist-put new-state :status new-status)
+          (setq pi-coding-agent--status new-status
+                pi-coding-agent--state new-state)))
       (force-mode-line-update t))))
 
 ;;;; Sending Infrastructure
@@ -1907,17 +1930,20 @@ returns the frontend to idle for that no-turn success path.")
 (defun pi-coding-agent--invalidate-prompt-start-wait ()
   "Cancel and invalidate any pending wait for agent_start."
   (pi-coding-agent--cancel-prompt-start-timer)
+  (setq pi-coding-agent--prompt-start-wait-active nil)
   (setq pi-coding-agent--prompt-start-generation
         (1+ pi-coding-agent--prompt-start-generation)))
 
 (defun pi-coding-agent--begin-prompt-start-wait ()
   "Mark the current prompt as waiting for agent_start and return its token."
   (pi-coding-agent--invalidate-prompt-start-wait)
+  (setq pi-coding-agent--prompt-start-wait-active t)
   pi-coding-agent--prompt-start-generation)
 
 (defun pi-coding-agent--prompt-start-current-p (generation)
   "Return non-nil when GENERATION is still the active prompt-start wait."
   (and generation
+       (pi-coding-agent--prompt-start-wait-active-p)
        (= generation pi-coding-agent--prompt-start-generation)))
 
 (defun pi-coding-agent--clear-sending-if-no-agent-start
@@ -1928,6 +1954,7 @@ When ON-NO-AGENT-START is non-nil, call it after the session returns to idle."
     (with-current-buffer chat-buf
       (when (pi-coding-agent--prompt-start-current-p generation)
         (setq pi-coding-agent--prompt-start-timer nil)
+        (setq pi-coding-agent--prompt-start-wait-active nil)
         (setq pi-coding-agent--prompt-start-generation
               (1+ pi-coding-agent--prompt-start-generation))
         (when (eq pi-coding-agent--status 'sending)

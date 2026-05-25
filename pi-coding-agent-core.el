@@ -299,8 +299,9 @@ Runtime status transitions are driven by events from pi:
 - `streaming' -> `idle' on agent_end without retry
 - `idle' -> `compacting' on compaction_start
 - `compacting' -> `sending' on successful compaction_end with willRetry
-- `compacting' -> `sending' on compaction_end that interrupted prompt preflight
-- `compacting' -> `idle' on compaction_end without retry
+- `compacting' -> `sending' on successful compaction_end that resumes
+  prompt preflight
+- `compacting' -> `idle' on compaction_end without retry, failure, or abort
 
 Local commands may mark a session busy before the first event arrives,
 for example normal prompt submission and manual compaction during the
@@ -362,13 +363,22 @@ JSON null (:null) and non-strings become nil."
                 (pi-coding-agent--json-null-p result))
       result)))
 
+(defun pi-coding-agent--compaction-end-success-p (event)
+  "Return non-nil when EVENT reports a completed, non-aborted compaction."
+  (and (not (pi-coding-agent--normalize-boolean (plist-get event :aborted)))
+       (not (null (pi-coding-agent--compaction-result-from-event event)))))
+
 (defun pi-coding-agent--compaction-end-will-retry-p (event)
   "Return non-nil when EVENT indicates Pi will retry after compaction.
 A retry is only considered pending for a successful compaction result;
 failed or aborted compactions must not leave the session busy."
   (and (pi-coding-agent--normalize-boolean (plist-get event :willRetry))
-       (not (pi-coding-agent--normalize-boolean (plist-get event :aborted)))
-       (not (null (pi-coding-agent--compaction-result-from-event event)))))
+       (pi-coding-agent--compaction-end-success-p event)))
+
+(defun pi-coding-agent--compaction-end-resumes-preflight-p (event)
+  "Return non-nil when EVENT can resume a pre-compaction prompt."
+  (and (eq pi-coding-agent--pre-compaction-status 'sending)
+       (pi-coding-agent--compaction-end-success-p event)))
 
 (defun pi-coding-agent--update-state-from-event (event)
   "Update status and state based on EVENT.
@@ -409,7 +419,7 @@ Handles agent lifecycle, message events, compaction, and error/retry events."
              (cond
               ((pi-coding-agent--compaction-end-will-retry-p event)
                'sending)
-              ((eq pi-coding-agent--pre-compaction-status 'sending)
+              ((pi-coding-agent--compaction-end-resumes-preflight-p event)
                'sending)
               (t
                'idle)))

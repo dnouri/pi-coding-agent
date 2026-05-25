@@ -2348,7 +2348,7 @@ The tree is built iteratively to avoid recursion in test setup."
                 ((symbol-function 'pi-coding-agent--rpc-async)
                  (lambda (_proc cmd callback)
                    (push cmd rpc-commands)
-                   (funcall callback '(:success nil :error "unsupported"))))
+                   (funcall callback '(:success :false :error "unsupported"))))
                 ((symbol-function 'message)
                  (lambda (fmt &rest args)
                    (setq shown-message (apply #'format fmt args)))))

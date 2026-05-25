@@ -491,6 +491,121 @@ Uses :false (JSON false representation) to verify boolean normalization."
         (should (equal pi-coding-agent--followup-queue
                        '("queued behind original prompt")))))))
 
+(ert-deftest pi-coding-agent-test-failed-preflight-compaction-restores-followups-before-prompt-failure ()
+  "Failed preflight compaction restores follow-ups while prompt failure is pending."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-preflight-compaction-failure-chat*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-preflight-compaction-failure-input*"))
+        (sent-text nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf))
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (let ((generation (pi-coding-agent--begin-prompt-start-wait)))
+              (setq pi-coding-agent--status 'sending
+                    pi-coding-agent--input-buffer input-buf
+                    pi-coding-agent--pre-compaction-status nil
+                    pi-coding-agent--followup-queue '("follow-up after prompt"))
+              (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
+                         (lambda (text &optional on-success &rest _)
+                           (setq sent-text text)
+                           (when on-success (funcall on-success))))
+                        ((symbol-function 'message) #'ignore))
+                (pi-coding-agent--handle-display-event
+                 '(:type "compaction_start" :reason "threshold"))
+                (pi-coding-agent--handle-display-event
+                 '(:type "compaction_end"
+                   :reason "threshold"
+                   :aborted :false
+                   :willRetry :false
+                   :result :null
+                   :errorMessage "quota exceeded")))
+              (should (eq pi-coding-agent--status 'idle))
+              (should (equal pi-coding-agent--activity-phase "thinking"))
+              (should (pi-coding-agent--prompt-start-current-p generation))
+              (should (null pi-coding-agent--followup-queue))
+              (should (null sent-text))))
+          (with-current-buffer input-buf
+            (should (equal (buffer-string) "follow-up after prompt"))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-aborted-preflight-compaction-clears-followups-before-prompt-failure ()
+  "Aborted preflight compaction clears follow-ups while prompt failure is pending."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((sent-text nil))
+      (pi-coding-agent--begin-prompt-start-wait)
+      (setq pi-coding-agent--status 'sending
+            pi-coding-agent--pre-compaction-status nil
+            pi-coding-agent--followup-queue '("discarded follow-up"))
+      (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
+                 (lambda (text &optional on-success &rest _)
+                   (setq sent-text text)
+                   (when on-success (funcall on-success))))
+                ((symbol-function 'message) #'ignore))
+        (pi-coding-agent--handle-display-event
+         '(:type "compaction_start" :reason "threshold"))
+        (pi-coding-agent--handle-display-event
+         '(:type "compaction_end"
+           :reason "threshold"
+           :aborted t
+           :willRetry :false
+           :result nil)))
+      (should (eq pi-coding-agent--status 'idle))
+      (should (equal pi-coding-agent--activity-phase "thinking"))
+      (should (null pi-coding-agent--followup-queue))
+      (should (null sent-text)))))
+
+(ert-deftest pi-coding-agent-test-failed-preflight-compaction-prompt-failure-restores-original ()
+  "Prompt RPC failure clears preflight wait after compaction failure."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-preflight-prompt-failure-chat*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-preflight-prompt-failure-input*"))
+        (rpc-callback nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle
+                  pi-coding-agent--activity-phase "idle"
+                  pi-coding-agent--input-buffer input-buf
+                  pi-coding-agent--followup-queue '("queued follow-up")))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "original prompt"))
+          (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                     (lambda () 'mock-proc))
+                    ((symbol-function 'process-live-p) (lambda (_) t))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc _cmd callback)
+                       (setq rpc-callback callback)))
+                    ((symbol-function 'message) #'ignore))
+            (with-current-buffer input-buf
+              (pi-coding-agent-send))
+            (with-current-buffer chat-buf
+              (pi-coding-agent--handle-display-event
+               '(:type "compaction_start" :reason "threshold"))
+              (pi-coding-agent--handle-display-event
+               '(:type "compaction_end"
+                 :reason "threshold"
+                 :aborted :false
+                 :willRetry :false
+                 :result :null
+                 :errorMessage "quota exceeded"))
+              (should (pi-coding-agent--session-busy-p chat-buf))
+              (funcall rpc-callback '(:success :false :error "quota exceeded"))
+              (should (eq pi-coding-agent--status 'idle))
+              (should (equal pi-coding-agent--activity-phase "idle"))
+              (should-not (pi-coding-agent--session-busy-p chat-buf))))
+          (with-current-buffer input-buf
+            (should (equal (buffer-string)
+                           "original prompt\n\nqueued follow-up"))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
 (ert-deftest pi-coding-agent-test-agent-end-will-retry-preserves-followup-queue ()
   "agent_end with willRetry keeps local follow-ups behind Pi's retry."
   (with-temp-buffer
@@ -1547,6 +1662,72 @@ from the queue and sends it as a normal prompt."
                              "older queued follow-up")))))
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-send-queues-when-stale-state-arrives-before-agent-start ()
+  "A stale idle get_state response must not open a second-send gap."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-stale-state-send-chat*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-stale-state-send-input*"))
+        (sent-prompts nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle
+                  pi-coding-agent--input-buffer input-buf
+                  pi-coding-agent--state '(:session-id "same-session")))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf))
+          (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                     (lambda () 'mock-proc))
+                    ((symbol-function 'process-live-p) (lambda (_) t))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc cmd _callback)
+                       (push (plist-get cmd :message) sent-prompts))))
+            (with-current-buffer input-buf
+              (insert "first prompt")
+              (pi-coding-agent-send))
+            (with-current-buffer chat-buf
+              (pi-coding-agent--apply-state-response
+               chat-buf
+               '(:success t :data (:isStreaming :false
+                                   :isCompacting :false
+                                   :sessionId "same-session"
+                                   :sessionFile "/tmp/same.jsonl"))))
+            (with-current-buffer input-buf
+              (insert "second prompt")
+              (pi-coding-agent-send)))
+          (with-current-buffer chat-buf
+            (should (equal (reverse sent-prompts) '("first prompt")))
+            (should (equal pi-coding-agent--followup-queue
+                           '("second prompt")))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-process-followup-queue-waits-until-ready ()
+  "Direct queue draining keeps its own safe-to-send guard."
+  (dolist (case '((sending nil nil)
+                  (streaming nil nil)
+                  (compacting nil nil)
+                  (idle "pending local echo" nil)
+                  (idle nil prompt-wait)))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((sent-prompts nil))
+        (setq pi-coding-agent--status (nth 0 case)
+              pi-coding-agent--local-user-message (nth 1 case)
+              pi-coding-agent--followup-queue '("queued follow-up"))
+        (when (eq (nth 2 case) 'prompt-wait)
+          (pi-coding-agent--begin-prompt-start-wait)
+          (setq pi-coding-agent--status 'idle))
+        (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
+                   (lambda (text &optional on-success &rest _)
+                     (push text sent-prompts)
+                     (when on-success (funcall on-success)))))
+          (pi-coding-agent--process-followup-queue))
+        (should (null sent-prompts))
+        (should (equal pi-coding-agent--followup-queue
+                       '("queued follow-up")))))))
 
 (ert-deftest pi-coding-agent-test-followup-queue-fifo-order ()
   "Multiple follow-ups are processed in FIFO order."

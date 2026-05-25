@@ -1553,6 +1553,36 @@ Catches wiring bugs like requiring deleted modules."
 
 ;;; State response
 
+(ert-deftest pi-coding-agent-test-session-busy-includes-prompt-start-wait ()
+  "A locally pending prompt keeps the session busy before Pi echoes events."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((generation (pi-coding-agent--begin-prompt-start-wait)))
+      (setq pi-coding-agent--status 'idle)
+      (should (pi-coding-agent--prompt-start-current-p generation))
+      (should (pi-coding-agent--session-busy-p (current-buffer))))))
+
+(ert-deftest pi-coding-agent-test-apply-state-response-keeps-local-prompt-start-busy ()
+  "Stale idle get_state must not erase local prompt preflight state."
+  (let ((chat-buf (generate-new-buffer "*test-state-local-prompt-start*")))
+    (unwind-protect
+        (with-current-buffer chat-buf
+          (pi-coding-agent-chat-mode)
+          (let ((generation (pi-coding-agent--begin-prompt-start-wait)))
+            (setq pi-coding-agent--status 'sending
+                  pi-coding-agent--state '(:session-id "same-session"))
+            (pi-coding-agent--apply-state-response
+             chat-buf
+             '(:success t :data (:isStreaming :false
+                                 :isCompacting :false
+                                 :sessionId "same-session"
+                                 :sessionFile "/tmp/same.jsonl")))
+            (should (pi-coding-agent--prompt-start-current-p generation))
+            (should (eq pi-coding-agent--status 'sending))
+            (should (eq (plist-get pi-coding-agent--state :status) 'sending))
+            (should (pi-coding-agent--session-busy-p chat-buf))))
+      (kill-buffer chat-buf))))
+
 (ert-deftest pi-coding-agent-test-apply-state-response-preserves-extension-ui-warnings-without-session-change ()
   "Applying state keeps unsupported UI warnings within the same pi session."
   (let ((chat-buf (generate-new-buffer "*test-state-same-session*")))
