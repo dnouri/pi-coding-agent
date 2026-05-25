@@ -7,7 +7,7 @@ BATCH = $(EMACS) --batch -Q -L . \
 LOCAL_LOAD_PATH = --eval "(setq load-path (cons (expand-file-name \".\") load-path))"
 
 # Pi CLI version — single source of truth (workflows extract this automatically)
-PI_VERSION ?= 0.75.4
+PI_VERSION ?= 0.75.5
 PI_PACKAGE ?= @earendil-works/pi-coding-agent
 PI_BIN ?= .cache/pi/node_modules/.bin/pi
 PI_BIN_DIR = $(abspath $(dir $(PI_BIN)))
@@ -144,7 +144,7 @@ install-hooks:
 
 setup-pi:
 	@if [ -x "$(PI_BIN)" ]; then \
-		CURRENT=$$($(PI_BIN) --version 2>/dev/null); \
+		CURRENT=$$($(PI_BIN) --version 2>&1 | tr -d '\r' | grep -Eo '^[0-9]+[.][0-9]+[.][0-9]+' | tail -1); \
 		if [ "$$CURRENT" != "$(PI_VERSION)" ] && [ "$(PI_VERSION)" != "latest" ]; then \
 			echo "Cached pi@$$CURRENT differs from requested $(PI_VERSION), reinstalling..."; \
 			rm -rf .cache/pi; \

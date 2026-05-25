@@ -19,10 +19,10 @@ shortest path to a usable session:
 
 #+begin_src bash
 # 1. Install the pi CLI
-npm install -g @earendil-works/pi-coding-agent
+npm install -g @earendil-works/pi-coding-agent@0.75.5
 
 # Or with mise
-mise use -g npm:@earendil-works/pi-coding-agent
+mise use -g npm:@earendil-works/pi-coding-agent@0.75.5
 
 # 2. Authenticate the CLI
 pi --login
@@ -65,7 +65,8 @@ needed for markdown rendering.  That requires a C compiler (=gcc= or =cc=).
 * Requirements
 
 - Emacs 29.1 or later (with tree-sitter support)
-- [[https://pi.dev][pi coding agent]] 0.65.0 or later, installed and in PATH
+- Node.js 22.19 or later for the pi CLI; Node 24 is used in CI
+- [[https://pi.dev][pi coding agent]] =@earendil-works/pi-coding-agent@0.75.5= or later, installed and in PATH
 - pi CLI authentication via =pi --login= or provider API keys
 - A C compiler (=gcc= or =cc=) for installing tree-sitter grammars
 

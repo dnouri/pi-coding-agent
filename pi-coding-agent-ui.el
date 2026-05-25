@@ -91,7 +91,8 @@ The first element is the program; remaining elements are passed
 before \"--mode rpc\" and `pi-coding-agent-extra-args'.
 
 For npx users:
-  (setq pi-coding-agent-executable \\='(\"npx\" \"pi\"))"
+  (setq pi-coding-agent-executable
+        \\='(\"npx\" \"-y\" \"@earendil-works/pi-coding-agent@0.75.5\"))"
   :type '(repeat string)
   :group 'pi-coding-agent)
 
@@ -1469,6 +1470,18 @@ Shows HH:MM if today, otherwise YYYY-MM-DD HH:MM."
 
 ;;;; Dependency Checking
 
+(defconst pi-coding-agent--pi-package "@earendil-works/pi-coding-agent"
+  "Npm package name for the pi CLI supported by pi-coding-agent.")
+
+(defconst pi-coding-agent--minimum-pi-version "0.75.5"
+  "Minimum supported pi CLI version.")
+
+(defun pi-coding-agent--pi-install-command ()
+  "Return the npm command to install the supported pi CLI."
+  (format "npm install -g %s@%s"
+          pi-coding-agent--pi-package
+          pi-coding-agent--minimum-pi-version))
+
 (defun pi-coding-agent--check-pi ()
   "Check if pi binary is available.
 Returns t if available, nil otherwise."
@@ -1478,8 +1491,9 @@ Returns t if available, nil otherwise."
   "Check all required dependencies.
 Displays warnings for missing dependencies."
   (unless (pi-coding-agent--check-pi)
-    (display-warning 'pi (format "%s not found in PATH. Install with: npm install -g @earendil-works/pi-coding-agent"
-                                 (car pi-coding-agent-executable))
+    (display-warning 'pi (format "%s not found in PATH. Install with: %s"
+                                 (car pi-coding-agent-executable)
+                                 (pi-coding-agent--pi-install-command))
                      :error))
   (pi-coding-agent--maybe-install-essential-grammars)
   (pi-coding-agent--maybe-install-optional-grammars))
@@ -1492,21 +1506,50 @@ Displays warnings for missing dependencies."
 (defconst pi-coding-agent--version-probe-delay 0.1
   "Seconds to wait before probing `pi --version' for a new process.")
 
+(defun pi-coding-agent--extract-pi-version (output)
+  "Extract a standalone semantic pi version from OUTPUT, or nil."
+  (when (stringp output)
+    (catch 'version
+      (dolist (line (split-string output "[\r\n]+" t))
+        (let ((trimmed (string-trim line)))
+          (when (string-match
+                 "\\`v?\\([0-9]+\\.[0-9]+\\.[0-9]+\\)\\'"
+                 trimmed)
+            (throw 'version (match-string 1 trimmed))))))))
+
+(defun pi-coding-agent--pi-version-outdated-p (version)
+  "Return non-nil when VERSION is older than supported pi."
+  (and (stringp version)
+       (condition-case nil
+           (version< version pi-coding-agent--minimum-pi-version)
+         (error nil))))
+
+(defun pi-coding-agent--warn-if-pi-version-outdated (version)
+  "Warn when VERSION is older than `pi-coding-agent--minimum-pi-version'."
+  (when (pi-coding-agent--pi-version-outdated-p version)
+    (display-warning
+     'pi
+     (format "Pi CLI version %s is older than the supported minimum %s. Upgrade with: %s"
+             version
+             pi-coding-agent--minimum-pi-version
+             (pi-coding-agent--pi-install-command))
+     :warning)))
+
 (defun pi-coding-agent--finish-pi-version-process (proc)
   "Collect `pi --version' output from PROC and invoke its callback."
   (let ((callback (process-get proc 'pi-coding-agent-version-callback))
         (stdout-buf (process-get proc 'pi-coding-agent-version-stdout-buf))
         (stderr-buf (process-get proc 'pi-coding-agent-version-stderr-buf)))
     (unwind-protect
-        (let ((stdout (when (buffer-live-p stdout-buf)
-                        (string-trim
+        (let* ((stdout (when (buffer-live-p stdout-buf)
                          (with-current-buffer stdout-buf
-                           (buffer-string))))))
+                           (buffer-string))))
+               (stderr (when (buffer-live-p stderr-buf)
+                         (with-current-buffer stderr-buf
+                           (buffer-string))))
+               (output (concat (or stdout "") "\n" (or stderr ""))))
           (when callback
-            (funcall callback
-                     (and stdout
-                          (not (string-empty-p stdout))
-                          stdout))))
+            (funcall callback (pi-coding-agent--extract-pi-version output))))
       (when (buffer-live-p stdout-buf)
         (kill-buffer stdout-buf))
       (when (buffer-live-p stderr-buf)
@@ -1553,7 +1596,8 @@ Stores the result in CHAT-BUF and emits a minibuffer notice when available."
      (when (and version (buffer-live-p chat-buf))
        (with-current-buffer chat-buf
          (setq pi-coding-agent--process-version version)
-         (message "Pi: version %s" version))))))
+         (message "Pi: version %s" version)
+         (pi-coding-agent--warn-if-pi-version-outdated version))))))
 
 (defun pi-coding-agent--format-startup-header ()
   "Format the startup header string with styled separator."

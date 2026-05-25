@@ -458,13 +458,61 @@ This ensures all files get code fences for consistent display."
   (let ((header (pi-coding-agent--format-startup-header)))
     (should (string-match-p "^Pi Coding Agent for Emacs$" header))))
 
+(ert-deftest pi-coding-agent-test-extract-pi-version-from-clean-output ()
+  "Extract the plain semantic version returned by pi."
+  (should (equal (pi-coding-agent--extract-pi-version "0.75.5\n")
+                 "0.75.5")))
+
+(ert-deftest pi-coding-agent-test-extract-pi-version-from-stderr-style-output ()
+  "Ignore npm warnings and extract the standalone pi version line."
+  (should (equal (pi-coding-agent--extract-pi-version
+                  "npm warn deprecated package@1.0.0: old\n0.75.5\n")
+                 "0.75.5")))
+
+(ert-deftest pi-coding-agent-test-extract-pi-version-returns-nil-for-unparseable-output ()
+  "Unparseable version output should be harmless."
+  (should-not (pi-coding-agent--extract-pi-version "npm warn only\n")))
+
+(ert-deftest pi-coding-agent-test-pi-version-outdated-compares-segments-numerically ()
+  "Compare pi versions numerically, not lexically."
+  (should (pi-coding-agent--pi-version-outdated-p "0.75.4"))
+  (should-not (pi-coding-agent--pi-version-outdated-p "0.75.5"))
+  (should-not (pi-coding-agent--pi-version-outdated-p "0.75.10"))
+  (should-not (pi-coding-agent--pi-version-outdated-p "1.0.0")))
+
+(ert-deftest pi-coding-agent-test-finish-pi-version-process-parses-stderr ()
+  "Version probing should accept pi versions printed to stderr."
+  (let ((proc (start-process "pi-coding-agent-test-version" nil "cat"))
+        (stdout-buf (generate-new-buffer " *pi-test-version-stdout*"))
+        (stderr-buf (generate-new-buffer " *pi-test-version-stderr*"))
+        (resolved-version nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer stderr-buf
+            (insert "npm warn deprecated package@1.0.0: old\n0.75.5\n"))
+          (process-put proc 'pi-coding-agent-version-callback
+                       (lambda (version)
+                         (setq resolved-version version)))
+          (process-put proc 'pi-coding-agent-version-stdout-buf stdout-buf)
+          (process-put proc 'pi-coding-agent-version-stderr-buf stderr-buf)
+          (pi-coding-agent--finish-pi-version-process proc)
+          (should (equal resolved-version "0.75.5"))
+          (should-not (buffer-live-p stdout-buf))
+          (should-not (buffer-live-p stderr-buf)))
+      (when (process-live-p proc)
+        (delete-process proc))
+      (when (buffer-live-p stdout-buf)
+        (kill-buffer stdout-buf))
+      (when (buffer-live-p stderr-buf)
+        (kill-buffer stderr-buf)))))
+
 (ert-deftest pi-coding-agent-test-request-pi-version-async-waits-before-probe ()
   "Version lookup waits briefly before starting the probe process."
   (let ((scheduled-delay nil)
         (resolved-version nil))
     (cl-letf (((symbol-function 'pi-coding-agent--run-pi-version-once-async)
                (lambda (callback)
-                 (funcall callback "0.53.0")))
+                 (funcall callback "0.75.5")))
               ((symbol-function 'run-at-time)
                (lambda (secs _repeat fn &rest args)
                  (setq scheduled-delay secs)
@@ -474,7 +522,7 @@ This ensures all files get code fences for consistent display."
        (lambda (version)
          (setq resolved-version version))))
     (should (= scheduled-delay pi-coding-agent--version-probe-delay))
-    (should (equal resolved-version "0.53.0"))))
+    (should (equal resolved-version "0.75.5"))))
 
 (ert-deftest pi-coding-agent-test-set-process-probes-version-for-current-process ()
   "Setting process starts version probe and stores result for current process."
@@ -494,9 +542,9 @@ This ensures all files get code fences for consistent display."
                        (push (apply #'format fmt args) messages))))
             (pi-coding-agent--set-process proc)
             (should callback)
-            (funcall callback "0.53.0")
-            (should (equal pi-coding-agent--process-version "0.53.0"))
-            (should (equal (car messages) "Pi: version 0.53.0"))))
+            (funcall callback "0.75.5")
+            (should (equal pi-coding-agent--process-version "0.75.5"))
+            (should (equal (car messages) "Pi: version 0.75.5"))))
       (when (process-live-p proc)
         (delete-process proc)))))
 
@@ -519,10 +567,64 @@ This ensures all files get code fences for consistent display."
                          (push (apply #'format fmt args) messages))))
               (pi-coding-agent--set-process proc)
               (with-temp-buffer
-                (funcall callback "0.53.0"))
+                (funcall callback "0.75.5"))
               (with-current-buffer chat-buf
-                (should (equal pi-coding-agent--process-version "0.53.0")))
-              (should (equal (car messages) "Pi: version 0.53.0")))))
+                (should (equal pi-coding-agent--process-version "0.75.5")))
+              (should (equal (car messages) "Pi: version 0.75.5")))))
+      (when (process-live-p proc)
+        (delete-process proc)))))
+
+(ert-deftest pi-coding-agent-test-probe-process-version-warns-when-pi-too-old ()
+  "Version probe warns clearly for unsupported pi versions."
+  (let ((callback nil)
+        (warning-text nil)
+        (noninteractive nil)
+        (proc (start-process "pi-coding-agent-test-proc-old" nil "cat")))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (cl-letf (((symbol-function 'pi-coding-agent--request-pi-version-async)
+                     (lambda (cb)
+                       (setq callback cb)
+                       nil))
+                    ((symbol-function 'message) #'ignore)
+                    ((symbol-function 'display-warning)
+                     (lambda (_type message &rest _)
+                       (setq warning-text message))))
+            (pi-coding-agent--set-process proc)
+            (should callback)
+            (funcall callback "0.75.4")
+            (should (equal pi-coding-agent--process-version "0.75.4"))
+            (should (string-match-p "0.75.4" warning-text))
+            (should (string-match-p "0.75.5" warning-text))
+            (should (string-match-p
+                     "npm install -g @earendil-works/pi-coding-agent@0.75.5"
+                     warning-text))))
+      (when (process-live-p proc)
+        (delete-process proc)))))
+
+(ert-deftest pi-coding-agent-test-probe-process-version-does-not-warn-when-supported ()
+  "Version probe accepts the minimum supported pi version."
+  (let ((callback nil)
+        (warning-called nil)
+        (noninteractive nil)
+        (proc (start-process "pi-coding-agent-test-proc-supported" nil "cat")))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (cl-letf (((symbol-function 'pi-coding-agent--request-pi-version-async)
+                     (lambda (cb)
+                       (setq callback cb)
+                       nil))
+                    ((symbol-function 'message) #'ignore)
+                    ((symbol-function 'display-warning)
+                     (lambda (&rest _)
+                       (setq warning-called t))))
+            (pi-coding-agent--set-process proc)
+            (should callback)
+            (funcall callback "0.75.5")
+            (should (equal pi-coding-agent--process-version "0.75.5"))
+            (should-not warning-called)))
       (when (process-live-p proc)
         (delete-process proc)))))
 
@@ -940,7 +1042,10 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
               ((symbol-function 'display-warning)
                (lambda (_type msg &rest _) (setq warning-text msg))))
       (pi-coding-agent--check-dependencies)
-      (should (string-match-p "my-custom-pi" warning-text)))))
+      (should (string-match-p "my-custom-pi" warning-text))
+      (should (string-match-p
+               "npm install -g @earendil-works/pi-coding-agent@0.75.5"
+               warning-text)))))
 
 ;;; Essential Grammar Install Prompt (markdown + markdown-inline)
 
