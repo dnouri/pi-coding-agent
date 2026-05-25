@@ -309,7 +309,7 @@ The /compact command is handled locally; other slash commands sent to pi."
      ((string-empty-p text) nil)
      (busy
       (pi-coding-agent--queue-followup-text chat-buf text)
-      (message "Pi: Message queued (will send after current response)"))
+      (message "Pi: Message queued (will send when Pi is ready)"))
      (t
       (pi-coding-agent--accept-input-text text)
       (with-current-buffer chat-buf
@@ -542,7 +542,8 @@ it back via message_start at the correct position (after current
 assistant output completes).
 
 When compaction is in progress, steering text is queued as a local
-follow-up and sent after compaction completes."
+follow-up.  It is sent after non-retry compaction, or after Pi's
+automatic overflow retry turn finishes."
   (interactive)
   (let ((text (string-trim (buffer-string))))
     (unless (string-empty-p text)
@@ -554,11 +555,13 @@ follow-up and sent after compaction completes."
               (message "Pi: Nothing to interrupt - use C-c C-c to send"))
              ((eq status 'compacting)
               (pi-coding-agent--queue-followup-text chat-buf text)
-              (message "Pi: Steering queued (will send after compaction)"))
-             (t
+              (message "Pi: Steering queued (will send when Pi is ready)"))
+             ((memq status '(sending streaming))
               (when (pi-coding-agent--send-steer-message text)
                 (pi-coding-agent--accept-input-text text)
-                (message "Pi: Steering message sent"))))))))))
+                (message "Pi: Steering message sent")))
+             (t
+              (message "Pi: Cannot steer while session status is %s" status)))))))))
 
 (defun pi-coding-agent-queue-followup ()
   "Queue current input as a follow-up message.

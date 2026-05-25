@@ -5309,13 +5309,26 @@ Commands with embedded newlines should not have any lines deleted."
     (should (equal pi-coding-agent--activity-phase "idle"))))
 
 (ert-deftest pi-coding-agent-test-activity-phase-idle-on-compaction-end ()
-  "Activity phase becomes idle on compaction_end."
+  "Activity phase becomes idle on compaction_end without retry."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (setq pi-coding-agent--activity-phase "compact")
     (pi-coding-agent--handle-display-event
      '(:type "compaction_end" :aborted t :result nil))
     (should (equal pi-coding-agent--activity-phase "idle"))))
+
+(ert-deftest pi-coding-agent-test-activity-phase-thinking-on-compaction-end-will-retry ()
+  "Activity phase stays busy while Pi's automatic retry is pending."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--activity-phase "compact")
+    (pi-coding-agent--handle-display-event
+     '(:type "compaction_end"
+       :reason "overflow"
+       :aborted :false
+       :willRetry t
+       :result (:tokensBefore 50000 :summary "Retry summary")))
+    (should (equal pi-coding-agent--activity-phase "thinking"))))
 
 (ert-deftest pi-coding-agent-test-display-compaction-result-shows-header-tokens-summary ()
   "pi-coding-agent--display-compaction-result shows header, token count, and summary."
@@ -5355,6 +5368,41 @@ Commands with embedded newlines should not have any lines deleted."
     (pi-coding-agent--handle-display-event '(:type "compaction_start" :reason "threshold"))
     ;; Status should change to compacting
     (should (eq pi-coding-agent--status 'compacting))))
+
+(ert-deftest pi-coding-agent-test-compaction-start-message-does-not-advertise-cancel ()
+  "Compaction status message must not promise unsupported cancellation."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let (shown-message)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq shown-message (apply #'format fmt args)))))
+        (pi-coding-agent--handle-display-event
+         '(:type "compaction_start" :reason "overflow")))
+      (should (equal shown-message "Pi: Context overflow, compacting..."))
+      (should-not (string-match-p "C-c C-k\\|cancel" shown-message)))))
+
+(ert-deftest pi-coding-agent-test-compaction-end-will-retry-keeps-session-busy ()
+  "Successful overflow compaction stays busy until Pi's retry turn ends."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((sent-text nil))
+      (setq pi-coding-agent--status 'compacting)
+      (setq pi-coding-agent--followup-queue '("queued behind retry"))
+      (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
+                 (lambda (text) (setq sent-text text))))
+        (pi-coding-agent--handle-display-event
+         '(:type "compaction_end"
+           :reason "overflow"
+           :aborted :false
+           :willRetry t
+           :result (:summary "Context was compacted."
+                    :tokensBefore 50000
+                    :firstKeptEntryId "entry-1"
+                    :details nil))))
+      (should (eq pi-coding-agent--status 'sending))
+      (should (equal pi-coding-agent--followup-queue '("queued behind retry")))
+      (should (null sent-text)))))
 
 (ert-deftest pi-coding-agent-test-display-handler-handles-compaction-end ()
   "Display handler processes compaction_end with current Pi result shape."

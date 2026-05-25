@@ -87,6 +87,34 @@
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
+(ert-deftest pi-coding-agent-test-send-queues-locally-while-sending ()
+  "pi-coding-agent-send adds to local queue while waiting for agent_start."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-sending*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-queue-sending-input*"))
+        (rpc-called nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'sending)
+            (setq pi-coding-agent--input-buffer input-buf)
+            (setq pi-coding-agent--followup-queue nil))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "Queued while retry is starting")
+            (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_proc _cmd _cb) (setq rpc-called t)))
+                      ((symbol-function 'message) #'ignore))
+              (pi-coding-agent-send))
+            (should-not rpc-called)
+            (with-current-buffer chat-buf
+              (should (equal pi-coding-agent--followup-queue
+                             '("Queued while retry is starting"))))
+            (should (string-empty-p (buffer-string)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
 (ert-deftest pi-coding-agent-test-send-queues-locally-while-compacting ()
   "pi-coding-agent-send adds to local queue while compacting, no RPC sent."
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-compact*"))
@@ -180,8 +208,8 @@
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
-(ert-deftest pi-coding-agent-test-compaction-success-sends-queued-messages ()
-  "compaction_end with aborted=false processes followup queue.
+(ert-deftest pi-coding-agent-test-compaction-success-without-retry-sends-queued-message ()
+  "Successful non-retry compaction sends the oldest queued follow-up.
 Uses :false (JSON false representation) to verify boolean normalization."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
@@ -194,11 +222,96 @@ Uses :false (JSON false representation) to verify boolean normalization."
          '(:type "compaction_end"
            :reason "threshold"
            :aborted :false
+           :willRetry :false
            :result (:tokensBefore 1000 :summary "Summary" :timestamp 1234567890000))))
-      ;; Queue should be empty after processing
+      (should (eq pi-coding-agent--status 'idle))
+      ;; Queue should be empty after processing.
       (should (null pi-coding-agent--followup-queue))
-      ;; The queued message should have been sent
+      ;; The queued message should have been sent.
       (should (equal sent-text "queued message")))))
+
+(ert-deftest pi-coding-agent-test-compaction-success-without-retry-preserves-fifo ()
+  "Successful non-retry compaction drains one queued follow-up in FIFO order."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((sent-text nil))
+      (setq pi-coding-agent--status 'compacting)
+      (dolist (text '("First" "Second" "Third"))
+        (pi-coding-agent--push-followup text))
+      (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
+                 (lambda (text) (setq sent-text text))))
+        (pi-coding-agent--handle-display-event
+         '(:type "compaction_end"
+           :reason "manual"
+           :aborted :false
+           :willRetry :false
+           :result (:tokensBefore 1000 :summary "Summary"))))
+      (should (equal sent-text "First"))
+      (should (equal pi-coding-agent--followup-queue '("Third" "Second"))))))
+
+(ert-deftest pi-coding-agent-test-overflow-compaction-will-retry-preserves-followup-queue ()
+  "Overflow compaction with automatic retry keeps local follow-ups queued."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((sent-text nil))
+      (setq pi-coding-agent--status 'compacting)
+      (setq pi-coding-agent--followup-queue '("queued behind retry"))
+      (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
+                 (lambda (text) (setq sent-text text))))
+        (pi-coding-agent--handle-display-event
+         '(:type "compaction_end"
+           :reason "overflow"
+           :aborted :false
+           :willRetry t
+           :result (:tokensBefore 1000 :summary "Summary"))))
+      (should (eq pi-coding-agent--status 'sending))
+      (should (equal pi-coding-agent--followup-queue '("queued behind retry")))
+      (should (null sent-text)))))
+
+(ert-deftest pi-coding-agent-test-overflow-compaction-retry-drains-queue-after-agent-end ()
+  "Queued follow-ups wait for Pi's automatic retry turn to finish."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((sent-prompts nil))
+      (setq pi-coding-agent--status 'compacting)
+      (setq pi-coding-agent--followup-queue '("queued behind retry"))
+      (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
+                 (lambda (text) (push text sent-prompts)))
+                ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
+        (pi-coding-agent--handle-display-event
+         '(:type "compaction_end"
+           :reason "overflow"
+           :aborted :false
+           :willRetry t
+           :result (:tokensBefore 1000 :summary "Summary")))
+        (should (null sent-prompts))
+        (should (equal pi-coding-agent--followup-queue '("queued behind retry")))
+        (pi-coding-agent--handle-display-event '(:type "agent_start"))
+        (should (eq pi-coding-agent--status 'streaming))
+        (pi-coding-agent--handle-display-event '(:type "agent_end" :messages [])))
+      (should (equal (reverse sent-prompts) '("queued behind retry")))
+      (should (null pi-coding-agent--followup-queue)))))
+
+(ert-deftest pi-coding-agent-test-compaction-failure-preserves-queued-followups ()
+  "Failed compaction leaves queued follow-ups available for user recovery."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((sent-text nil))
+      (setq pi-coding-agent--status 'compacting)
+      (setq pi-coding-agent--followup-queue '("recover me later"))
+      (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
+                 (lambda (text) (setq sent-text text)))
+                ((symbol-function 'message) #'ignore))
+        (pi-coding-agent--handle-display-event
+         '(:type "compaction_end"
+           :reason "threshold"
+           :aborted :false
+           :willRetry :false
+           :result :null
+           :errorMessage "quota exceeded")))
+      (should (eq pi-coding-agent--status 'idle))
+      (should (equal pi-coding-agent--followup-queue '("recover me later")))
+      (should (null sent-text)))))
 
 (ert-deftest pi-coding-agent-test-compaction-end-aborted-clears-queue ()
   "compaction_end when aborted clears followup queue without sending."
@@ -317,6 +430,33 @@ When user aborts, they want to stop everything - including queued messages."
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
+(ert-deftest pi-coding-agent-test-queue-steering-when-sending-sends-steer ()
+  "Queue steering sends steer RPC while waiting for agent_start."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-steer-sending*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-queue-steer-sending-input*"))
+        (sent-command nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'sending)
+            (setq pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "Steer the pending retry")
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
+                      ((symbol-function 'process-live-p) (lambda (_) t))
+                      ((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_proc cmd _cb) (setq sent-command cmd))))
+              (pi-coding-agent-queue-steering))
+            (should sent-command)
+            (should (equal (plist-get sent-command :type) "steer"))
+            (should (equal (plist-get sent-command :message) "Steer the pending retry"))
+            (should (string-empty-p (buffer-string)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
 (ert-deftest pi-coding-agent-test-queue-steering-send-failure-preserves-input ()
   "Steering send failures keep input text for retry and avoid success feedback."
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-steer-fail*"))
@@ -380,10 +520,49 @@ When user aborts, they want to stop everything - including queued messages."
             ;; Should queue in local follow-up queue
             (with-current-buffer chat-buf
               (should (equal pi-coding-agent--followup-queue '("Steer during compaction"))))
-            ;; Should tell user it was queued
-            (should (equal shown-message "Pi: Steering queued (will send after compaction)"))
+            ;; Should tell user it was queued without over-promising timing.
+            (should (equal shown-message "Pi: Steering queued (will send when Pi is ready)"))
             ;; Input should be cleared
             (should (string-empty-p (buffer-string)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-steering-and-send-during-compaction-preserve-fifo ()
+  "Steering and normal sends queued during compaction keep FIFO order."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-compaction-fifo*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-compaction-fifo-input*"))
+        (sent-prompts nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'compacting)
+            (setq pi-coding-agent--input-buffer input-buf)
+            (setq pi-coding-agent--followup-queue nil))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (cl-letf (((symbol-function 'message) #'ignore))
+              (insert "Steering first")
+              (pi-coding-agent-queue-steering)
+              (insert "Normal send second")
+              (pi-coding-agent-send)))
+          (with-current-buffer chat-buf
+            (should (equal pi-coding-agent--followup-queue
+                           '("Normal send second" "Steering first")))
+            (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
+                       (lambda (text) (push text sent-prompts)))
+                      ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
+              (pi-coding-agent--handle-display-event
+               '(:type "compaction_end"
+                 :reason "threshold"
+                 :aborted :false
+                 :willRetry :false
+                 :result (:tokensBefore 1000 :summary "Summary")))
+              (pi-coding-agent--handle-display-event '(:type "agent_end" :messages [])))
+            (should (equal (reverse sent-prompts)
+                           '("Steering first" "Normal send second")))
+            (should (null pi-coding-agent--followup-queue))))
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 

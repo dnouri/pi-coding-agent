@@ -1072,9 +1072,10 @@ Used to avoid duplicate headers during retry sequences.")
 
 (defvar-local pi-coding-agent--followup-queue nil
   "List of follow-up messages queued while agent is busy.
-Messages are added when user sends while streaming.
-On agent_end, the first message is popped and sent as a normal prompt.
-This is simpler than using pi's RPC follow_up command.")
+Messages are added when the user sends while streaming, compacting, or
+waiting for an automatic retry to start.  The oldest message is popped
+and sent as a normal prompt after agent_end or successful non-retry
+compaction.  This is simpler than using pi's RPC follow_up command.")
 
 (defun pi-coding-agent--push-followup (message)
   "Push MESSAGE onto the follow-up queue."

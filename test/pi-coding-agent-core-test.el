@@ -410,6 +410,31 @@ Display is handled by the display handler, not by state updates."
     (pi-coding-agent--update-state-from-event '(:type "compaction_end" :reason "threshold" :aborted :false))
     (should (eq pi-coding-agent--status 'idle))))
 
+(ert-deftest pi-coding-agent-test-event-compaction-end-will-retry-sets-sending ()
+  "Successful compaction_end with willRetry keeps the session busy."
+  (let ((pi-coding-agent--status 'compacting)
+        (pi-coding-agent--state nil))
+    (pi-coding-agent--update-state-from-event
+     '(:type "compaction_end"
+       :reason "overflow"
+       :aborted :false
+       :willRetry t
+       :result (:tokensBefore 1000 :summary "Summary")))
+    (should (eq pi-coding-agent--status 'sending))))
+
+(ert-deftest pi-coding-agent-test-event-compaction-end-will-retry-without-result-sets-idle ()
+  "willRetry without a result is not a retrying success."
+  (let ((pi-coding-agent--status 'compacting)
+        (pi-coding-agent--state nil))
+    (pi-coding-agent--update-state-from-event
+     '(:type "compaction_end"
+       :reason "overflow"
+       :aborted :false
+       :willRetry t
+       :result :null
+       :errorMessage "recovery failed"))
+    (should (eq pi-coding-agent--status 'idle))))
+
 (ert-deftest pi-coding-agent-test-ensure-active-tools-from-nil ()
   "pi-coding-agent--ensure-active-tools works when pi-coding-agent--state is nil."
   (let ((pi-coding-agent--state nil))
@@ -467,6 +492,13 @@ Display is handled by the display handler, not by state updates."
   (let ((pi-coding-agent--status 'streaming)
         (pi-coding-agent--state (list :model "test"))
         (pi-coding-agent--state-timestamp (- (float-time) 60)))  ;; Old, but streaming
+    (should (not (pi-coding-agent--state-needs-verification-p)))))
+
+(ert-deftest pi-coding-agent-test-state-no-verify-while-sending ()
+  "State does not need verification while waiting for agent_start."
+  (let ((pi-coding-agent--status 'sending)
+        (pi-coding-agent--state (list :model "test"))
+        (pi-coding-agent--state-timestamp (- (float-time) 60)))
     (should (not (pi-coding-agent--state-needs-verification-p)))))
 
 (ert-deftest pi-coding-agent-test-state-no-verify-when-no-timestamp ()

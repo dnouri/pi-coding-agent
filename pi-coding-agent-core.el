@@ -287,14 +287,16 @@ Returns the process object."
 
 (defvar-local pi-coding-agent--status 'idle
   "Current status of the pi session (buffer-local in chat buffer).
-One of: `idle', `streaming', `compacting'.
+One of: `idle', `sending', `streaming', `compacting'.
 This is the single source of truth for session activity state.
 
 Status transitions are driven by events from pi:
 - `idle' -> `streaming' on agent_start
 - `streaming' -> `idle' on agent_end
 - `idle' -> `compacting' on compaction_start
-- `compacting' -> `idle' on compaction_end")
+- `compacting' -> `sending' on successful compaction_end with willRetry
+- `compacting' -> `idle' on compaction_end without retry
+- `sending' -> `streaming' on the retry agent_start")
 
 (defvar-local pi-coding-agent--state nil
   "Current state of the pi session (buffer-local in chat buffer).
@@ -310,7 +312,7 @@ A plist with keys like :model, :thinking-level, :messages, etc.")
   "Return t if state should be verified with get_state.
 Verification is needed when:
 - State and timestamp exist
-- Session is idle (not streaming or compacting)
+- Session status is `idle'
 - Timestamp is older than `pi-coding-agent--state-verify-interval' seconds."
   (and pi-coding-agent--state
        pi-coding-agent--state-timestamp
@@ -340,10 +342,24 @@ Use when reading JSON fields that may be null or string.
 JSON null (:null) and non-strings become nil."
   (and (stringp value) value))
 
+(defun pi-coding-agent--compaction-result-from-event (event)
+  "Return EVENT's successful compaction result, or nil when absent."
+  (let ((result (plist-get event :result)))
+    (unless (or (null result)
+                (pi-coding-agent--json-null-p result))
+      result)))
+
+(defun pi-coding-agent--compaction-end-will-retry-p (event)
+  "Return non-nil when EVENT indicates Pi will retry after compaction.
+A retry is only considered pending for a successful compaction result;
+failed or aborted compactions must not leave the session busy."
+  (and (pi-coding-agent--normalize-boolean (plist-get event :willRetry))
+       (not (pi-coding-agent--normalize-boolean (plist-get event :aborted)))
+       (not (null (pi-coding-agent--compaction-result-from-event event)))))
+
 (defun pi-coding-agent--update-state-from-event (event)
   "Update status and state based on EVENT.
-Handles agent lifecycle, message events, and error/retry events.
-Sets status to `streaming' on agent_start, `idle' on agent_end."
+Handles agent lifecycle, message events, compaction, and error/retry events."
   (let ((type (plist-get event :type)))
     (pcase type
       ("agent_start"
@@ -370,7 +386,10 @@ Sets status to `streaming' on agent_start, `idle' on agent_end."
        (setq pi-coding-agent--status 'compacting)
        (setq pi-coding-agent--state-timestamp (float-time)))
       ("compaction_end"
-       (setq pi-coding-agent--status 'idle)
+       (setq pi-coding-agent--status
+             (if (pi-coding-agent--compaction-end-will-retry-p event)
+                 'sending
+               'idle))
        (setq pi-coding-agent--state-timestamp (float-time)))
       ("auto_retry_start"
        (plist-put pi-coding-agent--state :is-retrying t)
