@@ -167,6 +167,19 @@
           (should (plist-get received :error)))
       (ignore-errors (delete-process fake-proc)))))
 
+(ert-deftest pi-coding-agent-test-process-exit-runs-exit-handler-after-callbacks ()
+  "Process exit lets pending callbacks recover input before frontend cleanup."
+  (let ((events nil)
+        (fake-proc (start-process "cat" nil "cat")))
+    (unwind-protect
+        (let ((pending (pi-coding-agent--get-pending-requests fake-proc)))
+          (puthash "req_1" (lambda (_r) (push 'callback events)) pending)
+          (process-put fake-proc 'pi-coding-agent-exit-handler
+                       (lambda (_r) (push 'exit-handler events)))
+          (pi-coding-agent--handle-process-exit fake-proc "finished\n")
+          (should (equal (reverse events) '(callback exit-handler))))
+      (ignore-errors (delete-process fake-proc)))))
+
 ;;;; Response Dispatch Tests
 
 (ert-deftest pi-coding-agent-test-dispatch-response-calls-callback ()
@@ -330,6 +343,14 @@
     (pi-coding-agent--update-state-from-event '(:type "agent_end" :messages []))
     (should (eq pi-coding-agent--status 'idle))))
 
+(ert-deftest pi-coding-agent-test-event-agent-end-will-retry-keeps-sending ()
+  "agent_end with willRetry keeps the session busy for Pi's retry."
+  (let ((pi-coding-agent--status 'streaming)
+        (pi-coding-agent--state nil))
+    (pi-coding-agent--update-state-from-event
+     '(:type "agent_end" :messages [] :willRetry t))
+    (should (eq pi-coding-agent--status 'sending))))
+
 (ert-deftest pi-coding-agent-test-event-agent-end-stores-messages ()
   "agent_end event stores messages in state."
   (let ((pi-coding-agent--status 'streaming)
@@ -425,6 +446,7 @@ Display is handled by the display handler, not by state updates."
 (ert-deftest pi-coding-agent-test-event-compaction-end-will-retry-without-result-sets-idle ()
   "willRetry without a result is not a retrying success."
   (let ((pi-coding-agent--status 'compacting)
+        (pi-coding-agent--pre-compaction-status nil)
         (pi-coding-agent--state nil))
     (pi-coding-agent--update-state-from-event
      '(:type "compaction_end"
@@ -434,6 +456,24 @@ Display is handled by the display handler, not by state updates."
        :result :null
        :errorMessage "recovery failed"))
     (should (eq pi-coding-agent--status 'idle))))
+
+(ert-deftest pi-coding-agent-test-event-compaction-preserves-prompt-preflight-sending ()
+  "Compaction during prompt preflight returns to sending, not false idle."
+  (let ((pi-coding-agent--status 'sending)
+        (pi-coding-agent--pre-compaction-status nil)
+        (pi-coding-agent--state nil))
+    (pi-coding-agent--update-state-from-event
+     '(:type "compaction_start" :reason "threshold"))
+    (should (eq pi-coding-agent--status 'compacting))
+    (should (eq pi-coding-agent--pre-compaction-status 'sending))
+    (pi-coding-agent--update-state-from-event
+     '(:type "compaction_end"
+       :reason "threshold"
+       :aborted :false
+       :willRetry :false
+       :result (:tokensBefore 1000 :summary "Summary")))
+    (should (eq pi-coding-agent--status 'sending))
+    (should (null pi-coding-agent--pre-compaction-status))))
 
 (ert-deftest pi-coding-agent-test-ensure-active-tools-from-nil ()
   "pi-coding-agent--ensure-active-tools works when pi-coding-agent--state is nil."

@@ -23,7 +23,9 @@
   (let ((sent-text nil))
     (pi-coding-agent-test-with-mock-session "/tmp/pi-coding-agent-test-send1/"
       (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
-                 (lambda (text) (setq sent-text text))))
+                 (lambda (text &optional on-success &rest _)
+                   (setq sent-text text)
+                   (when on-success (funcall on-success)))))
         (with-current-buffer "*pi-coding-agent-input:/tmp/pi-coding-agent-test-send1/*"
           (insert "Hello, pi!")
           (pi-coding-agent-send)
@@ -112,6 +114,33 @@
               (should (equal pi-coding-agent--followup-queue
                              '("Queued while retry is starting"))))
             (should (string-empty-p (buffer-string)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-send-refuses-builtin-command-while-busy ()
+  "Client-side slash commands are not hidden in the follow-up queue."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-builtin-busy*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-builtin-busy-input*"))
+        (shown-message nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'streaming
+                  pi-coding-agent--input-buffer input-buf
+                  pi-coding-agent--followup-queue nil))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "/new")
+            (cl-letf (((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (setq shown-message (apply #'format fmt args)))))
+              (pi-coding-agent-send))
+            (should (equal (buffer-string) "/new")))
+          (with-current-buffer chat-buf
+            (should (null pi-coding-agent--followup-queue)))
+          (should (equal shown-message "Pi: Cannot queue /new while Pi is busy")))
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
@@ -209,43 +238,68 @@
       (kill-buffer input-buf))))
 
 (ert-deftest pi-coding-agent-test-compaction-success-without-retry-sends-queued-message ()
-  "Successful non-retry compaction sends the oldest queued follow-up.
+  "Successful non-retry compaction schedules the oldest queued follow-up.
 Uses :false (JSON false representation) to verify boolean normalization."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
-    (let ((sent-text nil))
+    (let ((sent-text nil)
+          drain-callback
+          drain-args)
       (setq pi-coding-agent--status 'compacting)
       (setq pi-coding-agent--followup-queue '("queued message"))
       (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
-                 (lambda (text) (setq sent-text text))))
+                 (lambda (text &optional on-success &rest _)
+                   (setq sent-text text)
+                   (when on-success (funcall on-success))))
+                ((symbol-function 'run-at-time)
+                 (lambda (_secs _repeat fn &rest args)
+                   (setq drain-callback fn
+                         drain-args args)
+                   'fake-drain-timer)))
         (pi-coding-agent--handle-display-event
          '(:type "compaction_end"
            :reason "threshold"
            :aborted :false
            :willRetry :false
-           :result (:tokensBefore 1000 :summary "Summary" :timestamp 1234567890000))))
-      (should (eq pi-coding-agent--status 'idle))
+           :result (:tokensBefore 1000 :summary "Summary" :timestamp 1234567890000)))
+        (should (eq pi-coding-agent--status 'idle))
+        (should (functionp drain-callback))
+        (should (equal pi-coding-agent--followup-queue '("queued message")))
+        (should (null sent-text))
+        (apply drain-callback drain-args))
       ;; Queue should be empty after processing.
       (should (null pi-coding-agent--followup-queue))
       ;; The queued message should have been sent.
       (should (equal sent-text "queued message")))))
 
 (ert-deftest pi-coding-agent-test-compaction-success-without-retry-preserves-fifo ()
-  "Successful non-retry compaction drains one queued follow-up in FIFO order."
+  "Successful non-retry compaction schedules one follow-up in FIFO order."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
-    (let ((sent-text nil))
+    (let ((sent-text nil)
+          drain-callback
+          drain-args)
       (setq pi-coding-agent--status 'compacting)
       (dolist (text '("First" "Second" "Third"))
         (pi-coding-agent--push-followup text))
       (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
-                 (lambda (text) (setq sent-text text))))
+                 (lambda (text &optional on-success &rest _)
+                   (setq sent-text text)
+                   (when on-success (funcall on-success))))
+                ((symbol-function 'run-at-time)
+                 (lambda (_secs _repeat fn &rest args)
+                   (setq drain-callback fn
+                         drain-args args)
+                   'fake-drain-timer)))
         (pi-coding-agent--handle-display-event
          '(:type "compaction_end"
            :reason "manual"
            :aborted :false
            :willRetry :false
-           :result (:tokensBefore 1000 :summary "Summary"))))
+           :result (:tokensBefore 1000 :summary "Summary")))
+        (should (equal pi-coding-agent--followup-queue '("Third" "Second" "First")))
+        (should (null sent-text))
+        (apply drain-callback drain-args))
       (should (equal sent-text "First"))
       (should (equal pi-coding-agent--followup-queue '("Third" "Second"))))))
 
@@ -257,7 +311,9 @@ Uses :false (JSON false representation) to verify boolean normalization."
       (setq pi-coding-agent--status 'compacting)
       (setq pi-coding-agent--followup-queue '("queued behind retry"))
       (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
-                 (lambda (text) (setq sent-text text))))
+                 (lambda (text &optional on-success &rest _)
+                   (setq sent-text text)
+                   (when on-success (funcall on-success)))))
         (pi-coding-agent--handle-display-event
          '(:type "compaction_end"
            :reason "overflow"
@@ -272,12 +328,21 @@ Uses :false (JSON false representation) to verify boolean normalization."
   "Queued follow-ups wait for Pi's automatic retry turn to finish."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
-    (let ((sent-prompts nil))
+    (let ((sent-prompts nil)
+          drain-callback
+          drain-args)
       (setq pi-coding-agent--status 'compacting)
       (setq pi-coding-agent--followup-queue '("queued behind retry"))
       (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
-                 (lambda (text) (push text sent-prompts)))
-                ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
+                 (lambda (text &optional on-success &rest _)
+                   (push text sent-prompts)
+                   (when on-success (funcall on-success))))
+                ((symbol-function 'pi-coding-agent--refresh-header) #'ignore)
+                ((symbol-function 'run-at-time)
+                 (lambda (_secs _repeat fn &rest args)
+                   (setq drain-callback fn
+                         drain-args args)
+                   'fake-drain-timer)))
         (pi-coding-agent--handle-display-event
          '(:type "compaction_end"
            :reason "overflow"
@@ -286,32 +351,243 @@ Uses :false (JSON false representation) to verify boolean normalization."
            :result (:tokensBefore 1000 :summary "Summary")))
         (should (null sent-prompts))
         (should (equal pi-coding-agent--followup-queue '("queued behind retry")))
+        (should (null drain-callback))
         (pi-coding-agent--handle-display-event '(:type "agent_start"))
         (should (eq pi-coding-agent--status 'streaming))
-        (pi-coding-agent--handle-display-event '(:type "agent_end" :messages [])))
+        (pi-coding-agent--handle-display-event '(:type "agent_end" :messages []))
+        (should (functionp drain-callback))
+        (apply drain-callback drain-args))
       (should (equal (reverse sent-prompts) '("queued behind retry")))
       (should (null pi-coding-agent--followup-queue)))))
 
-(ert-deftest pi-coding-agent-test-compaction-failure-preserves-queued-followups ()
-  "Failed compaction leaves queued follow-ups available for user recovery."
+(ert-deftest pi-coding-agent-test-compaction-end-before-agent-start-defers-followup-drain ()
+  "Queued follow-ups do not overtake Pi work that starts after compaction_end."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
-    (let ((sent-text nil))
-      (setq pi-coding-agent--status 'compacting)
-      (setq pi-coding-agent--followup-queue '("recover me later"))
+    (let ((sent-prompts nil)
+          first-drain-callback
+          first-drain-args
+          second-drain-callback
+          second-drain-args)
+      (setq pi-coding-agent--status 'compacting
+            pi-coding-agent--followup-queue '("local follow-up after Pi queue"))
       (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
-                 (lambda (text) (setq sent-text text)))
-                ((symbol-function 'message) #'ignore))
+                 (lambda (text &optional on-success &rest _)
+                   (push text sent-prompts)
+                   (when on-success (funcall on-success))))
+                ((symbol-function 'pi-coding-agent--refresh-header) #'ignore)
+                ((symbol-function 'run-at-time)
+                 (lambda (_secs _repeat fn &rest args)
+                   (if first-drain-callback
+                       (setq second-drain-callback fn
+                             second-drain-args args)
+                     (setq first-drain-callback fn
+                           first-drain-args args))
+                   'fake-drain-timer)))
+        ;; Pi can emit compaction_end and then immediately begin work it already
+        ;; owns.  Local follow-ups must wait for that visible agent turn.
         (pi-coding-agent--handle-display-event
          '(:type "compaction_end"
            :reason "threshold"
            :aborted :false
            :willRetry :false
-           :result :null
-           :errorMessage "quota exceeded")))
-      (should (eq pi-coding-agent--status 'idle))
-      (should (equal pi-coding-agent--followup-queue '("recover me later")))
-      (should (null sent-text)))))
+           :result (:tokensBefore 1000 :summary "Summary")))
+        (should (eq pi-coding-agent--status 'idle))
+        (should (functionp first-drain-callback))
+        (should (null sent-prompts))
+        (should (equal pi-coding-agent--followup-queue
+                       '("local follow-up after Pi queue")))
+        (pi-coding-agent--handle-display-event '(:type "agent_start"))
+        ;; A stale scheduled drain may still fire, but streaming status makes it
+        ;; a no-op.
+        (apply first-drain-callback first-drain-args)
+        (should (null sent-prompts))
+        (should (equal pi-coding-agent--followup-queue
+                       '("local follow-up after Pi queue")))
+        (pi-coding-agent--handle-display-event '(:type "agent_end" :messages []))
+        (should (functionp second-drain-callback))
+        (apply second-drain-callback second-drain-args))
+      (should (equal (reverse sent-prompts)
+                     '("local follow-up after Pi queue")))
+      (should (null pi-coding-agent--followup-queue)))))
+
+(ert-deftest pi-coding-agent-test-agent-end-before-compaction-defers-followup-drain ()
+  "Queued follow-ups do not overtake compaction that starts after agent_end."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((sent-prompts nil)
+          drain-callback
+          drain-args)
+      (setq pi-coding-agent--status 'streaming
+            pi-coding-agent--followup-queue '("queued until compaction settles"))
+      (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
+                 (lambda (text &optional on-success &rest _)
+                   (push text sent-prompts)
+                   (when on-success (funcall on-success))))
+                ((symbol-function 'pi-coding-agent--refresh-header) #'ignore)
+                ((symbol-function 'run-at-time)
+                 (lambda (_secs _repeat fn &rest args)
+                   (setq drain-callback fn
+                         drain-args args)
+                   'fake-drain-timer)))
+        ;; Pi emits agent_end before post-run compaction_start.  The local
+        ;; queue must wait long enough for that compaction event to claim the
+        ;; next ordering slot.
+        (pi-coding-agent--handle-display-event '(:type "agent_end" :messages []))
+        (should (eq pi-coding-agent--status 'idle))
+        (should (functionp drain-callback))
+        (should (null sent-prompts))
+        (should (equal pi-coding-agent--followup-queue
+                       '("queued until compaction settles")))
+        (pi-coding-agent--handle-display-event '(:type "compaction_start" :reason "threshold"))
+        ;; A stale scheduled drain may still fire, but compacting status makes
+        ;; it a no-op.
+        (apply drain-callback drain-args)
+        (should (null sent-prompts))
+        (should (equal pi-coding-agent--followup-queue
+                       '("queued until compaction settles")))
+        (setq drain-callback nil
+              drain-args nil)
+        (pi-coding-agent--handle-display-event
+         '(:type "compaction_end"
+           :reason "threshold"
+           :aborted :false
+           :willRetry :false
+           :result (:tokensBefore 1000 :summary "Summary")))
+        (should (functionp drain-callback))
+        (apply drain-callback drain-args))
+      (should (equal (reverse sent-prompts)
+                     '("queued until compaction settles")))
+      (should (null pi-coding-agent--followup-queue)))))
+
+(ert-deftest pi-coding-agent-test-preflight-compaction-keeps-followups-behind-prompt ()
+  "Compaction during prompt preflight must not drain local follow-ups."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((sent-prompts nil)
+          drain-callback)
+      (setq pi-coding-agent--status 'sending
+            pi-coding-agent--pre-compaction-status nil
+            pi-coding-agent--followup-queue '("queued behind original prompt"))
+      (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
+                 (lambda (text &optional on-success &rest _)
+                   (push text sent-prompts)
+                   (when on-success (funcall on-success))))
+                ((symbol-function 'run-at-time)
+                 (lambda (_secs _repeat fn &rest _args)
+                   (setq drain-callback fn)
+                   'fake-drain-timer)))
+        (pi-coding-agent--handle-display-event
+         '(:type "compaction_start" :reason "threshold"))
+        (pi-coding-agent--handle-display-event
+         '(:type "compaction_end"
+           :reason "threshold"
+           :aborted :false
+           :willRetry :false
+           :result (:tokensBefore 1000 :summary "Summary")))
+        (should (eq pi-coding-agent--status 'sending))
+        (should (null drain-callback))
+        (should (null sent-prompts))
+        (should (equal pi-coding-agent--followup-queue
+                       '("queued behind original prompt")))))))
+
+(ert-deftest pi-coding-agent-test-agent-end-will-retry-preserves-followup-queue ()
+  "agent_end with willRetry keeps local follow-ups behind Pi's retry."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((sent-prompts nil)
+          drain-callback
+          drain-args)
+      (setq pi-coding-agent--status 'streaming
+            pi-coding-agent--followup-queue '("queued behind transient retry"))
+      (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
+                 (lambda (text &optional on-success &rest _)
+                   (push text sent-prompts)
+                   (when on-success (funcall on-success))))
+                ((symbol-function 'pi-coding-agent--refresh-header) #'ignore)
+                ((symbol-function 'run-at-time)
+                 (lambda (_secs _repeat fn &rest args)
+                   (setq drain-callback fn
+                         drain-args args)
+                   'fake-drain-timer)))
+        (pi-coding-agent--handle-display-event
+         '(:type "agent_end" :messages [] :willRetry t))
+        (should (eq pi-coding-agent--status 'sending))
+        (should (null drain-callback))
+        (should (null sent-prompts))
+        (should (equal pi-coding-agent--followup-queue
+                       '("queued behind transient retry")))
+        (pi-coding-agent--handle-display-event '(:type "agent_start"))
+        (pi-coding-agent--handle-display-event '(:type "agent_end" :messages []))
+        (should (functionp drain-callback))
+        (apply drain-callback drain-args))
+      (should (equal (reverse sent-prompts)
+                     '("queued behind transient retry")))
+      (should (null pi-coding-agent--followup-queue)))))
+
+(ert-deftest pi-coding-agent-test-compaction-failure-restores-queued-followups ()
+  "Failed compaction surfaces queued follow-ups for user recovery."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-compaction-failure-chat*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-compaction-failure-input*"))
+        (sent-text nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf))
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'compacting
+                  pi-coding-agent--input-buffer input-buf
+                  pi-coding-agent--followup-queue '("recover me later"))
+            (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
+                       (lambda (text &optional on-success &rest _)
+                         (setq sent-text text)
+                         (when on-success (funcall on-success))))
+                      ((symbol-function 'message) #'ignore))
+              (pi-coding-agent--handle-display-event
+               '(:type "compaction_end"
+                 :reason "threshold"
+                 :aborted :false
+                 :willRetry :false
+                 :result :null
+                 :errorMessage "quota exceeded")))
+            (should (eq pi-coding-agent--status 'idle))
+            (should (null pi-coding-agent--followup-queue))
+            (should (null sent-text)))
+          (with-current-buffer input-buf
+            (should (equal (buffer-string) "recover me later"))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-auto-retry-failure-restores-queued-followups ()
+  "Final auto-retry failure surfaces queued follow-ups for user recovery."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-retry-failure-chat*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-retry-failure-input*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf))
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'sending
+                  pi-coding-agent--activity-phase "thinking"
+                  pi-coding-agent--input-buffer input-buf
+                  pi-coding-agent--followup-queue '("queued behind failed retry"))
+            (pi-coding-agent--handle-display-event
+             '(:type "auto_retry_end"
+               :success :false
+               :attempt 3
+               :finalError "overloaded"))
+            (should (eq pi-coding-agent--status 'idle))
+            (should (equal pi-coding-agent--activity-phase "idle"))
+            (should (null pi-coding-agent--followup-queue))
+            (should (string-match-p "Retry failed" (buffer-string))))
+          (with-current-buffer input-buf
+            (should (equal (buffer-string) "queued behind failed retry"))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
 
 (ert-deftest pi-coding-agent-test-compaction-end-aborted-clears-queue ()
   "compaction_end when aborted clears followup queue without sending."
@@ -321,7 +597,9 @@ Uses :false (JSON false representation) to verify boolean normalization."
       (setq pi-coding-agent--status 'compacting)
       (setq pi-coding-agent--followup-queue '("queued message"))
       (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
-                 (lambda (text) (setq sent-text text))))
+                 (lambda (text &optional on-success &rest _)
+                   (setq sent-text text)
+                   (when on-success (funcall on-success)))))
         ;; Simulate compaction_end event (aborted)
         (pi-coding-agent--handle-display-event
          '(:type "compaction_end"
@@ -550,19 +828,66 @@ When user aborts, they want to stop everything - including queued messages."
           (with-current-buffer chat-buf
             (should (equal pi-coding-agent--followup-queue
                            '("Normal send second" "Steering first")))
-            (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
-                       (lambda (text) (push text sent-prompts)))
-                      ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
-              (pi-coding-agent--handle-display-event
-               '(:type "compaction_end"
-                 :reason "threshold"
-                 :aborted :false
-                 :willRetry :false
-                 :result (:tokensBefore 1000 :summary "Summary")))
-              (pi-coding-agent--handle-display-event '(:type "agent_end" :messages [])))
+            (let (drain-callback
+                  drain-args)
+              (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
+                         (lambda (text &optional on-success &rest _)
+                           (push text sent-prompts)
+                           (when on-success (funcall on-success))))
+                        ((symbol-function 'pi-coding-agent--refresh-header) #'ignore)
+                        ((symbol-function 'run-at-time)
+                         (lambda (_secs _repeat fn &rest args)
+                           (setq drain-callback fn
+                                 drain-args args)
+                           'fake-drain-timer)))
+                (pi-coding-agent--handle-display-event
+                 '(:type "compaction_end"
+                   :reason "threshold"
+                   :aborted :false
+                   :willRetry :false
+                   :result (:tokensBefore 1000 :summary "Summary")))
+                (should (functionp drain-callback))
+                (apply drain-callback drain-args)
+                (setq drain-callback nil
+                      drain-args nil)
+                (pi-coding-agent--handle-display-event '(:type "agent_end" :messages []))
+                (should (functionp drain-callback))
+                (apply drain-callback drain-args)))
             (should (equal (reverse sent-prompts)
                            '("Steering first" "Normal send second")))
             (should (null pi-coding-agent--followup-queue))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-queued-builtin-command-restores-input-without-running ()
+  "Stale queued built-in commands are surfaced instead of run from a timer."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queued-builtin-chat*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-queued-builtin-input*"))
+        (new-session-called nil)
+        (shown-message nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle
+                  pi-coding-agent--input-buffer input-buf
+                  pi-coding-agent--followup-queue '("/new")))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf))
+          (with-current-buffer chat-buf
+            (cl-letf (((symbol-function 'pi-coding-agent-new-session)
+                       (lambda () (setq new-session-called t)))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (setq shown-message (apply #'format fmt args)))))
+              (pi-coding-agent--process-followup-queue))
+            (should-not new-session-called)
+            (should (null pi-coding-agent--followup-queue)))
+          (with-current-buffer input-buf
+            (should (equal (buffer-string) "/new")))
+          (should (equal shown-message
+                         "Pi: Cannot run queued /new command automatically")))
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
@@ -649,7 +974,9 @@ When user aborts, they want to stop everything - including queued messages."
             (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
                       ((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'pi-coding-agent--send-prompt)
-                       (lambda (text) (setq sent-prompt text))))
+                       (lambda (text &optional on-success &rest _)
+                         (setq sent-prompt text)
+                         (when on-success (funcall on-success)))))
               (pi-coding-agent-queue-followup))
             ;; Should send as normal prompt
             (should (equal sent-prompt "Do something else"))
@@ -827,7 +1154,9 @@ correct position in the conversation."
             (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
                       ((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'pi-coding-agent--send-prompt)
-                       (lambda (text) (setq sent-prompt text))))
+                       (lambda (text &optional on-success &rest _)
+                         (setq sent-prompt text)
+                         (when on-success (funcall on-success)))))
               (pi-coding-agent-send))
             ;; Should send literal command (pi handles expansion)
             (should (equal sent-prompt "/greet world"))))
@@ -1054,9 +1383,12 @@ mixed together like:
             (insert "First message")
             (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
                       ((symbol-function 'process-live-p) (lambda (_) t))
-                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore))
+                      ((symbol-function 'pi-coding-agent--send-prompt)
+                       (lambda (_text &optional on-success &rest _)
+                         (when on-success
+                           (funcall on-success)))))
               (pi-coding-agent-send)))
-          ;; After normal send, variable should store the message text
+          ;; After accepted normal send, variable should store the message text
           (with-current-buffer chat-buf
             (should (equal pi-coding-agent--local-user-message "First message"))
             ;; Simulate pi echo - variable clears to nil
@@ -1084,9 +1416,9 @@ mixed together like:
       (kill-buffer input-buf))))
 
 (ert-deftest pi-coding-agent-test-normal-send-not-duplicated-by-message-start ()
-  "Normal send should not be duplicated when message_start arrives.
-When user sends a message normally (idle state), we display it immediately.
-When pi echoes it back via message_start, we should NOT display it again."
+  "Accepted normal sends should not be duplicated when message_start arrives.
+When prompt preflight succeeds, we display the user text locally.  When pi
+echoes it back via message_start, we should NOT display it again."
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-no-dup*"))
         (input-buf (get-buffer-create "*pi-coding-agent-test-no-dup-input*")))
     (unwind-protect
@@ -1101,7 +1433,10 @@ When pi echoes it back via message_start, we should NOT display it again."
             (insert "Hello pi")
             (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
                       ((symbol-function 'process-live-p) (lambda (_) t))
-                      ((symbol-function 'pi-coding-agent--send-prompt) #'ignore))
+                      ((symbol-function 'pi-coding-agent--send-prompt)
+                       (lambda (_text &optional on-success &rest _)
+                         (when on-success
+                           (funcall on-success)))))
               (pi-coding-agent-send)))
           ;; Now simulate pi echoing the message back via message_start
           (with-current-buffer chat-buf
@@ -1121,12 +1456,15 @@ When pi echoes it back via message_start, we should NOT display it again."
       (kill-buffer input-buf))))
 
 (ert-deftest pi-coding-agent-test-agent-end-sends-queued-followup ()
-  "agent_end pops from followup queue and sends as normal prompt.
-When user queues a follow-up (busy state), it goes to local queue.
-On agent_end, we pop from queue and send (which displays the message)."
+  "agent_end schedules the queued follow-up after post-run events settle.
+When user queues a follow-up (busy state), it goes to the local queue.
+After an agent_end with no retry or compaction, the scheduled drain pops
+from the queue and sends it as a normal prompt."
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-agent-end-queue*"))
         (input-buf (get-buffer-create "*pi-coding-agent-test-agent-end-queue-input*"))
-        (sent-prompt nil))
+        (sent-prompt nil)
+        drain-callback
+        drain-args)
     (unwind-protect
         (progn
           (with-current-buffer chat-buf
@@ -1148,14 +1486,27 @@ On agent_end, we pop from queue and send (which displays the message)."
           (with-current-buffer chat-buf
             (should (equal pi-coding-agent--followup-queue '("My follow-up question")))
             (should-not (string-match-p "My follow-up question" (buffer-string))))
-          ;; Now simulate agent_end - this should pop queue and send
+          ;; Now simulate agent_end.  It should not drain synchronously, so an
+          ;; immediately following compaction_start would still be able to
+          ;; preserve ordering.
           (with-current-buffer chat-buf
             (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
                       ((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'pi-coding-agent--send-prompt)
-                       (lambda (text) (setq sent-prompt text)))
-                      ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
-              (pi-coding-agent--handle-display-event '(:type "agent_end")))
+                       (lambda (text &optional on-success &rest _)
+                         (setq sent-prompt text)
+                         (when on-success (funcall on-success))))
+                      ((symbol-function 'pi-coding-agent--refresh-header) #'ignore)
+                      ((symbol-function 'run-at-time)
+                       (lambda (_secs _repeat fn &rest args)
+                         (setq drain-callback fn
+                               drain-args args)
+                         'fake-drain-timer)))
+              (pi-coding-agent--handle-display-event '(:type "agent_end"))
+              (should (functionp drain-callback))
+              (should (equal pi-coding-agent--followup-queue '("My follow-up question")))
+              (should (null sent-prompt))
+              (apply drain-callback drain-args))
             ;; Queue should be empty now
             (should (null pi-coding-agent--followup-queue))
             ;; Should have sent the queued message
@@ -1165,11 +1516,45 @@ On agent_end, we pop from queue and send (which displays the message)."
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
+(ert-deftest pi-coding-agent-test-send-queues-while-followup-drain-pending ()
+  "New input waits behind an older queued follow-up drain."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-drain-pending-send*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-drain-pending-send-input*"))
+        (sent-prompt nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle
+                  pi-coding-agent--input-buffer input-buf
+                  pi-coding-agent--followup-queue '("older queued follow-up")
+                  pi-coding-agent--followup-drain-timer 'fake-drain-timer))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "new prompt during drain window")
+            (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
+                       (lambda (text &optional on-success &rest _)
+                         (setq sent-prompt text)
+                         (when on-success (funcall on-success))))
+                      ((symbol-function 'message) #'ignore))
+              (pi-coding-agent-send))
+            (should (string-empty-p (buffer-string))))
+          (with-current-buffer chat-buf
+            (should (null sent-prompt))
+            (should (equal pi-coding-agent--followup-queue
+                           '("new prompt during drain window"
+                             "older queued follow-up")))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
 (ert-deftest pi-coding-agent-test-followup-queue-fifo-order ()
   "Multiple follow-ups are processed in FIFO order."
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-fifo*"))
         (input-buf (get-buffer-create "*pi-coding-agent-test-fifo-input*"))
-        (sent-prompts nil))
+        (sent-prompts nil)
+        drain-callback
+        drain-args)
     (unwind-protect
         (progn
           (with-current-buffer chat-buf
@@ -1188,23 +1573,31 @@ On agent_end, we pop from queue and send (which displays the message)."
           ;; All three should be in queue
           (with-current-buffer chat-buf
             (should (= 3 (length pi-coding-agent--followup-queue))))
-          ;; Now simulate agent_end three times, capturing what gets sent
+          ;; Simulate each completed queued turn and then run the scheduled drain.
           (with-current-buffer chat-buf
             (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () 'mock-proc))
                       ((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'pi-coding-agent--send-prompt)
-                       (lambda (text) (push text sent-prompts)))
-                      ((symbol-function 'pi-coding-agent--refresh-header) #'ignore))
-              ;; First agent_end
-              (pi-coding-agent--handle-display-event '(:type "agent_end"))
-              ;; Second agent_end
-              (pi-coding-agent--handle-display-event '(:type "agent_end"))
-              ;; Third agent_end
-              (pi-coding-agent--handle-display-event '(:type "agent_end")))
-            ;; Should have sent all three in FIFO order (sent-prompts is reversed)
-            (should (equal (reverse sent-prompts)
-                           '("First message" "Second message" "Third message")))
-            ;; Queue should be empty
+                       (lambda (text &optional on-success &rest _)
+                   (push text sent-prompts)
+                   (when on-success (funcall on-success))))
+                      ((symbol-function 'pi-coding-agent--refresh-header) #'ignore)
+                      ((symbol-function 'run-at-time)
+                       (lambda (_secs _repeat fn &rest args)
+                         (setq drain-callback fn
+                               drain-args args)
+                         'fake-drain-timer)))
+              (dotimes (_ 3)
+                (setq drain-callback nil
+                      drain-args nil)
+                (pi-coding-agent--handle-display-event '(:type "agent_end"))
+                (should (functionp drain-callback))
+                (apply drain-callback drain-args))))
+          ;; Should have sent all three in FIFO order (sent-prompts is reversed)
+          (should (equal (reverse sent-prompts)
+                         '("First message" "Second message" "Third message")))
+          ;; Queue should be empty
+          (with-current-buffer chat-buf
             (should (null pi-coding-agent--followup-queue))))
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
@@ -2157,6 +2550,357 @@ Pi handles command expansion on the server side."
           (should (equal (plist-get rpc-message :message) "/greet world")))
       (delete-process fake-proc))))
 
+(ert-deftest pi-coding-agent-test-send-prompt-marks-sending-until-preflight-fails ()
+  "pi-coding-agent--send-prompt closes the local pre-agent_start idle gap."
+  (let* ((rpc-callback nil)
+         (fake-proc (start-process "test" nil "cat")))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (setq pi-coding-agent--status 'idle
+                pi-coding-agent--activity-phase "idle")
+          (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                     (lambda () fake-proc))
+                    ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                     (lambda () (current-buffer)))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc _msg cb) (setq rpc-callback cb)))
+                    ((symbol-function 'message) #'ignore))
+            (pi-coding-agent--send-prompt "hello")
+            (should (eq pi-coding-agent--status 'sending))
+            (should (equal pi-coding-agent--activity-phase "thinking"))
+            (should (functionp rpc-callback))
+            (funcall rpc-callback '(:success :false :error "preflight failed"))
+            (should (eq pi-coding-agent--status 'idle))
+            (should (equal pi-coding-agent--activity-phase "idle"))))
+      (delete-process fake-proc))))
+
+(ert-deftest pi-coding-agent-test-normal-send-preflight-failure-restores-input ()
+  "Rejected normal sends do not leave ghost chat text or lose input."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-send-fail-echo*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-send-fail-echo-input*"))
+        (rpc-callback nil)
+        (fake-proc (start-process "test" nil "cat")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle
+                  pi-coding-agent--activity-phase "idle"
+                  pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "this send will fail")
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                       (lambda () fake-proc))
+                      ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                       (lambda () chat-buf))
+                      ((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_proc _msg cb) (setq rpc-callback cb)))
+                      ((symbol-function 'message) #'ignore))
+              (pi-coding-agent-send)))
+          (with-current-buffer chat-buf
+            (should (null pi-coding-agent--local-user-message))
+            (should-not (string-match-p "this send will fail" (buffer-string)))
+            (funcall rpc-callback '(:success :false :error "preflight failed"))
+            (should (eq pi-coding-agent--status 'idle))
+            (should (equal pi-coding-agent--activity-phase "idle"))
+            (should (null pi-coding-agent--local-user-message))
+            (should-not (string-match-p "this send will fail" (buffer-string))))
+          (with-current-buffer input-buf
+            (should (equal (buffer-string) "this send will fail"))))
+      (delete-process fake-proc)
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-slash-prompt-preflight-failure-restores-input ()
+  "Rejected slash prompts are restored instead of being lost silently."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-slash-fail-chat*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-slash-fail-input*"))
+        (rpc-callback nil)
+        (fake-proc (start-process "test" nil "cat")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle
+                  pi-coding-agent--activity-phase "idle"
+                  pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "/unknown command")
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                       (lambda () fake-proc))
+                      ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                       (lambda () chat-buf))
+                      ((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_proc _msg cb) (setq rpc-callback cb)))
+                      ((symbol-function 'message) #'ignore))
+              (pi-coding-agent-send)))
+          (with-current-buffer chat-buf
+            (should-not (string-match-p "/unknown command" (buffer-string)))
+            (funcall rpc-callback '(:success :false :error "preflight failed"))
+            (should (eq pi-coding-agent--status 'idle)))
+          (with-current-buffer input-buf
+            (should (equal (buffer-string) "/unknown command"))))
+      (delete-process fake-proc)
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-normal-send-without-process-restores-input ()
+  "Direct sends without a process do not create ghost chat text."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-send-no-process-chat*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-send-no-process-input*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle
+                  pi-coding-agent--activity-phase "idle"
+                  pi-coding-agent--process nil
+                  pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "no process prompt")
+            (cl-letf (((symbol-function 'message) #'ignore))
+              (pi-coding-agent-send))
+            (should (equal (buffer-string) "no process prompt")))
+          (with-current-buffer chat-buf
+            (should (eq pi-coding-agent--status 'idle))
+            (should (null pi-coding-agent--local-user-message))
+            (should-not (string-match-p "no process prompt" (buffer-string)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-restore-followups-prepends-existing-draft ()
+  "Recovered queued text stays before any newer input draft."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-restore-before-draft-chat*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-restore-before-draft-input*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "newer draft"))
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--input-buffer input-buf
+                  pi-coding-agent--followup-queue '("second" "first"))
+            (pi-coding-agent--restore-followup-queue-to-input)
+            (should (null pi-coding-agent--followup-queue)))
+          (with-current-buffer input-buf
+            (should (equal (buffer-string) "first\n\nsecond\n\nnewer draft"))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-queued-followup-send-failure-restores-queue-to-input ()
+  "Rejected queued follow-ups become visible input instead of hidden work."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queued-fail-chat*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-queued-fail-input*"))
+        (rpc-callback nil)
+        (fake-proc (start-process "test" nil "cat")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle
+                  pi-coding-agent--activity-phase "idle"
+                  pi-coding-agent--input-buffer input-buf
+                  pi-coding-agent--followup-queue '("newer queued item" "queued send will fail")))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf))
+          (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                     (lambda () fake-proc))
+                    ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                     (lambda () chat-buf))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc _msg cb) (setq rpc-callback cb)))
+                    ((symbol-function 'message) #'ignore))
+            (with-current-buffer chat-buf
+              (pi-coding-agent--process-followup-queue)
+              (should (eq pi-coding-agent--status 'sending))
+              (should (equal pi-coding-agent--followup-queue
+                             '("newer queued item" "queued send will fail")))
+              (should-not (string-match-p "queued send will fail" (buffer-string)))
+              (funcall rpc-callback '(:success :false :error "preflight failed"))
+              (should (eq pi-coding-agent--status 'idle))
+              (should (null pi-coding-agent--followup-queue))
+              (should-not (string-match-p "queued send will fail" (buffer-string)))))
+          (with-current-buffer input-buf
+            (should (equal (buffer-string)
+                           "queued send will fail\n\nnewer queued item"))))
+      (delete-process fake-proc)
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-send-prompt-success-without-agent-start-returns-idle ()
+  "Successful no-turn slash commands do not leave the frontend sending."
+  (let* ((rpc-callback nil)
+         (fallback-callback nil)
+         (fallback-args nil)
+         (fake-proc (start-process "test" nil "cat")))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (setq pi-coding-agent--status 'idle
+                pi-coding-agent--activity-phase "idle")
+          (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                     (lambda () fake-proc))
+                    ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                     (lambda () (current-buffer)))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc _msg cb) (setq rpc-callback cb)))
+                    ((symbol-function 'run-at-time)
+                     (lambda (_secs _repeat fn &rest args)
+                       (setq fallback-callback fn
+                             fallback-args args)
+                       'fake-prompt-start-timer)))
+            (pi-coding-agent--send-prompt "/test-noop")
+            (should (eq pi-coding-agent--status 'sending))
+            (funcall rpc-callback '(:success t))
+            (should (functionp fallback-callback))
+            (apply fallback-callback fallback-args)
+            (should (eq pi-coding-agent--status 'idle))
+            (should (equal pi-coding-agent--activity-phase "idle"))))
+      (delete-process fake-proc))))
+
+(ert-deftest pi-coding-agent-test-no-turn-prompt-fallback-drains-queued-followup ()
+  "Successful no-turn commands release follow-ups queued while sending."
+  (let* ((rpc-callbacks nil)
+         (prompt-fallback-callback nil)
+         (prompt-fallback-args nil)
+         (drain-callback nil)
+         (drain-args nil)
+         (sent-messages nil)
+         (chat-buf (get-buffer-create "*pi-coding-agent-test-no-turn-drain*"))
+         (input-buf (get-buffer-create "*pi-coding-agent-test-no-turn-drain-input*"))
+         (fake-proc (start-process "test" nil "cat")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle
+                  pi-coding-agent--activity-phase "idle"
+                  pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf))
+          (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                     (lambda () fake-proc))
+                    ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                     (lambda () chat-buf))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc cmd cb)
+                       (push (plist-get cmd :message) sent-messages)
+                       (push cb rpc-callbacks)))
+                    ((symbol-function 'run-at-time)
+                     (lambda (_secs _repeat fn &rest args)
+                       (cond
+                        ((eq fn 'pi-coding-agent--clear-sending-if-no-agent-start)
+                         (setq prompt-fallback-callback fn
+                               prompt-fallback-args args)
+                         'fake-prompt-start-timer)
+                        ((eq fn 'pi-coding-agent--drain-followup-queue-if-idle)
+                         (setq drain-callback fn
+                               drain-args args)
+                         'fake-drain-timer)
+                        (t 'fake-timer))))
+                    ((symbol-function 'message) #'ignore))
+            (with-current-buffer chat-buf
+              (pi-coding-agent--prepare-and-send "/test-noop"))
+            (with-current-buffer input-buf
+              (insert "follow-up after noop")
+              (pi-coding-agent-send))
+            (with-current-buffer chat-buf
+              (should (eq pi-coding-agent--status 'sending))
+              (should (equal pi-coding-agent--followup-queue
+                             '("follow-up after noop"))))
+            (funcall (car rpc-callbacks) '(:success t))
+            (should (functionp prompt-fallback-callback))
+            (apply prompt-fallback-callback prompt-fallback-args)
+            (should (functionp drain-callback))
+            (apply drain-callback drain-args)
+            (should (equal (reverse sent-messages)
+                           '("/test-noop" "follow-up after noop")))))
+      (delete-process fake-proc)
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-stale-prompt-start-fallback-does-not-clear-newer-send ()
+  "A stale no-turn fallback timer cannot clear a newer sending prompt."
+  (let* ((rpc-callbacks nil)
+         (fallbacks nil)
+         (fake-proc (start-process "test" nil "cat")))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (setq pi-coding-agent--status 'idle
+                pi-coding-agent--activity-phase "idle")
+          (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                     (lambda () fake-proc))
+                    ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                     (lambda () (current-buffer)))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc _msg cb) (push cb rpc-callbacks)))
+                    ((symbol-function 'run-at-time)
+                     (lambda (_secs _repeat fn &rest args)
+                       (push (cons fn args) fallbacks)
+                       'fake-prompt-start-timer)))
+            (pi-coding-agent--send-prompt "/first-noop")
+            (funcall (car rpc-callbacks) '(:success t))
+            (let ((first-fallback (car fallbacks)))
+              (pi-coding-agent--send-prompt "/second-command")
+              (should (eq pi-coding-agent--status 'sending))
+              (apply (car first-fallback) (cdr first-fallback))
+              (should (eq pi-coding-agent--status 'sending))
+              (should (equal pi-coding-agent--activity-phase "thinking")))))
+      (delete-process fake-proc))))
+
+(ert-deftest pi-coding-agent-test-agent-start-invalidates-prompt-success-fallback ()
+  "A prompt response arriving after agent_start cannot schedule stale idle reset."
+  (let ((rpc-callback nil)
+        (fallback-scheduled nil)
+        (fake-proc (start-process "test" nil "cat")))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (setq pi-coding-agent--status 'idle
+                pi-coding-agent--activity-phase "idle")
+          (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                     (lambda () fake-proc))
+                    ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                     (lambda () (current-buffer)))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc _msg cb) (setq rpc-callback cb)))
+                    ((symbol-function 'run-at-time)
+                     (lambda (&rest _)
+                       (setq fallback-scheduled t)
+                       'fake-prompt-start-timer)))
+            (pi-coding-agent--send-prompt "/starts-fast")
+            (pi-coding-agent--handle-display-event '(:type "agent_start"))
+            (funcall rpc-callback '(:success t))
+            (should-not fallback-scheduled)
+            (should (eq pi-coding-agent--status 'streaming))))
+      (delete-process fake-proc))))
+
+(ert-deftest pi-coding-agent-test-agent-start-cancels-prompt-start-fallback ()
+  "A real agent_start cancels the no-turn prompt fallback timer."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((cancelled nil))
+      (setq pi-coding-agent--status 'sending
+            pi-coding-agent--prompt-start-timer 'fake-timer)
+      (cl-letf (((symbol-function 'timerp) (lambda (timer) (eq timer 'fake-timer)))
+                ((symbol-function 'cancel-timer) (lambda (_timer) (setq cancelled t))))
+        (pi-coding-agent--handle-display-event '(:type "agent_start")))
+      (should cancelled)
+      (should (null pi-coding-agent--prompt-start-timer))
+      (should (eq pi-coding-agent--status 'streaming)))))
+
 (ert-deftest pi-coding-agent-test-format-session-stats ()
   "Format session stats returns readable string with cache details."
   (let ((stats '(:tokens (:input 50000 :output 10000 :total 60000
@@ -2227,6 +2971,83 @@ Pi handles command expansion on the server side."
           pi-coding-agent--activity-phase "thinking")
     (let ((header (pi-coding-agent--header-line-string)))
       (should (string-match-p "thinking" header)))))
+
+(ert-deftest pi-coding-agent-test-process-exit-resets-busy-chat-and-restores-queue ()
+  "Process exit leaves the frontend idle and surfaces queued local work."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-process-exit-chat*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-process-exit-input*"))
+        (proc (start-process "test-process-exit" nil "cat")))
+    (unwind-protect
+        (progn
+          (set-process-sentinel proc nil)
+          (set-process-query-on-exit-flag proc nil)
+          (process-put proc 'pi-coding-agent-chat-buffer chat-buf)
+          (pi-coding-agent--register-display-handler proc)
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf))
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'streaming
+                  pi-coding-agent--activity-phase "replying"
+                  pi-coding-agent--process proc
+                  pi-coding-agent--input-buffer input-buf
+                  pi-coding-agent--local-user-message "pending echo"
+                  pi-coding-agent--followup-queue '("queued after crash")
+                  pi-coding-agent--prompt-start-generation 7)
+            (pi-coding-agent--handle-process-exit proc "exited abnormally with code 1\n")
+            (should (eq pi-coding-agent--status 'idle))
+            (should (equal pi-coding-agent--activity-phase "idle"))
+            (should (null pi-coding-agent--process))
+            (should (null pi-coding-agent--local-user-message))
+            (should (null pi-coding-agent--followup-queue))
+            (should (> pi-coding-agent--prompt-start-generation 7))
+            (should (string-match-p "Process exited"
+                                    (plist-get pi-coding-agent--state :last-error))))
+          (with-current-buffer input-buf
+            (should (equal (buffer-string) "queued after crash"))))
+      (when (process-live-p proc)
+        (delete-process proc))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-process-exit-restores-direct-pending-prompt ()
+  "Process exit restores a direct prompt whose RPC preflight never completed."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-process-exit-direct-chat*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-process-exit-direct-input*"))
+        (proc (start-process "test-process-exit-direct" nil "cat")))
+    (unwind-protect
+        (progn
+          (set-process-sentinel proc nil)
+          (set-process-query-on-exit-flag proc nil)
+          (process-put proc 'pi-coding-agent-chat-buffer chat-buf)
+          (pi-coding-agent--register-display-handler proc)
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle
+                  pi-coding-agent--process proc
+                  pi-coding-agent--input-buffer input-buf
+                  pi-coding-agent--prompt-start-generation 3))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "please survive the crash")
+            (pi-coding-agent-send)
+            (should (string-empty-p (buffer-string))))
+          (with-current-buffer chat-buf
+            (should (eq pi-coding-agent--status 'sending))
+            (should-not (string-match-p "please survive the crash" (buffer-string)))
+            (pi-coding-agent--handle-process-exit proc "exited abnormally with code 1\n")
+            (should (eq pi-coding-agent--status 'idle))
+            (should (null pi-coding-agent--process))
+            (should (string-match-p "Process exited"
+                                    (plist-get pi-coding-agent--state :last-error))))
+          (with-current-buffer input-buf
+            (should (equal (buffer-string) "please survive the crash"))))
+      (when (process-live-p proc)
+        (delete-process proc))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
 
 (ert-deftest pi-coding-agent-test-abort-send-resets-activity-phase ()
   "Abort send resets activity phase and status to idle in CHAT-BUF."

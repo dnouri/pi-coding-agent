@@ -1394,9 +1394,11 @@ block is closed."
     (should (string-match-p "^===" (buffer-string)))))
 
 (ert-deftest pi-coding-agent-test-send-displays-user-message ()
-  "Sending a prompt displays the user message in chat."
+  "Accepted prompt preflight displays the user message in chat."
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-chat*"))
-        (input-buf (get-buffer-create "*pi-coding-agent-test-input*")))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-input*"))
+        (rpc-callback nil)
+        (fake-proc (start-process "test" nil "cat")))
     (unwind-protect
         (progn
           (with-current-buffer chat-buf
@@ -1406,13 +1408,20 @@ block is closed."
             (pi-coding-agent-input-mode)
             (setq pi-coding-agent--chat-buffer chat-buf)
             (insert "Hello from test")
-            ;; Mock the process to avoid actual RPC
-            (setq pi-coding-agent--process nil)
-            (pi-coding-agent-send))
-          ;; Check chat buffer has the message with You setext heading and content
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                       (lambda () fake-proc))
+                      ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                       (lambda () chat-buf))
+                      ((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_proc _msg cb) (setq rpc-callback cb))))
+              (pi-coding-agent-send)))
           (with-current-buffer chat-buf
+            (should-not (string-match-p "Hello from test" (buffer-string)))
+            (funcall rpc-callback '(:success t))
+            ;; Check chat buffer has the message with You setext heading and content.
             (should (string-match-p "^You" (buffer-string)))
             (should (string-match-p "Hello from test" (buffer-string)))))
+      (delete-process fake-proc)
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
@@ -5366,8 +5375,33 @@ Commands with embedded newlines should not have any lines deleted."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (pi-coding-agent--handle-display-event '(:type "compaction_start" :reason "threshold"))
-    ;; Status should change to compacting
+    ;; Status should change to compacting via the core event state update.
     (should (eq pi-coding-agent--status 'compacting))))
+
+(ert-deftest pi-coding-agent-test-display-compaction-events-leave-status-to-core ()
+  "Display compaction handlers should not override core-owned status."
+  (dolist (event '((:type "compaction_start" :reason "threshold")
+                   (:type "compaction_end" :aborted t :result nil)
+                   (:type "compaction_end"
+                    :aborted :false
+                    :willRetry t
+                    :result (:summary "Retry summary" :tokensBefore 50000))
+                   (:type "compaction_end"
+                    :aborted :false
+                    :willRetry :false
+                    :result (:summary "Done" :tokensBefore 50000))
+                   (:type "compaction_end"
+                    :aborted :false
+                    :result :null
+                    :errorMessage "quota exceeded")))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (setq pi-coding-agent--status 'idle)
+      (cl-letf (((symbol-function 'pi-coding-agent--update-state-from-event)
+                 (lambda (_event)
+                   (setq pi-coding-agent--status 'core-owned))))
+        (pi-coding-agent--handle-display-event event))
+      (should (eq pi-coding-agent--status 'core-owned)))))
 
 (ert-deftest pi-coding-agent-test-compaction-start-message-does-not-advertise-cancel ()
   "Compaction status message must not promise unsupported cancellation."
@@ -5390,7 +5424,9 @@ Commands with embedded newlines should not have any lines deleted."
       (setq pi-coding-agent--status 'compacting)
       (setq pi-coding-agent--followup-queue '("queued behind retry"))
       (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
-                 (lambda (text) (setq sent-text text))))
+                 (lambda (text &optional on-success &rest _)
+                   (setq sent-text text)
+                   (when on-success (funcall on-success)))))
         (pi-coding-agent--handle-display-event
          '(:type "compaction_end"
            :reason "overflow"
@@ -5430,7 +5466,9 @@ Commands with embedded newlines should not have any lines deleted."
       (setq pi-coding-agent--status 'compacting)
       (setq pi-coding-agent--followup-queue '("queued after recovery"))
       (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
-                 (lambda (text) (setq sent-text text)))
+                 (lambda (text &optional on-success &rest _)
+                   (setq sent-text text)
+                   (when on-success (funcall on-success))))
                 ((symbol-function 'message)
                  (lambda (fmt &rest args)
                    (setq shown-message (apply #'format fmt args)))))
@@ -6036,7 +6074,9 @@ events where the header text hasn't changed."
     (cl-letf (((symbol-function 'pi-coding-agent-new-session)
                (lambda () (setq new-called t)))
               ((symbol-function 'pi-coding-agent--send-prompt)
-               (lambda (text) (setq prompt-sent text))))
+               (lambda (text &optional on-success &rest _)
+                 (setq prompt-sent text)
+                 (when on-success (funcall on-success)))))
       (with-temp-buffer
         (pi-coding-agent-chat-mode)
         (pi-coding-agent--prepare-and-send "/new")))
@@ -6047,7 +6087,9 @@ events where the header text hasn't changed."
   "prepare-and-send sends unknown slash commands to pi via prompt."
   (let (prompt-sent)
     (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
-               (lambda (text) (setq prompt-sent text))))
+               (lambda (text &optional on-success &rest _)
+                 (setq prompt-sent text)
+                 (when on-success (funcall on-success)))))
       (with-temp-buffer
         (pi-coding-agent-chat-mode)
         (pi-coding-agent--prepare-and-send "/my-extension arg")))

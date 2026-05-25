@@ -983,7 +983,9 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
         (input-buf (get-buffer-create "*pi-coding-agent-test-compact-status-input*"))
         (compact-callback nil)
         (prepared-texts nil)
-        (prompt-sent nil))
+        (prompt-sent nil)
+        drain-callback
+        drain-args)
     (unwind-protect
         (progn
           (with-current-buffer chat-buf
@@ -1006,7 +1008,15 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
                          (setq prompt-sent t))))
                     ((symbol-function 'pi-coding-agent--handle-compaction-success) #'ignore)
                     ((symbol-function 'pi-coding-agent--prepare-and-send)
-                     (lambda (text) (push text prepared-texts)))
+                     (lambda (text &optional queued)
+                       (push text prepared-texts)
+                       (when queued
+                         (pi-coding-agent--drop-followup text))))
+                    ((symbol-function 'run-at-time)
+                     (lambda (_secs _repeat fn &rest args)
+                       (setq drain-callback fn
+                             drain-args args)
+                       'fake-drain-timer))
                     ((symbol-function 'message) #'ignore))
             (with-current-buffer chat-buf
               (pi-coding-agent-compact)
@@ -1032,6 +1042,10 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
                           :firstKeptEntryId "entry-1"
                           :details nil)))
               (should (eq pi-coding-agent--status 'idle))
+              (should (functionp drain-callback))
+              (should (equal pi-coding-agent--followup-queue
+                             '("queued during compaction")))
+              (apply drain-callback drain-args)
               (should (null pi-coding-agent--followup-queue)))
             (should (equal (reverse prepared-texts) '("queued during compaction")))
 
@@ -1045,12 +1059,18 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
 (ert-deftest pi-coding-agent-test-compact-response-failure-reports-without-event ()
   "A failed compact RPC response reports plumbing failure when no event ended it."
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-compact-response-failure*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-compact-response-failure-input*"))
         (shown-message nil))
     (unwind-protect
         (progn
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf))
           (with-current-buffer chat-buf
             (pi-coding-agent-chat-mode)
-            (setq pi-coding-agent--status 'compacting)
+            (setq pi-coding-agent--status 'compacting
+                  pi-coding-agent--input-buffer input-buf
+                  pi-coding-agent--followup-queue '("queued during failed compact"))
             (pi-coding-agent--set-activity-phase "compact"))
           (cl-letf (((symbol-function 'message)
                      (lambda (fmt &rest args)
@@ -1061,10 +1081,14 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
           (with-current-buffer chat-buf
             (should (eq pi-coding-agent--status 'idle))
             (should (equal pi-coding-agent--activity-phase "idle"))
+            (should (null pi-coding-agent--followup-queue))
             (should-not (string-match-p "Compacted from" (buffer-string))))
+          (with-current-buffer input-buf
+            (should (equal (buffer-string) "queued during failed compact")))
           (should (equal shown-message
                          "Pi: Compact failed: transport failed before compaction event")))
-      (kill-buffer chat-buf))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
 
 (ert-deftest pi-coding-agent-test-compact-dead-process-keeps-idle ()
   "Manual compact should not transition state when process is dead."
@@ -1377,6 +1401,35 @@ replaced by the resumed or forked history."
     (should (equal shown-message
                    "Pi: Cannot resume while streaming"))))
 
+(ert-deftest pi-coding-agent-test-resume-session-skips-while-followup-drain-pending ()
+  "Resume refuses while a local follow-up drain is pending."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory
+               "pi-coding-agent-test-resume-drain-pending-"))
+         (shown-message nil)
+         (listed-sessions nil))
+    (unwind-protect
+        (pi-coding-agent-test-with-mock-session dir
+          (let ((chat-buf (get-buffer
+                           (pi-coding-agent-test--chat-buffer-name dir))))
+            (with-current-buffer chat-buf
+              (setq pi-coding-agent--status 'idle
+                    pi-coding-agent--followup-drain-timer 'fake-drain-timer))
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                       (lambda () 'mock-proc))
+                      ((symbol-function 'pi-coding-agent--list-sessions)
+                       (lambda (_dir)
+                         (setq listed-sessions t)
+                         (list "session.jsonl")))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (setq shown-message (apply #'format fmt args)))))
+              (with-current-buffer chat-buf
+                (pi-coding-agent-resume-session)))))
+      (delete-directory dir t))
+    (should-not listed-sessions)
+    (should (equal shown-message
+                   "Pi: Cannot resume while Pi is busy"))))
+
 (ert-deftest pi-coding-agent-test-resume-session-fetches-missing-session-file ()
   "Resume asks pi for state before listing sessions when the cache is empty."
   (let* ((dir (pi-coding-agent-test--make-temp-directory
@@ -1570,6 +1623,24 @@ replaced by the resumed or forked history."
       (pi-coding-agent-next-message)
       (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
                  (lambda (&rest _) (setq rpc-called t))))
+        (pi-coding-agent-fork-at-point))
+      (should-not rpc-called))))
+
+(ert-deftest pi-coding-agent-test-fork-at-point-followup-drain-guard ()
+  "Fork-at-point skips RPC while a local follow-up drain is pending."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent--status 'idle)
+          (pi-coding-agent--followup-drain-timer 'fake-drain-timer)
+          (pi-coding-agent--process 'mock-proc)
+          (rpc-called nil))
+      (let ((inhibit-read-only t))
+        (pi-coding-agent-test--insert-chat-turns))
+      (goto-char (point-min))
+      (pi-coding-agent-next-message)
+      (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (&rest _) (setq rpc-called t)))
+                ((symbol-function 'message) #'ignore))
         (pi-coding-agent-fork-at-point))
       (should-not rpc-called))))
 

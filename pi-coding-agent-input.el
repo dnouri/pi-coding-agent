@@ -303,10 +303,12 @@ The /compact command is handled locally; other slash commands sent to pi."
   (interactive)
   (let* ((text (string-trim (buffer-string)))
          (chat-buf (pi-coding-agent--get-chat-buffer))
-         (status (and chat-buf (buffer-local-value 'pi-coding-agent--status chat-buf)))
-         (busy (and status (memq status '(streaming sending compacting)))))
+         (busy (and chat-buf (pi-coding-agent--session-busy-p chat-buf))))
     (cond
      ((string-empty-p text) nil)
+     ((and busy (pi-coding-agent--builtin-command-text-p text))
+      (message "Pi: Cannot queue /%s while Pi is busy"
+               (pi-coding-agent--builtin-command-name text)))
      (busy
       (pi-coding-agent--queue-followup-text chat-buf text)
       (message "Pi: Message queued (will send when Pi is ready)"))
@@ -551,9 +553,12 @@ automatic overflow retry turn finishes."
         (when chat-buf
           (let ((status (buffer-local-value 'pi-coding-agent--status chat-buf)))
             (cond
-             ((eq status 'idle)
+             ((and (eq status 'idle)
+                   (not (pi-coding-agent--session-busy-p chat-buf)))
               (message "Pi: Nothing to interrupt - use C-c C-c to send"))
-             ((eq status 'compacting)
+             ((or (eq status 'compacting)
+                  (and (eq status 'idle)
+                       (pi-coding-agent--session-busy-p chat-buf)))
               (pi-coding-agent--queue-followup-text chat-buf text)
               (message "Pi: Steering queued (will send when Pi is ready)"))
              ((memq status '(sending streaming))

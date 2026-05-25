@@ -326,6 +326,7 @@ Call this when starting a new session to ensure no stale state persists."
         pi-coding-agent--local-user-message nil
         pi-coding-agent--extension-status nil
         pi-coding-agent--working-message nil
+        pi-coding-agent--pre-compaction-status nil
         pi-coding-agent--in-code-block nil
         pi-coding-agent--in-thinking-block nil
         pi-coding-agent--thinking-marker nil
@@ -339,6 +340,8 @@ Call this when starting a new session to ensure no stale state persists."
   (pi-coding-agent--clear-unsupported-extension-ui-warnings)
   (pi-coding-agent--invalidate-history-loads)
   ;; Use accessors for cross-module state
+  (pi-coding-agent--cancel-followup-drain-timer)
+  (pi-coding-agent--invalidate-prompt-start-wait)
   (pi-coding-agent--clear-followup-queue)
   (pi-coding-agent--set-aborted nil)
   (pi-coding-agent--set-canonical-messages nil)
@@ -399,6 +402,9 @@ ACTION should be a short verb such as resume or fork for user messages."
     (cond
      ((not (eq pi-coding-agent--status 'idle))
       (message "Pi: Cannot %s while streaming" action)
+      nil)
+     ((pi-coding-agent--session-busy-p)
+      (message "Pi: Cannot %s while Pi is busy" action)
       nil)
      (pi-coding-agent--local-user-message
       (message "Pi: Wait for pi to echo your prompt before you %s" action)
@@ -811,6 +817,7 @@ This callback reports only command-level failure seen before any end event."
         (when (eq pi-coding-agent--status 'compacting)
           (setq pi-coding-agent--status 'idle)
           (pi-coding-agent--set-activity-phase "idle")
+          (pi-coding-agent--restore-followup-queue-to-input)
           (message "Pi: Compact failed%s"
                    (if-let* ((error-text (plist-get response :error)))
                        (format ": %s" error-text)
