@@ -1058,16 +1058,31 @@ MESSAGES is a vector of plists from get_fork_messages."
 
 ;;;; Custom Commands
 
+(defun pi-coding-agent--command-chat-buffer-or-error ()
+  "Return the current pi chat buffer for running a slash command.
+Signal `user-error' when no live chat buffer is linked to the current buffer."
+  (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+    (unless (and chat-buf (buffer-live-p chat-buf))
+      (user-error "No pi session in current buffer"))
+    chat-buf))
+
 (defun pi-coding-agent-run-command (name &optional args)
-  "Run a pi slash command NAME with optional ARGS.
-This is useful for binding extension, skill, or prompt commands from Emacs Lisp."
+  "Run pi slash command NAME with optional ARGS in the current session.
+NAME is the command name without the leading slash.  ARGS, when
+non-nil and non-empty, is appended after one space.
+
+This command sends through the pi session associated with the current
+pi chat buffer or its linked input buffer.  Signal `user-error' when the
+current buffer is not part of a pi session."
   (interactive
-   (list (completing-read "Pi command: "
-                          (mapcar (lambda (cmd) (plist-get cmd :name))
-                                  pi-coding-agent--commands)
-                          nil t)
-         (read-string "Args: ")))
-  (when-let* ((chat-buf (pi-coding-agent--get-chat-buffer)))
+   (progn
+     (pi-coding-agent--command-chat-buffer-or-error)
+     (list (completing-read "Pi command: "
+                            (mapcar (lambda (cmd) (plist-get cmd :name))
+                                    pi-coding-agent--commands)
+                            nil t)
+           (read-string "Args: "))))
+  (let ((chat-buf (pi-coding-agent--command-chat-buffer-or-error)))
     (let ((full-command (if (or (null args) (string-empty-p args))
                             (format "/%s" name)
                           (format "/%s %s" name args))))

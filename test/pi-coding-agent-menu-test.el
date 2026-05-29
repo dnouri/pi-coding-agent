@@ -810,6 +810,71 @@ BINDING-SPEC is (DIR CHAT-NAME INPUT-NAME PROC).  DIR is evaluated once."
         (should (member "fix-tests" (nth 2 completion)))
         (should (member "review" (nth 2 completion)))))))
 
+(ert-deftest pi-coding-agent-test-run-command-formats-command-text ()
+  "run-command builds literal slash commands from NAME and optional args."
+  (let ((sent-messages nil)
+        (fake-proc (start-process "test" nil "cat")))
+    (set-process-query-on-exit-flag fake-proc nil)
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (let ((pi-coding-agent--process fake-proc))
+            (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_proc msg _cb)
+                         (push (plist-get msg :message) sent-messages))))
+              (pi-coding-agent-run-command "greet")
+              (pi-coding-agent-run-command "greet" "")
+              (pi-coding-agent-run-command "greet" "world")
+              (should (equal (nreverse sent-messages)
+                             '("/greet" "/greet" "/greet world"))))))
+      (delete-process fake-proc))))
+
+(ert-deftest pi-coding-agent-test-run-command-uses-linked-input-session ()
+  "run-command sends through the chat buffer linked to current input."
+  (let ((sent-message nil)
+        (fake-proc (start-process "test" nil "cat"))
+        (chat-buf (generate-new-buffer " *pi-command-chat*"))
+        (input-buf (generate-new-buffer " *pi-command-input*")))
+    (set-process-query-on-exit-flag fake-proc nil)
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--process fake-proc)
+            (pi-coding-agent--set-input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (pi-coding-agent--set-chat-buffer chat-buf)
+            (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_proc msg _cb)
+                         (setq sent-message (plist-get msg :message)))))
+              (pi-coding-agent-run-command "greet" "world")))
+          (should (equal sent-message "/greet world")))
+      (pi-coding-agent-test--kill-live-buffers input-buf chat-buf)
+      (delete-process fake-proc))))
+
+(ert-deftest pi-coding-agent-test-run-command-requires-current-session ()
+  "run-command reports a missing current pi session."
+  (with-temp-buffer
+    (should-error (pi-coding-agent-run-command "greet")
+                  :type 'user-error)))
+
+(ert-deftest pi-coding-agent-test-run-command-interactive-requires-session-first ()
+  "run-command reports a missing session before prompting interactively."
+  (with-temp-buffer
+    (let (prompted)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _args)
+                   (setq prompted t)
+                   "greet"))
+                ((symbol-function 'read-string)
+                 (lambda (&rest _args)
+                   (setq prompted t)
+                   "")))
+        (should-error (call-interactively #'pi-coding-agent-run-command)
+                      :type 'user-error)
+        (should-not prompted)))))
+
 (ert-deftest pi-coding-agent-test-run-custom-command-sends-literal ()
   "run-custom-command sends literal /command text, not expanded."
   (let* ((sent-message nil)
