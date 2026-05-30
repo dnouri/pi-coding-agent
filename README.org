@@ -81,8 +81,8 @@ M-x package-install RET pi-coding-agent RET
 #+end_src
 
 MELPA installs =transient=, =md-ts-mode=, and =markdown-table-wrap= automatically.
-=pi-coding-agent= uses =md-ts-mode= only for its own chat buffers, so
-installing or loading it does not change how unrelated =.md= files open.
+=pi-coding-agent= uses =md-ts-mode= only for its own chat and input buffers,
+so installing or loading it does not change how unrelated =.md= files open.
 If you want tree-sitter Markdown globally, configure =md-ts-mode=
 separately.
 
@@ -157,7 +157,7 @@ pi instead.  If =M-x pi-coding-agent= starts but says no model is available,
 the CLI usually still needs authentication.
 
 pi-coding-agent uses Emacs's built-in tree-sitter support to render
-markdown and highlight code blocks in the chat buffer.  This requires
+markdown and highlight code blocks in the chat and input buffers.  This requires
 small grammar libraries to be compiled and installed — a one-time step
 that needs a C compiler (=gcc= or =cc=).
 
@@ -226,9 +226,9 @@ Press =C-c C-p= to access the full menu with model selection, thinking level,
 completed-thinking settings for this chat and for future chat buffers, session
 management (new, resume, fork, export), statistics, and custom commands.
 
-Completed thinking is collapsed by default. Press =TAB= on a completed-thinking
-line to expand that block, use =C-c C-p h= for this chat, or =C-c C-p H= for
-future chat buffers in the current Emacs session.
+Completed thinking is expanded by default. Press =TAB= inside a completed-thinking
+block to collapse or expand that block, use =C-c C-p h= for this chat, or
+=C-c C-p H= for future chat buffers in the current Emacs session.
 
 * Tips & Tricks
 
@@ -269,8 +269,8 @@ component-based views are unavailable or fall back.
 
 New chat buffers inherit the user option =pi-coding-agent-thinking-display=,
 which controls how completed assistant thinking is shown. The default is
-=hidden=: live thinking still streams while the assistant is working, then it
-collapses when that thinking block finishes. Use =C-c C-p h= to switch this
+=visible=: live thinking streams while the assistant is working and remains
+expanded when that thinking block finishes. Use =C-c C-p h= to switch this
 chat, or =C-c C-p H= to change the default for future chat buffers in the
 current Emacs session. To make that default stick across restarts, set
 =pi-coding-agent-thinking-display= in your init file or via
@@ -358,10 +358,10 @@ Example configuration with =use-package=:
   (pi-coding-agent-context-error-threshold 90)    ; Critical when context exceeds this %
   (pi-coding-agent-visit-file-other-window t)     ; RET opens file in other window (nil for same)
   (pi-coding-agent-hot-tail-turn-count 3)         ; Recent headed turns that re-wrap on resize
-  ;; (pi-coding-agent-thinking-display 'visible)      ; Expand completed thinking by default
+  ;; (pi-coding-agent-thinking-display 'hidden)       ; Collapse completed thinking by default
   ;; (pi-coding-agent-thinking-hidden-preview nil)    ; Always use generic "Thinking hidden…" stubs
   ;; (pi-coding-agent-copy-raw-markdown t)            ; Keep raw markdown on copy (default: strip hidden markup)
-  ;; (pi-coding-agent-input-markdown-highlighting t)  ; tree-sitter markdown highlighting in input buffer
+  ;; (pi-coding-agent-input-markdown-highlighting nil) ; Plain text input buffer
   )
 #+end_src
 
@@ -370,9 +370,10 @@ Copying from the chat buffer strips hidden markdown markup by default —
 =pi-coding-agent-copy-raw-markdown= to =t= for raw markdown, useful
 when pasting into docs, Slack, or other markdown-aware contexts.
 
-The input buffer uses plain =text-mode= by default.  Set
-=pi-coding-agent-input-markdown-highlighting= to =t= for tree-sitter
-markdown highlighting (bold, code spans, fenced blocks) in new sessions.
+The input buffer uses tree-sitter Markdown highlighting by default (bold,
+code spans, fenced blocks) while keeping the typed markup characters visible.
+Set =pi-coding-agent-input-markdown-highlighting= to =nil= for plain text input
+buffers in new sessions.
 
 ** Markdown tables
 

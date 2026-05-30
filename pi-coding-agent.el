@@ -37,8 +37,8 @@
 ;;   - pi coding agent @earendil-works/pi-coding-agent 0.75.5 or later, installed and in PATH
 ;;   - tree-sitter grammars for markdown and markdown-inline
 ;;
-;; pi-coding-agent uses `md-ts-mode` for its chat buffers only; loading it
-;; does not change global Markdown file associations.
+;; pi-coding-agent uses `md-ts-mode` for its own chat and input buffers;
+;; loading it does not change global Markdown file associations.
 ;;
 ;; Usage:
 ;;   M-x pi-coding-agent         Start or focus session in current project

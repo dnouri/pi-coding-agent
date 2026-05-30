@@ -151,11 +151,11 @@ Prefix arg toggles the behavior."
   :type 'boolean
   :group 'pi-coding-agent)
 
-(defcustom pi-coding-agent-input-markdown-highlighting nil
+(defcustom pi-coding-agent-input-markdown-highlighting t
   "Whether to enable markdown syntax highlighting in the input buffer.
 When non-nil, the input buffer gets tree-sitter markdown highlighting
-\(bold, italic, code spans, fenced blocks).  When nil, the input buffer
-uses plain `text-mode'.
+\(bold, italic, code spans, fenced blocks) while keeping raw markdown
+markup visible.  When nil, the input buffer uses plain `text-mode'.
 
 Takes effect for new sessions; existing input buffers keep their mode."
   :type 'boolean
@@ -188,7 +188,7 @@ inside that suffix; older history stays frozen until explicitly rebuilt."
   :type 'natnum
   :group 'pi-coding-agent)
 
-(defcustom pi-coding-agent-thinking-display 'hidden
+(defcustom pi-coding-agent-thinking-display 'visible
   "Default display mode for completed assistant thinking in new chat buffers.
 New chat buffers copy this user preference into a buffer-local session value.
 Later per-buffer toggles affect only that chat buffer; they do not change this
