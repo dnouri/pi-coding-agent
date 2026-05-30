@@ -112,9 +112,9 @@ This ensures all files get code fences for consistent display."
       (pi-coding-agent-chat-mode)
       (should (derived-mode-p 'pi-coding-agent-chat-mode)))))
 
-(ert-deftest pi-coding-agent-test-thinking-display-default-is-hidden ()
-  "Package default keeps completed thinking collapsed in new chat buffers."
-  (should (eq (default-value 'pi-coding-agent-thinking-display) 'hidden)))
+(ert-deftest pi-coding-agent-test-thinking-display-default-is-visible ()
+  "Package default keeps completed thinking expanded in new chat buffers."
+  (should (eq (default-value 'pi-coding-agent-thinking-display) 'visible)))
 
 (ert-deftest pi-coding-agent-test-chat-mode-initializes-thinking-display-from-default ()
   "New chat buffers inherit the configured completed-thinking display default."
@@ -301,12 +301,13 @@ This ensures all files get code fences for consistent display."
       (ignore-errors (delete-file file))
       (ignore-errors (delete-directory root t)))))
 
-(ert-deftest pi-coding-agent-test-input-mode-derives-from-text ()
-  "pi-coding-agent-input-mode derives from text-mode, not md-ts-mode by default."
+(ert-deftest pi-coding-agent-test-input-mode-keeps-own-mode-with-markdown-default ()
+  "pi-coding-agent-input-mode keeps its identity with markdown highlighting."
   (with-temp-buffer
     (pi-coding-agent-input-mode)
+    (should (derived-mode-p 'pi-coding-agent-input-mode))
     (should (derived-mode-p 'text-mode))
-    (should-not (derived-mode-p 'md-ts-mode))))
+    (should-not md-ts-hide-markup)))
 
 (ert-deftest pi-coding-agent-test-input-mode-not-read-only ()
   "pi-coding-agent-input-mode allows editing."

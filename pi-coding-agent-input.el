@@ -232,9 +232,9 @@ For backward search: go to current input (nil index)."
 
 (define-derived-mode pi-coding-agent-input-mode text-mode "Pi-Input"
   "Major mode for composing pi prompts.
-Defaults to plain `text-mode'.  Set
-`pi-coding-agent-input-markdown-highlighting' to non-nil for tree-sitter
-markdown highlighting while preserving mode identity and keybindings."
+Uses tree-sitter markdown highlighting by default while preserving raw
+markup visibility, mode identity, and keybindings.  Set
+`pi-coding-agent-input-markdown-highlighting' to nil for plain text."
   :group 'pi-coding-agent
   (when pi-coding-agent-input-markdown-highlighting
     (md-ts-mode)
@@ -242,7 +242,8 @@ markdown highlighting while preserving mode identity and keybindings."
     (setq mode-name "Pi-Input")
     (use-local-map pi-coding-agent-input-mode-map)
     ;; Users see exactly what they type — never hide markup in input.
-    (setq-local md-ts-hide-markup nil))
+    (setq-local md-ts-hide-markup nil)
+    (md-ts--set-hide-markup nil))
   (setq-local header-line-format '(:eval (pi-coding-agent--header-line-string)))
   ;; Reset inherited completions (text-mode adds ispell, etc.) — our
   ;; input buffer should only offer slash commands, file refs, and paths.

@@ -3892,46 +3892,48 @@ display-agent-end must finalize the pending overlay with error face."
     ;; Inline backticks shouldn't affect heading transform
     (should (string-match-p "^## Heading" (buffer-string)))))
 
-;;; Input Mode — Markdown Highlighting (opt-in)
+;;; Input Mode — Markdown Highlighting
 
-(ert-deftest pi-coding-agent-test-input-mode-md-ts-when-enabled ()
-  "With markdown highlighting enabled, input mode has tree-sitter font-lock."
+(ert-deftest pi-coding-agent-test-input-mode-md-ts-by-default ()
+  "By default, input mode has tree-sitter markdown font-lock."
   (with-temp-buffer
-    (let ((pi-coding-agent-input-markdown-highlighting t))
-      (pi-coding-agent-input-mode)
-      (should (derived-mode-p 'pi-coding-agent-input-mode))
-      (insert "some **bold** text")
-      (font-lock-ensure)
-      (goto-char (point-min))
-      (search-forward "bold")
-      (should (memq 'bold
-                    (let ((f (get-text-property (1- (point)) 'face)))
-                      (if (listp f) f (list f))))))))
+    (pi-coding-agent-input-mode)
+    (should (derived-mode-p 'pi-coding-agent-input-mode))
+    (insert "some **bold** text")
+    (font-lock-ensure)
+    (goto-char (point-min))
+    (search-forward "bold")
+    (should (memq 'bold
+                  (let ((f (get-text-property (1- (point)) 'face)))
+                    (if (listp f) f (list f)))))))
 
 (ert-deftest pi-coding-agent-test-input-mode-no-metadata-face ()
   "With markdown highlighting, lines ending with colon have no metadata face.
 Tree-sitter markdown doesn't have metadata face, so this verifies
 no spurious faces are applied to plain colon-ending lines."
   (with-temp-buffer
-    (let ((pi-coding-agent-input-markdown-highlighting t))
-      (pi-coding-agent-input-mode)
-      (insert "Fix the bug:\n- item\n")
-      (font-lock-ensure)
-      (goto-char (point-min))
-      (let ((f (get-text-property (point) 'face)))
-        ;; No heading, bold, or other markdown face on plain text
-        (should-not (and f (not (eq f 'default))))))))
+    (pi-coding-agent-input-mode)
+    (insert "Fix the bug:\n- item\n")
+    (font-lock-ensure)
+    (goto-char (point-min))
+    (let ((f (get-text-property (point) 'face)))
+      ;; No heading, bold, or other markdown face on plain text
+      (should-not (and f (not (eq f 'default)))))))
 
 (ert-deftest pi-coding-agent-test-input-mode-no-hidden-markup ()
   "Input mode does NOT hide markup, even when user customizes it globally."
   (with-temp-buffer
-    (let ((pi-coding-agent-input-markdown-highlighting t)
-          (old-default (default-value 'md-ts-hide-markup)))
+    (let ((old-default (default-value 'md-ts-hide-markup)))
       (unwind-protect
           (progn
             (setq-default md-ts-hide-markup t)
             (pi-coding-agent-input-mode)
-            (should-not md-ts-hide-markup))
+            (should-not md-ts-hide-markup)
+            (insert "some **bold** text")
+            (font-lock-ensure)
+            (goto-char (point-min))
+            (search-forward "**")
+            (should-not (get-text-property (1- (point)) 'invisible)))
         (setq-default md-ts-hide-markup old-default)))))
 
 (ert-deftest pi-coding-agent-test-input-mode-no-fontification-without-markdown ()
