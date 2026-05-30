@@ -692,6 +692,35 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
   "Hot-tail turn count defaults to 3 headed turns."
   (should (= 3 pi-coding-agent-hot-tail-turn-count)))
 
+(ert-deftest pi-coding-agent-test-extension-status-properties-apply-in-header-line ()
+  "Extension status properties are applied by status key in the header line."
+  (let ((pi-coding-agent-extension-status-faces
+         '(("sub-status:usage" . (:foreground "#c6a0f6")))))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (setq pi-coding-agent--state '(:model "claude-sonnet-4")
+            pi-coding-agent--extension-status
+            '(("solveit-mode" . "⚡ concise")
+              ("sub-status:usage" . "4h51m 1% · 9h9m 41%")))
+      (let ((header (pi-coding-agent--header-line-string)))
+        (should (string-match-p "⚡ concise · 4h51m 1%% · 9h9m 41%%"
+                                (substring-no-properties header)))
+        (should-not (get-text-property (string-match-p "⚡" header) 'face header))
+        (should (equal (get-text-property (string-match-p "⚡" header)
+                                          'help-echo header)
+                       "solveit-mode"))
+        (should (eq (get-text-property (string-match-p "⚡" header)
+                                       'mouse-face header)
+                    'highlight))
+        (should (equal (get-text-property (string-match-p "4h" header) 'face header)
+                       '(:foreground "#c6a0f6")))
+        (should (equal (get-text-property (string-match-p "4h" header)
+                                          'help-echo header)
+                       "sub-status:usage"))
+        (should (eq (get-text-property (string-match-p "4h" header)
+                                       'mouse-face header)
+                    'highlight))))))
+
 (ert-deftest pi-coding-agent-test-kill-ring-save-strips-by-default ()
   "kill-ring-save strips hidden markup by default."
   (pi-coding-agent-test--with-chat-markup "Hello **bold** world"

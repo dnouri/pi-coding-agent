@@ -172,6 +172,23 @@ When nil (the default), only the visible text is copied."
   :type 'boolean
   :group 'pi-coding-agent)
 
+(defcustom pi-coding-agent-extension-status-faces nil
+  "Alist mapping extension status keys to faces in the header line.
+Keys are exact `statusKey' strings sent by extension `setStatus' requests,
+not necessarily extension package names.  Hovering header status text shows
+the key to use here.  Values are face symbols or face attribute plists
+accepted by `propertize'.
+
+For example:
+  \='((\"sub-status:usage\" . (:foreground \"#c6a0f6\"))
+    (\"solveit-mode\" . warning))"
+  :type '(alist :key-type string
+                :value-type (choice (face :tag "Face")
+                                     (plist :tag "Face attributes"
+                                            :key-type symbol
+                                            :value-type sexp)))
+  :group 'pi-coding-agent)
+
 (defcustom pi-coding-agent-quit-without-confirmation nil
   "Whether `pi-coding-agent-quit' skips confirmation for a live process.
 When non-nil, quitting a session never asks whether a running pi process
@@ -1775,7 +1792,17 @@ Returns extension statuses joined with \" · \", or empty string."
   (if (null ext-status)
       ""
     (mapconcat (lambda (pair)
-                 (pi-coding-agent--header-escape-text (cdr pair)))
+                 (let* ((key (car pair))
+                        (text (pi-coding-agent--header-escape-text (cdr pair)))
+                        (face (cdr (assoc key pi-coding-agent-extension-status-faces)))
+                        (properties (and (stringp key)
+                                         (list 'help-echo key
+                                               'mouse-face 'highlight))))
+                   (when face
+                     (setq properties (append properties (list 'face face))))
+                   (if properties
+                       (apply #'propertize text properties)
+                     text)))
                ext-status
                " · ")))
 
