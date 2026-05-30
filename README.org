@@ -259,7 +259,8 @@ Several features match the TUI experience:
 pi-coding-agent has basic support for pi extensions.  Extension commands
 show up in slash completion and the transient menu, extension tools run
 normally, and extensions can use notifications, confirm/select/input
-prompts, prefill the input buffer, and show status text.
+prompts, prefill the input buffer, and show status text.  Hover status text
+to see the exact =statusKey= used for =pi-coding-agent-extension-status-faces=.
 
 Rich TUI-specific extension UI is not supported in Emacs yet: custom
 widgets, custom editor components, custom headers/footers, and other
