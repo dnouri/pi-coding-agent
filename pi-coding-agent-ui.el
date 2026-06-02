@@ -657,6 +657,11 @@ still uses this name to find the live conversation.")
 Project lookup, window toggling, and path completion use this directory even
 when the buffer is also backed by a transcript file elsewhere.")
 
+(defvar-local pi-coding-agent--canonical-session-name nil
+  "Stable named-session suffix for this chat buffer.
+This is the optional SESSION passed to `pi-coding-agent--setup-session', not
+necessarily the persisted pi session display name.")
+
 (defvar pi-coding-agent--chat-buffer)
 
 (defun pi-coding-agent--chat-session-buffer-name (&optional buffer)
@@ -680,6 +685,8 @@ DIR is the session directory and SESSION is the optional named-session suffix."
   (setq pi-coding-agent--canonical-buffer-name
         (pi-coding-agent--buffer-name :chat dir session)
         pi-coding-agent--canonical-session-directory dir
+        pi-coding-agent--canonical-session-name
+        (and session (not (string-empty-p session)) session)
         default-directory dir))
 
 (defun pi-coding-agent--restore-chat-buffer-read-only ()

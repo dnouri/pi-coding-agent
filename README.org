@@ -324,6 +324,36 @@ transcript on disk. Saving does not interrupt or replace the live pi session.
 If you want a shareable export instead, use HTML export (=C-c C-p e= or
 =/export=).
 
+** 🗂 Org links
+
+pi-coding-agent includes optional Org link support in =pi-coding-agent-org.el=.
+Load it from your Org configuration if you want =pi:= links:
+
+#+begin_src emacs-lisp
+(with-eval-after-load 'org
+  (require 'pi-coding-agent-org))
+#+end_src
+
+From a pi chat or input buffer, use =org-store-link= (normally =C-c l=, or
+=C-c n l= in some Doom setups) to store a link to the current session. Insert
+it later in Org with =org-insert-link=.
+
+Durable session-file links open that session directly:
+
+#+begin_src org
+[[pi:session?file=/abs/path/to/.pi/sessions/session.jsonl][Open pi session]]
+#+end_src
+
+Links can also target a project directory and named session:
+
+#+begin_src org
+[[pi:session?dir=/abs/path/to/project/&name=feature-try][Open pi session]]
+#+end_src
+
+When a link opens a different session in a directory that already has a pi
+buffer, pi-coding-agent uses a separate named session buffer, like =C-u M-x
+pi-coding-agent=.
+
 ** 🌿 Forking and Context Management
 
 When a conversation gets long, the AI's context window fills up. The menu
