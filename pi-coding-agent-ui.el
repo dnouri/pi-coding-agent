@@ -314,6 +314,9 @@ Background is derived from the current theme so syntax faces stay visible."
 (defvar-local pi-coding-agent--input-activity-tinted nil
   "Non-nil when the input buffer background is tinted for activity.")
 
+(defvar-local pi-coding-agent--input-buffer nil
+  "Reference to the input buffer for this session.")
+
 ;;;; Dynamic Face Computation
 
 (defun pi-coding-agent--blend-color (base target amount)
@@ -938,9 +941,6 @@ so built-in other-window scrolling commands target the linked chat."
   (setq pi-coding-agent--chat-buffer buffer)
   (when (derived-mode-p 'pi-coding-agent-input-mode)
     (setq-local other-window-scroll-buffer buffer)))
-
-(defvar-local pi-coding-agent--input-buffer nil
-  "Reference to the input buffer for this session.")
 
 (defun pi-coding-agent--set-input-buffer (buffer)
   "Set the input BUFFER reference for this session."
