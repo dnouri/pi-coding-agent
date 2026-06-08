@@ -120,6 +120,56 @@ Each entry is (LANG URL REVISION [SOURCE-DIR]).")
   (seq-filter #'treesit-language-available-p
               pi-coding-agent--optional-grammars))
 
+(defconst pi-coding-agent--markdown-table-smoke-text
+  "| a | b |\n| - | - |\n| 1 | 2 |\n"
+  "Small table used to check Markdown grammar compatibility.")
+
+(defconst pi-coding-agent--markdown-table-smoke-query
+  '((pipe_table) @table
+    (pipe_table_cell) @cell
+    (pipe_table_row) @row)
+  "Markdown grammar query required by chat table rendering.")
+
+(defun pi-coding-agent--markdown-grammar-compatible-p ()
+  "Return non-nil when the loaded Markdown grammar supports chat rendering."
+  (condition-case nil
+      (with-temp-buffer
+        (insert pi-coding-agent--markdown-table-smoke-text)
+        (let* ((parser (treesit-parser-create 'markdown))
+               (root (treesit-parser-root-node parser))
+               (captures (treesit-query-capture
+                          root pi-coding-agent--markdown-table-smoke-query)))
+          (and (assq 'table captures)
+               (assq 'cell captures)
+               (assq 'row captures)
+               t)))
+    (error nil)))
+
+(defun pi-coding-agent--markdown-grammar-incompatible-p ()
+  "Return non-nil when an installed Markdown grammar is incompatible."
+  (and (treesit-language-available-p 'markdown)
+       (not (pi-coding-agent--markdown-grammar-compatible-p))))
+
+(defun pi-coding-agent--incompatible-markdown-grammar-message ()
+  "Return the user-facing Markdown grammar compatibility warning."
+  (format "Incompatible Markdown tree-sitter grammar version loaded.  Remove\
+ old/system libtree-sitter-markdown from `treesit-extra-load-path', %s, or\
+ system packages, then restart Emacs or run M-x pi-coding-agent-install-grammars."
+          (abbreviate-file-name (locate-user-emacs-file "tree-sitter"))))
+
+(defvar pi-coding-agent--markdown-grammar-warning-done nil
+  "Non-nil once the incompatible Markdown grammar warning was shown.")
+
+(defun pi-coding-agent--maybe-warn-incompatible-markdown-grammar ()
+  "Warn once when the loaded Markdown tree-sitter grammar is incompatible."
+  (unless (or noninteractive pi-coding-agent--markdown-grammar-warning-done)
+    (when (pi-coding-agent--markdown-grammar-incompatible-p)
+      (setq pi-coding-agent--markdown-grammar-warning-done t)
+      (display-warning
+       'pi-coding-agent
+       (pi-coding-agent--incompatible-markdown-grammar-message)
+       :warning))))
+
 ;;;; Installation
 
 (defun pi-coding-agent--install-grammars (grammars)
@@ -146,6 +196,7 @@ A C compiler (gcc or cc) is required.\n\
        (setq idx (1- idx))))
     (when (> idx 0)
       (message "[pi-coding-agent] Installed %d/%d grammars." idx total))
+    (setq pi-coding-agent--markdown-grammar-warning-done nil)
     idx))
 
 (defcustom pi-coding-agent-essential-grammar-action 'prompt
@@ -251,10 +302,19 @@ then offers to install the missing ones."
   (interactive)
   (let ((installed (pi-coding-agent--installed-optional-grammars))
         (missing (pi-coding-agent--missing-optional-grammars))
-        (essential-missing (pi-coding-agent--missing-essential-grammars)))
-    (if (and (null missing) (null essential-missing))
-        (message "All %d tree-sitter grammars are installed. ✓"
-                 (length installed))
+        (essential-missing (pi-coding-agent--missing-essential-grammars))
+        (markdown-incompatible
+         (pi-coding-agent--markdown-grammar-incompatible-p)))
+    (cond
+     (markdown-incompatible
+      (display-warning
+       'pi-coding-agent
+       (pi-coding-agent--incompatible-markdown-grammar-message)
+       :warning))
+     ((and (null missing) (null essential-missing))
+      (message "All %d tree-sitter grammars are installed. ✓"
+               (length installed)))
+     (t
       (let ((buf (get-buffer-create "*pi-coding-agent-grammars*")))
         (with-current-buffer buf
           (let ((inhibit-read-only t))
@@ -286,7 +346,7 @@ then offers to install the missing ones."
                                    (pi-coding-agent-install-grammars)))))
           (local-set-key "q" #'quit-window)
           (goto-char (point-min)))
-        (pop-to-buffer buf)))))
+        (pop-to-buffer buf))))))
 
 (provide 'pi-coding-agent-grammars)
 ;;; pi-coding-agent-grammars.el ends here

@@ -1597,6 +1597,7 @@ Displays warnings for missing dependencies."
                                  (pi-coding-agent--pi-install-command))
                      :error))
   (pi-coding-agent--maybe-install-essential-grammars)
+  (pi-coding-agent--maybe-warn-incompatible-markdown-grammar)
   (pi-coding-agent--maybe-install-optional-grammars))
 
 ;;;; Startup Header

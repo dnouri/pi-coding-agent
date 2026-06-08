@@ -1205,6 +1205,39 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
       (pi-coding-agent--maybe-install-essential-grammars)
       (should-not installed))))
 
+;;; Markdown Grammar Compatibility
+
+(ert-deftest pi-coding-agent-test-incompatible-markdown-grammar-detected ()
+  "Detect an installed Markdown grammar that lacks required table nodes."
+  (cl-letf (((symbol-function 'treesit-language-available-p)
+             (lambda (_lang &rest _) t))
+            ((symbol-function 'pi-coding-agent--markdown-grammar-compatible-p)
+             (lambda () nil)))
+    (should (pi-coding-agent--markdown-grammar-incompatible-p))))
+
+(ert-deftest pi-coding-agent-test-missing-markdown-grammar-not-incompatible ()
+  "Missing Markdown grammar is handled by the missing-essential path."
+  (cl-letf (((symbol-function 'treesit-language-available-p)
+             (lambda (_lang &rest _) nil))
+            ((symbol-function 'pi-coding-agent--markdown-grammar-compatible-p)
+             (lambda () nil)))
+    (should-not (pi-coding-agent--markdown-grammar-incompatible-p))))
+
+(ert-deftest pi-coding-agent-test-incompatible-markdown-grammar-warns-once ()
+  "Warn once when the loaded Markdown grammar is incompatible."
+  (let ((noninteractive nil)
+        (pi-coding-agent--markdown-grammar-warning-done nil)
+        (warnings nil))
+    (cl-letf (((symbol-function 'pi-coding-agent--markdown-grammar-incompatible-p)
+               (lambda () t))
+              ((symbol-function 'display-warning)
+               (lambda (_type msg &rest _) (push msg warnings))))
+      (pi-coding-agent--maybe-warn-incompatible-markdown-grammar)
+      (pi-coding-agent--maybe-warn-incompatible-markdown-grammar)
+      (should (= 1 (length warnings)))
+      (should (string-match-p "Incompatible Markdown" (car warnings)))
+      (should (string-match-p "treesit-extra-load-path" (car warnings))))))
+
 ;;; Grammar Recipe Validation
 
 (ert-deftest pi-coding-agent-test-grammar-recipes-all-registered ()
@@ -1504,6 +1537,8 @@ a new grammar (e.g., `zig') appears in the missing set."
   (let ((msg nil))
     (cl-letf (((symbol-function 'treesit-language-available-p)
                (lambda (_lang &rest _) t))
+              ((symbol-function 'pi-coding-agent--markdown-grammar-compatible-p)
+               (lambda () t))
               ((symbol-function 'message)
                (lambda (fmt &rest args) (setq msg (apply #'format fmt args)))))
       (pi-coding-agent-install-grammars)
@@ -1515,6 +1550,8 @@ a new grammar (e.g., `zig') appears in the missing set."
   (cl-letf (((symbol-function 'treesit-language-available-p)
              (lambda (lang &rest _)
                (memq lang '(markdown markdown-inline python))))
+            ((symbol-function 'pi-coding-agent--markdown-grammar-compatible-p)
+             (lambda () t))
             ((symbol-function 'pop-to-buffer)
              #'ignore))
     (unwind-protect
@@ -1540,6 +1577,8 @@ a new grammar (e.g., `zig') appears in the missing set."
   "Interactive command highlights missing essential grammars prominently."
   (cl-letf (((symbol-function 'treesit-language-available-p)
              (lambda (_lang &rest _) nil))
+            ((symbol-function 'pi-coding-agent--markdown-grammar-compatible-p)
+             (lambda () t))
             ((symbol-function 'pop-to-buffer)
              #'ignore))
     (unwind-protect
@@ -1552,6 +1591,22 @@ a new grammar (e.g., `zig') appears in the missing set."
               (should (string-match-p "markdown" (buffer-string))))))
       (when-let* ((buf (get-buffer "*pi-coding-agent-grammars*")))
         (kill-buffer buf)))))
+
+(ert-deftest pi-coding-agent-test-install-grammars-command-warns-incompatible-markdown ()
+  "Interactive command warns when an installed Markdown grammar is incompatible."
+  (let ((warning-text nil)
+        (msg nil))
+    (cl-letf (((symbol-function 'treesit-language-available-p)
+               (lambda (_lang &rest _) t))
+              ((symbol-function 'pi-coding-agent--markdown-grammar-compatible-p)
+               (lambda () nil))
+              ((symbol-function 'display-warning)
+               (lambda (_type msg &rest _) (setq warning-text msg)))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args) (setq msg (apply #'format fmt args)))))
+      (pi-coding-agent-install-grammars)
+      (should (string-match-p "Incompatible Markdown" warning-text))
+      (should-not msg))))
 
 ;;; CI Install Script Smoke Test
 
@@ -1569,16 +1624,20 @@ Catches wiring bugs like requiring deleted modules."
 ;;; check-dependencies
 
 (ert-deftest pi-coding-agent-test-check-dependencies-calls-grammar-checks ()
-  "check-dependencies invokes both grammar check functions."
+  "check-dependencies invokes grammar install and compatibility checks."
   (let ((essential-called nil)
+        (compatibility-called nil)
         (optional-called nil))
     (cl-letf (((symbol-function 'pi-coding-agent--check-pi) (lambda () t))
               ((symbol-function 'pi-coding-agent--maybe-install-essential-grammars)
                (lambda () (setq essential-called t)))
+              ((symbol-function 'pi-coding-agent--maybe-warn-incompatible-markdown-grammar)
+               (lambda () (setq compatibility-called t)))
               ((symbol-function 'pi-coding-agent--maybe-install-optional-grammars)
                (lambda () (setq optional-called t))))
       (pi-coding-agent--check-dependencies)
       (should essential-called)
+      (should compatibility-called)
       (should optional-called))))
 
 ;;; State response
