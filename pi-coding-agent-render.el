@@ -50,6 +50,28 @@
 
 ;;;; Response Display
 
+(defvar-local pi-coding-agent--defer-history-postprocessing nil
+  "Non-nil while replaying history with batched display post-processing.
+When set, per-message fontification and table decoration are skipped;
+`pi-coding-agent--postprocess-history-buffer' runs one consolidated pass after
+all history has been inserted.")
+
+(defvar-local pi-coding-agent--streaming-table-candidate nil
+  "Non-nil when recent streaming text may contain a markdown pipe table.
+Streaming table decoration is comparatively expensive because it queries the
+current message with tree-sitter.  Most assistant text is not table content, so
+we track whether a pipe has appeared since the last decoration attempt and skip
+the query when no table can be present.")
+
+(defun pi-coding-agent--history-postprocessing-deferred-p ()
+  "Return non-nil when history display post-processing is currently deferred."
+  pi-coding-agent--defer-history-postprocessing)
+
+(defun pi-coding-agent--decorate-tables-unless-deferred (start end)
+  "Decorate markdown tables between START and END unless deferred."
+  (unless (pi-coding-agent--history-postprocessing-deferred-p)
+    (pi-coding-agent--decorate-tables-in-region start end)))
+
 (defun pi-coding-agent--display-user-message (text &optional timestamp)
   "Display user message TEXT in the chat buffer.
 If TIMESTAMP (Emacs time value) is provided, display it in the header."
@@ -58,7 +80,7 @@ If TIMESTAMP (Emacs time value) is provided, display it in the header."
      (concat "\n" (pi-coding-agent--make-separator "You" timestamp) "\n"
              text "\n"))
     (with-current-buffer (pi-coding-agent--get-chat-buffer)
-      (pi-coding-agent--decorate-tables-in-region start (point-max)))))
+      (pi-coding-agent--decorate-tables-unless-deferred start (point-max)))))
 
 (defun pi-coding-agent--display-agent-start ()
   "Display separator for new agent turn.
@@ -79,6 +101,7 @@ Note: status is set to `streaming' by the event handler."
   (setq pi-coding-agent--line-parse-state 'line-start)
   (setq pi-coding-agent--in-code-block nil)
   (setq pi-coding-agent--in-thinking-block nil)
+  (setq pi-coding-agent--streaming-table-candidate nil)
   (pi-coding-agent--set-activity-phase "thinking"))
 
 (defun pi-coding-agent--process-streaming-char (char state in-block)
@@ -178,8 +201,14 @@ fontification; tree-sitter re-parses at the C level on each insert."
           (goto-char (marker-position pi-coding-agent--streaming-marker))
           (insert transformed)
           (set-marker pi-coding-agent--streaming-marker (point))))
-      ;; After inserting text with completed lines, check for active table
-      (when (string-match-p "\n" delta)
+      ;; After inserting text with completed lines, check for active tables only
+      ;; if recent streaming text contained a pipe.  This avoids a tree-sitter
+      ;; table query on every non-table newline in long assistant messages.
+      (when (string-match-p "|" delta)
+        (setq pi-coding-agent--streaming-table-candidate t))
+      (when (and pi-coding-agent--streaming-table-candidate
+                 (string-match-p "\n" delta))
+        (setq pi-coding-agent--streaming-table-candidate nil)
         (pi-coding-agent--maybe-decorate-streaming-table)))))
 
 (defun pi-coding-agent--thinking-insert-position ()
@@ -1065,7 +1094,7 @@ which asks upfront before any buffers are touched."
              (not (string-empty-p content)))
     (let ((start (point-max)))
       (pi-coding-agent--append-to-chat (concat "\n" content "\n"))
-      (pi-coding-agent--decorate-tables-in-region start (point-max)))
+      (pi-coding-agent--decorate-tables-unless-deferred start (point-max)))
     ;; Reset so next assistant message shows its header
     (setq pi-coding-agent--assistant-header-shown nil)))
 
@@ -1128,7 +1157,8 @@ Updates buffer-local state and renders display updates."
          ("text_end"
           ;; Text block ended — finalize any active table that may have
           ;; a trailing row without newline (backstop for streaming).
-          (pi-coding-agent--maybe-decorate-streaming-table))
+          (pi-coding-agent--maybe-decorate-streaming-table)
+          (setq pi-coding-agent--streaming-table-candidate nil))
          ("thinking_start"
           (pi-coding-agent--display-thinking-start))
          ("thinking_delta"
@@ -2572,7 +2602,7 @@ TIMESTAMP is optional time when compaction occurred."
                          'face 'pi-coding-agent-tool-name)
              (or summary "") "\n"))
     (with-current-buffer (pi-coding-agent--get-chat-buffer)
-      (pi-coding-agent--decorate-tables-in-region start (point-max)))))
+      (pi-coding-agent--decorate-tables-unless-deferred start (point-max)))))
 
 (defun pi-coding-agent--handle-compaction-success (tokens-before summary &optional timestamp)
   "Handle successful compaction: display result and notify user.
@@ -2694,6 +2724,19 @@ Uses the current buffer's completed-thinking display mode."
             (puthash (plist-get msg :toolCallId) msg index)))))
     index))
 
+(defun pi-coding-agent--postprocess-history-buffer ()
+  "Run consolidated display post-processing after history replay.
+History replay inserts many small user/assistant chunks.  Running fontification
+and table decoration after each chunk is expensive in large sessions, so replay
+defers those operations and performs one full-buffer pass here."
+  ;; History replay should keep rendering even if markdown fontification trips
+  ;; over a tree-sitter/runtime mismatch.  Preserve debugger behavior when
+  ;; `debug-on-error' is non-nil.
+  (condition-case-unless-debug nil
+      (font-lock-ensure (point-min) (point-max))
+    (error nil))
+  (pi-coding-agent--decorate-tables-in-region (point-min) (point-max)))
+
 (defun pi-coding-agent--render-history-text (text)
   "Render TEXT as markdown content with proper isolation.
 Ensures markdown structures don't leak to subsequent content.
@@ -2705,10 +2748,11 @@ Display-only table decoration is applied after fontification."
         ;; History replay should keep rendering even if markdown
         ;; fontification trips over a tree-sitter/runtime mismatch.
         ;; Preserve debugger behavior when `debug-on-error' is non-nil.
-        (condition-case-unless-debug nil
-            (font-lock-ensure start (point-max))
-          (error nil))
-        (pi-coding-agent--decorate-tables-in-region start (point-max)))
+        (unless (pi-coding-agent--history-postprocessing-deferred-p)
+          (condition-case-unless-debug nil
+              (font-lock-ensure start (point-max))
+            (error nil))
+          (pi-coding-agent--decorate-tables-in-region start (point-max))))
       ;; Two trailing newlines reset any open markdown list/paragraph context
       (pi-coding-agent--append-to-chat "\n\n"))))
 
@@ -3010,13 +3054,15 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
         (erase-buffer)
         (insert (pi-coding-agent--format-startup-header) "\n")
         (when (vectorp messages)
-          (pi-coding-agent--display-history-messages messages))
+          (let ((pi-coding-agent--defer-history-postprocessing t))
+            (pi-coding-agent--display-history-messages messages)))
         (goto-char (point-max))
         (unless (bolp) (insert "\n"))
         (pi-coding-agent--set-message-start-marker nil)
         (pi-coding-agent--set-streaming-marker nil)
         (pi-coding-agent--update-hot-tail-boundary)
         (pi-coding-agent--cool-completed-tool-blocks-outside-hot-tail)
+        (pi-coding-agent--postprocess-history-buffer)
         (goto-char (point-max))))))
 
 (provide 'pi-coding-agent-render)
