@@ -6192,5 +6192,171 @@ events where the header text hasn't changed."
       (goto-char (marker-position pi-coding-agent--hot-tail-start))
       (should (looking-at "Assistant")))))
 
+;;; Inline Image Display
+
+(ert-deftest pi-coding-agent-test-mime-to-image-type ()
+  "MIME type conversion covers backend types and rejects unknowns."
+  (should (eq (pi-coding-agent--mime-to-image-type "image/png") 'png))
+  (should (eq (pi-coding-agent--mime-to-image-type "image/jpeg") 'jpeg))
+  (should (eq (pi-coding-agent--mime-to-image-type "image/jpg") 'jpeg))
+  (should (eq (pi-coding-agent--mime-to-image-type "image/gif") 'gif))
+  (should (eq (pi-coding-agent--mime-to-image-type "image/webp") 'webp))
+  (should-not (pi-coding-agent--mime-to-image-type "image/tga"))
+  (should-not (pi-coding-agent--mime-to-image-type "text/plain")))
+
+(ert-deftest pi-coding-agent-test-insert-inline-image-placeholder ()
+  "insert-inline-image produces a placeholder in batch mode."
+  ;; In batch mode display-images-p is nil, so we always get the placeholder.
+  (with-temp-buffer
+    (pi-coding-agent--insert-inline-image "iVBORw0KGgo=" "image/png")
+    (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+      ;; Should contain MIME type and a size indicator
+      (should (string-match-p "Image:" content))
+      (should (string-match-p "image/png" content)))))
+
+(ert-deftest pi-coding-agent-test-insert-inline-image-error-path ()
+  "insert-inline-image handles corrupt base64 gracefully."
+  (with-temp-buffer
+    (pi-coding-agent--insert-inline-image "!!!invalid!!!" "image/png")
+    (should (string-match-p "decode error"
+                            (buffer-substring-no-properties
+                             (point-min) (point-max))))))
+
+(ert-deftest pi-coding-agent-test-tool-end-image-block-renders ()
+  "Image content block in tool result is displayed."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-end
+     "read" '(:path "photo.png")
+     '((:type "text" :text "Read image file [image/png]")
+       (:type "image" :data "iVBORw0KGgo=" :mimeType "image/png"))
+     nil nil)
+    (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+      (should (string-match-p "Read image file" content))
+      ;; In batch: placeholder text; in GUI: [image] fallback from insert-image
+      (should (or (string-match-p "\\[Image:" content)
+                  (string-match-p "\\[image\\]" content))))))
+
+(ert-deftest pi-coding-agent-test-tool-end-text-only-no-image ()
+  "Tool result with only text blocks has no image placeholder."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-end
+     "bash" '(:command "ls")
+     '((:type "text" :text "file1\nfile2"))
+     nil nil)
+    (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+      (should (string-match-p "file1" content))
+      (should-not (string-match-p "\\[Image:" content))
+      (should-not (string-match-p "\\[image\\]" content)))))
+
+(ert-deftest pi-coding-agent-test-tool-end-image-inside-overlay ()
+  "Image content is contained within the tool block overlay."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((block (pi-coding-agent--display-tool-start
+                  "read" '(:path "photo.png"))))
+      (pi-coding-agent--display-tool-end
+       "read" '(:path "photo.png")
+       '((:type "text" :text "Read image file [image/png]")
+         (:type "image" :data "iVBORw0KGgo=" :mimeType "image/png"))
+       nil nil block)
+      (let ((ov (seq-find (lambda (o) (overlay-get o 'pi-coding-agent-tool-block))
+                          (overlays-in (point-min) (point-max)))))
+        (should ov)
+        (let ((ov-content (buffer-substring-no-properties
+                           (overlay-start ov) (overlay-end ov))))
+          (should (or (string-match-p "\\[Image:" ov-content)
+                      (string-match-p "\\[image\\]" ov-content))))))))
+
+(ert-deftest pi-coding-agent-test-tool-end-image-blocks-stored ()
+  "Image content blocks are stored on the tool block struct."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((block (pi-coding-agent--display-tool-start
+                  "read" '(:path "photo.png"))))
+      (pi-coding-agent--display-tool-end
+       "read" '(:path "photo.png")
+       '((:type "text" :text "Read image")
+         (:type "image" :data "iVBORw0KGgo=" :mimeType "image/png"))
+       nil nil block)
+      (should (pi-coding-agent--tool-block-image-blocks block))
+      ;; Content should include image block
+      (should (seq-some (lambda (b) (equal (plist-get b :type) "image"))
+                        (pi-coding-agent--tool-block-image-blocks block))))))
+
+(ert-deftest pi-coding-agent-test-tool-end-multiple-images ()
+  "Multiple image blocks each produce output."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-end
+     "read" '(:path "photo.png")
+     '((:type "text" :text "Two images")
+       (:type "image" :data "iVBORw0KGgo=" :mimeType "image/png")
+       (:type "image" :data "/9j/4AAQ" :mimeType "image/jpeg"))
+     nil nil)
+    (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+      ;; Both image indicators should be present
+      (should (or (>= (length (split-string content "\\[Image:\\|\\[image\\]" t)) 2)
+                  ;; GUI mode: two [image] from insert-image
+                  (string-match-p "\\[image\\].*\\[image\\]" content))))))
+
+(ert-deftest pi-coding-agent-test-tool-end-image-only ()
+  "Tool result with only image blocks, no text, still renders."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-end
+     "read" '(:path "photo.png")
+     '((:type "image" :data "iVBORw0KGgo=" :mimeType "image/png"))
+     nil nil)
+    (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+      (should (or (string-match-p "\\[Image:" content)
+                  (string-match-p "\\[image\\]" content))))))
+
+(ert-deftest pi-coding-agent-test-tool-end-unknown-mime-type ()
+  "Unknown MIME type produces a placeholder, not an error."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-end
+     "read" '(:path "file.tga")
+     '((:type "text" :text "Read image")
+       (:type "image" :data "AAAA" :mimeType "image/tga"))
+     nil nil)
+    (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+      (should (string-match-p "image/tga" content)))))
+
+(ert-deftest pi-coding-agent-test-history-tool-with-image ()
+  "History replay renders image from tool result."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((messages [(:role "assistant"
+                      :content [(:type "toolCall" :id "tc1"
+                                 :name "read"
+                                 :arguments (:path "photo.png"))]
+                      :timestamp 1704067200000)
+                     (:role "toolResult" :toolCallId "tc1"
+                      :toolName "read"
+                      :content [(:type "text" :text "Read image file [image/png]")
+                                (:type "image" :data "iVBORw0KGgo=" :mimeType "image/png")]
+                      :isError :json-false
+                      :timestamp 1704067201000)]))
+      (pi-coding-agent--display-history-messages messages))
+    (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+      (should (or (string-match-p "\\[Image:.*image/png" content)
+                  (string-match-p "\\[image\\]" content))))))
+
+(ert-deftest pi-coding-agent-test-tool-end-image-with-vector-content ()
+  "Image blocks work when content is a vector (JSON parse format)."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-end
+     "read" '(:path "photo.png")
+     [(:type "text" :text "Read image")
+      (:type "image" :data "iVBORw0KGgo=" :mimeType "image/png")]
+     nil nil)
+    (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+      (should (or (string-match-p "\\[Image:" content)
+                  (string-match-p "\\[image\\]" content))))))
+
 (provide 'pi-coding-agent-render-test)
 ;;; pi-coding-agent-render-test.el ends here
