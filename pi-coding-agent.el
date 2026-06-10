@@ -83,6 +83,158 @@
 
 (require 'pi-coding-agent-menu)
 (require 'pi-coding-agent-input)
+(require 'json)
+
+;;;; Public Session API
+
+(defun pi-coding-agent--session-file-cwd (session-file)
+  "Return the recorded cwd from SESSION-FILE, or nil if unavailable."
+  (when (file-readable-p session-file)
+    (with-temp-buffer
+      (insert-file-contents session-file nil 0 4096)
+      (goto-char (point-min))
+      (when-let* ((line (buffer-substring-no-properties
+                         (line-beginning-position)
+                         (line-end-position))))
+        (ignore-errors
+          (let ((event (json-parse-string line :object-type 'plist)))
+            (when (equal (plist-get event :type) "session")
+              (plist-get event :cwd))))))))
+
+(defun pi-coding-agent--session-file-project-directory (session-file)
+  "Return a likely project directory for SESSION-FILE.
+This prefers the cwd recorded inside the session file, then the nearest
+ancestor containing .git, falling back to the session file's containing
+directory."
+  (let* ((file (expand-file-name session-file))
+         (dir (file-name-directory file)))
+    (file-name-as-directory
+     (expand-file-name
+      (or (pi-coding-agent--session-file-cwd file)
+          (locate-dominating-file dir ".git")
+          dir)))))
+
+(defun pi-coding-agent--find-session-file-buffer (session-file)
+  "Return a live chat buffer currently displaying SESSION-FILE, or nil."
+  (let ((target (expand-file-name session-file))
+        found)
+    (dolist (buffer (buffer-list) found)
+      (when (and (not found)
+                 (buffer-live-p buffer))
+        (with-current-buffer buffer
+          (when (and (derived-mode-p 'pi-coding-agent-chat-mode)
+                     (let ((file (plist-get pi-coding-agent--state
+                                            :session-file)))
+                       (and (stringp file)
+                            (equal (expand-file-name
+                                    file
+                                    (or (pi-coding-agent--chat-session-directory)
+                                        default-directory))
+                                   target))))
+            (setq found buffer)))))))
+
+;;;###autoload
+(defun pi-coding-agent-session-open (dir &optional display-name)
+  "Open or create a pi session in DIR with optional DISPLAY-NAME.
+The normal pi chat/input UI is shown and the chat buffer is returned."
+  (interactive
+   (list (read-directory-name "Pi directory: " nil nil t)
+         (let ((name (read-string "Session name (optional): ")))
+           (and (not (string-empty-p (string-trim name))) name))))
+  (pi-coding-agent--check-dependencies)
+  (let* ((dir (file-name-as-directory (expand-file-name dir)))
+         (name (and display-name (string-trim display-name)))
+         (name (and name (not (string-empty-p name)) name))
+         (chat-buf (pi-coding-agent--setup-session dir name))
+         (input-buf (buffer-local-value 'pi-coding-agent--input-buffer chat-buf)))
+    (pi-coding-agent--display-buffers chat-buf input-buf)
+    (when name
+      (with-current-buffer chat-buf
+        (when (and pi-coding-agent--process
+                   (process-live-p pi-coding-agent--process))
+          (pi-coding-agent-set-session-name name))))
+    chat-buf))
+
+(defun pi-coding-agent--session-buffer-for-dir-p (dir)
+  "Return non-nil when a live chat buffer already exists for DIR."
+  (let ((target (file-name-as-directory (expand-file-name dir)))
+        found)
+    (dolist (buffer (buffer-list) found)
+      (when (and (not found)
+                 (buffer-live-p buffer))
+        (with-current-buffer buffer
+          (when (and (derived-mode-p 'pi-coding-agent-chat-mode)
+                     (equal (file-name-as-directory
+                             (expand-file-name
+                              (pi-coding-agent--chat-session-directory)))
+                            target))
+            (setq found t)))))))
+
+(defun pi-coding-agent--session-file-buffer-session-name (session-file)
+  "Return a stable buffer session name for SESSION-FILE."
+  (let ((name (file-name-base (directory-file-name session-file))))
+    (if (string-empty-p name) "session" name)))
+
+;;;###autoload
+(defun pi-coding-agent-session-open-file (session-file &optional dir display-name)
+  "Open durable pi SESSION-FILE, optionally running pi in DIR.
+When DIR is nil, a likely project directory is inferred from SESSION-FILE.
+DISPLAY-NAME names the Emacs session buffer.  When another pi session is
+already open for DIR, a distinct named buffer is used, matching the named
+multi-session behavior of `pi-coding-agent'.  The normal pi chat/input UI is
+shown and the chat buffer is returned."
+  (interactive (list (read-file-name "Pi session file: " nil nil t)))
+  (pi-coding-agent--check-dependencies)
+  (let* ((session-file (expand-file-name session-file))
+         (dir (file-name-as-directory
+               (expand-file-name
+                (or dir (pi-coding-agent--session-file-project-directory
+                         session-file)))))
+         (existing (pi-coding-agent--find-session-file-buffer session-file))
+         (trimmed-name (and display-name (string-trim display-name)))
+         (display-name (and trimmed-name
+                            (not (string-empty-p trimmed-name))
+                            trimmed-name))
+         (session-name (and (not existing)
+                            (or display-name
+                                (and (pi-coding-agent--session-buffer-for-dir-p dir)
+                                     (pi-coding-agent--session-file-buffer-session-name
+                                      session-file)))))
+         (chat-buf (or existing (pi-coding-agent--setup-session dir session-name)))
+         (input-buf (buffer-local-value 'pi-coding-agent--input-buffer chat-buf))
+         (proc (buffer-local-value 'pi-coding-agent--process chat-buf)))
+    (pi-coding-agent--display-buffers chat-buf input-buf)
+    (when (and (not existing)
+               proc
+               (process-live-p proc)
+               (pi-coding-agent--session-transition-ready-p chat-buf "resume"))
+      (pi-coding-agent--resume-selected-session proc chat-buf session-file))
+    chat-buf))
+
+;;;###autoload
+(defun pi-coding-agent-session-file (&optional chat-buffer)
+  "Return the durable session file for CHAT-BUFFER, if it exists."
+  (let ((chat-buf (or chat-buffer (pi-coding-agent--get-chat-buffer))))
+    (when (buffer-live-p chat-buf)
+      (with-current-buffer chat-buf
+        (when-let* ((file (plist-get pi-coding-agent--state :session-file))
+                    ((stringp file))
+                    ((not (string-empty-p file)))
+                    (expanded (expand-file-name
+                               file
+                               (or (pi-coding-agent--chat-session-directory)
+                                   default-directory)))
+                    ((file-readable-p expanded)))
+          expanded)))))
+
+;;;###autoload
+(defun pi-coding-agent-session-display-name (&optional chat-buffer)
+  "Return the human-readable display name for CHAT-BUFFER, if known."
+  (let ((chat-buf (or chat-buffer (pi-coding-agent--get-chat-buffer))))
+    (and (buffer-live-p chat-buf)
+         (or (buffer-local-value 'pi-coding-agent--session-name chat-buf)
+             (buffer-local-value 'pi-coding-agent--canonical-session-name
+                                 chat-buf)))))
 
 (declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
 
