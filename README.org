@@ -8,30 +8,56 @@
 #+html: <a href="https://github.com/dnouri/pi-coding-agent/actions/workflows/nightly.yml"><img alt="Nightly" src="https://github.com/dnouri/pi-coding-agent/actions/workflows/nightly.yml/badge.svg"/></a>
 #+html: <a href="https://github.com/dnouri/pi-coding-agent/actions/workflows/melpazoid.yml"><img alt="melpazoid" src="https://github.com/dnouri/pi-coding-agent/actions/workflows/melpazoid.yml/badge.svg"/></a>
 
-An Emacs frontend for the [[https://pi.dev][pi coding agent]].
+* What is pi-coding-agent for Emacs?
+
+=pi-coding-agent= is an Emacs frontend for [[https://pi.dev][Pi]].  The Pi CLI still runs
+the agent, talks to models, and executes tools.  This package wraps Pi
+in an ergonomic Emacs interface: a Markdown chat buffer for the
+conversation and a separate prompt buffer where you compose the next
+message.
+
+The main advantage may be that your prompt is no longer trapped in a
+terminal text box.  You can edit it like any other Emacs buffer,
+scroll through the chat without losing focus, navigate and copy from
+previous output with ease, and use the key bindings and editing habits
+you already have.
 
 #+html: <a href="https://danielnouri.org/media/pi-coding-agent-demo.mp4"><img src="https://danielnouri.org/media/pi-coding-agent-preview.gif" alt="pi-coding-agent demo - click to play" width="600" height="600"></a>
 
-* Quick Start
+* Quick start
 
-If you already have a working Emacs with tree-sitter support, this is the
-shortest path to a usable session:
+If you already have Emacs 29.1 or later with tree-sitter support, this
+is the shortest path to a usable session.
+
+** Requirements
+
+- Emacs 29.1 or later, built with tree-sitter support
+- Node.js 22.19 or later for the pi CLI
+- [[https://pi.dev][pi coding  agent]] =@earendil-works/pi-coding-agent@0.75.5=  or later,
+  installed and in =PATH=
+- Pi CLI authentication via =pi --login=, or provider API keys
+  configured for pi
+- A C compiler if Emacs needs to compile tree-sitter grammars
+
+** Install pi and authenticate
 
 #+begin_src bash
-# 1. Install the pi CLI
-npm install -g @earendil-works/pi-coding-agent@0.75.5
+# Install the pi CLI
+npm install -g @earendil-works/pi-coding-agent
 
 # Or with mise
-mise use -g npm:@earendil-works/pi-coding-agent@0.75.5
+mise use -g npm:@earendil-works/pi-coding-agent@latest
 
-# 2. Authenticate the CLI
+# Authenticate the CLI
 pi --login
 #+end_src
 
-If you prefer not to use OAuth, configure the provider API keys supported by
-pi instead.
+If you prefer not to use OAuth, configure the provider API keys
+supported by Pi instead.
 
-Then install the Emacs package from MELPA:
+** Install the Emacs package
+
+Install from [[https://melpa.org/#/pi-coding-agent][MELPA]]:
 
 #+begin_src
 M-x package-install RET pi-coding-agent RET
@@ -43,132 +69,295 @@ Then start a session:
 M-x pi-coding-agent
 #+end_src
 
-On first start, pi-coding-agent may prompt to install the tree-sitter grammars
-needed for markdown rendering.  That requires a C compiler (=gcc= or =cc=).
+On first start, =pi-coding-agent= may prompt to install the
+tree-sitter grammars needed for Markdown rendering.  Say yes if you
+want the chat buffer to render properly.  Grammar installation is a
+one-time step and requires a C compiler (=gcc= or =cc=).
 
-* Features
+You may also define a shorter command name:
 
-- Compose prompts in a full Emacs buffer: multi-line, copy/paste, macros, support for Vi bindings
-- Chat history as a markdown buffer: copy, save, search, navigate
-- Fork the conversation at any point in the chat buffer (f)
-- Live streaming output as bash commands and tool operations run
-- Tree-sitter-powered markdown rendering and syntax-highlighted code blocks
-- Display-only wrapping for markdown pipe tables, with raw buffer text kept canonical
-- Configurable completed-thinking display, with per-block TAB expand/collapse
-- Collapsible tool output with smart preview (expand with TAB)
-- Click the model name or thinking level to change them
-- Rich header line: activity phase, session name, extension status
-- Input history with search (M-p/M-n, C-r)
-- Magit-style transient menu for all commands
-- Basic support for pi extensions and extension commands
+#+begin_src emacs-lisp
+(defalias 'pi 'pi-coding-agent)
+#+end_src
 
-* Requirements
+After that, =M-x pi= starts or focuses the current project's pi
+session.
 
-- Emacs 29.1 or later (with tree-sitter support)
-- Node.js 22.19 or later for the pi CLI; Node 24 is used in CI
-- [[https://pi.dev][pi coding agent]] =@earendil-works/pi-coding-agent@0.75.5= or later, installed and in PATH
-- pi CLI authentication via =pi --login= or provider API keys
-- A C compiler (=gcc= or =cc=) for installing tree-sitter grammars
+** Troubleshooting and first-run notes
 
-* Installation
+*** No model is available
 
-** MELPA
+Make sure the [[https://pi.dev/docs/latest/providers][Pi CLI is authenticated]] before expecting models to
+appear, either via =pi --login= or by configuring API keys.
 
-Install from [[https://melpa.org/#/pi-coding-agent][MELPA]]:
+*** Missing pi executable
+
+=pi-coding-agent= runs the command in =pi-coding-agent-executable=,
+which defaults to =("pi")=.  If Emacs cannot find =pi=, install the
+CLI with the npm command from Quick Start, adjust Emacs's =exec-path=,
+or customize =pi-coding-agent-executable=.  An example:
+
+#+begin_src emacs-lisp
+;; npx users:
+(setopt pi-coding-agent-executable
+        '("npx" "-y" "@earendil-works/pi-coding-agent@latest"))
+#+end_src
+
+*** Grammar installation fails
+
+Grammar installation needs a working C compiler.  Install =gcc= or
+=cc=, then run:
 
 #+begin_src
-M-x package-install RET pi-coding-agent RET
+M-x pi-coding-agent-install-grammars
 #+end_src
 
-MELPA installs =transient=, =md-ts-mode=, and =markdown-table-wrap= automatically.
-=pi-coding-agent= uses =md-ts-mode= only for its own chat and input buffers,
-so installing or loading it does not change how unrelated =.md= files open.
-If you want tree-sitter Markdown globally, configure =md-ts-mode=
-separately.
+If an old system Markdown grammar is loaded and tables render
+incorrectly, remove the old =libtree-sitter-markdown= from
+=treesit-extra-load-path=, your Emacs tree-sitter directory, or your
+system packages, then restart Emacs or run =M-x
+pi-coding-agent-install-grammars=.
 
-Or with =use-package=:
+*** Transient is too old
+
+Emacs may load its bundled =transient= before the newer MELPA package.
+If the menu complains about =transient=, set
+=package-install-upgrade-built-in= to =t=, install or upgrade
+=transient= from MELPA, and restart Emacs.
+
+* Everyday workflow
+
+Start a session with =M-x pi-coding-agent=.  =pi-coding-agent= opens
+two windows:
+
+- *Chat buffer* at the top: rendered Markdown conversation history,
+  tool output, thinking blocks, and previous turns.
+- *Input buffer* at the bottom: a normal Emacs buffer where you write
+  the next prompt.
+
+The input header line shows the current model, thinking level,
+activity phase, cost and context usage, session name, and extension
+status when available.  The model and thinking fields can be clicked
+to change their values.
+
+Type in the input buffer and press =C-c C-c= to send.  If Pi is
+already working, =C-c C-c= queues the text as a follow-up and sends it
+when the current turn finishes.  Press =C-c C-s= while Pi is busy to
+send a steering message: it is delivered after the current tool call
+and interrupts the remaining queued tools.  Press =C-c C-k= to abort a
+streaming response.
+
+Press =C-c C-p= for the transient menu which allows you to
+conveniently discover commands and shortcuts for model selection,
+thinking level, sessions, fork, compact, export, stats, skills and
+custom commands.
+
+** Composing prompts
+
+The input buffer is intentionally boring Emacs.  Write multi-line
+prompts, paste from other buffers, use the kill ring, keyboard macros,
+registers, spell checks, Evil, or whatever else your setup already
+gives you.  Your prompt stays in the bottom window while the
+conversation streams above it.
+
+Slash commands work with completion: type =/= then =TAB= to complete
+built-in commands and pi commands such as prompt templates, skills,
+and extension commands.  Prompt templates are discovered from places
+such as =~/.pi/agent/prompts/=, and skills from =~/.agents/skills/=.
+File references also complete: use =TAB= on paths such as =./=, =../=,
+and =~/=.  Absolute paths complete too, except for a bare =/= at the
+start of the buffer, where slash-command completion wins.
+
+While composing, you can page through the chat without moving focus
+out of the input buffer.  Use =M+PageDown= and =M+PageUp= to scroll
+the linked chat window (also known as =M-<next>= and =M-<prior>=).  If
+your terminal does not send those keys, =C-M-v= and =C-M-S-v= are the
+traditional Emacs fallbacks.
+
+** Reading output
+
+The chat buffer is rendered as Markdown and uses tree-sitter for
+syntax highlighting code blocks and diffs.  Long tool output is
+collapsed to a preview so the chat stays readable; press =TAB= on a
+tool block to expand or collapse it.  Long-running commands stream
+output live, file operations (=read=, =write=, =edit=) get syntax
+highlighting, and edit diffs highlight what changed.
+
+Markdown pipe tables get a display-only treatment: wide tables are
+wrapped and drawn to neatly fit window width, with cleaner separators,
+while the underlying buffer text remains ordinary Markdown.
+
+Output from file tools such as =read=, =write=, and =edit=, and custom
+tools that include =:path= allow that =RET= on a file-content line
+opens the backing file at the matching line.  By default the file
+opens in the other window so the chat stays visible; use =C-u RET= to
+open it in the same window instead.
+
+Press =TAB= on a turn header (=You= or =Assistant=) to fold or unfold
+that turn.  Use =n= and =p= in the chat buffer to jump between user
+messages, and =f= to fork the conversation from the turn at point.
+
+** Sessions and context
+
+Each project directory gets its own session automatically.  Running
+=M-x pi-coding-agent= again from a Pi buffer restores missing panes;
+if both panes are visible, focus moves to the input window.  Use =M-x
+pi-coding-agent-toggle= to hide or show the session windows in the
+current frame.
+
+For multiple sessions in the same directory, use =C-u M-x
+pi-coding-agent= and enter a session name.  Resume (=C-c C-r=) and
+fork (=C-c C-p f=) present a selection menu.  Compact (=C-c C-p c=)
+summarizes older conversation when the context window gets full; Pi
+can also compact automatically when needed.  The header line shows
+context usage and changes face when it crosses the configured warning
+and error thresholds.
+
+** Common keys
+
+| Key              | Context | Description                                |
+|------------------+---------+--------------------------------------------|
+| =C-c C-c=        | input   | Send prompt, or queue follow-up if busy    |
+| =C-c C-s=        | input   | Send steering message while Pi is busy     |
+| =C-c C-k=        | input   | Abort streaming                            |
+| =C-c C-p=        | input   | Open transient menu                        |
+| =C-c C-r=        | input   | Resume a previous session                  |
+| =M-p= / =M-n=    | input   | Prompt history (=C-↑= / =C-↓= also work)   |
+| =C-r=            | input   | Incremental prompt-history search          |
+| =TAB=            | input   | Complete paths, and =/= commands           |
+| =M+<prior/next>= | input   | Scroll linked chat window                  |
+| =TAB=            | chat    | Toggle thinking block, tool block, or turn |
+| =RET=            | chat    | Visit file at point from tool output       |
+| =n= / =p=        | chat    | Navigate user messages                     |
+| =f=              | chat    | Fork from the turn at point                |
+| =q=              | chat    | Quit session                               |
+
+* Advanced features and configuration
+
+This section is for more advanced usage, including changing defaults,
+managing grammars yourself, using extension features, or integrating
+=pi-coding-agent= into the rest of your Emacs setup.
+
+** Configuration
+
+Here's some common non-default preferences:
 
 #+begin_src emacs-lisp
-(use-package pi-coding-agent
-  :ensure t
-  :init (defalias 'pi 'pi-coding-agent))
+;; Collapse completed thinking in new chats; live thinking still streams:
+(setopt pi-coding-agent-thinking-display 'hidden)
+
+;; Make the input pane 25% of the Pi window pair; rebalanced on frame resize:
+(setopt pi-coding-agent-input-window-height 0.25)
+
+;; Copy source Markdown from the chat buffer instead of only visible text:
+(setopt pi-coding-agent-copy-raw-markdown t)
+
+;; Open files from tool output in the current window instead of another window:
+(setopt pi-coding-agent-visit-file-other-window nil)
 #+end_src
 
-If you don't have MELPA configured, add this to your init file:
+
+Less common tuning knobs:
 
 #+begin_src emacs-lisp
-(require 'package)
-(add-to-list 'package-archives '("melpa" . "https://melpa.org/packages/") t)
-(package-initialize)
+;; New input buffers use plain text instead of Markdown highlighting:
+;; (setopt pi-coding-agent-input-markdown-highlighting nil)
+
+;; Show more tool output before it collapses, counted in visual lines:
+;; (setopt pi-coding-agent-tool-preview-lines 20)
+;; (setopt pi-coding-agent-bash-preview-lines 10)
+
+;; Lower context warning/error colors in the header line:
+;; (setopt pi-coding-agent-context-warning-threshold 40)
+;; (setopt pi-coding-agent-context-error-threshold 60)
+
+;; Keep more recent turns live for table rewrapping and tool overlays:
+;; Older history is cooled to keep long sessions fast.
+;; (setopt pi-coding-agent-hot-tail-turn-count 5)
+
+;; Hidden thinking uses generic line-count stubs instead of first-line previews:
+;; (setopt pi-coding-agent-thinking-hidden-preview nil)
 #+end_src
 
-** Manual installation
+You can also inspect the whole customization group with:
 
-If you prefer a plain Git checkout, configure MELPA first (see above),
-then evaluate this once to install the external dependencies:
-
-#+begin_src emacs-lisp
-(require 'package)
-(setq package-install-upgrade-built-in t)
-(package-initialize)
-(unless package-archive-contents
-  (package-refresh-contents))
-(package-install 'transient)
-(package-install 'md-ts-mode)
-(package-install 'markdown-table-wrap)
+#+begin_src
+M-x customize-group RET pi-coding-agent RET
 #+end_src
 
-The =package-install-upgrade-built-in= setting upgrades Emacs's bundled
-=transient= when needed.
+** Display of thinking
 
-Then clone the repository and add it to your load path:
+New chat buffers inherit =pi-coding-agent-thinking-display=.  The
+default is =visible=: live thinking streams while the assistant is
+working and remains expanded when that thinking block finishes.  Use
+=C-c C-p h= to change the current chat, or =C-c C-p H= to change the
+default for future chat buffers in the current Emacs session.  To make
+that default persist across restarts, set
+=pi-coding-agent-thinking-display= in your init file or via =M-x
+customize-option=.
 
-#+begin_src bash
-git clone https://github.com/dnouri/pi-coding-agent ~/.emacs.d/site-lisp/pi-coding-agent
+Press =TAB= inside completed thinking to toggle that block locally.
+
+** Markdown tables
+
+Pipe tables in the chat buffer are beautified as a display-only view.
+Recent tables re-wrap automatically when the chat window width
+changes.  Older history stays frozen at its previous width to avoid
+expensive whole-buffer redisplay on every resize.  Tool blocks in
+older history also lose their expand/collapse buttons and syntax
+highlighting, keeping long sessions snappy.  Customize
+=pi-coding-agent-hot-tail-turn-count= to choose how many recent
+=You=/=Assistant= turns stay live.
+
+** Sessions, transcripts, and exports
+
+To open an existing Pi JSONL session file directly, run:
+
+#+begin_src
+M-x pi-coding-agent-open-session-file
 #+end_src
 
-#+begin_src emacs-lisp
-(require 'package)
-(package-initialize)
-(add-to-list 'load-path "~/.emacs.d/site-lisp/pi-coding-agent")
-(require 'pi-coding-agent)
-#+end_src
+This opens the file as a live Pi session in the normal chat/input UI,
+not as a static viewer.  In Dired, it defaults the prompt to the
+regular file at point.  From a buffer visiting a local readable
+=.jsonl= file, it defaults to that file.
 
-Or with =use-package= (after installing =transient= and =md-ts-mode= as
-above):
+You can save the chat buffer like any other buffer to keep a Markdown
+transcript on disk.  Saving does not interrupt or replace the live Pi
+session.  For a shareable export, use HTML export from the menu (=C-c
+C-p e=) or run =/export=.
 
-#+begin_src emacs-lisp
-(use-package pi-coding-agent
-  :load-path "~/.emacs.d/site-lisp/pi-coding-agent"
-  :init (defalias 'pi 'pi-coding-agent))
-#+end_src
+** Extension support
 
-** First start
+The =pi-coding-agent= Emacs frontend has basic support for Pi
+extensions.  Extension commands show up in slash completion and the
+transient menu, extension tools run normally, and extensions can use
+notifications, confirm/select/input prompts, prefill the input buffer,
+and show status text.
 
-Make sure the pi CLI is authenticated before expecting models to appear.
-The simplest path is:
+Rich TUI-specific extension UI is not supported in Emacs yet: custom
+widgets, custom editor components, custom headers/footers, and other
+component-based views are unavailable or fall back.  Hover extension
+status text in the header line to see the exact =statusKey=, which you
+can use to change the font for that extension's status text using
+=pi-coding-agent-extension-status-faces=.
 
-#+begin_src bash
-pi --login
-#+end_src
+** Tree-sitter grammar management
 
-If you prefer not to use OAuth, configure the provider API keys supported by
-pi instead.  If =M-x pi-coding-agent= starts but says no model is available,
-the CLI usually still needs authentication.
+=pi-coding-agent= uses Emacs's built-in tree-sitter support to render
+Markdown and highlight code blocks in the chat and input buffers.  The
+two essential grammars are =markdown= and =markdown-inline=.  Optional
+grammars such as =python=, =javascript=, =rust=, and =go= improve
+syntax highlighting inside code blocks.
 
-pi-coding-agent uses Emacs's built-in tree-sitter support to render
-markdown and highlight code blocks in the chat and input buffers.  This requires
-small grammar libraries to be compiled and installed — a one-time step
-that needs a C compiler (=gcc= or =cc=).
-
-On first session start, pi-coding-agent can prompt to install the two
-grammars needed for markdown rendering.  If you decline that essential
-prompt, it appears again next time until the grammars are installed or
-you change =pi-coding-agent-essential-grammar-action=.  A separate
-optional prompt offers additional grammars for syntax highlighting
-inside code blocks (Python, JavaScript, Rust, etc.).  Declining the
-optional prompt is remembered and it appears again only if new grammar
-recipes are added or you clear =pi-coding-agent-grammar-declined-set=.
+On first session start, =pi-coding-agent= prompts to install the
+essential grammars.  If you decline that prompt, it appears again next
+time until the grammars are installed or you change
+=pi-coding-agent-essential-grammar-action=.  A separate optional
+prompt offers additional grammars for syntax highlighting inside code
+blocks.  Declining the optional prompt is remembered and it appears
+again only if new grammar recipes are added or you clear
+=pi-coding-agent-grammar-declined-set=.
 
 To check which grammars are installed or install them later:
 
@@ -176,238 +365,14 @@ To check which grammars are installed or install them later:
 M-x pi-coding-agent-install-grammars
 #+end_src
 
-If you manage tree-sitter grammars outside of Emacs (e.g. via a system
-package manager), set =pi-coding-agent-essential-grammar-action= to
-=warn= to suppress the essential grammar prompt.  The optional grammar
-prompt can be dismissed once and will not reappear.
+If you manage tree-sitter grammars outside of Emacs, for example
+through a system package manager, set
+=pi-coding-agent-essential-grammar-action= to =warn= to suppress the
+essential grammar prompt:
 
-* Usage
-
-Start a session with =M-x pi-coding-agent=. This opens two windows:
-- *Chat buffer* (top): Shows conversation history with rendered markdown
-- *Input buffer* (bottom): Where you compose prompts
-
-Type your prompt and press =C-c C-c= to send. Press =C-c C-p= for the full command menu.
-
-If you define =(defalias 'pi 'pi-coding-agent)=, then =M-x pi= works as a
-shortcut.
-
-Running =M-x pi-coding-agent= again from a pi buffer restores missing panes.
-If both chat and input are already visible in the current frame, the layout
-stays unchanged and focus moves to the input window.
-
-Use =M-x pi-coding-agent-toggle= to hide/show session windows in the
-current frame.
-
-For multiple sessions in the same directory, use
-=C-u M-x pi-coding-agent= to create a named session.
-
-* Key Bindings
-
-| Key           | Context | Description                       |
-|---------------+---------+-----------------------------------|
-| =C-c C-c=     | input   | Send (queues if busy)             |
-| =C-c C-s=     | input   | Queue steering message (busy only)|
-| =C-c C-k=     | input   | Abort streaming                   |
-| =C-c C-p=     | both    | Open menu                         |
-| =C-c C-r=     | input   | Resume session                    |
-| =M-p= / =M-n= | input   | History navigation                |
-| =C-r=         | input   | Incremental history search        |
-| =TAB=         | input   | Complete paths, @files, /commands |
-| =@=           | input   | File reference (search)           |
-| =n= / =p=     | chat    | Navigate messages                 |
-| =TAB=         | chat    | Toggle thinking/tool section or fold turn |
-| =S-TAB=       | chat    | Cycle all folds                   |
-| =RET=         | chat    | Visit file at point (other window)|
-| =f=           | chat    | Fork from point                   |
-| =q=           | chat    | Quit session                      |
-
-Press =C-c C-p= to access the full menu with model selection, thinking level,
-completed-thinking settings for this chat and for future chat buffers, session
-management (new, resume, fork, export), statistics, and custom commands.
-
-Completed thinking is expanded by default. Press =TAB= inside a completed-thinking
-block to collapse or expand that block, use =C-c C-p h= for this chat, or
-=C-c C-p H= for future chat buffers in the current Emacs session.
-
-* Tips & Tricks
-
-** ✏️ Composing Prompts
-
-The input buffer is a full Emacs buffer, one of the main advantages over
-terminal interfaces. Take your time composing, write multi-line prompts,
-paste from other buffers, use registers or kill-ring history. Your prompt
-stays put while the AI responds above.
-
-Slash commands (=/command=) work with completion: type =/= then =TAB= to
-see available commands, including prompt templates from =~/.pi/agent/prompts/=
-and skills from =~/.agents/skills/=.
-
-** 📎 Editor Features
-
-Several features match the TUI experience:
-
-- *Path completion (Tab)*: Complete relative paths like =./=, =../=, =~/=.
-
-- *Message queuing*: Submit messages while the agent is working:
-  - =C-c C-c= queues a /follow-up/ message, delivered after the agent finishes
-  - =C-c C-s= queues a /steering/ message, delivered after current tool
-    (interrupts remaining tools; only works when agent is busy)
-
-** 🧩 Extension Support
-
-pi-coding-agent has basic support for pi extensions.  Extension commands
-show up in slash completion and the transient menu, extension tools run
-normally, and extensions can use notifications, confirm/select/input
-prompts, prefill the input buffer, and show status text.  Hover status text
-to see the exact =statusKey= used for =pi-coding-agent-extension-status-faces=.
-
-Rich TUI-specific extension UI is not supported in Emacs yet: custom
-widgets, custom editor components, custom headers/footers, and other
-component-based views are unavailable or fall back.
-
-** 🧠 Completed thinking
-
-New chat buffers inherit the user option =pi-coding-agent-thinking-display=,
-which controls how completed assistant thinking is shown. The default is
-=visible=: live thinking streams while the assistant is working and remains
-expanded when that thinking block finishes. Use =C-c C-p h= to switch this
-chat, or =C-c C-p H= to change the default for future chat buffers in the
-current Emacs session. To make that default stick across restarts, set
-=pi-coding-agent-thinking-display= in your init file or via
-=M-x customize-option=.
-
-When thinking is hidden, the collapsed line shows either a short preview from
-the first non-empty thinking line, such as
-=> Thinking: Crafting response style… (11 more lines)=, or a generic fallback
-like => Thinking hidden… (12 lines)=. Set
-=pi-coding-agent-thinking-hidden-preview= to =nil= if you prefer the generic
-form every time.
-
-Press =TAB= inside completed thinking to toggle that block locally. In
-=hidden= mode, the collapsed line expands to the full completed thinking;
-inside expanded thinking, =TAB= collapses it back again. These per-block
-toggles are temporary: a rebuild, reload, or display-mode change recomputes
-each block from the current buffer display mode.
-
-** 🔧 Tool Output
-
-Tool output is collapsed by default to keep the chat readable, with a
-preview of the first few lines visible. Press =TAB= on a tool block to
-expand and see everything. File operations (read, write, edit) show full
-syntax highlighting, and edit diffs highlight what changed. Long-running
-commands stream output live so you can watch progress.
-
-Press =RET= on a file-content line in a tool block to open the backing file
-at the matching line number. This works for file tools (=read=, =write=,
-=edit=) and custom tools that include =:path=. By default, the file opens in
-the other window so you can keep the chat visible. Use =C-u RET= to open in
-the same window instead.
-
-** 📁 Folding Turns
-
-Press =TAB= on a turn header (You/Assistant) to fold it, =TAB= again to
-unfold. Use =S-TAB= to cycle visibility of all turns at once.
-
-** 💾 Sessions
-
-Each project directory gets its own session automatically. To run multiple
-sessions in the same directory, use =C-u M-x pi-coding-agent= to create a
-named session.
-
-Resume (=C-c C-r=) and fork (=C-c C-p f=) present a selection menu:
-pick from previous sessions or conversation messages to start from.
-
-To open an existing pi JSONL session file directly, run
-=M-x pi-coding-agent-open-session-file=. This opens the file as a live pi
-session in the normal chat/input UI, not as a static viewer. The session
-header must contain a non-empty absolute =cwd= that still names an existing
-directory; the command does not guess or ask for a replacement cwd. In Dired,
-it defaults the prompt to the regular file at point; otherwise, from a buffer
-visiting a local regular readable =.jsonl= file, it defaults to that file.
-
-You can save the chat buffer like any other buffer to keep a Markdown
-transcript on disk. Saving does not interrupt or replace the live pi session.
-
-If you want a shareable export instead, use HTML export (=C-c C-p e= or
-=/export=).
-
-** 🌿 Forking and Context Management
-
-When a conversation gets long, the AI's context window fills up. The menu
-(=C-c C-p=) offers tools to manage this:
-
-- *Compact* (=c=): Summarizes earlier conversation to free up context while
-  preserving key information. Use when context is filling up. If you don't
-  compact manually, pi does it automatically when needed.
-
-- *Fork* (=f=): Branches the conversation from any earlier turn.
-  Press =f= on any turn in the chat buffer, or use the menu to pick
-  from a list.
-
-- *Export* (=e=): Saves the conversation as an HTML file for sharing or
-  archiving.
-
-The context indicator in the status area shows current usage, warning
-when getting full.
-
-* Configuration
-
-Example configuration with =use-package=:
-
-#+begin_src emacs-lisp
-(use-package pi-coding-agent
-  :ensure t
-  :init (defalias 'pi 'pi-coding-agent)
-  :custom
-  (pi-coding-agent-input-window-height 10)        ; Height of input window
-  (pi-coding-agent-tool-preview-lines 10)         ; Lines shown before collapsing tool output
-  (pi-coding-agent-bash-preview-lines 5)          ; Lines shown for bash output
-  (pi-coding-agent-context-warning-threshold 70)  ; Warn when context exceeds this %
-  (pi-coding-agent-context-error-threshold 90)    ; Critical when context exceeds this %
-  (pi-coding-agent-visit-file-other-window t)     ; RET opens file in other window (nil for same)
-  (pi-coding-agent-hot-tail-turn-count 3)         ; Recent headed turns that re-wrap on resize
-  ;; (pi-coding-agent-thinking-display 'hidden)       ; Collapse completed thinking by default
-  ;; (pi-coding-agent-thinking-hidden-preview nil)    ; Always use generic "Thinking hidden…" stubs
-  ;; (pi-coding-agent-copy-raw-markdown t)            ; Keep raw markdown on copy (default: strip hidden markup)
-  ;; (pi-coding-agent-input-markdown-highlighting nil) ; Plain text input buffer
-  )
+#+begin_src
+(setopt pi-coding-agent-essential-grammar-action 'warn)
 #+end_src
-
-Copying from the chat buffer strips hidden markdown markup by default —
-=M-w= and =C-w= produce the visible text you see on screen.  Set
-=pi-coding-agent-copy-raw-markdown= to =t= for raw markdown, useful
-when pasting into docs, Slack, or other markdown-aware contexts.
-
-The input buffer uses tree-sitter Markdown highlighting by default (bold,
-code spans, fenced blocks) while keeping the typed markup characters visible.
-Set =pi-coding-agent-input-markdown-highlighting= to =nil= for plain text input
-buffers in new sessions.
-
-For activity-driven UI customizations, see [[*Activity phase hooks][Activity phase hooks]].
-
-** Markdown tables
-
-Pipe tables in the chat buffer are beautified as a display-only view.  The
-underlying buffer text stays canonical markdown, so tree-sitter and search
-still operate on the source table text rather than a rewritten pretty-print.
-Copy commands also work on that underlying source, but they still honor the
-existing chat copy contract: hidden markdown markup is stripped by default,
-and =pi-coding-agent-copy-raw-markdown= preserves fully raw markdown.
-
-Recent tables re-wrap automatically when the chat window width changes.  Older
-history stays frozen at its previous width to avoid expensive whole-buffer
-redisplay on every resize.  Tool blocks in older history also lose their
-expand/collapse buttons and syntax highlighting, keeping long sessions snappy.
-Customize =pi-coding-agent-hot-tail-turn-count= to choose how many recent
-=You=/=Assistant= headed turns stay live.
-
-A chat buffer has one active wrapped width at a time.  That matches the normal
-two-window UI, where each session shows one chat window and one input window.
-If you deliberately show the same chat buffer in multiple windows with
-different widths, one of those widths wins until the next refresh.
-
-* Advanced
 
 ** Activity phase hooks
 
@@ -418,22 +383,23 @@ For custom UI changes tied to activity, add functions to
 (CHAT-BUFFER INPUT-BUFFER OLD-PHASE NEW-PHASE REASON)
 #+end_src
 
-=NEW-PHASE= is one of ="thinking"=, ="replying"=, ="running"=,
-="compact"=, or ="idle"=.  =REASON= explains why the phase was applied:
+=NEW-PHASE= is one of ="thinking"=, ="replying"=, ="running"=, ="compact"=, or
+="idle"=.  =REASON= explains why the phase was applied:
 
-| Reason         | Meaning                                      |
-|----------------+----------------------------------------------|
-| =phase-change= | The session activity phase changed.          |
-| =reset=        | A session reset forced ="idle"=.             |
-| =teardown=     | Session teardown forced ="idle"=.            |
+| Reason         | Meaning                                       |
+|----------------+-----------------------------------------------|
+| =phase-change= | The session activity phase changed.           |
+| =reset=        | A session reset forced ="idle"=.              |
+| =teardown=     | Session teardown forced ="idle"=.             |
 | =input-link=   | A newly linked input should apply the phase.  |
 | =input-unlink= | An old input should clean up local UI state.  |
 
-Handlers should be idempotent.  pi-coding-agent may reapply the same phase
-when buffers are relinked, reset, or torn down.  =INPUT-BUFFER= may also be
-nil or dead during teardown.
+Handlers should be idempotent.  =pi-coding-agent= may reapply the same
+phase when buffers are relinked, reset, or torn down.  =INPUT-BUFFER=
+may also be nil or dead during teardown.
 
-Tint the input buffer while the session is busy:
+As an example, consider tinting the input buffer while the session is
+busy:
 
 #+begin_src emacs-lisp
 (defvar-local my-pi-input-tint-cookie nil)
@@ -453,9 +419,9 @@ Tint the input buffer while the session is busy:
           #'my-pi-tint-input-while-busy)
 #+end_src
 
-Notify when a real session turn finishes.  The =REASON= check matters: input
-relink cleanup also applies ="idle"= to the old input, but that does not mean
-Pi finished working.
+Another example: Notify when a real session turn finishes.  The
+=REASON= check matters: input relink cleanup also applies ="idle"= to
+the old input, but that does not mean Pi finished working.
 
 #+begin_src emacs-lisp
 (defun my-pi-message-when-done (chat _input old new reason)
@@ -484,6 +450,81 @@ Track busy sessions for your own mode-line or tab display:
           #'my-pi-track-busy-sessions)
 #+end_src
 
+** Installation details
+
+MELPA installs =transient=, =md-ts-mode=, and =markdown-table-wrap=
+automatically.  =pi-coding-agent= uses =md-ts-mode= only for its own
+chat and input buffers, so installing or loading this package does not
+change how unrelated =.md= files open.  If you want tree-sitter
+Markdown globally, configure =md-ts-mode= separately.
+
+With =use-package=:
+
+#+begin_src emacs-lisp
+(use-package pi-coding-agent
+  :ensure t
+  :init (defalias 'pi 'pi-coding-agent))
+#+end_src
+
+If you do not have MELPA configured, add it to your init file first:
+
+#+begin_src emacs-lisp
+(require 'package)
+(add-to-list 'package-archives '("melpa" . "https://melpa.org/packages/") t)
+(package-initialize)
+#+end_src
+
+For a plain Git checkout, configure MELPA first, then evaluate this
+once to install the external dependencies:
+
+#+begin_src emacs-lisp
+(require 'package)
+(add-to-list 'package-archives '("melpa" . "https://melpa.org/packages/") t)
+(package-initialize)
+
+;; Must be set before installing/upgrading Emacs's bundled transient.
+(setq package-install-upgrade-built-in t)
+
+;; Refresh once after adding MELPA.
+(package-refresh-contents)
+
+(package-install 'transient)
+(package-install 'md-ts-mode)
+(package-install 'markdown-table-wrap)
+#+end_src
+
+The =package-install-upgrade-built-in= setting upgrades Emacs's
+bundled =transient= when needed.
+
+Then clone the repository and add it to your load path:
+
+#+begin_src bash
+git clone https://github.com/dnouri/pi-coding-agent ~/.emacs.d/site-lisp/pi-coding-agent
+#+end_src
+
+#+begin_src emacs-lisp
+(require 'package)
+(package-initialize)
+(add-to-list 'load-path "~/.emacs.d/site-lisp/pi-coding-agent")
+(require 'pi-coding-agent)
+#+end_src
+
+Or with =use-package= after installing the dependencies above:
+
+#+begin_src emacs-lisp
+(use-package pi-coding-agent
+  :load-path "~/.emacs.d/site-lisp/pi-coding-agent"
+  :init (defalias 'pi 'pi-coding-agent))
+#+end_src
+
+If you prefer not to install the Pi CLI globally, customize
+=pi-coding-agent-executable=.  For example:
+
+#+begin_src emacs-lisp
+(setq pi-coding-agent-executable
+      '("npx" "-y" "@earendil-works/pi-coding-agent@0.75.5"))
+#+end_src
+
 * Development
 
 Most users can skip this section.  It is for contributors and local
@@ -491,32 +532,34 @@ package development.
 
 ** Running tests locally
 
-The shared integration contract has two lanes:
+The shared integration tests have two lanes:
+
 - a fast fake-pi lane for deterministic RPC-boundary checks
 - a real pi lane for backend compatibility coverage
 
-The default local integration target runs the fake lane first and the real
-lane second, so it still needs Docker for the real lane.  The GUI suite is
-fully fake-backed and does not need Docker or a local pi install.
+The default local integration target runs the fake lane first and the
+real lane second, so it still needs Docker for the real lane.  The GUI
+suite is fully fake-backed and does not need Docker or a local pi
+install.
 
 #+begin_src bash
-# Byte-compile, lint, and unit tests (fast, no Docker)
+# Byte-compile, lint, and unit tests
 make check
 
-# Shared integration contract: fake first, then real (requires Docker for the real lane)
+# Shared integration contract: fake first, then real
 make test-integration
 
-# Fast integration lane against the fake-pi harness only (no Docker)
+# Fast integration lane against the fake-pi harness only (no Docker, no pi install)
 make test-integration-fake
 
-# Real pi lane only (requires Docker)
+# Real pi lane only; starts the project-local Ollama Docker container
 make test-integration-real
 
 # Run a single integration contract by selector
 make test-integration-fake SELECTOR=rpc-smoke
 make test-integration-real SELECTOR=steering-contract
 
-# Deterministic GUI tests (fake-backed, no Docker)
+# Deterministic GUI tests (fake-backed, no Docker or local pi install)
 make test-gui
 
 # Run one GUI regression by selector
@@ -528,8 +571,9 @@ make test-all
 
 ** Running fake-pi manually
 
-Run the harness directly when debugging the subprocess contract itself.
-These commands start an interactive JSONL peer on stdin/stdout.
+Run the harness directly when debugging the subprocess contract
+itself.  These commands start an interactive JSONL peer on
+stdin/stdout.
 
 #+begin_src bash
 # Basic prompt lifecycle scenario
@@ -543,8 +587,8 @@ Scenario fixtures live under =test/fixtures/fake-pi/=.
 
 ** GUI tests with visible window
 
-The GUI suite is deterministic and fake-backed.  By default it auto-detects
-whether to show a window or run headless.
+The GUI suite is deterministic and fake-backed.  By default it
+auto-detects whether to show a window or run headless.
 
 #+begin_src bash
 # With a display available, runs with visible window
@@ -560,17 +604,18 @@ whether to show a window or run headless.
 ** CI setup
 
 GitHub Actions runs on every push:
+
 - =test-unit.yml= - Unit tests across Emacs 29.4, 30.1, and snapshot (31)
-- =lint.yml= - Byte-compile, checkdoc, package-lint across Emacs 29.4, 30.1, and snapshot
+- =lint.yml= - Byte-compile, checkdoc, and package-lint across Emacs 29.4, 30.1, and snapshot
 - =test-integration.yml= - Split fake/real integration jobs; fake stays fast, real keeps Ollama compatibility coverage
 - =test-gui.yml= - Deterministic fake-backed GUI tests with xvfb virtual framebuffer
 
-Nightly builds keep real integration coverage against the pinned pi version
-(from Makefile) and latest, while the fake-backed GUI suite runs once.
+The real integration workflows use Node 24.  Nightly builds keep real
+integration coverage against the pinned pi version (from Makefile) and
+latest, while the fake-backed GUI suite runs once.
 
 * Links
 
-- [[https://danielnouri.org/notes/2025/12/30/an-emacs-mode-for-a-shitty-coding-agent/][Blog post]]: Background and motivation
 - [[https://pi.dev][pi.dev]]: pi coding agent home page
 
 * License
