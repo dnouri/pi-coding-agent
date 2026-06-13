@@ -622,14 +622,14 @@ This ensures all files get code fences for consistent display."
 
 (ert-deftest pi-coding-agent-test-extract-pi-version-from-clean-output ()
   "Extract the plain semantic version returned by pi."
-  (should (equal (pi-coding-agent--extract-pi-version "0.75.5\n")
-                 "0.75.5")))
+  (should (equal (pi-coding-agent--extract-pi-version "0.79.1\n")
+                 "0.79.1")))
 
 (ert-deftest pi-coding-agent-test-extract-pi-version-from-stderr-style-output ()
   "Ignore npm warnings and extract the standalone pi version line."
   (should (equal (pi-coding-agent--extract-pi-version
-                  "npm warn deprecated package@1.0.0: old\n0.75.5\n")
-                 "0.75.5")))
+                  "npm warn deprecated package@1.0.0: old\n0.79.1\n")
+                 "0.79.1")))
 
 (ert-deftest pi-coding-agent-test-extract-pi-version-returns-nil-for-unparseable-output ()
   "Unparseable version output should be harmless."
@@ -637,9 +637,9 @@ This ensures all files get code fences for consistent display."
 
 (ert-deftest pi-coding-agent-test-pi-version-outdated-compares-segments-numerically ()
   "Compare pi versions numerically, not lexically."
-  (should (pi-coding-agent--pi-version-outdated-p "0.75.4"))
-  (should-not (pi-coding-agent--pi-version-outdated-p "0.75.5"))
-  (should-not (pi-coding-agent--pi-version-outdated-p "0.75.10"))
+  (should (pi-coding-agent--pi-version-outdated-p "0.79.0"))
+  (should-not (pi-coding-agent--pi-version-outdated-p "0.79.1"))
+  (should-not (pi-coding-agent--pi-version-outdated-p "0.79.10"))
   (should-not (pi-coding-agent--pi-version-outdated-p "1.0.0")))
 
 (ert-deftest pi-coding-agent-test-finish-pi-version-process-parses-stderr ()
@@ -651,14 +651,14 @@ This ensures all files get code fences for consistent display."
     (unwind-protect
         (progn
           (with-current-buffer stderr-buf
-            (insert "npm warn deprecated package@1.0.0: old\n0.75.5\n"))
+            (insert "npm warn deprecated package@1.0.0: old\n0.79.1\n"))
           (process-put proc 'pi-coding-agent-version-callback
                        (lambda (version)
                          (setq resolved-version version)))
           (process-put proc 'pi-coding-agent-version-stdout-buf stdout-buf)
           (process-put proc 'pi-coding-agent-version-stderr-buf stderr-buf)
           (pi-coding-agent--finish-pi-version-process proc)
-          (should (equal resolved-version "0.75.5"))
+          (should (equal resolved-version "0.79.1"))
           (should-not (buffer-live-p stdout-buf))
           (should-not (buffer-live-p stderr-buf)))
       (when (process-live-p proc)
@@ -674,7 +674,7 @@ This ensures all files get code fences for consistent display."
         (resolved-version nil))
     (cl-letf (((symbol-function 'pi-coding-agent--run-pi-version-once-async)
                (lambda (callback)
-                 (funcall callback "0.75.5")))
+                 (funcall callback "0.79.1")))
               ((symbol-function 'run-at-time)
                (lambda (secs _repeat fn &rest args)
                  (setq scheduled-delay secs)
@@ -684,7 +684,7 @@ This ensures all files get code fences for consistent display."
        (lambda (version)
          (setq resolved-version version))))
     (should (= scheduled-delay pi-coding-agent--version-probe-delay))
-    (should (equal resolved-version "0.75.5"))))
+    (should (equal resolved-version "0.79.1"))))
 
 (ert-deftest pi-coding-agent-test-set-process-probes-version-for-current-process ()
   "Setting process starts version probe and stores result for current process."
@@ -704,9 +704,9 @@ This ensures all files get code fences for consistent display."
                        (push (apply #'format fmt args) messages))))
             (pi-coding-agent--set-process proc)
             (should callback)
-            (funcall callback "0.75.5")
-            (should (equal pi-coding-agent--process-version "0.75.5"))
-            (should (equal (car messages) "Pi: version 0.75.5"))))
+            (funcall callback "0.79.1")
+            (should (equal pi-coding-agent--process-version "0.79.1"))
+            (should (equal (car messages) "Pi: version 0.79.1"))))
       (when (process-live-p proc)
         (delete-process proc)))))
 
@@ -729,10 +729,10 @@ This ensures all files get code fences for consistent display."
                          (push (apply #'format fmt args) messages))))
               (pi-coding-agent--set-process proc)
               (with-temp-buffer
-                (funcall callback "0.75.5"))
+                (funcall callback "0.79.1"))
               (with-current-buffer chat-buf
-                (should (equal pi-coding-agent--process-version "0.75.5")))
-              (should (equal (car messages) "Pi: version 0.75.5")))))
+                (should (equal pi-coding-agent--process-version "0.79.1")))
+              (should (equal (car messages) "Pi: version 0.79.1")))))
       (when (process-live-p proc)
         (delete-process proc)))))
 
@@ -755,12 +755,12 @@ This ensures all files get code fences for consistent display."
                        (setq warning-text message))))
             (pi-coding-agent--set-process proc)
             (should callback)
-            (funcall callback "0.75.4")
-            (should (equal pi-coding-agent--process-version "0.75.4"))
-            (should (string-match-p "0.75.4" warning-text))
-            (should (string-match-p "0.75.5" warning-text))
+            (funcall callback "0.79.0")
+            (should (equal pi-coding-agent--process-version "0.79.0"))
+            (should (string-match-p "0.79.0" warning-text))
+            (should (string-match-p "0.79.1" warning-text))
             (should (string-match-p
-                     "npm install -g @earendil-works/pi-coding-agent@0.75.5"
+                     "npm install -g @earendil-works/pi-coding-agent@0.79.1"
                      warning-text))))
       (when (process-live-p proc)
         (delete-process proc)))))
@@ -784,8 +784,8 @@ This ensures all files get code fences for consistent display."
                        (setq warning-called t))))
             (pi-coding-agent--set-process proc)
             (should callback)
-            (funcall callback "0.75.5")
-            (should (equal pi-coding-agent--process-version "0.75.5"))
+            (funcall callback "0.79.1")
+            (should (equal pi-coding-agent--process-version "0.79.1"))
             (should-not warning-called)))
       (when (process-live-p proc)
         (delete-process proc)))))
@@ -1239,7 +1239,7 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
       (pi-coding-agent--check-dependencies)
       (should (string-match-p "my-custom-pi" warning-text))
       (should (string-match-p
-               "npm install -g @earendil-works/pi-coding-agent@0.75.5"
+               "npm install -g @earendil-works/pi-coding-agent@0.79.1"
                warning-text)))))
 
 ;;; Essential Grammar Install Prompt (markdown + markdown-inline)

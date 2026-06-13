@@ -93,7 +93,7 @@ trust flag selected by `pi-coding-agent-project-trust-policy'.
 
 For npx users:
   (setq pi-coding-agent-executable
-        \\='(\"npx\" \"-y\" \"@earendil-works/pi-coding-agent@0.75.5\"))"
+        \\='(\"npx\" \"-y\" \"@earendil-works/pi-coding-agent@0.79.1\"))"
   :type '(repeat string)
   :group 'pi-coding-agent)
 
@@ -1653,7 +1653,7 @@ Shows HH:MM if today, otherwise YYYY-MM-DD HH:MM."
 (defconst pi-coding-agent--pi-package "@earendil-works/pi-coding-agent"
   "Npm package name for the pi CLI supported by pi-coding-agent.")
 
-(defconst pi-coding-agent--minimum-pi-version "0.75.5"
+(defconst pi-coding-agent--minimum-pi-version "0.79.1"
   "Minimum supported pi CLI version.")
 
 (defun pi-coding-agent--pi-install-command ()

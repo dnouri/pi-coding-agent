@@ -33,7 +33,7 @@ is the shortest path to a usable session.
 
 - Emacs 29.1 or later, built with tree-sitter support
 - Node.js 22.19 or later for the pi CLI
-- [[https://pi.dev][pi coding  agent]] =@earendil-works/pi-coding-agent@0.75.5=  or later,
+- [[https://pi.dev][pi coding agent]] =@earendil-works/pi-coding-agent@0.79.1= or later,
   installed and in =PATH=
 - Pi CLI authentication via =pi --login=, or provider API keys
   configured for pi
@@ -544,7 +544,7 @@ If you prefer not to install the Pi CLI globally, customize
 
 #+begin_src emacs-lisp
 (setq pi-coding-agent-executable
-      '("npx" "-y" "@earendil-works/pi-coding-agent@0.75.5"))
+      '("npx" "-y" "@earendil-works/pi-coding-agent@0.79.1"))
 #+end_src
 
 * Development

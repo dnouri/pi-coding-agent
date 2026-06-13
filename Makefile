@@ -7,7 +7,7 @@ BATCH = $(EMACS) --batch -Q -L . \
 LOCAL_LOAD_PATH = --eval "(setq load-path (cons (expand-file-name \".\") load-path))"
 
 # Pi CLI version — single source of truth (workflows extract this automatically)
-PI_VERSION ?= 0.75.5
+PI_VERSION ?= 0.79.1
 PI_PACKAGE ?= @earendil-works/pi-coding-agent
 PI_BIN ?= .cache/pi/node_modules/.bin/pi
 PI_BIN_DIR = $(abspath $(dir $(PI_BIN)))
