@@ -521,6 +521,30 @@ chat buffer from session history."
                  (message "Pi: Failed to reload - %s"
                           (or (plist-get response :error) "unknown error"))))))))))))
 
+;;;###autoload
+(defun pi-coding-agent-force-idle ()
+  "Force the session status back to idle.
+
+Use this when the session appears stuck with no activity occurring.
+Resets the local status and activity phase, cancels any pending timers,
+and restores the follow-up queue to the input buffer.
+
+This does NOT kill the pi process.  If the server is still processing, it
+may send events that override this reset.  For a full recovery, use
+`pi-coding-agent-reload' instead."
+  (interactive)
+  (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+    (if (not chat-buf)
+        (message "Pi: No session to reset")
+      (with-current-buffer chat-buf
+        (pi-coding-agent--cancel-followup-drain-timer)
+        (pi-coding-agent--invalidate-prompt-start-wait)
+        (setq pi-coding-agent--status 'idle
+              pi-coding-agent--pre-compaction-status nil)
+        (pi-coding-agent--set-activity-phase "idle" 'reset t)
+        (pi-coding-agent--restore-followup-queue-to-input)
+        (message "Pi: Status reset to idle")))))
+
 (defun pi-coding-agent--resume-selected-session (proc chat-buf selected-path)
   "Resume SELECTED-PATH using PROC and rebuild CHAT-BUF from its history."
   (pi-coding-agent--rpc-async
