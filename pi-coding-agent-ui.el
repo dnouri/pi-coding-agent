@@ -227,6 +227,11 @@ For example:
                                             :value-type sexp)))
   :group 'pi-coding-agent)
 
+(defcustom pi-coding-agent-image-preview-max-width 900
+  "Maximum width in pixels for inline image previews."
+  :type 'integer
+  :group 'pi-coding-agent)
+
 (defcustom pi-coding-agent-quit-without-confirmation nil
   "Whether `pi-coding-agent-quit' skips confirmation for a live process.
 When non-nil, quitting a session never asks whether a running pi process
