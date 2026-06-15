@@ -52,9 +52,9 @@
 
 (defvar-local pi-coding-agent--defer-history-postprocessing nil
   "Non-nil while replaying history with batched display post-processing.
-When set, per-message fontification and table decoration are skipped;
-`pi-coding-agent--postprocess-history-buffer' runs one consolidated pass after
-all history has been inserted.")
+When set, per-message explicit fontification and table decoration are skipped.
+Jit-lock fontifies visible markdown at redisplay; history post-processing only
+adds display-only table overlays for the recent hot tail after insertion.")
 
 (defvar-local pi-coding-agent--streaming-table-candidate nil
   "Non-nil when recent streaming text may contain a markdown pipe table.
@@ -2725,23 +2725,47 @@ Uses the current buffer's completed-thinking display mode."
             (puthash (plist-get msg :toolCallId) msg index)))))
     index))
 
+(defun pi-coding-agent--history-postprocess-start ()
+  "Return the first position that needs eager history post-processing.
+Large resumed histories should render the visible tail promptly.  Older content
+can rely on normal jit-lock when visited, while display-only table decoration is
+kept to the same hot-tail suffix used by resize refreshes."
+  (if (markerp pi-coding-agent--hot-tail-start)
+      (marker-position pi-coding-agent--hot-tail-start)
+    (point-min)))
+
+(defconst pi-coding-agent--history-table-separator-candidate-re
+  "^[ \t>]*|?[-:| \t]*---[-:| \t]*|[-:| \t]*$"
+  "Regex matching a cheap markdown pipe-table separator candidate.
+This avoids invoking tree-sitter for ordinary prose or shell commands that
+contain `|' but cannot be pipe tables.")
+
+(defun pi-coding-agent--history-table-candidate-p (start end)
+  "Return non-nil when START..END may contain a markdown pipe table."
+  (save-excursion
+    (goto-char start)
+    (re-search-forward
+     pi-coding-agent--history-table-separator-candidate-re end t)))
+
 (defun pi-coding-agent--postprocess-history-buffer ()
   "Run consolidated display post-processing after history replay.
 History replay inserts many small user/assistant chunks.  Running fontification
 and table decoration after each chunk is expensive in large sessions, so replay
-defers those operations and performs one full-buffer pass here."
-  ;; History replay should keep rendering even if markdown fontification trips
-  ;; over a tree-sitter/runtime mismatch.  Preserve debugger behavior when
-  ;; `debug-on-error' is non-nil.
-  (condition-case-unless-debug nil
-      (font-lock-ensure (point-min) (point-max))
-    (error nil))
-  (pi-coding-agent--decorate-tables-in-region (point-min) (point-max)))
+defers that work.  Fontification is left to jit-lock on redisplay; the only
+synchronous pass decorates candidate tables in the recent hot tail."
+  (let ((start (pi-coding-agent--history-postprocess-start))
+        (end (point-max)))
+    (when (pi-coding-agent--history-table-candidate-p start end)
+      ;; Narrowing keeps tree-sitter's initial parse proportional to the hot
+      ;; tail instead of the entire resumed transcript.
+      (save-restriction
+        (narrow-to-region start end)
+        (pi-coding-agent--decorate-tables-in-region start end)))))
 
 (defun pi-coding-agent--render-history-text (text)
   "Render TEXT as markdown content with proper isolation.
 Ensures markdown structures don't leak to subsequent content.
-Display-only table decoration is applied after fontification."
+Display-only table decoration is applied after deferred history insertion."
   (when (and text (not (string-empty-p text)))
     (let ((start (with-current-buffer (pi-coding-agent--get-chat-buffer) (point-max))))
       (pi-coding-agent--append-to-chat text)

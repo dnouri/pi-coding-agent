@@ -680,8 +680,69 @@ agent_end + next section's leading newline must not create triple newlines."
            :content [(:type "text" :text "Second answer.")]
            :timestamp 1704067202000)]
          (current-buffer)))
-      (should (= font-lock-count 1))
+      (should (= font-lock-count 0))
       (should (= table-decoration-count 1)))))
+
+(ert-deftest pi-coding-agent-test-display-session-history-postprocesses-hot-tail-only ()
+  "Large history replay eagerly decorates candidate tables only in the hot tail."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 2)
+          (font-lock-calls nil)
+          (table-decoration-calls nil)
+          (messages [(:role "user"
+                      :content [(:type "text" :text "Old question")]
+                      :timestamp 1704067200000)
+                     (:role "assistant"
+                      :content [(:type "text" :text "Old answer")]
+                      :timestamp 1704067201000)
+                     (:role "user"
+                      :content [(:type "text" :text "Middle question")]
+                      :timestamp 1704067202000)
+                     (:role "assistant"
+                      :content [(:type "text" :text "Middle answer")]
+                      :timestamp 1704067203000)
+                     (:role "user"
+                      :content [(:type "text" :text "Newest question")]
+                      :timestamp 1704067204000)
+                     (:role "assistant"
+                      :content [(:type "text" :text "Newest answer\n\n| a | b |\n|---|---|\n| 1 | 2 |")]
+                      :timestamp 1704067205000)]))
+      (cl-letf (((symbol-function 'font-lock-ensure)
+                 (lambda (start end)
+                   (push (cons start end) font-lock-calls)))
+                ((symbol-function 'pi-coding-agent--decorate-tables-in-region)
+                 (lambda (start end &optional _width)
+                   (push (list start end (point-min) (point-max))
+                         table-decoration-calls))))
+        (pi-coding-agent--display-session-history messages (current-buffer)))
+      (let ((start (marker-position pi-coding-agent--hot-tail-start))
+            (end (point-max)))
+        (should (> start (point-min)))
+        (goto-char start)
+        (should (looking-at "You"))
+        (should (search-forward "Newest question" nil t))
+        (should-not font-lock-calls)
+        (should (equal (nreverse table-decoration-calls)
+                       (list (list start end start end))))))))
+
+(ert-deftest pi-coding-agent-test-display-session-history-skips-table-postprocess-without-table-candidate ()
+  "History replay should not invoke tree-sitter table scans without tables."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((table-decoration-called nil))
+      (cl-letf (((symbol-function 'pi-coding-agent--decorate-tables-in-region)
+                 (lambda (&rest _)
+                   (setq table-decoration-called t))))
+        (pi-coding-agent--display-session-history
+         [(:role "user"
+           :content [(:type "text" :text "Question with a pipe command")]
+           :timestamp 1704067200000)
+          (:role "assistant"
+           :content [(:type "text" :text "Try `grep foo file | sort` first.")]
+           :timestamp 1704067201000)]
+         (current-buffer)))
+      (should-not table-decoration-called))))
 
 (ert-deftest pi-coding-agent-test-display-session-history-renders-custom-messages ()
   "Session history replay should preserve visible custom messages."
