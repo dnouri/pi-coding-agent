@@ -1,7 +1,12 @@
 # pi-coding-agent Makefile
 
 EMACS ?= emacs
+# Keep package state project-local so test/dep installs never pollute the
+# developer's real ~/.emacs.d/elpa (which may be managed by straight.el etc.).
+# Override with `make test PACKAGE_USER_DIR=...` if needed.
+PACKAGE_USER_DIR ?= $(abspath .cache/elpa)
 BATCH = $(EMACS) --batch -Q -L . \
+	--eval "(setq package-user-dir \"$(PACKAGE_USER_DIR)\")" \
 	--eval "(add-to-list 'treesit-extra-load-path (expand-file-name \"~/.emacs.d/tree-sitter\"))"
 # Keep this checkout first in load-path even after package-initialize.
 LOCAL_LOAD_PATH = --eval "(setq load-path (cons (expand-file-name \".\") load-path))"
