@@ -815,7 +815,9 @@ Always returns an expanded absolute path (no ~ abbreviation)."
        default-directory))
     (t
      (or (when-let* ((proj (project-current)))
-           (project-root proj))
+           (pcase proj
+             (`(projectile . ,dir) dir)
+             (_ (project-root proj))))
          default-directory)))))
 
 ;;;; Buffer Naming & Creation
