@@ -644,8 +644,14 @@ follow-up as a fresh prompt.")
           (skip-chars-backward "\n")
           (delete-region (point) (point-max))
           (insert "\n"))))
-    (pi-coding-agent--set-activity-phase
-     (if (eq pi-coding-agent--status 'sending) "thinking" "idle"))
+    (if (eq pi-coding-agent--status 'sending)
+        (progn
+          ;; Pi will retry (auto_retry or compaction retry).
+          ;; Begin prompt-start-wait so the fallback timer resets to idle if
+          ;; no agent_start/auto_retry_start arrives.
+          (pi-coding-agent--begin-prompt-start-wait)
+          (pi-coding-agent--set-activity-phase "thinking"))
+      (pi-coding-agent--set-activity-phase "idle"))
     (pi-coding-agent--refresh-header)
     ;; Give immediate post-run compaction/retry events a chance to arrive before
     ;; turning a local follow-up into a new independent prompt.
@@ -771,7 +777,11 @@ Status transitions are handled by `pi-coding-agent--update-state-from-event'."
             ;; Pi is either retrying automatically or resuming a prompt whose
             ;; preflight compacted first.  Keep local follow-ups behind that
             ;; Pi-owned work.
-            (pi-coding-agent--set-activity-phase "thinking"))
+            (pi-coding-agent--set-activity-phase "thinking")
+            ;; Server-initiated retry has no user-owned prompt-start-wait.
+            ;; Begin one so the fallback timer resets to idle if agent_start
+            ;; never arrives (e.g. server bug, network issue).
+            (pi-coding-agent--begin-prompt-start-wait))
         (pi-coding-agent--set-activity-phase "idle")
         (pi-coding-agent--schedule-followup-queue-processing)))
      (t
