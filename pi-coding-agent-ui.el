@@ -815,7 +815,16 @@ Always returns an expanded absolute path (no ~ abbreviation)."
        default-directory))
     (t
      (or (when-let* ((proj (project-current)))
-           (project-root proj))
+           ;; `project-current' may return an instance whose backend
+           ;; never defined a `project-root' method (older projectile
+           ;; returns (projectile . DIR)).  Recover the root from that
+           ;; cons shape, else degrade to `default-directory' instead
+           ;; of crashing session startup on `cl-no-applicable-method'.
+           (condition-case nil
+               (project-root proj)
+             (cl-no-applicable-method
+              (when (and (consp proj) (stringp (cdr proj)))
+                (cdr proj)))))
          default-directory)))))
 
 ;;;; Buffer Naming & Creation

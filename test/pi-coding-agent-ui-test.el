@@ -333,6 +333,34 @@ This ensures all files get code fences for consistent display."
                (lambda (&rest _) nil)))
       (should (equal (pi-coding-agent--session-directory) "/tmp/somedir/")))))
 
+(ert-deftest pi-coding-agent-test-session-directory-recovers-projectile-root ()
+  "Recovers root when a backend returns a cons cell with no `project-root'.
+Older projectile returns (projectile . DIR) but defines no method, raising
+`cl-no-applicable-method' (issue #234)."
+  (let ((default-directory "/tmp/"))
+    (cl-letf (((symbol-function 'project-current)
+               (lambda (&rest _) (cons 'projectile "/home/user/proj/")))
+              ((symbol-function 'project-root)
+               (lambda (_proj)
+                 (signal 'cl-no-applicable-method
+                         (list 'project-root
+                               (cons 'projectile "/home/user/proj/"))))))
+      (should (equal (pi-coding-agent--session-directory) "/home/user/proj/")))))
+
+(ert-deftest pi-coding-agent-test-session-directory-survives-malformed-backend ()
+  "Degrades to `default-directory' when a backend's root can't be found.
+Closes the category from issue #234: any instance without a usable
+`(SYMBOL . DIR)' shape must not crash session startup."
+  (let ((default-directory "/tmp/somedir/"))
+    (cl-letf (((symbol-function 'project-current)
+               (lambda (&rest _) (vector 'weird-backend)))
+              ((symbol-function 'project-root)
+               (lambda (_proj)
+                 (signal 'cl-no-applicable-method
+                         (list 'project-root
+                               (vector 'weird-backend))))))
+      (should (equal (pi-coding-agent--session-directory) "/tmp/somedir/")))))
+
 ;;; Buffer Linkage
 
 (defvar-local pi-coding-agent-test--activity-marker nil
