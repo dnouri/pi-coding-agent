@@ -10,6 +10,7 @@
 #+html: <a href="https://github.com/dnouri/pi-coding-agent/actions/workflows/melpazoid.yml"><img alt="melpazoid" src="https://github.com/dnouri/pi-coding-agent/actions/workflows/melpazoid.yml/badge.svg"/></a>
 
 #+html: <p><em>Jump to:</em> <a href="#quick-start">Quick start</a> ·
+#+html: <a href="#how-it-compares">Comparison</a> ·
 #+html: <a href="#everyday-workflow">Everyday workflow</a>
 #+html: (<a href="#composing-prompts">composing prompts</a>,
 #+html: <a href="#reading-output">reading output</a>,
@@ -33,6 +34,29 @@ previous output with ease, and use the key bindings and editing habits
 you already have.
 
 #+html: <a href="https://danielnouri.org/media/pi-coding-agent-demo.mp4"><img src="https://danielnouri.org/media/pi-coding-agent-preview.gif" alt="pi-coding-agent demo - click to play" width="600" height="600"></a>
+
+#+html: <a id="how-it-compares"></a>
+* How does it compare to other Emacs LLM helpers? 🧭
+
+=pi-coding-agent= is a Pi frontend and provides a tight integration
+through the RPC protocol.  Here's a quick overview of other popular
+Emacs packages for AI assisted coding:
+
+- [[https://github.com/karthink/gptel][gptel]] is a general LLM workbench for Emacs.  It works from ordinary
+  buffers, saves chats as files, rewrites regions, attaches context,
+  calls tools, and can use MCP through =mcp.el=.  Core =gptel= ships
+  no tools by default; add-ons such as [[https://github.com/karthink/gptel-agent][gptel-agent]] and [[https://github.com/kmontag/macher][macher]] add
+  agentic and project-editing workflows.
+
+- [[https://github.com/xenodium/agent-shell][agent-shell]] is an ACP shell for many coding agents, including
+  Claude, Codex, Gemini, Goose, OpenCode, Cursor, Copilot, and Pi
+  through =pi-acp=.  The Pi adapter covers a lot of ground but may
+  miss some of the more specific features of Pi such as busy-run
+  steering, forks, and extension UI.
+
+- [[https://github.com/editor-code-assistant/eca-emacs][eca-emacs]] is the Emacs client for the [[https://eca.dev/][ECA server]].  Its Emacs UI
+  leans toward an IDE experience, with inline completion and a
+  rewrite/diff flow.
 
 #+html: <a id="quick-start"></a>
 * Quick start 🚀
