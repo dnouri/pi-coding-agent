@@ -67,10 +67,11 @@ would otherwise become allocation-heavy and effectively quadratic."
   (let ((lines nil)
         (start 0)
         newline)
-    (while (setq newline (string-match "\n" chunk start))
+    (while (setq newline (string-search "\n" chunk start))
       (let ((line (substring chunk start newline)))
         (when chunks
-          (setq line (concat (pi-coding-agent--line-chunks-string chunks) line)
+          (push line chunks)
+          (setq line (pi-coding-agent--line-chunks-string chunks)
                 chunks nil))
         (unless (string-empty-p line)
           (push line lines)))
@@ -88,7 +89,8 @@ and REMAINDER is any incomplete line fragment to save for next call.
 This string API is kept for tests and small helpers.  The process filter uses
 `pi-coding-agent--accumulate-line-chunks' directly so very large partial lines
 are not repeatedly copied."
-  (let* ((chunks (unless (string-empty-p accumulated)
+  (let* ((accumulated (or accumulated ""))
+         (chunks (unless (string-empty-p accumulated)
                    (list accumulated)))
          (result (pi-coding-agent--accumulate-line-chunks chunks chunk)))
     (cons (car result)

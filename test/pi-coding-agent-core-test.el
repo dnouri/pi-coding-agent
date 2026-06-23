@@ -71,6 +71,12 @@
     (should (equal (car result) '("foo")))
     (should (equal (cdr result) ""))))
 
+(ert-deftest pi-coding-agent-test-accumulate-lines-treats-nil-as-empty ()
+  "A nil accumulated fragment is treated as no previous input."
+  (let ((result (pi-coding-agent--accumulate-lines nil "foo\nbar")))
+    (should (equal (car result) '("foo")))
+    (should (equal (cdr result) "bar"))))
+
 (ert-deftest pi-coding-agent-test-accumulate-partial-line ()
   "A partial line (no newline) is saved as remainder."
   (let ((result (pi-coding-agent--accumulate-lines "" "foo")))
@@ -908,6 +914,38 @@ redisplay cycle instead of triggering N separate redraws."
           (pi-coding-agent--process-filter
            fake-proc "{\"type\":\"agent_start\"}\n")
           (should (eq captured-inhibit t)))
+      (delete-process fake-proc))))
+
+(ert-deftest pi-coding-agent-test-process-filter-keeps-partial-output-chunked ()
+  "Process filter dispatches only complete JSON lines and clears chunk state."
+  (let ((events nil)
+        (fake-proc (start-process "cat" nil "cat")))
+    (unwind-protect
+        (progn
+          (process-put fake-proc 'pi-coding-agent-display-handler
+                       (lambda (event) (push event events)))
+          (process-put fake-proc 'pi-coding-agent-partial-output
+                       "{\"type\":\"agent")
+          (pi-coding-agent--process-filter fake-proc "_start\"")
+          (should (null events))
+          (should (null (process-get fake-proc
+                                     'pi-coding-agent-partial-output)))
+          (should (equal (process-get fake-proc
+                                      'pi-coding-agent-partial-output-chunks)
+                         '("_start\"" "{\"type\":\"agent")))
+          (pi-coding-agent--process-filter
+           fake-proc "}\n{\"type\":\"agent_stop\"}\npartial")
+          (should (equal (mapcar (lambda (event) (plist-get event :type))
+                                 (nreverse events))
+                         '("agent_start" "agent_stop")))
+          (should (equal (process-get fake-proc
+                                      'pi-coding-agent-partial-output-chunks)
+                         '("partial")))
+          (setq events nil)
+          (pi-coding-agent--process-filter fake-proc "\n")
+          (should (null events))
+          (should (null (process-get fake-proc
+                                     'pi-coding-agent-partial-output-chunks))))
       (delete-process fake-proc))))
 
 (provide 'pi-coding-agent-core-test)

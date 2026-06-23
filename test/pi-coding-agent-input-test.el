@@ -2174,6 +2174,33 @@ This ensures history loads correctly when callback runs in arbitrary context."
       (delete-file temp-file)
       (delete-directory project-dir t))))
 
+(ert-deftest pi-coding-agent-test-session-metadata-accepts-type-after-other-keys ()
+  "Session metadata handles small records whose type key is not first."
+  (let ((temp-file (make-temp-file "pi-coding-agent-test-session" nil ".jsonl"))
+        (project-dir (pi-coding-agent-test--make-temp-directory
+                      "pi-coding-agent-test-project-")))
+    (unwind-protect
+        (let ((cwd (directory-file-name project-dir)))
+          (with-temp-file temp-file
+            (insert (json-encode `(:id "test" :type "session" :cwd ,cwd)) "\n")
+            (insert (json-encode '(:id "m1" :type "message"
+                                   :message (:role "user"
+                                             :content [(:type "text"
+                                                       :text "Hello")]))))
+            (insert "\n")
+            (insert (json-encode '(:id "si1" :type "session_info"
+                                   :name "Named session")))
+            (insert "\n"))
+          (let ((metadata (pi-coding-agent--session-metadata temp-file)))
+            (should metadata)
+            (should (equal (plist-get metadata :cwd) cwd))
+            (should (equal (plist-get metadata :first-message) "Hello"))
+            (should (equal (plist-get metadata :message-count) 1))
+            (should (equal (plist-get metadata :session-name)
+                           "Named session"))))
+      (delete-file temp-file)
+      (delete-directory project-dir t))))
+
 (ert-deftest pi-coding-agent-test-session-metadata-returns-nil-for-empty-file ()
   "pi-coding-agent--session-metadata returns nil for empty or invalid files."
   (let ((temp-file (make-temp-file "pi-coding-agent-test-session" nil ".jsonl")))

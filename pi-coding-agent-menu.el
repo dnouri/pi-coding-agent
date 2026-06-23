@@ -233,6 +233,25 @@ payloads."
   (looking-at-p (format pi-coding-agent--session-line-type-re
                         (regexp-quote type))))
 
+(defconst pi-coding-agent--session-metadata-fallback-max-line-length 8192
+  "Maximum line length parsed when the cheap session type prefix misses.")
+
+(defun pi-coding-agent--session-current-line-data ()
+  "Parse the current JSONL line as a plist."
+  (json-parse-string (buffer-substring-no-properties
+                      (point) (line-end-position))
+                     :object-type 'plist))
+
+(defun pi-coding-agent--session-small-current-line-data ()
+  "Parse the current line when it is small enough for metadata fallback."
+  (let ((end (line-end-position)))
+    (when (and (<= (- end (point))
+                   pi-coding-agent--session-metadata-fallback-max-line-length)
+               (save-excursion
+                 (skip-chars-forward " \t" end)
+                 (< (point) end)))
+      (pi-coding-agent--session-current-line-data))))
+
 (defun pi-coding-agent--session-first-message-text (data)
   "Return first visible message text from parsed session DATA, or nil."
   (let* ((message (plist-get data :message))
@@ -258,36 +277,44 @@ most recent session_info entry if present."
                 (session-name nil)
                 (session-cwd nil)
                 (has-session-header nil))
-            (goto-char (point-min))
-            ;; Count ordinary message lines by their cheap prefix.  Only parse
-            ;; session headers, session_info lines, and the first message whose
-            ;; text is needed for the resume picker.
-            (while (not (eobp))
-              (cond
-               ((pi-coding-agent--session-line-type-p "message")
-                (setq message-count (1+ message-count))
-                (unless first-message
-                  (let* ((line (buffer-substring-no-properties
-                                (point) (line-end-position)))
-                         (data (json-parse-string line :object-type 'plist)))
-                    (setq first-message
-                          (pi-coding-agent--session-first-message-text data)))))
-               ((pi-coding-agent--session-line-type-p "session")
-                (let* ((line (buffer-substring-no-properties
-                              (point) (line-end-position)))
-                       (data (json-parse-string line :object-type 'plist)))
-                  (setq has-session-header t
-                        session-cwd
-                        (pi-coding-agent--normalize-string-or-null
-                         (plist-get data :cwd)))))
-               ((pi-coding-agent--session-line-type-p "session_info")
-                (let* ((line (buffer-substring-no-properties
-                              (point) (line-end-position)))
-                       (data (json-parse-string line :object-type 'plist)))
-                  (setq session-name
-                        (pi-coding-agent--normalize-string-or-null
-                         (plist-get data :name))))))
-              (forward-line 1))
+            (cl-labels
+                ((apply-entry
+                  (data &optional message-counted)
+                  (pcase (plist-get data :type)
+                    ("message"
+                     (unless message-counted
+                       (setq message-count (1+ message-count)))
+                     (unless first-message
+                       (setq first-message
+                             (pi-coding-agent--session-first-message-text
+                              data))))
+                    ("session"
+                     (setq has-session-header t
+                           session-cwd
+                           (pi-coding-agent--normalize-string-or-null
+                            (plist-get data :cwd))))
+                    ("session_info"
+                     (setq session-name
+                           (pi-coding-agent--normalize-string-or-null
+                            (plist-get data :name)))))))
+              (goto-char (point-min))
+              ;; Count ordinary message lines by their cheap prefix.  Only parse
+              ;; session headers, session_info lines, and the first message whose
+              ;; text is needed for the resume picker.
+              (while (not (eobp))
+                (cond
+                 ((pi-coding-agent--session-line-type-p "message")
+                  (setq message-count (1+ message-count))
+                  (unless first-message
+                    (apply-entry (pi-coding-agent--session-current-line-data)
+                                 t)))
+                 ((or (pi-coding-agent--session-line-type-p "session")
+                      (pi-coding-agent--session-line-type-p "session_info"))
+                  (apply-entry (pi-coding-agent--session-current-line-data)))
+                 (t
+                  (when-let* ((data (pi-coding-agent--session-small-current-line-data)))
+                    (apply-entry data))))
+                (forward-line 1)))
             ;; Only return metadata if we found a valid session header.
             (when has-session-header
               (list :modified-time modified-time
@@ -616,9 +643,14 @@ CHAT-BUF is rebuilt from the selected session history."
   (let ((entries (pi-coding-agent--list-session-entries session-dir)))
     (if (null entries)
         (message "Pi: No previous sessions found")
-      (let* ((choices (delq nil
-                            (mapcar #'pi-coding-agent--format-session-entry-choice
-                                    entries)))
+      (let* ((choices
+              (delq nil
+                    (mapcar (lambda (entry)
+                              (when-let* ((choice
+                                            (pi-coding-agent--format-session-entry-choice
+                                             entry)))
+                                (cons (car choice) entry)))
+                            entries)))
              (choice-strings (mapcar #'car choices)))
         (if (null choices)
             (message "Pi: No previous sessions found")
@@ -630,9 +662,7 @@ CHAT-BUF is rebuilt from the selected session history."
                               (complete-with-action action choice-strings
                                                     string pred)))
                           nil t))
-                 (choice-index (cl-position choice choices
-                                            :key #'car :test #'equal))
-                 (entry (and choice-index (nth choice-index entries)))
+                 (entry (cdr (assoc choice choices)))
                  (selected-path (and entry (plist-get entry :path))))
             (when selected-path
               (pi-coding-agent--resume-selected-session

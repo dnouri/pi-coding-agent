@@ -683,6 +683,19 @@ agent_end + next section's leading newline must not create triple newlines."
       (should (= font-lock-count 0))
       (should (= table-decoration-count 1)))))
 
+(ert-deftest pi-coding-agent-test-display-session-history-raises-gc-threshold ()
+  "Session history replay raises and restores `gc-cons-threshold'."
+  (let ((gc-cons-threshold 1024)
+        (captured-threshold nil))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (cl-letf (((symbol-function 'pi-coding-agent--display-history-messages)
+                 (lambda (_messages)
+                   (setq captured-threshold gc-cons-threshold))))
+        (pi-coding-agent--display-session-history [] (current-buffer))))
+    (should (>= captured-threshold (* 64 1024 1024)))
+    (should (= gc-cons-threshold 1024))))
+
 (ert-deftest pi-coding-agent-test-display-session-history-postprocesses-hot-tail-only ()
   "Large history replay eagerly decorates candidate tables only in the hot tail."
   (with-temp-buffer

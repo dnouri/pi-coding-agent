@@ -807,6 +807,42 @@ BINDING-SPEC is (DIR CHAT-NAME INPUT-NAME PROC).  DIR is evaluated once."
       (when (buffer-live-p chat-buf)
         (kill-buffer chat-buf)))))
 
+(ert-deftest pi-coding-agent-test-refresh-session-state-reuses-listed-metadata ()
+  "Refreshing a selected session uses listed metadata without scanning again."
+  (let* ((chat-buf (get-buffer-create "*pi-coding-agent-test-refresh-metadata*"))
+         (session-file "/tmp/pi-session.jsonl")
+         (metadata '(:session-name "Listed name"))
+         (proc (start-process "test-refresh-session-metadata" nil "cat")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--process proc))
+          (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc cmd cb)
+                       (should (equal (plist-get cmd :type) "get_state"))
+                       (funcall cb `(:success t
+                                     :data (:model (:name "model")
+                                            :thinkingLevel "medium"
+                                            :isStreaming :json-false
+                                            :isCompacting :json-false
+                                            :sessionId "session-id"
+                                            :sessionFile ,session-file
+                                            :messageCount 0
+                                            :pendingMessageCount 0)))))
+                    ((symbol-function 'pi-coding-agent--update-session-name-from-file)
+                     (lambda (&rest _)
+                       (ert-fail "session metadata was rescanned")))
+                    ((symbol-function 'force-mode-line-update) #'ignore))
+            (pi-coding-agent--refresh-session-state
+             proc chat-buf session-file metadata))
+          (with-current-buffer chat-buf
+            (should (equal pi-coding-agent--session-name "Listed name"))))
+      (when (and proc (process-live-p proc))
+        (delete-process proc))
+      (when (buffer-live-p chat-buf)
+        (kill-buffer chat-buf)))))
+
 (ert-deftest pi-coding-agent-test-send-resets-activity-when-process-dead ()
   "Sending when process is dead resets activity phase and status."
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-process-dead*"))
@@ -1459,6 +1495,31 @@ replaced by the resumed or forked history."
           (should (equal (pi-coding-agent--list-sessions session-dir)
                          (list session-file))))
       (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-resume-session-choice-keeps-entry-metadata ()
+  "The resume selector maps formatted choices back to their original entries."
+  (let* ((first-entry '(:path "/tmp/first.jsonl"
+                        :metadata (:session-name "First")))
+         (second-entry '(:path "/tmp/second.jsonl"
+                         :metadata (:session-name "Second")))
+         (selected-path nil)
+         (selected-metadata nil))
+    (cl-letf (((symbol-function 'pi-coding-agent--list-session-entries)
+               (lambda (_session-dir) (list first-entry second-entry)))
+              ((symbol-function 'pi-coding-agent--format-session-entry-choice)
+               (lambda (entry)
+                 (when (equal (plist-get entry :path) "/tmp/second.jsonl")
+                   (cons "Second" (plist-get entry :path)))))
+              ((symbol-function 'completing-read)
+               (lambda (&rest _) "Second"))
+              ((symbol-function 'pi-coding-agent--resume-selected-session)
+               (lambda (_proc _chat-buf path metadata)
+                 (setq selected-path path
+                       selected-metadata metadata))))
+      (pi-coding-agent--resume-session-from-directory
+       'mock-proc (current-buffer) "/tmp/sessions")
+      (should (equal selected-path "/tmp/second.jsonl"))
+      (should (equal selected-metadata '(:session-name "Second"))))))
 
 (ert-deftest pi-coding-agent-test-resume-session-from-input-switches-session-and-rebuilds-history ()
   "Resuming from the input buffer refreshes the linked chat and session state."
