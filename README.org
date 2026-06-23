@@ -70,8 +70,8 @@ is the shortest path to a usable session.
 - Node.js 22.19 or later for the pi CLI
 - [[https://pi.dev][pi coding agent]] =@earendil-works/pi-coding-agent@0.79.1= or later,
   installed and in =PATH=
-- Pi CLI authentication via =pi --login=, or provider API keys
-  configured for pi
+- Pi CLI authentication: a provider API key, or a one-time =/login= run
+  in a terminal (see [[*Install pi and authenticate][Install pi and authenticate]])
 - A C compiler if Emacs needs to compile tree-sitter grammars
 
 ** Install pi and authenticate 🔐
@@ -83,12 +83,24 @@ npm install -g @earendil-works/pi-coding-agent
 # Or with mise
 mise use -g npm:@earendil-works/pi-coding-agent@latest
 
-# Authenticate the CLI
-pi --login
+# Authenticate the CLI: either set a provider API key (see below), or
+# run `pi` interactively in a terminal and type `/login`.
 #+end_src
 
-If you prefer not to use OAuth, configure the provider API keys
-supported by Pi instead.
+Pi authenticates in one of two ways:
+
+- *Subscription or API key via =/login=:* =/login= is an interactive
+  command that is unavailable from Emacs: run plain =pi= once in a
+  terminal and type =/login=; you can then pick a subscription such as
+  ChatGPT Plus/Pro, or choose a provider and enter its API key.
+  Credentials are stored in =~/.pi/agent/auth.json= and auto-refresh,
+  so later Emacs sessions pick them up automatically.
+
+- *Provider API key (no terminal login needed):* export a provider
+  environment variable, e.g. =export ZAI_API_KEY=...=, or add an entry
+  to =~/.pi/agent/auth.json=.  Pi supports many providers including
+  DeepSeek, OpenAI, Z.AI.  See the [[https://pi.dev/docs/latest/providers][providers documentation]] for the
+  full set and its environment variables.
 
 ** Install the Emacs package 📦
 
@@ -123,7 +135,10 @@ session.
 *** No model is available
 
 Make sure the [[https://pi.dev/docs/latest/providers][Pi CLI is authenticated]] before expecting models to
-appear, either via =pi --login= or by configuring API keys.
+appear: set a provider API key, or run =pi= in a terminal once and use
+=/login=.  Then make the running session pick up the new credentials:
+press =C-c C-p R= (or =M-x pi-coding-agent-reload=) to restart the Pi
+process without losing the conversation.
 
 *** Missing pi executable
 
