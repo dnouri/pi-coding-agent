@@ -104,6 +104,18 @@
     (should (equal (car result) '("hello" "world")))
     (should (equal (cdr result) ""))))
 
+(ert-deftest pi-coding-agent-test-accumulate-line-chunks-materializes-on-newline ()
+  "Chunk accumulation keeps partial lines chunked until a newline arrives."
+  (let* ((result1 (pi-coding-agent--accumulate-line-chunks nil "hel"))
+         (result2 (pi-coding-agent--accumulate-line-chunks (cdr result1) "lo\nworld"))
+         (result3 (pi-coding-agent--accumulate-line-chunks (cdr result2) "\n")))
+    (should (null (car result1)))
+    (should (equal (cdr result1) '("hel")))
+    (should (equal (car result2) '("hello")))
+    (should (equal (cdr result2) '("world")))
+    (should (equal (car result3) '("world")))
+    (should (null (cdr result3)))))
+
 ;;;; JSON Encoding Tests
 
 (ert-deftest pi-coding-agent-test-encode-simple-command ()

@@ -2274,6 +2274,20 @@ This ensures history loads correctly when callback runs in arbitrary context."
             (should-not (string-match-p "Hello world" (car choice)))))
       (delete-file temp-file))))
 
+(ert-deftest pi-coding-agent-test-format-session-choice-reuses-metadata ()
+  "pi-coding-agent--format-session-choice need not rescan a listed session."
+  (cl-letf (((symbol-function 'pi-coding-agent--session-metadata)
+             (lambda (_path)
+               (ert-fail "session metadata was rescanned"))))
+    (let* ((path "/tmp/session.jsonl")
+           (metadata (list :modified-time (current-time)
+                           :session-name "Cached name"
+                           :message-count 12))
+           (choice (pi-coding-agent--format-session-choice path metadata)))
+      (should (equal (cdr choice) path))
+      (should (string-match-p "Cached name" (car choice)))
+      (should (string-match-p "12 msgs" (car choice))))))
+
 (ert-deftest pi-coding-agent-test-header-line-includes-session-name ()
   "pi-coding-agent--header-line-string includes session name when set."
   (let ((chat-buf (get-buffer-create "*pi-test-header-session-name*")))

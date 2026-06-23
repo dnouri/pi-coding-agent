@@ -772,6 +772,41 @@ BINDING-SPEC is (DIR CHAT-NAME INPUT-NAME PROC).  DIR is evaluated once."
       (when (buffer-live-p chat-buf)
         (kill-buffer chat-buf)))))
 
+(ert-deftest pi-coding-agent-test-refresh-session-state-skips-duplicate-name-scan ()
+  "Refreshing state does not re-read the same session file for its name."
+  (let* ((chat-buf (get-buffer-create "*pi-coding-agent-test-refresh-name*"))
+         (session-file "/tmp/pi-session.jsonl")
+         (update-calls 0)
+         (proc (start-process "test-refresh-session-name" nil "cat")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--process proc))
+          (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc cmd cb)
+                       (should (equal (plist-get cmd :type) "get_state"))
+                       (funcall cb `(:success t
+                                     :data (:model (:name "model")
+                                            :thinkingLevel "medium"
+                                            :isStreaming :json-false
+                                            :isCompacting :json-false
+                                            :sessionId "session-id"
+                                            :sessionFile ,session-file
+                                            :messageCount 0
+                                            :pendingMessageCount 0)))))
+                    ((symbol-function 'pi-coding-agent--update-session-name-from-file)
+                     (lambda (_session-file)
+                       (setq update-calls (1+ update-calls))
+                       '(:session-name "Cached name")))
+                    ((symbol-function 'force-mode-line-update) #'ignore))
+            (pi-coding-agent--refresh-session-state proc chat-buf session-file))
+          (should (= update-calls 1)))
+      (when (and proc (process-live-p proc))
+        (delete-process proc))
+      (when (buffer-live-p chat-buf)
+        (kill-buffer chat-buf)))))
+
 (ert-deftest pi-coding-agent-test-send-resets-activity-when-process-dead ()
   "Sending when process is dead resets activity phase and status."
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-process-dead*"))
@@ -1451,12 +1486,15 @@ replaced by the resumed or forked history."
               (setq pi-coding-agent--state
                     (plist-put pi-coding-agent--state :session-file
                                current-session)))
-            (cl-letf (((symbol-function 'pi-coding-agent--list-sessions)
+            (cl-letf (((symbol-function 'pi-coding-agent--list-session-entries)
                        (lambda (session-dir)
                          (setq listed-dir session-dir)
-                         (list target-session)))
-                      ((symbol-function 'pi-coding-agent--format-session-choice)
-                       (lambda (_path)
+                         (list (list :path target-session
+                                     :metadata (list :modified-time (current-time)
+                                                     :first-message "Resume target"
+                                                     :message-count 1)))))
+                      ((symbol-function 'pi-coding-agent--format-session-entry-choice)
+                       (lambda (_entry)
                          (cons "Resume target" target-session)))
                       ((symbol-function 'completing-read)
                        (lambda (&rest _) "Resume target"))
@@ -1596,10 +1634,10 @@ replaced by the resumed or forked history."
               (setq pi-coding-agent--status 'streaming))
             (cl-letf (((symbol-function 'pi-coding-agent--get-process)
                        (lambda () 'mock-proc))
-                      ((symbol-function 'pi-coding-agent--list-sessions)
+                      ((symbol-function 'pi-coding-agent--list-session-entries)
                        (lambda (_dir)
                          (setq listed-sessions t)
-                         (list "session.jsonl")))
+                         (list (list :path "session.jsonl"))))
                       ((symbol-function 'message)
                        (lambda (fmt &rest args)
                          (setq shown-message (apply #'format fmt args)))))
@@ -1625,10 +1663,10 @@ replaced by the resumed or forked history."
                     pi-coding-agent--followup-drain-timer 'fake-drain-timer))
             (cl-letf (((symbol-function 'pi-coding-agent--get-process)
                        (lambda () 'mock-proc))
-                      ((symbol-function 'pi-coding-agent--list-sessions)
+                      ((symbol-function 'pi-coding-agent--list-session-entries)
                        (lambda (_dir)
                          (setq listed-sessions t)
-                         (list "session.jsonl")))
+                         (list (list :path "session.jsonl"))))
                       ((symbol-function 'message)
                        (lambda (fmt &rest args)
                          (setq shown-message (apply #'format fmt args)))))
@@ -1671,7 +1709,7 @@ replaced by the resumed or forked history."
                                               :sessionFile ,session-file
                                               :messageCount 0
                                               :pendingMessageCount 0)))))
-                      ((symbol-function 'pi-coding-agent--list-sessions)
+                      ((symbol-function 'pi-coding-agent--list-session-entries)
                        (lambda (session-dir)
                          (setq listed-dir session-dir)
                          nil))
@@ -1711,7 +1749,7 @@ replaced by the resumed or forked history."
                                               :sessionId "session-id"
                                               :messageCount 0
                                               :pendingMessageCount 0)))))
-                      ((symbol-function 'pi-coding-agent--list-sessions)
+                      ((symbol-function 'pi-coding-agent--list-session-entries)
                        (lambda (_session-dir)
                          (setq listed-sessions t)
                          nil))

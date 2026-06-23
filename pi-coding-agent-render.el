@@ -3074,7 +3074,11 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
   (when (and chat-buf (buffer-live-p chat-buf))
     (with-current-buffer chat-buf
       (pi-coding-agent--set-canonical-messages messages)
-      (let ((inhibit-read-only t))
+      (let ((inhibit-read-only t)
+            ;; A full resume/reload rebuild allocates many short strings,
+            ;; overlays, and display properties.  Keep GC out of the hot path;
+            ;; Emacs will collect normally after the dynamic binding unwinds.
+            (gc-cons-threshold (max gc-cons-threshold (* 64 1024 1024))))
         (pi-coding-agent--clear-render-artifacts)
         (erase-buffer)
         (insert (pi-coding-agent--format-startup-header) "\n")

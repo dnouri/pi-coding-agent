@@ -45,19 +45,54 @@ Returns nil if LINE is not valid JSON."
 
 ;;;; Line Accumulation
 
-(defun pi-coding-agent--accumulate-lines (accumulated chunk)
+(defun pi-coding-agent--line-chunks-string (chunks)
+  "Return CHUNKS, stored newest first, as one string."
+  (if chunks
+      (apply #'concat (nreverse (copy-sequence chunks)))
+    ""))
+
+(defun pi-coding-agent--accumulate-line-chunks (chunks chunk)
+  "Accumulate CHUNK into partial line CHUNKS.
+CHUNKS stores fragments for an unfinished line newest first.  Return a cons
+cell whose car is COMPLETE-LINES and cdr is REMAINDER-CHUNKS.  COMPLETE-LINES
+are newline-terminated lines without newlines, and REMAINDER-CHUNKS is the
+unfinished line state to keep for the next `process-filter' call.
+
+The important property is that an unfinished long JSON line is kept as chunks
+and materialized only when its newline arrives.  Large `get_messages' RPC
+responses are one huge JSON line, so repeatedly concatenating the partial line
+would otherwise become allocation-heavy and effectively quadratic."
   ;; Note: Empty strings are filtered here because they're not valid JSON.
   ;; This couples line splitting with JSON semantics, but keeps the API simple.
+  (let ((lines nil)
+        (start 0)
+        newline)
+    (while (setq newline (string-match "\n" chunk start))
+      (let ((line (substring chunk start newline)))
+        (when chunks
+          (setq line (concat (pi-coding-agent--line-chunks-string chunks) line)
+                chunks nil))
+        (unless (string-empty-p line)
+          (push line lines)))
+      (setq start (1+ newline)))
+    (when (< start (length chunk))
+      (push (substring chunk start) chunks))
+    (cons (nreverse lines) chunks)))
+
+(defun pi-coding-agent--accumulate-lines (accumulated chunk)
   "Accumulate CHUNK into ACCUMULATED, extracting complete lines.
 Returns a cons cell (COMPLETE-LINES . REMAINDER) where COMPLETE-LINES
 is a list of complete newline-terminated lines (without the newlines)
-and REMAINDER is any incomplete line fragment to save for next call."
-  (let* ((combined (concat accumulated chunk))
-         (parts (split-string combined "\n"))
-         (complete-lines (butlast parts))
-         (remainder (car (last parts))))
-    (cons (seq-filter (lambda (s) (not (string-empty-p s))) complete-lines)
-          remainder)))
+and REMAINDER is any incomplete line fragment to save for next call.
+
+This string API is kept for tests and small helpers.  The process filter uses
+`pi-coding-agent--accumulate-line-chunks' directly so very large partial lines
+are not repeatedly copied."
+  (let* ((chunks (unless (string-empty-p accumulated)
+                   (list accumulated)))
+         (result (pi-coding-agent--accumulate-line-chunks chunks chunk)))
+    (cons (car result)
+          (pi-coding-agent--line-chunks-string (cdr result)))))
 
 ;;;; JSON Encoding
 
@@ -133,10 +168,16 @@ Returns nil on timeout."
   "Handle OUTPUT from pi PROC.
 Accumulates output and dispatches complete JSON lines."
   (let* ((inhibit-redisplay t)
-         (partial (or (process-get proc 'pi-coding-agent-partial-output) ""))
-         (result (pi-coding-agent--accumulate-lines partial output))
+         (partial (or (process-get proc 'pi-coding-agent-partial-output-chunks)
+                      (when-let* ((old-partial
+                                   (process-get proc 'pi-coding-agent-partial-output))
+                                  ((stringp old-partial))
+                                  ((not (string-empty-p old-partial))))
+                        (list old-partial))))
+         (result (pi-coding-agent--accumulate-line-chunks partial output))
          (lines (car result)))
-    (process-put proc 'pi-coding-agent-partial-output (cdr result))
+    (process-put proc 'pi-coding-agent-partial-output nil)
+    (process-put proc 'pi-coding-agent-partial-output-chunks (cdr result))
     (dolist (line lines)
       (when-let* ((json (pi-coding-agent--parse-json-line line)))
         (pi-coding-agent--dispatch-response proc json)))))
