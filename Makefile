@@ -22,7 +22,7 @@ VERBOSE ?=
 
 .PHONY: test test-unit test-core test-ui test-render test-table test-input test-menu test-build
 .PHONY: test-integration test-integration-fake test-integration-real test-integration-ci test-integration-ci-real test-gui test-gui-ci test-all
-.PHONY: bench bench-batch
+.PHONY: bench bench-batch bench-reload-resume bench-reload-resume-batch bench-reload-resume-smoke
 .PHONY: check check-parens compile lint lint-checkdoc lint-package clean clean-cache help
 .PHONY: ollama-start ollama-stop ollama-status setup-pi install-hooks
 
@@ -41,8 +41,11 @@ help:
 	@echo "  make test-integration-fake Shared integration tests against fake backend only"
 	@echo "  make test-integration-real Shared integration tests against real backend only (local target starts Ollama)"
 	@echo "  make test-gui         Deterministic fake-backed GUI tests (SELECTOR=pattern; no Docker)"
-	@echo "  make bench            Table rendering benchmarks (GUI via xvfb)"
-	@echo "  make bench-batch      Table rendering benchmarks (batch, secondary lane)"
+	@echo "  make bench                         Table rendering benchmarks (GUI via xvfb)"
+	@echo "  make bench-batch                   Table rendering benchmarks (batch, secondary lane)"
+	@echo "  make bench-reload-resume           Reload/resume benchmarks (GUI via xvfb)"
+	@echo "  make bench-reload-resume-batch     Reload/resume benchmarks (batch, secondary lane)"
+	@echo "  make bench-reload-resume-smoke     Reload/resume smoke benchmark (batch, no timing thresholds)"
 	@echo "  make lint             Checkdoc + package-lint"
 	@echo "  make check            Compile, lint, unit tests (pre-commit)"
 	@echo "  make install-hooks    Set up git pre-commit hook"
@@ -245,6 +248,18 @@ bench: .deps-stamp
 # Secondary lane: batch mode (faster, no font engine).
 bench-batch: .deps-stamp
 	@./bench/run-bench.sh --batch
+
+# Primary lane: GUI via xvfb for real reload/resume rendering behavior.
+bench-reload-resume: .deps-stamp
+	@./bench/run-reload-resume-bench.sh
+
+# Secondary lane: batch mode; useful for CI artifacts and quick comparisons.
+bench-reload-resume-batch: .deps-stamp
+	@./bench/run-reload-resume-bench.sh --batch
+
+# Cheap correctness/regression smoke; no timing thresholds are enforced.
+bench-reload-resume-smoke: .deps-stamp
+	@./bench/run-reload-resume-bench.sh --batch --scenario smoke -c 1
 
 # ============================================================
 # Ollama management (local development)

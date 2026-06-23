@@ -7,9 +7,12 @@ on:
 
 jobs:
   bench:
-    name: Table rendering
+    name: Benchmarks
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: purcell/setup-emacs@master
@@ -19,11 +22,26 @@ jobs:
         run: emacs --batch -Q -L . -l scripts/install-ts-grammars.el
       - name: Install package dependencies
         run: make deps
-      - name: Run benchmarks (batch)
-        run: ./bench/run-bench.sh --batch -c 3 | tee bench-output.txt
+      - name: Run table rendering benchmarks (batch)
+        run: |
+          set -o pipefail
+          ./bench/run-bench.sh --batch -c 3 | tee bench-output.txt
+      - name: Run reload/resume benchmarks (batch smoke)
+        run: |
+          set -o pipefail
+          ./bench/run-reload-resume-bench.sh --batch --scenario smoke -c 1 --out-dir tmp/reload-resume-bench-ci | tee reload-resume-bench-output.txt
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: bench-results
-          path: bench-output.txt
+          path: |
+            bench-output.txt
+            reload-resume-bench-output.txt
+            tmp/reload-resume-bench-ci/summary.csv
+            tmp/reload-resume-bench-ci/summary.md
+            tmp/reload-resume-bench-ci/**/report.md
+            tmp/reload-resume-bench-ci/**/result.json
+            tmp/reload-resume-bench-ci/**/times.tsv
+            tmp/reload-resume-bench-ci/**/stdout.log
+            tmp/reload-resume-bench-ci/**/stderr.log

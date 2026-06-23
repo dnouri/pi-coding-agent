@@ -76,8 +76,11 @@ module, direct `setq` is fine.
 |------|---------|
 | `Makefile` | Build, test, lint targets |
 | `bench/pi-coding-agent-bench.el` | Table rendering benchmark harness (xvfb GUI or batch) |
-| `bench/run-bench.sh` | Benchmark runner script; `--batch` for headless lane |
-| `bench/fixtures/tables.md` | Sample pipe tables used by the benchmark |
+| `bench/run-bench.sh` | Table benchmark runner script; `--batch` for headless lane |
+| `bench/pi-coding-agent-reload-resume-bench.el` | Synthetic reload/resume benchmark harness |
+| `bench/fake-pi-reload-resume.py` | Fake JSON-over-stdio pi backend for reload/resume benchmarks |
+| `bench/run-reload-resume-bench.sh` | Reload/resume benchmark runner; GUI uses `xvfb-run`, `--batch` for headless lane |
+| `bench/fixtures/tables.md` | Sample pipe tables used by the table benchmark |
 | `scripts/check.sh` | Pre-commit hook: byte-compile + lint + tests |
 | `scripts/pi-coding-agent-build.el` | Shared batch helpers for dependency and grammar installation |
 | `scripts/install-deps.el` | Batch script: install required Emacs package dependencies |
@@ -133,12 +136,18 @@ without losing behavioral coverage.
 ## Benchmarks
 
 ```bash
-make bench             # GUI lane via xvfb (font metrics matter)
-make bench-batch       # batch lane (no display, faster but no font engine)
+make bench                         # table GUI lane via xvfb (font metrics matter)
+make bench-batch                   # table batch lane (no display, secondary)
+make bench-reload-resume           # reload/resume GUI lane via xvfb (primary)
+make bench-reload-resume-batch     # reload/resume batch lane (secondary)
+make bench-reload-resume-smoke     # cheap synthetic correctness smoke
 ```
 
-The GUI lane is the primary measurement; batch is a quick sanity check.
-Fixtures live in `bench/fixtures/tables.md`.
+The GUI lanes are the primary measurements; batch lanes are quick sanity
+checks and CI artifact generators.  Reload/resume benchmarks use synthetic
+JSONL fixtures only and fail on correctness errors, not timing thresholds.
+Table fixtures live in `bench/fixtures/tables.md`. Reload/resume artifacts are
+written under `tmp/reload-resume-bench/` by default.
 
 ## Linting
 
