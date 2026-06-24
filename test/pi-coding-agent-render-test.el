@@ -693,7 +693,8 @@ agent_end + next section's leading newline must not create triple newlines."
                  (lambda (_messages)
                    (setq captured-threshold gc-cons-threshold))))
         (pi-coding-agent--display-session-history [] (current-buffer))))
-    (should (>= captured-threshold (* 64 1024 1024)))
+    (should (>= captured-threshold
+                pi-coding-agent--history-replay-gc-threshold))
     (should (= gc-cons-threshold 1024))))
 
 (ert-deftest pi-coding-agent-test-display-session-history-postprocesses-hot-tail-only ()

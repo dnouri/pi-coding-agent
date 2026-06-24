@@ -170,15 +170,9 @@ Returns nil on timeout."
   "Handle OUTPUT from pi PROC.
 Accumulates output and dispatches complete JSON lines."
   (let* ((inhibit-redisplay t)
-         (partial (or (process-get proc 'pi-coding-agent-partial-output-chunks)
-                      (when-let* ((old-partial
-                                   (process-get proc 'pi-coding-agent-partial-output))
-                                  ((stringp old-partial))
-                                  ((not (string-empty-p old-partial))))
-                        (list old-partial))))
+         (partial (process-get proc 'pi-coding-agent-partial-output-chunks))
          (result (pi-coding-agent--accumulate-line-chunks partial output))
          (lines (car result)))
-    (process-put proc 'pi-coding-agent-partial-output nil)
     (process-put proc 'pi-coding-agent-partial-output-chunks (cdr result))
     (dolist (line lines)
       (when-let* ((json (pi-coding-agent--parse-json-line line)))

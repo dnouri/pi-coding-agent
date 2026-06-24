@@ -8,7 +8,7 @@
 #   ./bench/run-reload-resume-bench.sh --scenario smoke -c 1   # cheap correctness smoke
 #   ./bench/run-reload-resume-bench.sh --scenarios a,b         # comma-separated scenarios
 #   ./bench/run-reload-resume-bench.sh --out-dir tmp/rr-bench  # write artifacts elsewhere
-#   ./bench/run-reload-resume-bench.sh --no-timings            # wall-clock without advice
+#   ./bench/run-reload-resume-bench.sh --timings               # add diagnostic advice data
 #
 # The primary lane uses xvfb-run for GUI Emacs, so interactive buffers render
 # under a virtual display instead of popping up locally.  Batch numbers are a
@@ -22,7 +22,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 BATCH=0
 REPS=5
-TIMINGS=1
+TIMINGS=0
 OUT_DIR="$PROJECT_DIR/tmp/reload-resume-bench"
 SCENARIOS=()
 
@@ -84,6 +84,16 @@ case "$OUT_DIR" in
 esac
 if [[ -z "$OUT_DIR" || "$OUT_DIR" == "/" ]]; then
     echo "ERROR: refusing unsafe output directory: $OUT_DIR" >&2
+    exit 1
+fi
+
+BENCH_MARKER="$OUT_DIR/.pi-coding-agent-reload-resume-bench"
+if [[ -e "$OUT_DIR" && ! -d "$OUT_DIR" ]]; then
+    echo "ERROR: refusing to replace non-directory output path: $OUT_DIR" >&2
+    exit 1
+fi
+if [[ -d "$OUT_DIR" && ! -f "$BENCH_MARKER" ]] && find "$OUT_DIR" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+    echo "ERROR: refusing to remove non-empty output directory without benchmark marker: $OUT_DIR" >&2
     exit 1
 fi
 
@@ -160,6 +170,7 @@ EMACS_INIT=(
 
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
+touch "$BENCH_MARKER"
 
 printf '=== pi-coding-agent Reload/Resume Benchmarks ===\n'
 printf 'Project: %s\n' "$PROJECT_DIR"

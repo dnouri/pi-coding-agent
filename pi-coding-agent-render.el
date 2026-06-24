@@ -48,6 +48,9 @@
 ;; Forward references for functions in other modules
 (declare-function pi-coding-agent-compact "pi-coding-agent-menu" (&optional custom-instructions))
 
+(defconst pi-coding-agent--history-replay-gc-threshold (* 64 1024 1024)
+  "Minimum `gc-cons-threshold' used while replaying full session history.")
+
 ;;;; Response Display
 
 (defvar-local pi-coding-agent--defer-history-postprocessing nil
@@ -3078,7 +3081,9 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
             ;; A full resume/reload rebuild allocates many short strings,
             ;; overlays, and display properties.  Keep GC out of the hot path;
             ;; Emacs will collect normally after the dynamic binding unwinds.
-            (gc-cons-threshold (max gc-cons-threshold (* 64 1024 1024))))
+            (gc-cons-threshold
+             (max gc-cons-threshold
+                  pi-coding-agent--history-replay-gc-threshold)))
         (pi-coding-agent--clear-render-artifacts)
         (erase-buffer)
         (insert (pi-coding-agent--format-startup-header) "\n")

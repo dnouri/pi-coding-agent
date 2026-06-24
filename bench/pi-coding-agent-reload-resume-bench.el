@@ -22,8 +22,9 @@
 ;; The primary lane is GUI/xvfb because reload/resume includes redisplay,
 ;; tree-sitter, overlays, and window-visible rendering.  Batch numbers are
 ;; useful for CI trend artifacts but less representative of interactive use.
-;; Timing advice is diagnostic only; pass --no-timings for purer wall-clock
-;; numbers.  No timing threshold is enforced by this benchmark.
+;; Timing advice is diagnostic only; pass --timings when inclusive function
+;; timings are more useful than purer wall-clock numbers.  No timing threshold
+;; is enforced by this benchmark.
 
 ;;; Code:
 
@@ -121,7 +122,7 @@ rendered transcript, which keeps the RPC framing benchmark focused.")
   "Whether GUI benchmark iterations should display chat and input windows.")
 
 (defvar pi-coding-agent-rr-bench-timings-enabled
-  (pi-coding-agent-rr-bench--truthy-env-p "PI_RR_BENCH_TIMINGS" "1")
+  (pi-coding-agent-rr-bench--truthy-env-p "PI_RR_BENCH_TIMINGS" "0")
   "Whether to collect diagnostic inclusive timing advice data.")
 
 (defvar pi-coding-agent-rr-bench-out-dir

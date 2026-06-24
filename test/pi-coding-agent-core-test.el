@@ -924,12 +924,10 @@ redisplay cycle instead of triggering N separate redraws."
         (progn
           (process-put fake-proc 'pi-coding-agent-display-handler
                        (lambda (event) (push event events)))
-          (process-put fake-proc 'pi-coding-agent-partial-output
-                       "{\"type\":\"agent")
+          (process-put fake-proc 'pi-coding-agent-partial-output-chunks
+                       '("{\"type\":\"agent"))
           (pi-coding-agent--process-filter fake-proc "_start\"")
           (should (null events))
-          (should (null (process-get fake-proc
-                                     'pi-coding-agent-partial-output)))
           (should (equal (process-get fake-proc
                                       'pi-coding-agent-partial-output-chunks)
                          '("_start\"" "{\"type\":\"agent")))

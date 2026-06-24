@@ -510,53 +510,31 @@ ACTION should be a short verb such as resume or fork for user messages."
       nil)
      (t t))))
 
-(defun pi-coding-agent--same-session-file-p (a b chat-buf)
-  "Return non-nil when A and B name the same session file for CHAT-BUF."
-  (and (stringp a)
-       (stringp b)
-       (not (string-empty-p a))
-       (not (string-empty-p b))
-       (let ((base (and (buffer-live-p chat-buf)
-                        (with-current-buffer chat-buf
-                          (pi-coding-agent--chat-session-directory chat-buf)))))
-         (equal (expand-file-name a base)
-                (expand-file-name b base)))))
-
-(defun pi-coding-agent--refresh-session-state
-    (proc chat-buf &optional session-file session-metadata)
+(defun pi-coding-agent--refresh-session-state (proc chat-buf &optional session-file)
   "Refresh session state for CHAT-BUF from PROC.
-SESSION-FILE seeds the session-name cache when it is already known from the
-switching action itself.  Optional SESSION-METADATA reuses metadata already
-collected by the resume picker.  Stale callbacks from older session transitions
-are ignored so they cannot overwrite the active session identity."
+SESSION-FILE seeds the session-name cache when the switching action already
+knows the selected file.  Stale callbacks from older session transitions are
+ignored so they cannot overwrite the active session identity."
   (when (buffer-live-p chat-buf)
     (with-current-buffer chat-buf
       (pi-coding-agent--set-canonical-messages nil)
-      (let ((seeded-session-file nil))
-        (cond
-         (session-metadata
-          (setq pi-coding-agent--session-name
-                (plist-get session-metadata :session-name)
-                seeded-session-file session-file))
-         (session-file
-          (when (pi-coding-agent--update-session-name-from-file session-file)
-            (setq seeded-session-file session-file))))
-        (let ((generation (pi-coding-agent--begin-session-transition)))
-          (pi-coding-agent--rpc-async proc '(:type "get_state")
-            (lambda (response)
-              (when (and (eq (plist-get response :success) t)
-                         (pi-coding-agent--session-transition-current-p
-                          chat-buf proc generation))
-                (pi-coding-agent--apply-state-response chat-buf response)
-                (when (buffer-live-p chat-buf)
-                  (with-current-buffer chat-buf
+      (when session-file
+        (pi-coding-agent--update-session-name-from-file session-file))
+      (let ((generation (pi-coding-agent--begin-session-transition)))
+        (pi-coding-agent--rpc-async proc '(:type "get_state")
+          (lambda (response)
+            (when (and (eq (plist-get response :success) t)
+                       (pi-coding-agent--session-transition-current-p
+                        chat-buf proc generation))
+              (pi-coding-agent--apply-state-response chat-buf response)
+              (when (buffer-live-p chat-buf)
+                (with-current-buffer chat-buf
+                  (unless session-file
                     (when-let* ((current-session-file
                                  (plist-get pi-coding-agent--state :session-file)))
-                      (unless (pi-coding-agent--same-session-file-p
-                               current-session-file seeded-session-file chat-buf)
-                        (pi-coding-agent--update-session-name-from-file
-                         current-session-file)))
-                    (force-mode-line-update t)))))))))))
+                      (pi-coding-agent--update-session-name-from-file
+                       current-session-file)))
+                  (force-mode-line-update t))))))))))
 
 ;;;###autoload
 (defun pi-coding-agent-reload ()
@@ -615,10 +593,8 @@ chat buffer from session history."
                  (message "Pi: Failed to reload - %s"
                           (or (plist-get response :error) "unknown error"))))))))))))
 
-(defun pi-coding-agent--resume-selected-session
-    (proc chat-buf selected-path &optional metadata)
-  "Resume SELECTED-PATH using PROC and rebuild CHAT-BUF from its history.
-Optional METADATA is the resume-list metadata for SELECTED-PATH."
+(defun pi-coding-agent--resume-selected-session (proc chat-buf selected-path)
+  "Resume SELECTED-PATH using PROC and rebuild CHAT-BUF from its history."
   (pi-coding-agent--rpc-async
    proc
    (list :type "switch_session" :sessionPath selected-path)
@@ -628,8 +604,7 @@ Optional METADATA is the resume-list metadata for SELECTED-PATH."
        (if (and (eq (plist-get response :success) t)
                 (pi-coding-agent--json-false-p cancelled))
            (progn
-             (pi-coding-agent--refresh-session-state
-              proc chat-buf selected-path metadata)
+             (pi-coding-agent--refresh-session-state proc chat-buf selected-path)
              (pi-coding-agent--load-session-history
               proc
               (lambda (count)
@@ -643,14 +618,9 @@ CHAT-BUF is rebuilt from the selected session history."
   (let ((entries (pi-coding-agent--list-session-entries session-dir)))
     (if (null entries)
         (message "Pi: No previous sessions found")
-      (let* ((choices
-              (delq nil
-                    (mapcar (lambda (entry)
-                              (when-let* ((choice
-                                            (pi-coding-agent--format-session-entry-choice
-                                             entry)))
-                                (cons (car choice) entry)))
-                            entries)))
+      (let* ((choices (delq nil
+                            (mapcar #'pi-coding-agent--format-session-entry-choice
+                                    entries)))
              (choice-strings (mapcar #'car choices)))
         (if (null choices)
             (message "Pi: No previous sessions found")
@@ -662,11 +632,10 @@ CHAT-BUF is rebuilt from the selected session history."
                               (complete-with-action action choice-strings
                                                     string pred)))
                           nil t))
-                 (entry (cdr (assoc choice choices)))
-                 (selected-path (and entry (plist-get entry :path))))
+                 (selected-path (cdr (assoc choice choices))))
             (when selected-path
               (pi-coding-agent--resume-selected-session
-               proc chat-buf selected-path (plist-get entry :metadata)))))))))
+               proc chat-buf selected-path))))))))
 
 (defun pi-coding-agent-resume-session ()
   "Resume a previous pi session stored beside the current session file."
