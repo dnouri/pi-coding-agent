@@ -1460,6 +1460,43 @@ replaced by the resumed or forked history."
                          (list session-file))))
       (delete-directory session-dir t))))
 
+(ert-deftest pi-coding-agent-test-session-line-type-stays-on-current-line ()
+  "Session type prefix matching allows horizontal whitespace, not newlines."
+  (with-temp-buffer
+    (insert " \t{ \t\"type\" \t: \t\"message\"}\n")
+    (insert "\n{\"type\":\"message\"}\n")
+    (goto-char (point-min))
+    (should (pi-coding-agent--session-line-type-p "message"))
+    (forward-line 1)
+    (should-not (pi-coding-agent--session-line-type-p "message"))
+    (forward-line 1)
+    (should (pi-coding-agent--session-line-type-p "message"))))
+
+(ert-deftest pi-coding-agent-test-session-metadata-ignores-blank-lines ()
+  "Blank JSONL lines should not be counted as the following record."
+  (let ((temp-file (make-temp-file "pi-coding-agent-test-session" nil
+                                   ".jsonl")))
+    (unwind-protect
+        (progn
+          (with-temp-file temp-file
+            (insert (json-encode '(:type "session" :id "test")) "\n")
+            (insert (json-encode
+                     '(:type "message"
+                       :message (:role "user"
+                                 :content [(:type "text" :text "Hello")])))
+                    "\n")
+            (insert "\n")
+            (insert (json-encode
+                     '(:type "message"
+                       :message (:role "assistant"
+                                 :content [(:type "text" :text "Hi")])))
+                    "\n"))
+          (let ((metadata (pi-coding-agent--session-metadata temp-file)))
+            (should metadata)
+            (should (equal (plist-get metadata :first-message) "Hello"))
+            (should (equal (plist-get metadata :message-count) 2))))
+      (delete-file temp-file))))
+
 (ert-deftest pi-coding-agent-test-resume-session-choice-selects-path ()
   "The resume selector maps formatted choices back to session paths."
   (let* ((first-entry '(:path "/tmp/first.jsonl"
@@ -1481,6 +1518,45 @@ replaced by the resumed or forked history."
       (pi-coding-agent--resume-session-from-directory
        'mock-proc (current-buffer) "/tmp/sessions")
       (should (equal selected-path "/tmp/second.jsonl")))))
+
+(ert-deftest pi-coding-agent-test-session-choices-append-basename-on-collision ()
+  "Duplicate resume display strings get a path suffix; unique ones do not."
+  (let* ((first "/tmp/sessions/first.jsonl")
+         (second "/tmp/sessions/second.jsonl")
+         (unique "/tmp/sessions/unique.jsonl")
+         (choices `(("Duplicate" . ,first)
+                    ("Unique" . ,unique)
+                    ("Duplicate" . ,second))))
+    (should (equal (pi-coding-agent--uniquify-session-choices choices)
+                   `(("Duplicate · first" . ,first)
+                     ("Unique" . ,unique)
+                     ("Duplicate · second" . ,second))))))
+
+(ert-deftest pi-coding-agent-test-resume-session-duplicate-choice-selects-second-path ()
+  "Duplicate resume labels are disambiguated before path lookup."
+  (let* ((first-path "/tmp/sessions/first.jsonl")
+         (second-path "/tmp/sessions/second.jsonl")
+         (first-entry (list :path first-path))
+         (second-entry (list :path second-path))
+         (offered-choices nil)
+         (selected-path nil))
+    (cl-letf (((symbol-function 'pi-coding-agent--list-session-entries)
+               (lambda (_session-dir) (list first-entry second-entry)))
+              ((symbol-function 'pi-coding-agent--format-session-entry-choice)
+               (lambda (entry)
+                 (cons "Duplicate" (plist-get entry :path))))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt collection &rest _args)
+                 (setq offered-choices (funcall collection "" nil t))
+                 "Duplicate · second"))
+              ((symbol-function 'pi-coding-agent--resume-selected-session)
+               (lambda (_proc _chat-buf path)
+                 (setq selected-path path))))
+      (pi-coding-agent--resume-session-from-directory
+       'mock-proc (current-buffer) "/tmp/sessions")
+      (should (equal offered-choices
+                     '("Duplicate · first" "Duplicate · second")))
+      (should (equal selected-path second-path)))))
 
 (ert-deftest pi-coding-agent-test-resume-session-from-input-switches-session-and-rebuilds-history ()
   "Resuming from the input buffer refreshes the linked chat and session state."

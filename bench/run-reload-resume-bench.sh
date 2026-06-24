@@ -82,12 +82,19 @@ case "$OUT_DIR" in
     /*) ;;
     *) OUT_DIR="$PWD/$OUT_DIR" ;;
 esac
+while [[ "$OUT_DIR" != "/" && "$OUT_DIR" == */ ]]; do
+    OUT_DIR="${OUT_DIR%/}"
+done
 if [[ -z "$OUT_DIR" || "$OUT_DIR" == "/" ]]; then
     echo "ERROR: refusing unsafe output directory: $OUT_DIR" >&2
     exit 1
 fi
 
 BENCH_MARKER="$OUT_DIR/.pi-coding-agent-reload-resume-bench"
+if [[ -L "$OUT_DIR" ]]; then
+    echo "ERROR: refusing symlink output directory: $OUT_DIR" >&2
+    exit 1
+fi
 if [[ -e "$OUT_DIR" && ! -d "$OUT_DIR" ]]; then
     echo "ERROR: refusing to replace non-directory output path: $OUT_DIR" >&2
     exit 1
@@ -159,6 +166,10 @@ EOF
     esac
 }
 
+for scenario in "${SCENARIOS[@]}"; do
+    scenario_env "$scenario" >/dev/null
+done
+
 EMACS_INIT=(
     -Q -L "$PROJECT_DIR"
     --eval "(setq inhibit-startup-screen t)"
@@ -167,10 +178,6 @@ EMACS_INIT=(
     --eval "(setq load-path (cons (expand-file-name \"$PROJECT_DIR\") load-path))"
     -l "$SCRIPT_DIR/pi-coding-agent-reload-resume-bench.el"
 )
-
-rm -rf "$OUT_DIR"
-mkdir -p "$OUT_DIR"
-touch "$BENCH_MARKER"
 
 printf '=== pi-coding-agent Reload/Resume Benchmarks ===\n'
 printf 'Project: %s\n' "$PROJECT_DIR"
@@ -187,6 +194,10 @@ else
 fi
 printf 'Diagnostic timings: %s\n' "$([[ "$TIMINGS" = "1" ]] && echo enabled || echo disabled)"
 printf 'Scenarios: %s\n\n' "${SCENARIOS[*]}"
+
+rm -rf -- "$OUT_DIR"
+mkdir -p -- "$OUT_DIR"
+touch -- "$BENCH_MARKER"
 
 for scenario in "${SCENARIOS[@]}"; do
     for ((iter = 1; iter <= REPS; iter++)); do

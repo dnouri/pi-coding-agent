@@ -222,7 +222,7 @@ When cached state has no session file, fetch fresh state from PROC first."
                    (pi-coding-agent--session-list-directory chat-buf)))))))
 
 (defconst pi-coding-agent--session-line-type-re
-  "[[:space:]]*{[[:space:]]*\"type\"[[:space:]]*:[[:space:]]*\"%s\""
+  "[ \t]*{[ \t]*\"type\"[ \t]*:[ \t]*\"%s\""
   "Format string matching a JSONL line whose top-level type appears first.")
 
 (defun pi-coding-agent--session-line-type-p (type)
@@ -409,6 +409,26 @@ Optional METADATA reuses data already collected by the session-list step."
   (pi-coding-agent--format-session-choice
    (plist-get entry :path)
    (plist-get entry :metadata)))
+
+(defun pi-coding-agent--uniquify-session-choices (choices)
+  "Return CHOICES with duplicate display strings made unique.
+CHOICES is a list of (DISPLAY . PATH) pairs.  Entries whose DISPLAY occurs
+once are returned unchanged.  Entries whose DISPLAY collides get their session
+file base name appended."
+  (let ((counts (make-hash-table :test 'equal)))
+    (dolist (choice choices)
+      (puthash (car choice) (1+ (gethash (car choice) counts 0)) counts))
+    (mapcar
+     (lambda (choice)
+       (let ((display (car choice))
+             (path (cdr choice)))
+         (if (> (gethash display counts 0) 1)
+             (cons (format "%s · %s"
+                           display
+                           (file-name-base (directory-file-name path)))
+                   path)
+           choice)))
+     choices)))
 
 (defun pi-coding-agent--reset-session-state ()
   "Reset all session-specific state for a new session.
@@ -618,9 +638,11 @@ CHAT-BUF is rebuilt from the selected session history."
   (let ((entries (pi-coding-agent--list-session-entries session-dir)))
     (if (null entries)
         (message "Pi: No previous sessions found")
-      (let* ((choices (delq nil
-                            (mapcar #'pi-coding-agent--format-session-entry-choice
-                                    entries)))
+      (let* ((choices
+              (pi-coding-agent--uniquify-session-choices
+               (delq nil
+                     (mapcar #'pi-coding-agent--format-session-entry-choice
+                             entries))))
              (choice-strings (mapcar #'car choices)))
         (if (null choices)
             (message "Pi: No previous sessions found")
