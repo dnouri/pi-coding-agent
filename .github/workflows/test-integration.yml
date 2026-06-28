@@ -12,7 +12,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: purcell/setup-emacs@master
+      - uses: ./.github/actions/setup-emacs
         with:
           version: '30.1'
       - name: Run fake backend contract
@@ -29,7 +29,7 @@ jobs:
           - 11434:11434
     steps:
       - uses: actions/checkout@v4
-      - uses: purcell/setup-emacs@master
+      - uses: ./.github/actions/setup-emacs
         with:
           version: '30.1'
       - uses: actions/setup-node@v4

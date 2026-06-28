@@ -1,0 +1,32 @@
+name: Set up Emacs
+
+description: Install a pinned Emacs build for CI.
+
+inputs:
+  version:
+    description: Emacs version to install, such as 29.4, 30.1, or snapshot.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install Nix
+      uses: cachix/install-nix-action@v31.10.6
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+
+    - name: Install Emacs
+      shell: bash
+      env:
+        EMACS_VERSION: ${{ inputs.version }}
+        # Pin the flake repo so Nix does not resolve github:purcell/nix-emacs-ci#...
+        # through the GitHub commits/HEAD API endpoint on every CI job.
+        NIX_EMACS_CI_REV: 868482a78575138aebb1b5c16a9266b95c800f2e
+      run: |
+        set -euo pipefail
+
+        emacs_attr="emacs-${EMACS_VERSION//./-}"
+        echo "::group::Installing ${emacs_attr} from purcell/nix-emacs-ci@${NIX_EMACS_CI_REV}"
+        nix profile install --accept-flake-config "github:purcell/nix-emacs-ci/${NIX_EMACS_CI_REV}#${emacs_attr}"
+        echo "::endgroup::"
+
+        emacs --version

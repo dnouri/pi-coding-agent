@@ -15,7 +15,7 @@ jobs:
     name: Emacs ${{ matrix.emacs_version }}
     steps:
       - uses: actions/checkout@v4
-      - uses: purcell/setup-emacs@master
+      - uses: ./.github/actions/setup-emacs
         with:
           version: ${{ matrix.emacs_version }}
       - name: Install tree-sitter grammars

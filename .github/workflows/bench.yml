@@ -15,7 +15,7 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-      - uses: purcell/setup-emacs@master
+      - uses: ./.github/actions/setup-emacs
         with:
           version: '30.1'
       - name: Install tree-sitter grammars
