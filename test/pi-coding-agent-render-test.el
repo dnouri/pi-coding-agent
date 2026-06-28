@@ -1370,6 +1370,32 @@ and DISPLAY controls how completed thinking is rendered."
     ;; Should show summary text
     (should (string-match-p "Key points" (buffer-string)))))
 
+(ert-deftest pi-coding-agent-test-history-tolerates-malformed-content-blocks ()
+  "Malformed history content does not break resume rendering."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((messages [(:role "assistant"
+                      :content [42
+                                (:type "text" :text 99)
+                                (:type "thinking" :thinking 123)]
+                      :timestamp 1704067200000)
+                     (:role "toolResult" :toolCallId "tc1"
+                      :toolName "bash"
+                      :content 42
+                      :timestamp 1704067201000)
+                     (:role "compactionSummary"
+                      :summary 42
+                      :tokensBefore 50000
+                      :timestamp 1704067202000)]))
+      (should (condition-case nil
+                  (progn
+                    (pi-coding-agent--display-history-messages messages)
+                    t)
+                (error nil)))
+      (should (string-match-p "99" (buffer-string)))
+      (should (string-match-p "123" (buffer-string)))
+      (should (string-match-p "42" (buffer-string))))))
+
 ;;; Streaming Marker
 
 (ert-deftest pi-coding-agent-test-streaming-marker-created-on-agent-start ()
@@ -2325,6 +2351,17 @@ See https://github.com/dnouri/pi-coding-agent/issues/176."
     (should (string-match-p "\"agent\"" (substring-no-properties header)))
     (should (string-match-p "\"worker\"" (substring-no-properties header)))))
 
+(ert-deftest pi-coding-agent-test-generic-tool-header-escapes-control-and-format-chars ()
+  "Generic JSON arg headers escape C1 controls and bidi format chars."
+  (let* ((value (concat "a" (string #x85) "b" (string #x202e) "c"))
+         (header (substring-no-properties
+                  (pi-coding-agent--tool-header
+                   "custom_tool" (list :payload value)))))
+    (should (string-match-p (regexp-quote "\\u0085") header))
+    (should (string-match-p (regexp-quote "\\u202E") header))
+    (should-not (cl-position #x85 header :test #'=))
+    (should-not (cl-position #x202e header :test #'=))))
+
 (ert-deftest pi-coding-agent-test-generic-tool-header-compact-when-short ()
   "Short args produce a single-line compact header."
   (let* ((fill-column 70)
@@ -2380,6 +2417,31 @@ See https://github.com/dnouri/pi-coding-agent/issues/176."
                    tool '(:path "foo.txt") 'streaming)))
       (should (string-prefix-p (concat tool " foo.txt")
                                (substring-no-properties header))))))
+
+(ert-deftest pi-coding-agent-test-tool-path-header-escapes-controls-for-display-only ()
+  "Tool path headers escape controls without changing stored path metadata."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((path (concat "/tmp/project/a\nread /etc/passwd\r\t"
+                        (string ?\e)
+                        (string #x7f)
+                        (string #x85)
+                        (string #x202e)
+                        ".el")))
+      (pi-coding-agent--display-tool-start "read" (list :path path))
+      (save-excursion
+        (goto-char (point-min))
+        (let ((header-line (buffer-substring-no-properties
+                            (line-beginning-position)
+                            (line-end-position))))
+          (should (equal header-line
+                         "read /tmp/project/a\\nread /etc/passwd\\r\\t\\x1B\\x7F\\u0085\\u202E.el"))
+          (dolist (char (list ?\n ?\r ?\t ?\e #x7f #x85 #x202e))
+            (should-not (cl-position char header-line :test #'=)))))
+      (let ((ov pi-coding-agent--pending-tool-overlay))
+        (should ov)
+        (should (equal path (overlay-get ov 'pi-coding-agent-tool-path)))
+        (should (equal path (overlay-get ov 'pi-coding-agent-tool-raw-path)))))))
 
 ;;; Tool Output
 
@@ -3546,6 +3608,495 @@ Edit diffs include unchanged context rows with a leading space marker."
                    (overlay-get pi-coding-agent--pending-tool-overlay
                                 'pi-coding-agent-tool-path)))))
 
+(ert-deftest pi-coding-agent-test-tool-overlay-normalizes-remote-path ()
+  "Remote tool paths are stored as Emacs/TRAMP paths for navigation."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity
+     "/ssh:pi-host:/home/pi/project/")
+    (pi-coding-agent--display-tool-start
+     "read" '(:path "/home/pi/project/src/app.py"))
+    (should pi-coding-agent--pending-tool-overlay)
+    (should (equal "/ssh:pi-host:/home/pi/project/src/app.py"
+                   (overlay-get pi-coding-agent--pending-tool-overlay
+                                'pi-coding-agent-tool-path)))))
+
+(ert-deftest pi-coding-agent-test-tool-overlay-preserves-multi-hop-remote-path ()
+  "Tool metadata stores full multi-hop Emacs/TRAMP paths for navigation."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity
+     "/ssh:bastion|sudo:root@pi-host:/home/pi/project/")
+    (pi-coding-agent--display-tool-start
+     "read" '(:path "src/app.py"))
+    (should pi-coding-agent--pending-tool-overlay)
+    (should (equal "/ssh:bastion|sudo:root@pi-host:/home/pi/project/src/app.py"
+                   (overlay-get pi-coding-agent--pending-tool-overlay
+                                'pi-coding-agent-tool-path)))))
+
+(ert-deftest pi-coding-agent-test-toolcall-preview-path-display-is-not-navigable-until-final ()
+  "Streaming preview paths are visual only until authoritative execution data."
+  (pi-coding-agent-test--with-streaming-assistant
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_start" 0
+     (list (pi-coding-agent-test--toolcall "call_1" "write" nil)))
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_delta" 0
+     (list (pi-coding-agent-test--toolcall
+            "call_1" "write"
+            '(:path "/tmp/preview.py" :content "line1\nline2\n")))
+     "x")
+    (let ((ov pi-coding-agent--pending-tool-overlay))
+      (should (string-match-p "write /tmp/preview\\.py" (buffer-string)))
+      (should-not (overlay-get ov 'pi-coding-agent-tool-path))
+      (should-not (overlay-get ov 'pi-coding-agent-tool-raw-path))
+      (should-not (overlay-get ov 'pi-coding-agent-tool-path-error))
+      (goto-char (point-min))
+      (search-forward "line2")
+      (beginning-of-line)
+      (should-error (pi-coding-agent-visit-file) :type 'user-error)
+      (pi-coding-agent--handle-display-event
+       '(:type "message_end" :message (:role "assistant")))
+      (pi-coding-agent--handle-display-event
+       '(:type "tool_execution_start" :toolCallId "call_1"
+         :toolName "write"
+         :args (:path "/tmp/preview.py" :content "line1\nline2\n")))
+      (pi-coding-agent--handle-display-event
+       '(:type "tool_execution_end" :toolCallId "call_1"
+         :toolName "write"
+         :result (:content [(:type "text" :text "wrote file")])
+         :isError nil))
+      (goto-char (point-min))
+      (search-forward "line2")
+      (beginning-of-line)
+      (let ((result (pi-coding-agent-test--visit-file-line 10)))
+        (should (equal "/tmp/preview.py" (plist-get result :path)))
+        (should (= 2 (plist-get result :line)))))))
+
+(ert-deftest pi-coding-agent-test-toolcall-delta-invalid-path-keeps-preview-navigation-absent ()
+  "Invalid streaming paths may display but must not create navigation metadata."
+  (pi-coding-agent-test--with-streaming-assistant
+    (pi-coding-agent--set-chat-session-identity
+     "/ssh:localhost:/tmp/project/")
+    (let ((bad-path "/ssh:127.0.0.1:/tmp/project/src/bad.txt"))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_start" 0
+       (list (pi-coding-agent-test--toolcall
+              "call_1" "read" '(:path "/tmp/project/src/good.txt"))))
+      (let ((ov pi-coding-agent--pending-tool-overlay))
+        (should (string-match-p "read /tmp/project/src/good\\.txt"
+                                (buffer-string)))
+        (should-not (overlay-get ov 'pi-coding-agent-tool-path))
+        (pi-coding-agent-test--send-toolcall-message-update
+         "toolcall_delta" 0
+         (list (pi-coding-agent-test--toolcall
+                "call_1" "read" (list :path bad-path)))
+         "x")
+        (should (string-match-p (regexp-quote bad-path) (buffer-string)))
+        (should-not (overlay-get ov 'pi-coding-agent-tool-path))
+        (should-not (overlay-get ov 'pi-coding-agent-tool-raw-path))
+        (should-not (overlay-get ov 'pi-coding-agent-tool-path-error))))))
+
+(ert-deftest pi-coding-agent-test-tool-execution-start-missing-path-keeps-preview-navigation-absent ()
+  "Authoritative execution args with no path leave preview navigation absent."
+  (pi-coding-agent-test--with-toolcall "read" '(:path "/tmp/preview.py")
+    (let ((ov pi-coding-agent--pending-tool-overlay))
+      (should (string-match-p "read /tmp/preview\\.py" (buffer-string)))
+      (should-not (overlay-get ov 'pi-coding-agent-tool-path))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_end" :message (:role "assistant")))
+      (pi-coding-agent--handle-display-event
+       '(:type "tool_execution_start" :toolCallId "call_1"
+         :toolName "read" :args (:offset 10)))
+      (should (eq ov pi-coding-agent--pending-tool-overlay))
+      (should-not (overlay-get ov 'pi-coding-agent-tool-path))
+      (should-not (overlay-get ov 'pi-coding-agent-tool-raw-path))
+      (should-not (overlay-get ov 'pi-coding-agent-tool-path-error)))))
+
+(ert-deftest pi-coding-agent-test-visit-file-path-error-percent-is-literal ()
+  "Stored path errors are user-error messages, not format strings."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "read" '(:path "/tmp/ok.py"))
+    (let ((ov pi-coding-agent--pending-tool-overlay)
+          (message "backend path contains %s marker"))
+      (overlay-put ov 'pi-coding-agent-tool-path nil)
+      (overlay-put ov 'pi-coding-agent-tool-path-error message)
+      (goto-char (overlay-start ov))
+      (let ((err (should-error (pi-coding-agent-visit-file)
+                               :type 'user-error)))
+        (should (equal message (error-message-string err)))))))
+
+(ert-deftest pi-coding-agent-test-mismatched-remote-tool-path-renders-safely ()
+  "Mismatched remote tool metadata does not escape passive rendering."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((path "/ssh:127.0.0.1:/tmp/project/src/a.txt"))
+      (pi-coding-agent--set-chat-session-identity
+       "/ssh:localhost:/tmp/project/")
+      (should
+       (condition-case nil
+           (progn
+             (pi-coding-agent--handle-display-event
+              `(:type "tool_execution_start" :toolCallId "call_1"
+                :toolName "read" :args (:path ,path)))
+             (pi-coding-agent--handle-display-event
+              '(:type "tool_execution_end" :toolCallId "call_1"
+                :toolName "read"
+                :result (:content [(:type "text" :text "contents")])
+                :isError nil))
+             t)
+         (user-error nil)))
+      (should (string-match-p (regexp-quote path) (buffer-string)))
+      (should (string-match-p "contents" (buffer-string)))
+      (goto-char (point-min))
+      (search-forward "contents")
+      (let ((ov (seq-find (lambda (overlay)
+                            (overlay-get overlay 'pi-coding-agent-tool-block))
+                          (overlays-at (point)))))
+        (should ov)
+        (should-not (overlay-get ov 'pi-coding-agent-tool-path))
+        (should (equal path (overlay-get ov 'pi-coding-agent-tool-raw-path)))
+        (should (string-match-p
+                 "Remote path is not on this session host"
+                 (overlay-get ov 'pi-coding-agent-tool-path-error)))
+        (should-error (pi-coding-agent-visit-file) :type 'user-error)))))
+
+(ert-deftest pi-coding-agent-test-process-filter-mismatched-remote-tool-path-renders-safely ()
+  "Mismatched remote tool metadata must not signal from the process filter."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity
+     "/ssh:localhost:/tmp/project/")
+    (let* ((path "/ssh:127.0.0.1:/tmp/project/src/a.txt")
+           (proc (start-process "pi-coding-agent-render-test-cat" nil "cat"))
+           (encode (lambda (event) (concat (json-encode event) "\n")))
+           caught)
+      (unwind-protect
+          (progn
+            (process-put proc 'pi-coding-agent-chat-buffer (current-buffer))
+            (pi-coding-agent--register-display-handler proc)
+            (condition-case err
+                (progn
+                  (pi-coding-agent--process-filter
+                   proc
+                   (funcall encode
+                            `(:type "tool_execution_start"
+                              :toolCallId "call_filter"
+                              :toolName "read"
+                              :args (:path ,path))))
+                  (pi-coding-agent--process-filter
+                   proc
+                   (funcall encode
+                            '(:type "tool_execution_end"
+                              :toolCallId "call_filter"
+                              :toolName "read"
+                              :result (:content [(:type "text" :text "contents")])
+                              :isError nil))))
+              (error (setq caught err)))
+            (should-not caught)
+            (save-excursion
+              (goto-char (point-min))
+              (let ((header-line (buffer-substring-no-properties
+                                  (line-beginning-position)
+                                  (line-end-position))))
+                (should (string-match-p (regexp-quote path) header-line))
+                (should-not (cl-position ?\n header-line :test #'=))))
+            (should (string-match-p "contents" (buffer-string)))
+            (goto-char (point-min))
+            (search-forward "contents")
+            (let ((ov (seq-find (lambda (overlay)
+                                  (overlay-get overlay 'pi-coding-agent-tool-block))
+                                (overlays-at (point)))))
+              (should ov)
+              (should-not (overlay-get ov 'pi-coding-agent-tool-path))
+              (should (equal path (overlay-get ov 'pi-coding-agent-tool-raw-path)))
+              (should (string-match-p
+                       "Remote path is not on this session host"
+                       (overlay-get ov 'pi-coding-agent-tool-path-error)))
+              (should (string-match-p
+                       (regexp-quote path)
+                       (overlay-get ov 'pi-coding-agent-tool-path-error)))))
+        (pi-coding-agent--unregister-display-handler proc)
+        (when (process-live-p proc)
+          (delete-process proc))))))
+
+(ert-deftest pi-coding-agent-test-process-filter-numeric-text-delta-renders-safely ()
+  "Numeric text_delta payloads must not signal from the process filter."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((proc (start-process "pi-coding-agent-render-test-text-cat" nil "cat"))
+           (encode (lambda (event) (concat (json-encode event) "\n")))
+           caught)
+      (unwind-protect
+          (progn
+            (process-put proc 'pi-coding-agent-chat-buffer (current-buffer))
+            (pi-coding-agent--register-display-handler proc)
+            (condition-case err
+                (progn
+                  (pi-coding-agent--process-filter
+                   proc (funcall encode '(:type "agent_start")))
+                  (pi-coding-agent--process-filter
+                   proc (funcall encode '(:type "message_start"
+                                          :message (:role "assistant"))))
+                  (pi-coding-agent--process-filter
+                   proc (funcall encode '(:type "message_update"
+                                          :assistantMessageEvent
+                                          (:type "text_delta" :delta 42)))))
+              (error (setq caught err)))
+            (should-not caught)
+            (should (string-match-p "42" (buffer-string))))
+        (pi-coding-agent--unregister-display-handler proc)
+        (when (process-live-p proc)
+          (delete-process proc))))))
+
+(ert-deftest pi-coding-agent-test-process-filter-numeric-thinking-delta-renders-safely ()
+  "Numeric thinking_delta payloads must not signal from the process filter."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((proc (start-process "pi-coding-agent-render-test-thinking-cat" nil "cat"))
+           (encode (lambda (event) (concat (json-encode event) "\n")))
+           caught)
+      (unwind-protect
+          (progn
+            (process-put proc 'pi-coding-agent-chat-buffer (current-buffer))
+            (pi-coding-agent--register-display-handler proc)
+            (condition-case err
+                (progn
+                  (pi-coding-agent--process-filter
+                   proc (funcall encode '(:type "agent_start")))
+                  (pi-coding-agent--process-filter
+                   proc (funcall encode '(:type "message_start"
+                                          :message (:role "assistant"))))
+                  (pi-coding-agent--process-filter
+                   proc (funcall encode '(:type "message_update"
+                                          :assistantMessageEvent
+                                          (:type "thinking_start"))))
+                  (pi-coding-agent--process-filter
+                   proc (funcall encode '(:type "message_update"
+                                          :assistantMessageEvent
+                                          (:type "thinking_delta" :delta 42)))))
+              (error (setq caught err)))
+            (should-not caught)
+            (should (string-match-p "^> 42" (buffer-string))))
+        (pi-coding-agent--unregister-display-handler proc)
+        (when (process-live-p proc)
+          (delete-process proc))))))
+
+(ert-deftest pi-coding-agent-test-process-filter-numeric-bash-command-renders-safely ()
+  "Malformed non-path bash metadata must not signal from the process filter."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((proc (start-process "pi-coding-agent-render-test-cat" nil "cat"))
+           (event '(:type "tool_execution_start"
+                    :toolCallId "call_numeric"
+                    :toolName "bash"
+                    :args (:command 42)))
+           caught)
+      (unwind-protect
+          (progn
+            (process-put proc 'pi-coding-agent-chat-buffer (current-buffer))
+            (pi-coding-agent--register-display-handler proc)
+            (condition-case err
+                (pi-coding-agent--process-filter
+                 proc (concat (json-encode event) "\n"))
+              (error (setq caught err)))
+            (should-not caught)
+            (should (string-match-p "\\$ 42" (buffer-string)))
+            (let ((ov (seq-find (lambda (overlay)
+                                  (overlay-get overlay 'pi-coding-agent-tool-block))
+                                (overlays-in (point-min) (point-max)))))
+              (should ov)
+              (should-not (overlay-get ov 'pi-coding-agent-tool-path))))
+        (pi-coding-agent--unregister-display-handler proc)
+        (when (process-live-p proc)
+          (delete-process proc))))))
+
+(ert-deftest pi-coding-agent-test-process-filter-numeric-write-content-renders-safely ()
+  "Numeric write :content must not signal from the process filter."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((proc (start-process "pi-coding-agent-render-test-cat" nil "cat"))
+           (encode (lambda (event) (concat (json-encode event) "\n")))
+           caught)
+      (unwind-protect
+          (progn
+            (process-put proc 'pi-coding-agent-chat-buffer (current-buffer))
+            (pi-coding-agent--register-display-handler proc)
+            (condition-case err
+                (progn
+                  (pi-coding-agent--process-filter
+                   proc
+                   (funcall encode
+                            '(:type "tool_execution_start"
+                              :toolCallId "call_write_numeric"
+                              :toolName "write"
+                              :args (:path "/tmp/out.txt" :content 42))))
+                  (pi-coding-agent--process-filter
+                   proc
+                   (funcall encode
+                            '(:type "tool_execution_end"
+                              :toolCallId "call_write_numeric"
+                              :toolName "write"
+                              :result (:content [(:type "text" :text "wrote file")])
+                              :isError nil))))
+              (error (setq caught err)))
+            (should-not caught)
+            (let ((content (buffer-substring-no-properties
+                            (point-min) (point-max))))
+              (should (string-match-p "write /tmp/out\\.txt" content))
+              (should (string-match-p "42" content))))
+        (pi-coding-agent--unregister-display-handler proc)
+        (when (process-live-p proc)
+          (delete-process proc))))))
+
+(ert-deftest pi-coding-agent-test-edit-tool-numeric-diff-renders-safely ()
+  "Numeric edit details diff must not signal during display rendering."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (should
+     (condition-case nil
+         (progn
+           (pi-coding-agent--handle-display-event
+            '(:type "tool_execution_start"
+              :toolCallId "call_edit_numeric"
+              :toolName "edit"
+              :args (:path "/tmp/edit.txt")))
+           (pi-coding-agent--handle-display-event
+            '(:type "tool_execution_end"
+              :toolCallId "call_edit_numeric"
+              :toolName "edit"
+              :result (:content [(:type "text" :text "fallback")]
+                       :details (:diff 42))
+              :isError nil))
+           t)
+       (error nil)))
+    (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+      (should (string-match-p "edit /tmp/edit\\.txt" content))
+      (should (string-match-p "42" content)))))
+
+(ert-deftest pi-coding-agent-test-nul-tool-path-renders-safely ()
+  "NUL-containing tool path metadata does not become navigation metadata."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((path (concat "/tmp/project/bad" (string ?\0) "name.el")))
+      (pi-coding-agent--set-chat-session-identity
+       "/ssh:localhost:/tmp/project/")
+      (should
+       (condition-case nil
+           (progn
+             (pi-coding-agent--handle-display-event
+              `(:type "tool_execution_start" :toolCallId "call_nul"
+                :toolName "read" :args (:path ,path)))
+             (pi-coding-agent--handle-display-event
+              '(:type "tool_execution_end" :toolCallId "call_nul"
+                :toolName "read"
+                :result (:content [(:type "text" :text "contents")])
+                :isError nil))
+             t)
+         (error nil)))
+      (should (string-match-p "read \\.\\.\\." (buffer-string)))
+      (should (string-match-p "contents" (buffer-string)))
+      (goto-char (point-min))
+      (search-forward "contents")
+      (let ((ov (seq-find (lambda (overlay)
+                            (overlay-get overlay 'pi-coding-agent-tool-block))
+                          (overlays-at (point)))))
+        (should ov)
+        (should-not (overlay-get ov 'pi-coding-agent-tool-path))
+        (should (equal path (overlay-get ov 'pi-coding-agent-tool-raw-path)))
+        (should (string-match-p
+                 "NUL"
+                 (overlay-get ov 'pi-coding-agent-tool-path-error)))
+        (cl-letf (((symbol-function 'find-file)
+                   (lambda (&rest _)
+                     (ert-fail "visit-file must reject before find-file")))
+                  ((symbol-function 'find-file-other-window)
+                   (lambda (&rest _)
+                     (ert-fail "visit-file must reject before find-file"))))
+          (let ((err (should-error (pi-coding-agent-visit-file)
+                                   :type 'user-error)))
+            (should (string-match-p "NUL" (error-message-string err)))))))))
+
+(ert-deftest pi-coding-agent-test-non-string-tool-path-renders-safely ()
+  "Non-string path metadata should not escape passive rendering."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (should
+     (condition-case nil
+         (progn
+           (pi-coding-agent--display-tool-start
+            "read" '(:path (:not "a string")))
+           (pi-coding-agent--display-tool-end
+            "read" '(:path (:not "a string"))
+            '((:type "text" :text "contents"))
+            nil nil)
+           t)
+       (error nil)))
+    (should (string-match-p "read \\.\\.\\." (buffer-string)))
+    (should (string-match-p "contents" (buffer-string)))
+    (goto-char (point-min))
+    (search-forward "contents")
+    (let ((ov (seq-find (lambda (overlay)
+                          (overlay-get overlay 'pi-coding-agent-tool-block))
+                        (overlays-at (point)))))
+      (should ov)
+      (should-not (overlay-get ov 'pi-coding-agent-tool-path))
+      (should-not (overlay-get ov 'pi-coding-agent-tool-raw-path))
+      (should (string-match-p
+               "not a string"
+               (overlay-get ov 'pi-coding-agent-tool-path-error)))
+      (should-error (pi-coding-agent-visit-file) :type 'user-error))))
+
+(ert-deftest pi-coding-agent-test-malformed-write-path-preview-renders-safely ()
+  "Malformed write path metadata should not crash preview rendering."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event '(:type "agent_start"))
+    (pi-coding-agent--handle-display-event '(:type "message_start"))
+    (should
+     (condition-case nil
+         (progn
+           (pi-coding-agent--handle-display-event
+            '(:type "message_update"
+              :assistantMessageEvent (:type "toolcall_delta" :contentIndex 0)
+              :message (:role "assistant"
+                        :content [(:type "toolCall" :id "call_1"
+                                   :name "write"
+                                   :arguments (:path ["not" "a" "path"]
+                                               :content "hello\n"))])))
+           t)
+       (error nil)))
+    (should (string-match-p "write \\.\\.\\." (buffer-string)))
+    (should (string-match-p "hello" (buffer-string)))
+    (let ((ov (seq-find (lambda (overlay)
+                          (overlay-get overlay 'pi-coding-agent-tool-block))
+                        (overlays-in (point-min) (point-max)))))
+      (should ov)
+      (should-not (overlay-get ov 'pi-coding-agent-tool-path))
+      (should-not (overlay-get ov 'pi-coding-agent-tool-raw-path))
+      (should-not (overlay-get ov 'pi-coding-agent-tool-path-error)))))
+
+(ert-deftest pi-coding-agent-test-visit-file-opens-remote-tool-path ()
+  "visit-file opens tool paths as Emacs/TRAMP paths in remote sessions."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity
+     "/ssh:pi-host:/home/pi/project/")
+    (pi-coding-agent--display-tool-start
+     "read" '(:path "src/app.py"))
+    (pi-coding-agent--display-tool-end
+     "read" '(:path "src/app.py")
+     '((:type "text" :text "line1\nline2"))
+     nil nil)
+    (goto-char (point-min))
+    (search-forward "line2")
+    (beginning-of-line)
+    (let ((result (pi-coding-agent-test--visit-file-line 10)))
+      (should (equal "/ssh:pi-host:/home/pi/project/src/app.py"
+                     (plist-get result :path)))
+      (should (= 2 (plist-get result :line))))))
+
 (ert-deftest pi-coding-agent-test-tool-overlay-stores-path-after-finalize ()
   "Tool overlay should preserve path after finalization."
   (with-temp-buffer
@@ -4384,9 +4935,7 @@ Content lines — even those starting with ``` — are preserved."
     (should (string-match-p "check\\.\n\n\\$ ls" (buffer-string)))))
 
 (ert-deftest pi-coding-agent-test-toolcall-delta-updates-header-not-path ()
-  "toolcall_delta updates header text for responsiveness but not overlay path.
-Header shows path as soon as it appears in streaming args (visual feedback).
-Overlay path is only set at tool_execution_start (authoritative for navigation)."
+  "toolcall_delta updates visible header text but not navigation metadata."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (pi-coding-agent--handle-display-event '(:type "agent_start"))
@@ -4398,7 +4947,7 @@ Overlay path is only set at tool_execution_start (authoritative for navigation).
        :message (:role "assistant"
                  :content [(:type "toolCall" :id "call_1"
                             :name "read" :arguments nil)])))
-    ;; Delta with path — header SHOULD update (visual feedback)
+    ;; Delta with path — header updates for visual feedback only.
     (pi-coding-agent--handle-display-event
      `(:type "message_update"
        :assistantMessageEvent (:type "toolcall_delta" :contentIndex 0 :delta "x")
@@ -4406,11 +4955,47 @@ Overlay path is only set at tool_execution_start (authoritative for navigation).
                  :content [(:type "toolCall" :id "call_1"
                             :name "read"
                             :arguments (:path "/tmp/foo.py"))])))
-    ;; Header should show the real path
     (should (string-match-p "read /tmp/foo\\.py" (buffer-string)))
-    ;; But overlay should NOT have path yet (deferred to tool_execution_start)
     (should-not (overlay-get pi-coding-agent--pending-tool-overlay
-                             'pi-coding-agent-tool-path))))
+                             'pi-coding-agent-tool-path))
+    (should-not (overlay-get pi-coding-agent--pending-tool-overlay
+                             'pi-coding-agent-tool-raw-path))
+    (should-not (overlay-get pi-coding-agent--pending-tool-overlay
+                             'pi-coding-agent-tool-path-error))))
+
+(ert-deftest pi-coding-agent-test-multitool-preview-update-keeps-path-metadata-absent ()
+  "Updating one preview header must not leave another block's path metadata stale."
+  (pi-coding-agent-test--with-streaming-assistant
+    (let ((initial (list (pi-coding-agent-test--toolcall
+                          "call_1" "write" '(:path "/tmp/a.py"))
+                         (pi-coding-agent-test--toolcall
+                          "call_2" "write" '(:path "/tmp/b.py")))))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_start" 0 initial)
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_start" 1 initial))
+    (should (equal "write /tmp/a.py"
+                   (pi-coding-agent-test--tool-header-by-id "call_1")))
+    (should (equal "write /tmp/b.py"
+                   (pi-coding-agent-test--tool-header-by-id "call_2")))
+    (let ((updated (list (pi-coding-agent-test--toolcall
+                          "call_1" "write" '(:path "/tmp/a-new.py"))
+                         (pi-coding-agent-test--toolcall
+                          "call_2" "write" '(:path "/tmp/b-new.py")))))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_delta" 0 updated "x"))
+    (should (equal "write /tmp/a-new.py"
+                   (pi-coding-agent-test--tool-header-by-id "call_1")))
+    ;; The inactive block's displayed header did not change; its metadata must
+    ;; not silently move to /tmp/b-new.py either.  Preview metadata stays absent.
+    (should (equal "write /tmp/b.py"
+                   (pi-coding-agent-test--tool-header-by-id "call_2")))
+    (dolist (id '("call_1" "call_2"))
+      (let ((ov (pi-coding-agent-test--tool-block-overlay-by-id id)))
+        (should ov)
+        (should-not (overlay-get ov 'pi-coding-agent-tool-path))
+        (should-not (overlay-get ov 'pi-coding-agent-tool-raw-path))
+        (should-not (overlay-get ov 'pi-coding-agent-tool-path-error))))))
 
 (ert-deftest pi-coding-agent-test-toolcall-header-updated-at-execution-start ()
   "Header updates from placeholder to real args at tool_execution_start.
@@ -4490,6 +5075,24 @@ authoritative args, header and overlay path are updated."
       (should (string-match-p
                "\"task\": \"final\""
                (pi-coding-agent-test--tool-header-by-id "call_1"))))))
+
+(ert-deftest pi-coding-agent-test-generic-toolcall-json-header-escapes-controls ()
+  "Completed generic toolcall JSON headers escape C1 and bidi controls."
+  (pi-coding-agent-test--with-streaming-assistant
+    (let ((value (concat "x" (string #x85) "y" (string #x202e) "z")))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_start" 0
+       (list (pi-coding-agent-test--toolcall
+              "call_1" "custom_generic_tool" (list :payload "initial"))))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_end" 0
+       (list (pi-coding-agent-test--toolcall
+              "call_1" "custom_generic_tool" (list :payload value))))
+      (let ((header (pi-coding-agent-test--tool-header-by-id "call_1")))
+        (should (string-match-p (regexp-quote "\\u0085") header))
+        (should (string-match-p (regexp-quote "\\u202E") header))
+        (should-not (cl-position #x85 header :test #'=))
+        (should-not (cl-position #x202e header :test #'=))))))
 
 (ert-deftest pi-coding-agent-test-generic-toolcall-execution-start-restores-json-header ()
   "tool_execution_start restores authoritative generic JSON args."

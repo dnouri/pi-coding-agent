@@ -35,6 +35,14 @@
   (let ((name (pi-coding-agent--buffer-name :chat (expand-file-name "~/myproject/"))))
     (should (string-match-p "~" name))))
 
+(ert-deftest pi-coding-agent-test-buffer-name-preserves-multi-hop-route ()
+  "Buffer names keep the full TRAMP route for remote sessions."
+  (let* ((dir "/ssh:bastion|sudo:root@pi-host:/home/pi/project/")
+         (name (pi-coding-agent--buffer-name :chat dir)))
+    (should (string-match-p (regexp-quote dir) name))
+    (should-not (string-match-p (regexp-quote "/sudo:root@pi-host:")
+                                name))))
+
 (ert-deftest pi-coding-agent-test-path-to-language-known-extension ()
   "path-to-language returns correct language for known extensions."
   (should (equal "python" (pi-coding-agent--path-to-language "/tmp/foo.py")))
@@ -47,6 +55,11 @@ This ensures all files get code fences for consistent display."
   (should (equal "text" (pi-coding-agent--path-to-language "/tmp/foo.txt")))
   (should (equal "text" (pi-coding-agent--path-to-language "/tmp/bar.xyz")))
   (should (equal "text" (pi-coding-agent--path-to-language "/tmp/noext"))))
+
+(ert-deftest pi-coding-agent-test-path-to-language-ignores-non-string ()
+  "path-to-language returns nil for malformed path metadata."
+  (should-not (pi-coding-agent--path-to-language '(:not "a path")))
+  (should-not (pi-coding-agent--path-to-language ["not" "a" "path"])))
 
 ;;; Buffer Creation
 
@@ -332,6 +345,18 @@ This ensures all files get code fences for consistent display."
     (cl-letf (((symbol-function 'project-current)
                (lambda (&rest _) nil)))
       (should (equal (pi-coding-agent--session-directory) "/tmp/somedir/")))))
+
+(ert-deftest pi-coding-agent-test-session-directory-preserves-multi-hop-root ()
+  "Session directory detection keeps multi-hop TRAMP project roots intact."
+  (let ((default-directory "/tmp/"))
+    (cl-letf (((symbol-function 'project-current)
+               (lambda (&rest _)
+                 '(vc . "/ssh:bastion|sudo:root@pi-host:/srv/project/")))
+              ((symbol-function 'project-root)
+               (lambda (_)
+                 "/ssh:bastion|sudo:root@pi-host:/srv/project/")))
+      (should (equal (pi-coding-agent--session-directory)
+                     "/ssh:bastion|sudo:root@pi-host:/srv/project/")))))
 
 (ert-deftest pi-coding-agent-test-session-directory-recovers-projectile-root ()
   "Recovers root when a backend returns a cons cell with no `project-root'.
@@ -699,20 +724,68 @@ Closes the category from issue #234: any instance without a usable
 (ert-deftest pi-coding-agent-test-request-pi-version-async-waits-before-probe ()
   "Version lookup waits briefly before starting the probe process."
   (let ((scheduled-delay nil)
+        (scheduled-directory nil)
         (resolved-version nil))
     (cl-letf (((symbol-function 'pi-coding-agent--run-pi-version-once-async)
-               (lambda (callback)
+               (lambda (callback &optional directory)
+                 (setq scheduled-directory directory)
                  (funcall callback "0.79.1")))
               ((symbol-function 'run-at-time)
                (lambda (secs _repeat fn &rest args)
                  (setq scheduled-delay secs)
                  (apply fn args)
                  'mock-timer)))
-      (pi-coding-agent--request-pi-version-async
-       (lambda (version)
-         (setq resolved-version version))))
+      (let ((default-directory "/ssh:pi-host:/home/pi/project/"))
+        (pi-coding-agent--request-pi-version-async
+         (lambda (version)
+           (setq resolved-version version)))))
     (should (= scheduled-delay pi-coding-agent--version-probe-delay))
+    (should (equal scheduled-directory "/ssh:pi-host:/home/pi/project/"))
     (should (equal resolved-version "0.79.1"))))
+
+(ert-deftest pi-coding-agent-test-run-pi-version-uses-default-directory-file-handler ()
+  "Version probes let `default-directory' file handlers create the process."
+  (let ((pi-coding-agent-executable '("pi"))
+        (captured nil)
+        (captured-default-directory nil)
+        (dummy-proc (start-process "pi-coding-agent-test-version-capture" nil "cat")))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'make-process)
+                     (lambda (&rest args)
+                       (setq captured args
+                             captured-default-directory default-directory)
+                       dummy-proc)))
+            (pi-coding-agent--run-pi-version-once-async
+             #'ignore "/ssh:pi-host:/home/pi/project/"))
+          (should (eq (plist-get captured :file-handler) t))
+          (should (equal captured-default-directory
+                         "/ssh:pi-host:/home/pi/project/"))
+          (should (bufferp (plist-get captured :buffer)))
+          (should (bufferp (plist-get captured :stderr))))
+      (when-let* ((stdout-buf (plist-get captured :buffer)))
+        (when (buffer-live-p stdout-buf)
+          (kill-buffer stdout-buf)))
+      (when-let* ((stderr-buf (plist-get captured :stderr)))
+        (when (buffer-live-p stderr-buf)
+          (kill-buffer stderr-buf)))
+      (when (process-live-p dummy-proc)
+        (delete-process dummy-proc)))))
+
+(ert-deftest pi-coding-agent-test-probe-process-version-uses-chat-session-directory ()
+  "Version probing uses the stable chat session directory."
+  (let ((captured-default-directory nil))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (setq default-directory "/tmp/transcript/"
+            pi-coding-agent--canonical-session-directory
+            "/ssh:pi-host:/home/pi/project/")
+      (cl-letf (((symbol-function 'pi-coding-agent--request-pi-version-async)
+                 (lambda (_callback)
+                   (setq captured-default-directory default-directory))))
+        (pi-coding-agent--probe-process-version-async (current-buffer)))
+      (should (equal captured-default-directory
+                     "/ssh:pi-host:/home/pi/project/")))))
 
 (ert-deftest pi-coding-agent-test-set-process-probes-version-for-current-process ()
   "Setting process starts version probe and stores result for current process."
@@ -788,8 +861,11 @@ Closes the category from issue #234: any instance without a usable
             (should (string-match-p "0.79.0" warning-text))
             (should (string-match-p "0.79.1" warning-text))
             (should (string-match-p
-                     "npm install -g @earendil-works/pi-coding-agent@0.79.1"
-                     warning-text))))
+                     "npm install -g @earendil-works/pi-coding-agent"
+                     warning-text))
+            (should-not (string-match-p
+                         "npm install -g @earendil-works/pi-coding-agent@"
+                         warning-text))))
       (when (process-live-p proc)
         (delete-process proc)))))
 
@@ -1250,16 +1326,171 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
 
 (ert-deftest pi-coding-agent-test-check-pi-uses-executable ()
   "check-pi uses car of `pi-coding-agent-executable' for lookup."
-  (let ((pi-coding-agent-executable '("npx" "pi")))
+  (let ((pi-coding-agent-executable '("npx" "pi"))
+        looked-up-command
+        remote-flag)
     (cl-letf (((symbol-function 'executable-find)
-               (lambda (cmd) (when (equal cmd "npx") "/usr/bin/npx"))))
-      (should (pi-coding-agent--check-pi)))))
+               (lambda (cmd &optional remote)
+                 (setq looked-up-command cmd
+                       remote-flag remote)
+                 (when (equal cmd "npx")
+                   "/usr/bin/npx"))))
+      (should (pi-coding-agent--check-pi))
+      (should (equal looked-up-command "npx"))
+      (should (eq remote-flag t)))))
 
 (ert-deftest pi-coding-agent-test-check-pi-returns-nil-when-missing ()
   "check-pi returns nil when executable is not found."
   (let ((pi-coding-agent-executable '("nonexistent-binary")))
-    (cl-letf (((symbol-function 'executable-find) (lambda (_) nil)))
+    (cl-letf (((symbol-function 'executable-find) (lambda (_cmd &optional _remote) nil)))
       (should-not (pi-coding-agent--check-pi)))))
+
+(ert-deftest pi-coding-agent-test-check-pi-uses-remote-executable-find ()
+  "Remote sessions should look for pi on the remote host."
+  (let ((pi-coding-agent-executable '("pi"))
+        (default-directory "/ssh:pi-host:/home/pi/project/")
+        (calls nil))
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (cmd &optional remote)
+                 (push (list cmd remote default-directory) calls)
+                 (and remote "/ssh:pi-host:/usr/bin/pi"))))
+      (should (pi-coding-agent--check-pi))
+      (should (member '("pi" t "/ssh:pi-host:/home/pi/project/") calls))
+      (should-not (cl-find-if (lambda (call)
+                                (and (equal (car call) "pi")
+                                     (null (cadr call))))
+                              calls)))))
+
+(ert-deftest pi-coding-agent-test-check-pi-multi-hop-uses-full-prefix-candidates ()
+  "Multi-hop remote dependency lookup builds candidates with the full route."
+  (let ((pi-coding-agent-executable '("pi"))
+        (exec-path '("/usr/local/bin" "/usr/bin" nil))
+        (exec-suffixes '(""))
+        (default-directory "/ssh:bastion|sudo:root@pi-host:/srv/project/")
+        (checked nil))
+    (cl-letf (((symbol-function 'exec-path)
+               (lambda () exec-path))
+              ((symbol-function 'executable-find)
+               (lambda (&rest _)
+                 (ert-fail "multi-hop lookup should not call executable-find")))
+              ((symbol-function 'file-executable-p)
+               (lambda (path)
+                 (push path checked)
+                 (equal path
+                        "/ssh:bastion|sudo:root@pi-host:/usr/bin/pi"))))
+      (should (pi-coding-agent--check-pi))
+      (should (member "/ssh:bastion|sudo:root@pi-host:/usr/local/bin/pi"
+                      checked))
+      (should (member "/ssh:bastion|sudo:root@pi-host:/usr/bin/pi"
+                      checked))
+      (should-not (cl-some (lambda (path)
+                             (string-prefix-p "/sudo:root@pi-host:" path))
+                           checked)))))
+
+(ert-deftest pi-coding-agent-test-check-pi-multi-hop-uses-remote-exec-path ()
+  "Multi-hop dependency lookup asks TRAMP for the remote PATH entries."
+  (let ((pi-coding-agent-executable '("pi"))
+        (exec-path '("/local-only/bin"))
+        (exec-suffixes '(""))
+        (remote-dir "/ssh:bastion|sudo:root@pi-host:/srv/project/")
+        (checked nil))
+    (cl-letf (((symbol-function 'exec-path)
+               (lambda ()
+                 (should (equal default-directory remote-dir))
+                 '("/opt/remote/bin")))
+              ((symbol-function 'executable-find)
+               (lambda (&rest _)
+                 (ert-fail "multi-hop lookup should not call executable-find")))
+              ((symbol-function 'file-executable-p)
+               (lambda (path)
+                 (push path checked)
+                 (equal path
+                        "/ssh:bastion|sudo:root@pi-host:/opt/remote/bin/pi"))))
+      (let ((default-directory remote-dir))
+        (should (pi-coding-agent--check-pi)))
+      (should (equal checked
+                     '("/ssh:bastion|sudo:root@pi-host:/opt/remote/bin/pi"))))))
+
+(ert-deftest pi-coding-agent-test-check-dependencies-no-local-warning-for-remote-pi ()
+  "Remote dependency checks should not warn just because local PATH lacks pi."
+  (let ((pi-coding-agent-executable '("pi"))
+        (default-directory "/ssh:pi-host:/home/pi/project/")
+        (warning-text nil)
+        (remote-lookup nil))
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (_cmd &optional remote)
+                 (setq remote-lookup remote)
+                 (and remote "/ssh:pi-host:/usr/bin/pi")))
+              ((symbol-function 'display-warning)
+               (lambda (_type msg &rest _)
+                 (setq warning-text msg)))
+              ((symbol-function 'pi-coding-agent--maybe-install-essential-grammars)
+               #'ignore)
+              ((symbol-function 'pi-coding-agent--maybe-warn-incompatible-markdown-grammar)
+               #'ignore)
+              ((symbol-function 'pi-coding-agent--maybe-install-optional-grammars)
+               #'ignore))
+      (pi-coding-agent--check-dependencies)
+      (should remote-lookup)
+      (should-not warning-text))))
+
+(ert-deftest pi-coding-agent-test-check-dependencies-warning-names-remote-path ()
+  "Remote missing-pi warnings explain that the remote PATH was checked."
+  (let ((pi-coding-agent-executable '("pi"))
+        (warning-text nil))
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (_cmd &optional _remote) nil))
+              ((symbol-function 'display-warning)
+               (lambda (_type msg &rest _) (setq warning-text msg)))
+              ((symbol-function 'pi-coding-agent--maybe-install-essential-grammars)
+               #'ignore)
+              ((symbol-function 'pi-coding-agent--maybe-warn-incompatible-markdown-grammar)
+               #'ignore)
+              ((symbol-function 'pi-coding-agent--maybe-install-optional-grammars)
+               #'ignore))
+      (pi-coding-agent--check-dependencies "/ssh:pi-host:/home/pi/project/")
+      (should (string-match-p "remote PATH (/ssh:pi-host:)" warning-text))
+      (should (string-match-p "npm install -g @earendil-works/pi-coding-agent" warning-text))
+      (should-not (string-match-p "@earendil-works/pi-coding-agent@" warning-text)))))
+
+(ert-deftest pi-coding-agent-test-check-dependencies-warning-names-multi-hop-remote-path ()
+  "Remote missing-pi warnings preserve the full TRAMP route."
+  (let ((pi-coding-agent-executable '("pi"))
+        (exec-path '("/usr/bin"))
+        (warning-text nil))
+    (cl-letf (((symbol-function 'exec-path)
+               (lambda () exec-path))
+              ((symbol-function 'pi-coding-agent--remote-executable-file-p)
+               (lambda (_path) nil))
+              ((symbol-function 'display-warning)
+               (lambda (_type msg &rest _) (setq warning-text msg)))
+              ((symbol-function 'pi-coding-agent--maybe-install-essential-grammars)
+               #'ignore)
+              ((symbol-function 'pi-coding-agent--maybe-warn-incompatible-markdown-grammar)
+               #'ignore)
+              ((symbol-function 'pi-coding-agent--maybe-install-optional-grammars)
+               #'ignore))
+      (pi-coding-agent--check-dependencies
+       "/ssh:bastion|sudo:root@pi-host:/srv/project/")
+      (should (string-match-p
+               (regexp-quote "remote PATH (/ssh:bastion|sudo:root@pi-host:)")
+               warning-text)))))
+
+(ert-deftest pi-coding-agent-test-check-dependencies-uses-explicit-directory ()
+  "An explicit dependency directory overrides the caller buffer context."
+  (let ((checked-directory nil))
+    (cl-letf (((symbol-function 'pi-coding-agent--check-pi)
+               (lambda (&optional directory)
+                 (setq checked-directory directory)
+                 t))
+              ((symbol-function 'pi-coding-agent--maybe-install-essential-grammars)
+               #'ignore)
+              ((symbol-function 'pi-coding-agent--maybe-warn-incompatible-markdown-grammar)
+               #'ignore)
+              ((symbol-function 'pi-coding-agent--maybe-install-optional-grammars)
+               #'ignore))
+      (pi-coding-agent--check-dependencies "/ssh:pi-host:/home/pi/project/")
+      (should (equal checked-directory "/ssh:pi-host:/home/pi/project/")))))
 
 (ert-deftest pi-coding-agent-test-executable-default-value ()
   "Default value of pi-coding-agent-executable is (\"pi\")."
@@ -1269,14 +1500,17 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
   "Warning message includes the actual executable name."
   (let ((pi-coding-agent-executable '("my-custom-pi"))
         (warning-text nil))
-    (cl-letf (((symbol-function 'executable-find) (lambda (_) nil))
+    (cl-letf (((symbol-function 'executable-find) (lambda (_cmd &optional _remote) nil))
               ((symbol-function 'display-warning)
                (lambda (_type msg &rest _) (setq warning-text msg))))
       (pi-coding-agent--check-dependencies)
       (should (string-match-p "my-custom-pi" warning-text))
       (should (string-match-p
-               "npm install -g @earendil-works/pi-coding-agent@0.79.1"
-               warning-text)))))
+               "npm install -g @earendil-works/pi-coding-agent"
+               warning-text))
+      (should-not (string-match-p
+                   "npm install -g @earendil-works/pi-coding-agent@"
+                   warning-text)))))
 
 ;;; Essential Grammar Install Prompt (markdown + markdown-inline)
 
@@ -1829,7 +2063,7 @@ Catches wiring bugs like requiring deleted modules."
   (let ((essential-called nil)
         (compatibility-called nil)
         (optional-called nil))
-    (cl-letf (((symbol-function 'pi-coding-agent--check-pi) (lambda () t))
+    (cl-letf (((symbol-function 'pi-coding-agent--check-pi) (lambda (&optional _directory) t))
               ((symbol-function 'pi-coding-agent--maybe-install-essential-grammars)
                (lambda () (setq essential-called t)))
               ((symbol-function 'pi-coding-agent--maybe-warn-incompatible-markdown-grammar)
@@ -1851,6 +2085,55 @@ Catches wiring bugs like requiring deleted modules."
       (setq pi-coding-agent--status 'idle)
       (should (pi-coding-agent--prompt-start-current-p generation))
       (should (pi-coding-agent--session-busy-p (current-buffer))))))
+
+(ert-deftest pi-coding-agent-test-session-busy-includes-session-transition ()
+  "An in-flight session switch keeps the session busy."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--status 'idle)
+    (let ((generation (pi-coding-agent--begin-session-transition 'mock-proc)))
+      (should (pi-coding-agent--session-transition-active-p (current-buffer)))
+      (should (pi-coding-agent--session-busy-p (current-buffer)))
+      (pi-coding-agent--finish-session-transition generation)
+      (should-not (pi-coding-agent--session-transition-active-p
+                   (current-buffer))))))
+
+(ert-deftest pi-coding-agent-test-apply-state-response-normalizes-remote-session-file ()
+  "Applying state anchors inbound sessionFile paths in the chat session dir."
+  (let ((chat-buf (generate-new-buffer "*test-state-remote-session-file*")))
+    (unwind-protect
+        (with-current-buffer chat-buf
+          (pi-coding-agent-chat-mode)
+          (pi-coding-agent--set-chat-session-identity
+           "/ssh:pi-host:/home/pi/project/")
+          (pi-coding-agent--apply-state-response
+           chat-buf
+           '(:success t :data (:isStreaming :false
+                               :isCompacting :false
+                               :sessionId "remote-session"
+                               :sessionFile "/home/pi/.pi/sessions/current.jsonl")))
+          (should (equal (plist-get pi-coding-agent--state :session-file)
+                         "/ssh:pi-host:/home/pi/.pi/sessions/current.jsonl")))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-apply-state-response-ignores-nul-session-file ()
+  "Applying state does not store unsafe sessionFile as a navigable path."
+  (let ((chat-buf (generate-new-buffer "*test-state-nul-session-file*")))
+    (unwind-protect
+        (with-current-buffer chat-buf
+          (pi-coding-agent-chat-mode)
+          (let ((bad (concat "/tmp/a" (string ?\0) "b.jsonl")))
+            (pi-coding-agent--apply-state-response
+             chat-buf
+             (list :success t
+                   :data (list :isStreaming :false
+                               :isCompacting :false
+                               :sessionId "nul-session"
+                               :sessionFile bad)))
+            (should (equal (plist-get pi-coding-agent--state :session-id)
+                           "nul-session"))
+            (should-not (plist-get pi-coding-agent--state :session-file))))
+      (kill-buffer chat-buf))))
 
 (ert-deftest pi-coding-agent-test-apply-state-response-keeps-local-prompt-start-busy ()
   "Stale idle get_state must not erase local prompt preflight state."

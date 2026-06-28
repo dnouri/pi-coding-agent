@@ -170,7 +170,8 @@ plist."
 (defun pi-coding-agent-gui-test-end-session ()
   "End the current test session."
   (when pi-coding-agent-gui-test--session
-    (let ((chat-buf (plist-get pi-coding-agent-gui-test--session :chat-buffer)))
+    (let ((chat-buf (plist-get pi-coding-agent-gui-test--session :chat-buffer))
+          (pi-coding-agent-quit-without-confirmation t))
       (when (buffer-live-p chat-buf)
         (kill-buffer chat-buf)))
     (setq pi-coding-agent-gui-test--session nil)))

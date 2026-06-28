@@ -235,12 +235,12 @@ Uses tool call ID \"call_1\" and contentIndex 0."
   "Execute BODY with a mocked pi session in DIR, cleaning up after.
 DIR should be a unique directory path, typically created with
 `pi-coding-agent-test--make-temp-directory'.
-Mocks `project-current', `pi-coding-agent--start-process', and
-`pi-coding-agent--display-buffers'.
+Mocks `project-current', dependency checks, process startup, and display.
 Automatically cleans up chat and input buffers."
   (declare (indent 1) (debug t))
   `(let ((default-directory ,dir))
      (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+               ((symbol-function 'pi-coding-agent--check-dependencies) #'ignore)
                ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
                ((symbol-function 'pi-coding-agent--display-buffers) #'ignore))
        (unwind-protect
@@ -257,14 +257,16 @@ Automatically cleans up chat and input buffers."
 
 (defun pi-coding-agent-test--kill-session-buffers (dir &optional session)
   "Kill chat and input buffers for DIR and optional SESSION."
-  (ignore-errors (kill-buffer (pi-coding-agent-test--chat-buffer-name dir session)))
-  (ignore-errors (kill-buffer (pi-coding-agent-test--input-buffer-name dir session))))
+  (pi-coding-agent-test--kill-live-buffers
+   (get-buffer (pi-coding-agent-test--input-buffer-name dir session))
+   (get-buffer (pi-coding-agent-test--chat-buffer-name dir session))))
 
 (defun pi-coding-agent-test--kill-live-buffers (&rest buffers)
-  "Kill each live buffer in BUFFERS."
-  (dolist (buf buffers)
-    (when (buffer-live-p buf)
-      (kill-buffer buf))))
+  "Kill each live buffer in BUFFERS without interactive session prompts."
+  (let ((pi-coding-agent-quit-without-confirmation t))
+    (dolist (buf buffers)
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
 
 (defun pi-coding-agent-test--make-temp-directory (prefix)
   "Create and return a fresh temporary directory for tests.

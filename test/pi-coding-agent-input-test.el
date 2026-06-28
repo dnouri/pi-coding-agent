@@ -117,6 +117,35 @@
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
+(ert-deftest pi-coding-agent-test-send-refuses-during-session-transition ()
+  "A prompt typed while switching sessions is not queued into either session."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-send-transition*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-send-transition-input*"))
+        (shown-message nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle
+                  pi-coding-agent--input-buffer input-buf
+                  pi-coding-agent--followup-queue nil)
+            (pi-coding-agent--begin-session-transition 'mock-proc))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "not yet")
+            (cl-letf (((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (setq shown-message (apply #'format fmt args)))))
+              (pi-coding-agent-send))
+            (should (equal (buffer-string) "not yet")))
+          (with-current-buffer chat-buf
+            (should (null pi-coding-agent--followup-queue)))
+          (should (equal shown-message
+                         "Pi: Cannot send while session is switching")))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
 (ert-deftest pi-coding-agent-test-send-refuses-builtin-command-while-busy ()
   "Client-side slash commands are not hidden in the follow-up queue."
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-builtin-busy*"))
@@ -862,6 +891,41 @@ When user aborts, they want to stop everything - including queued messages."
             (should (equal (plist-get sent-command :type) "steer"))
             (should (equal (plist-get sent-command :message) "Steer the pending retry"))
             (should (string-empty-p (buffer-string)))))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-queue-steering-refuses-during-session-transition ()
+  "Steering must not bypass the session-transition send guard."
+  (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-steer-transition*"))
+        (input-buf (get-buffer-create "*pi-coding-agent-test-steer-transition-input*"))
+        (steer-sent nil)
+        (shown-message nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'streaming
+                  pi-coding-agent--input-buffer input-buf
+                  pi-coding-agent--followup-queue nil)
+            (pi-coding-agent--begin-session-transition 'mock-proc))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (pi-coding-agent--set-chat-buffer chat-buf)
+            (insert "do not steer during switch")
+            (cl-letf (((symbol-function 'pi-coding-agent--send-steer-message)
+                       (lambda (_text)
+                         (setq steer-sent t)
+                         t))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (setq shown-message (apply #'format fmt args)))))
+              (pi-coding-agent-queue-steering))
+            (should-not steer-sent)
+            (should (equal (buffer-string) "do not steer during switch")))
+          (with-current-buffer chat-buf
+            (should (null pi-coding-agent--followup-queue)))
+          (should (equal shown-message
+                         "Pi: Cannot send steering while session is switching")))
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
 
@@ -1725,16 +1789,20 @@ from the queue and sends it as a normal prompt."
                   (streaming nil nil)
                   (compacting nil nil)
                   (idle "pending local echo" nil)
-                  (idle nil prompt-wait)))
+                  (idle nil prompt-wait)
+                  (idle nil transition)))
     (with-temp-buffer
       (pi-coding-agent-chat-mode)
       (let ((sent-prompts nil))
         (setq pi-coding-agent--status (nth 0 case)
               pi-coding-agent--local-user-message (nth 1 case)
               pi-coding-agent--followup-queue '("queued follow-up"))
-        (when (eq (nth 2 case) 'prompt-wait)
-          (pi-coding-agent--begin-prompt-start-wait)
-          (setq pi-coding-agent--status 'idle))
+        (pcase (nth 2 case)
+          ('prompt-wait
+           (pi-coding-agent--begin-prompt-start-wait)
+           (setq pi-coding-agent--status 'idle))
+          ('transition
+           (pi-coding-agent--begin-session-transition 'mock-proc)))
         (cl-letf (((symbol-function 'pi-coding-agent--send-prompt)
                    (lambda (text &optional on-success &rest _)
                      (push text sent-prompts)
@@ -3231,6 +3299,36 @@ Pi handles command expansion on the server side."
     (let ((header (pi-coding-agent--header-line-string)))
       (should (string-match-p "thinking" header)))))
 
+(ert-deftest pi-coding-agent-test-quit-prompts-even-when-process-noquery ()
+  "Explicit quit still asks before killing a live noquery process."
+  (let ((chat-buf (generate-new-buffer "*pi-coding-agent-test-quit-chat*"))
+        (input-buf (generate-new-buffer "*pi-coding-agent-test-quit-input*"))
+        (proc (start-process "test-quit-noquery" nil "cat"))
+        (asked nil))
+    (unwind-protect
+        (progn
+          (set-process-query-on-exit-flag proc nil)
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--process proc)
+            (pi-coding-agent--set-input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (pi-coding-agent--set-chat-buffer chat-buf))
+          (cl-letf (((symbol-function 'yes-or-no-p)
+                     (lambda (_prompt)
+                       (setq asked t)
+                       nil)))
+            (with-current-buffer chat-buf
+              (should-error (pi-coding-agent-quit) :type 'user-error)))
+          (should asked)
+          (should (buffer-live-p chat-buf))
+          (should (buffer-live-p input-buf))
+          (should (process-live-p proc)))
+      (when (process-live-p proc)
+        (delete-process proc))
+      (pi-coding-agent-test--kill-live-buffers input-buf chat-buf))))
+
 (ert-deftest pi-coding-agent-test-process-exit-resets-busy-chat-and-restores-queue ()
   "Process exit leaves the frontend idle and surfaces queued local work."
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-process-exit-chat*"))
@@ -3777,6 +3875,74 @@ This occurs after compaction before the next assistant message."
     (let ((result (pi-coding-agent--path-capf)))
       (when result
         (should (listp (nth 2 result)))))))
+
+(ert-deftest pi-coding-agent-test-path-capf-remote-absolute-uses-remote-root ()
+  "Remote absolute path completion checks remote / but inserts /-style paths."
+  (let ((default-directory "/ssh:pi-host:/home/pi/project/")
+        (completion-base nil)
+        (completion-dir nil)
+        (directory-checks nil))
+    (with-temp-buffer
+      (pi-coding-agent-input-mode)
+      (setq default-directory "/ssh:pi-host:/home/pi/project/")
+      (cl-letf (((symbol-function 'file-directory-p)
+                 (lambda (path)
+                   (push path directory-checks)
+                   (string-prefix-p "/ssh:pi-host:" path)))
+                ((symbol-function 'file-name-all-completions)
+                 (lambda (base dir)
+                   (setq completion-base base
+                         completion-dir dir)
+                   '("log/" "local"))))
+        (insert "see /var/lo")
+        (let* ((result (pi-coding-agent--path-capf))
+               (candidates (nth 2 result))
+               (annotation (plist-get (nthcdr 3 result) :annotation-function)))
+          (should result)
+          (should (equal completion-base "lo"))
+          (should (equal completion-dir "/ssh:pi-host:/var/"))
+          (should (equal candidates '("/var/log/" "/var/local")))
+          (should-not (cl-some #'file-remote-p candidates))
+          (should (equal (funcall annotation "/var/log/") " (dir)"))
+          (should (equal (funcall annotation "/var/local") " (file)"))
+          (should (member "/ssh:pi-host:/var/" directory-checks))
+          (should-not (member "/ssh:pi-host:/var/log/" directory-checks))
+          (should-not (member "/var/" directory-checks)))))))
+
+(ert-deftest pi-coding-agent-test-path-capf-multi-hop-absolute-keeps-full-route ()
+  "Remote absolute path completion checks the full multi-hop TRAMP route."
+  (let ((completion-base nil)
+        (completion-dir nil)
+        (directory-checks nil)
+        (session-dir "/ssh:bastion|sudo:root@pi-host:/home/pi/project/"))
+    (with-temp-buffer
+      (pi-coding-agent-input-mode)
+      (cl-letf (((symbol-function 'pi-coding-agent--session-directory)
+                 (lambda () session-dir))
+                ((symbol-function 'file-directory-p)
+                 (lambda (path)
+                   (push path directory-checks)
+                   (equal path "/ssh:bastion|sudo:root@pi-host:/var/")))
+                ((symbol-function 'file-name-all-completions)
+                 (lambda (base dir)
+                   (setq completion-base base
+                         completion-dir dir)
+                   '("log/" "local"))))
+        (insert "see /var/lo")
+        (let* ((result (pi-coding-agent--path-capf))
+               (candidates (nth 2 result)))
+          (should result)
+          (should (equal completion-base "lo"))
+          (should (equal completion-dir
+                         "/ssh:bastion|sudo:root@pi-host:/var/"))
+          (should (equal candidates '("/var/log/" "/var/local")))
+          (should (member "/ssh:bastion|sudo:root@pi-host:/var/"
+                          directory-checks)))))))
+
+(ert-deftest pi-coding-agent-test-path-completions-returns-nil-for-unsafe-input ()
+  "Path completion treats malformed path text as no completions."
+  (let ((bad-path (concat "/tmp/bad" (string ?\0) "name")))
+    (should-not (pi-coding-agent--path-completions bad-path))))
 
 (ert-deftest pi-coding-agent-test-path-completions-excludes-dot-entries ()
   "Path completions should not include ./ or ../ entries."

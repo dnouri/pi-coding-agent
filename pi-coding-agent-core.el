@@ -104,6 +104,216 @@ COMMAND must be a valid plist with string/number/list values.
 Returns a JSON string terminated with a newline."
   (concat (json-encode command) "\n"))
 
+;;;; Path Boundary Helpers
+
+(defun pi-coding-agent--path-string-contains-nul-p (path)
+  "Return non-nil if PATH is a string containing a NUL byte."
+  (and (stringp path)
+       (cl-position ?\0 path :test #'=)))
+
+(defun pi-coding-agent--ensure-usable-path-string (path)
+  "Signal `user-error' when PATH is a malformed file name string.
+Non-string PATH values are ignored so callers can keep treating missing or
+non-string path metadata as absent."
+  (when (pi-coding-agent--path-string-contains-nul-p path)
+    (user-error "Path contains NUL byte"))
+  path)
+
+(defun pi-coding-agent--syntactic-remote-prefix (path)
+  "Return PATH's TRAMP-looking prefix, or nil.
+This is a fallback for contexts that temporarily bind
+`file-name-handler-alist' to nil; ordinary operation still delegates to
+`file-remote-p'."
+  (when (and (stringp path)
+             (string-match "\\`\\(/[^/:]+:[^\n]*:\\)\\(?:/\\|~\\)" path))
+    (match-string 1 path)))
+
+(defun pi-coding-agent--remote-prefix-from-handler (path)
+  "Return PATH's full TRAMP prefix using `file-remote-p', or nil."
+  (when-let* ((localname (and (stringp path)
+                              (file-remote-p path 'localname))))
+    (when (string-suffix-p localname path)
+      (substring path 0 (- (length path) (length localname))))))
+
+(defun pi-coding-agent--remote-prefix (&optional anchor)
+  "Return the full TRAMP remote prefix for ANCHOR, or nil.
+When ANCHOR is nil, use `default-directory'.  This keeps multi-hop TRAMP
+routes intact and falls back to a syntax check without requiring a remote
+connection."
+  (let ((anchor (or anchor default-directory)))
+    (and (stringp anchor)
+         (not (string-empty-p anchor))
+         (or (pi-coding-agent--remote-prefix-from-handler anchor)
+             (pi-coding-agent--syntactic-remote-prefix anchor)))))
+
+(defun pi-coding-agent--remote-home-path-p (path)
+  "Return non-nil when PATH is tilde-prefixed."
+  (and (stringp path)
+       (> (length path) 0)
+       (eq (aref path 0) ?~)))
+
+(defun pi-coding-agent--plain-remote-home-path-p (path)
+  "Return non-nil when PATH is `~' or has the `~/' prefix."
+  (and (stringp path)
+       (or (equal path "~")
+           (string-prefix-p "~/" path))))
+
+(defun pi-coding-agent--named-remote-home-path-p (path)
+  "Return non-nil when PATH has a named-user home prefix such as `~root'."
+  (and (pi-coding-agent--remote-home-path-p path)
+       (not (pi-coding-agent--plain-remote-home-path-p path))))
+
+(defun pi-coding-agent--remote-prefix-for-path (path)
+  "Return PATH's full TRAMP remote prefix, or nil."
+  (and (stringp path)
+       (not (string-empty-p path))
+       (or (pi-coding-agent--remote-prefix-from-handler path)
+           (pi-coding-agent--syntactic-remote-prefix path))))
+
+(defun pi-coding-agent--route-preserving-path-op-p (&rest paths)
+  "Return non-nil when any of PATHS should bypass TRAMP handlers.
+This predicate is for pure file-name string transforms only.  TRAMP's file
+name handlers canonicalize multi-hop routes like `/ssh:bastion|sudo:host:' to
+just the final hop for generic operations such as `expand-file-name'."
+  (cl-some #'pi-coding-agent--remote-prefix-for-path paths))
+
+(defun pi-coding-agent--route-preserving-expand-file-name (path &optional anchor)
+  "Expand PATH against ANCHOR without collapsing TRAMP route text.
+This helper only changes pure string normalization.  Callers must not use it to
+wrap real file I/O or process creation.  When PATH or ANCHOR is remote-looking,
+file-name handlers are disabled for the `expand-file-name' call so multi-hop
+TRAMP prefixes remain byte-for-byte intact."
+  (let* ((anchor (or anchor default-directory))
+         (prefix (pi-coding-agent--remote-prefix anchor)))
+    (cond
+     ((and prefix
+           (pi-coding-agent--remote-home-path-p path)
+           (not (pi-coding-agent--remote-prefix-for-path path)))
+      (concat prefix path))
+     ((pi-coding-agent--route-preserving-path-op-p path anchor)
+      (let ((file-name-handler-alist nil))
+        (expand-file-name path anchor)))
+     (t
+      (expand-file-name path anchor)))))
+
+(defun pi-coding-agent--route-preserving-file-name-as-directory (path)
+  "Return PATH as a directory without collapsing TRAMP route text.
+This is a pure string helper; do not use it around real file I/O."
+  (if (pi-coding-agent--route-preserving-path-op-p path)
+      (let ((file-name-handler-alist nil))
+        (file-name-as-directory path))
+    (file-name-as-directory path)))
+
+(defun pi-coding-agent--route-preserving-file-name-directory (path)
+  "Return PATH's directory without collapsing TRAMP route text.
+This is a pure string helper; do not use it around real file I/O."
+  (if (pi-coding-agent--route-preserving-path-op-p path)
+      (let ((file-name-handler-alist nil))
+        (file-name-directory path))
+    (file-name-directory path)))
+
+(defun pi-coding-agent--route-preserving-abbreviate-file-name (path)
+  "Abbreviate PATH for display without collapsing TRAMP route text.
+This is a pure string helper; do not use it around real file I/O."
+  (if (pi-coding-agent--route-preserving-path-op-p path)
+      (let ((file-name-handler-alist nil))
+        (abbreviate-file-name path))
+    (abbreviate-file-name path)))
+
+(defun pi-coding-agent--ensure-compatible-remote-path (path &optional anchor)
+  "Signal `user-error' when remote PATH is incompatible with ANCHOR.
+ANCHOR defaults to `default-directory'.  Remote PATH must use the same TRAMP
+prefix as a remote ANCHOR, and is rejected when ANCHOR is local.  Malformed
+file name strings are rejected before TRAMP prefix checks."
+  (pi-coding-agent--ensure-usable-path-string path)
+  (let ((path-prefix (pi-coding-agent--remote-prefix-for-path path))
+        (anchor-prefix (pi-coding-agent--remote-prefix anchor)))
+    (when path-prefix
+      (cond
+       ((not anchor-prefix)
+        (user-error "Remote path cannot be used with local session: %s" path))
+       ((not (equal path-prefix anchor-prefix))
+        (user-error "Remote path is not on this session host: %s" path))))))
+
+(defun pi-coding-agent--emacs-path (path &optional anchor)
+  "Return inbound PATH as an Emacs-local file name.
+PATH must be a nonempty string; otherwise return nil.  Already-remote PATHs
+must match ANCHOR's TRAMP prefix, and are rejected when ANCHOR is local.  With
+a remote ANCHOR (or remote `default-directory'), process-local absolute paths
+like /x and home paths like ~/x are prefixed with that remote prefix.  Relative
+paths are expanded under ANCHOR or `default-directory'.  Malformed file name
+strings signal `user-error'."
+  (pi-coding-agent--ensure-usable-path-string path)
+  (when (and (stringp path) (not (string-empty-p path)))
+    (let ((prefix (pi-coding-agent--remote-prefix anchor))
+          (anchor (or anchor default-directory)))
+      (cond
+       ((pi-coding-agent--remote-prefix-for-path path)
+        (pi-coding-agent--ensure-compatible-remote-path path anchor)
+        path)
+       ((and prefix (string-prefix-p "/" path))
+        (concat prefix path))
+       ((and prefix (pi-coding-agent--remote-home-path-p path))
+        (concat prefix path))
+       (t
+        (pi-coding-agent--route-preserving-expand-file-name path anchor))))))
+
+(defun pi-coding-agent--emacs-directory (path &optional anchor)
+  "Return inbound PATH as an Emacs directory name.
+Optional ANCHOR is forwarded to `pi-coding-agent--emacs-path'.  This adds a
+trailing slash when PATH is usable."
+  (when-let* ((emacs-path (pi-coding-agent--emacs-path path anchor)))
+    (pi-coding-agent--route-preserving-file-name-as-directory emacs-path)))
+
+(defun pi-coding-agent--passive-emacs-path (path &optional anchor)
+  "Return inbound backend PATH as an Emacs path, or nil when unsafe.
+Optional ANCHOR is forwarded to `pi-coding-agent--emacs-path'.  This is for
+passive Pi-originated metadata only.  It intentionally keeps
+`pi-coding-agent--emacs-path' strict for explicit navigation, validation, and
+outbound boundaries, while preventing malformed backend metadata from escaping
+process filters or callbacks."
+  (condition-case nil
+      (pi-coding-agent--emacs-path path anchor)
+    (error nil)))
+
+(defun pi-coding-agent--local-name-for-process (path)
+  "Return PATH without its TRAMP prefix, even when handlers are disabled."
+  (if-let* ((prefix (pi-coding-agent--remote-prefix-for-path path)))
+      (substring path (length prefix))
+    (file-local-name path)))
+
+(defun pi-coding-agent--process-local-path (path &optional anchor)
+  "Return outbound PATH as the process-local path Pi should receive.
+PATH must be a nonempty string; otherwise return nil.  Emacs/TRAMP paths are
+converted only when they match remote ANCHOR; TRAMP paths are rejected for local
+ANCHOR.  The paths `~' and `~/x' are preserved for remote sessions because only
+Pi on that host can expand the remote account home.  Named-user homes such as
+`~root/x' are rejected for remote sessions because Pi does not implement that
+shell expansion.  Local sessions expand home, absolute, and relative paths
+through Emacs before sending them over JSON.  Malformed file name strings signal
+`user-error'."
+  (pi-coding-agent--ensure-compatible-remote-path path anchor)
+  (when (and (stringp path) (not (string-empty-p path)))
+    (let ((remote-anchor (pi-coding-agent--remote-prefix anchor)))
+      (cond
+       ((and remote-anchor
+             (pi-coding-agent--plain-remote-home-path-p path)
+             (not (pi-coding-agent--remote-prefix-for-path path)))
+        path)
+       ((and remote-anchor
+             (pi-coding-agent--named-remote-home-path-p path)
+             (not (pi-coding-agent--remote-prefix-for-path path)))
+        (user-error "Remote Pi paths only support ~ or ~/..., not named homes: %s"
+                    path))
+       (t
+        (when-let* ((emacs-path (pi-coding-agent--emacs-path path anchor)))
+          (let ((localname (pi-coding-agent--local-name-for-process emacs-path)))
+            (when (and remote-anchor
+                       (pi-coding-agent--named-remote-home-path-p localname))
+              (user-error "Remote Pi paths only support ~ or ~/..., not named homes: %s"
+                          localname))
+            localname)))))))
+
 ;;;; Request ID Management
 
 (defvar pi-coding-agent--request-id-counter 0
@@ -129,6 +339,41 @@ Maps request IDs to command type strings."
         (process-put process 'pi-coding-agent-pending-command-types table)
         table)))
 
+(defconst pi-coding-agent--remote-ready-marker
+  "__PI_CODING_AGENT_RPC_READY_V1__"
+  "Exact stdout line that marks a remote Pi process ready for stdin.")
+
+(defun pi-coding-agent--process-awaiting-ready-p (process)
+  "Return non-nil when PROCESS must emit the ready marker before sends."
+  (and (process-get process 'pi-coding-agent-awaiting-ready-marker)
+       (not (process-get process 'pi-coding-agent-ready))))
+
+(defun pi-coding-agent--enqueue-outbound-string (process string)
+  "Queue STRING to be sent to PROCESS when its ready marker arrives."
+  (process-put process 'pi-coding-agent-outbound-queue
+               (append (process-get process 'pi-coding-agent-outbound-queue)
+                       (list string))))
+
+(defun pi-coding-agent--flush-outbound-queue (process)
+  "Flush queued outbound strings to PROCESS in FIFO order."
+  (let ((queue (process-get process 'pi-coding-agent-outbound-queue)))
+    (when queue
+      (process-put process 'pi-coding-agent-outbound-queue nil)
+      (dolist (string queue)
+        (process-send-string process string)))))
+
+(defun pi-coding-agent--mark-process-ready (process)
+  "Mark PROCESS ready for stdin and flush queued outbound strings."
+  (process-put process 'pi-coding-agent-ready t)
+  (process-put process 'pi-coding-agent-awaiting-ready-marker nil)
+  (pi-coding-agent--flush-outbound-queue process))
+
+(defun pi-coding-agent--send-string (process string)
+  "Send STRING to PROCESS, or queue it until a remote process is ready."
+  (if (pi-coding-agent--process-awaiting-ready-p process)
+      (pi-coding-agent--enqueue-outbound-string process string)
+    (process-send-string process string)))
+
 (defun pi-coding-agent--rpc-async (process command callback)
   "Send COMMAND to pi PROCESS asynchronously.
 COMMAND is a plist that will be augmented with a unique ID.
@@ -139,13 +384,14 @@ CALLBACK is called with the response plist when received."
          (pending-types (pi-coding-agent--get-pending-command-types process)))
     (puthash id callback pending)
     (puthash id (plist-get command :type) pending-types)
-    (process-send-string process (pi-coding-agent--encode-command full-command))))
+    (pi-coding-agent--send-string
+     process (pi-coding-agent--encode-command full-command))))
 
 (defun pi-coding-agent--send-extension-ui-response (process response)
   "Send extension UI RESPONSE to pi PROCESS.
 RESPONSE must include the original :id from the request, as pi uses
 this to match responses to pending promises."
-  (process-send-string process (pi-coding-agent--encode-command response)))
+  (pi-coding-agent--send-string process (pi-coding-agent--encode-command response)))
 
 (defun pi-coding-agent--rpc-sync (process command &optional timeout)
   "Send COMMAND to pi PROCESS synchronously, returning the response.
@@ -175,8 +421,14 @@ Accumulates output and dispatches complete JSON lines."
          (lines (car result)))
     (process-put proc 'pi-coding-agent-partial-output-chunks (cdr result))
     (dolist (line lines)
-      (when-let* ((json (pi-coding-agent--parse-json-line line)))
-        (pi-coding-agent--dispatch-response proc json)))))
+      (if (equal line pi-coding-agent--remote-ready-marker)
+          (pi-coding-agent--mark-process-ready proc)
+        (when-let* ((json (pi-coding-agent--parse-json-line line)))
+          (condition-case err
+              (pi-coding-agent--dispatch-response proc json)
+            (error
+             (message "pi-coding-agent: error dispatching process response: %s"
+                      (error-message-string err)))))))))
 
 (defun pi-coding-agent--process-sentinel (proc event)
   "Handle process state change EVENT for PROC."
@@ -314,22 +566,45 @@ This is useful for testing extensions or passing additional flags.")
       ('no-approve '("--no-approve"))
       (_ (error "Invalid pi-coding-agent-project-trust-policy: %S" policy)))))
 
+(defun pi-coding-agent--pi-command ()
+  "Return the argv used to start Pi in RPC mode."
+  (append pi-coding-agent-executable
+          '("--mode" "rpc")
+          pi-coding-agent-extra-args
+          (pi-coding-agent--project-trust-args)))
+
+(defun pi-coding-agent--remote-start-command (command)
+  "Return a remote shell wrapper COMMAND that emits the ready marker.
+COMMAND is passed as `$0' and `$@' to preserve the original argv exactly."
+  (append (list "sh" "-c"
+                (format "printf '%%s\\n' %s; exec \"$0\" \"$@\""
+                        (shell-quote-argument
+                         pi-coding-agent--remote-ready-marker)))
+          command))
+
 (defun pi-coding-agent--start-process (directory)
   "Start pi RPC process in DIRECTORY.
 Returns the process object."
-  (let ((default-directory directory)
-        (stderr-buf (generate-new-buffer " *pi-coding-agent-stderr*")))
+  (let* ((default-directory directory)
+         (remote-start-p (pi-coding-agent--remote-prefix directory))
+         (command (pi-coding-agent--pi-command))
+         (process-command (if remote-start-p
+                              (pi-coding-agent--remote-start-command command)
+                            command))
+         (stderr-buf (generate-new-buffer " *pi-coding-agent-stderr*")))
     (condition-case err
         (let ((proc (make-process
                      :name "pi"
-                     :command `(,@pi-coding-agent-executable
-                                "--mode" "rpc"
-                                ,@pi-coding-agent-extra-args
-                                ,@(pi-coding-agent--project-trust-args))
+                     :command process-command
                      :connection-type 'pipe
+                     :noquery t
+                     :file-handler t
                      :stderr stderr-buf
                      :filter #'pi-coding-agent--process-filter
                      :sentinel #'pi-coding-agent--process-sentinel)))
+          (when (and remote-start-p
+                     (not (process-get proc 'pi-coding-agent-ready)))
+            (process-put proc 'pi-coding-agent-awaiting-ready-marker t))
           (process-put proc 'pi-coding-agent-stderr-buf stderr-buf)
           (when-let* ((stderr-proc (get-buffer-process stderr-buf)))
             (set-process-query-on-exit-flag stderr-proc nil))
@@ -549,20 +824,23 @@ Only processes successful responses for state-modifying commands."
                  pi-coding-agent--state new-state
                  pi-coding-agent--state-timestamp (float-time))))))))
 
-(defun pi-coding-agent--extract-state-from-response (response)
+(defun pi-coding-agent--extract-state-from-response (response &optional anchor)
   "Extract state plist from a get_state RESPONSE.
-Converts camelCase keys to kebab-case and normalizes booleans.
+Converts camelCase keys to kebab-case, normalizes booleans, and converts
+inbound sessionFile values to Emacs paths using ANCHOR or `default-directory'.
 Returns plist with :status key for setting `pi-coding-agent--status'."
   (when-let* ((data (plist-get response :data)))
     (let ((is-streaming (pi-coding-agent--normalize-boolean (plist-get data :isStreaming)))
-          (is-compacting (pi-coding-agent--normalize-boolean (plist-get data :isCompacting))))
+          (is-compacting (pi-coding-agent--normalize-boolean (plist-get data :isCompacting)))
+          (session-file (pi-coding-agent--normalize-string-or-null
+                         (plist-get data :sessionFile))))
       (list :status (cond (is-streaming 'streaming)
                           (is-compacting 'compacting)
                           (t 'idle))
             :model (plist-get data :model)
             :thinking-level (plist-get data :thinkingLevel)
             :session-id (plist-get data :sessionId)
-            :session-file (plist-get data :sessionFile)
+            :session-file (pi-coding-agent--passive-emacs-path session-file anchor)
             :message-count (plist-get data :messageCount)
             :pending-message-count (plist-get data :pendingMessageCount)))))
 

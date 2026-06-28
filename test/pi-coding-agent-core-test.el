@@ -153,6 +153,183 @@
          (parsed (json-parse-string (string-trim-right result) :object-type 'plist)))
     (should (equal (plist-get parsed :attachments) []))))
 
+;;;; Path Boundary Helper Tests
+
+(ert-deftest pi-coding-agent-test-remote-prefix-detects-tramp-anchor ()
+  "Remote prefix helper returns the TRAMP prefix without connecting."
+  (let ((default-directory "/ssh:pi-host:/home/pi/project/"))
+    (should (equal (pi-coding-agent--remote-prefix)
+                   "/ssh:pi-host:"))
+    (should (equal (pi-coding-agent--remote-prefix
+                    "/ssh:other:/srv/project/")
+                   "/ssh:other:"))
+    (should (equal (pi-coding-agent--remote-prefix
+                    "/ssh:bastion|sudo:root@pi-host:/srv/project/")
+                   "/ssh:bastion|sudo:root@pi-host:"))
+    (should-not (pi-coding-agent--remote-prefix "/tmp/project/"))))
+
+(ert-deftest pi-coding-agent-test-emacs-path-normalizes-remote-inbound-paths ()
+  "Inbound process-local paths become Emacs/TRAMP paths at the boundary."
+  (let ((anchor "/ssh:pi-host:/home/pi/project/"))
+    (should (equal (pi-coding-agent--emacs-path "/var/pi/session.jsonl" anchor)
+                   "/ssh:pi-host:/var/pi/session.jsonl"))
+    (should (equal (pi-coding-agent--emacs-path "~/pi/session.jsonl" anchor)
+                   "/ssh:pi-host:~/pi/session.jsonl"))
+    (should (equal (pi-coding-agent--emacs-path "~root/pi/session.jsonl" anchor)
+                   "/ssh:pi-host:~root/pi/session.jsonl"))
+    (should (equal (pi-coding-agent--emacs-path "sessions/current.jsonl" anchor)
+                   "/ssh:pi-host:/home/pi/project/sessions/current.jsonl"))
+    (should (equal (pi-coding-agent--emacs-path
+                    "/ssh:pi-host:/tmp/remote.jsonl" anchor)
+                   "/ssh:pi-host:/tmp/remote.jsonl"))
+    (should-not (pi-coding-agent--emacs-path "" anchor))))
+
+(ert-deftest pi-coding-agent-test-emacs-path-preserves-multi-hop-route ()
+  "Inbound process-local paths keep the full multi-hop TRAMP anchor."
+  (let ((anchor "/ssh:bastion|sudo:root@pi-host:/home/pi/project/"))
+    (should (equal (pi-coding-agent--emacs-path
+                    "sessions/current.jsonl" anchor)
+                   "/ssh:bastion|sudo:root@pi-host:/home/pi/project/sessions/current.jsonl"))
+    (should (equal (pi-coding-agent--emacs-path
+                    "/var/pi/session.jsonl" anchor)
+                   "/ssh:bastion|sudo:root@pi-host:/var/pi/session.jsonl"))))
+
+(ert-deftest pi-coding-agent-test-emacs-path-rejects-incompatible-tramp-inbound-paths ()
+  "Inbound TRAMP paths must match the full session anchor route."
+  (let ((anchor "/ssh:pi-host:/home/pi/project/"))
+    (should-error (pi-coding-agent--emacs-path
+                   "/ssh:other:/tmp/remote.jsonl" anchor)
+                  :type 'user-error)
+    (should-error (pi-coding-agent--emacs-path
+                   "/ssh:pi-host:/tmp/remote.jsonl" "/tmp/project/")
+                  :type 'user-error))
+  (let ((anchor "/ssh:bastion|sudo:root@pi-host:/home/pi/project/"))
+    (should (equal (pi-coding-agent--emacs-path "/etc/hosts" anchor)
+                   "/ssh:bastion|sudo:root@pi-host:/etc/hosts"))
+    (should-error (pi-coding-agent--emacs-path
+                   "/sudo:root@pi-host:/etc/hosts" anchor)
+                  :type 'user-error)))
+
+(ert-deftest pi-coding-agent-test-path-helpers-reject-nul-strings ()
+  "NUL-containing path strings are not usable file names."
+  (let ((anchor "/ssh:pi-host:/home/pi/project/")
+        (bad (concat "/tmp/bad" (string ?\0) "name.el")))
+    (let ((err (should-error (pi-coding-agent--emacs-path bad anchor)
+                             :type 'user-error)))
+      (should (string-match-p "NUL" (error-message-string err))))
+    (let ((err (should-error (pi-coding-agent--process-local-path bad anchor)
+                             :type 'user-error)))
+      (should (string-match-p "NUL" (error-message-string err))))))
+
+(ert-deftest pi-coding-agent-test-passive-emacs-path-ignores-unsafe-metadata ()
+  "Passive backend path metadata returns nil instead of signaling."
+  (let ((anchor "/ssh:pi-host:/home/pi/project/")
+        (bad (concat "/tmp/bad" (string ?\0) "name.el")))
+    (should-not (pi-coding-agent--passive-emacs-path bad anchor))
+    (should-not (pi-coding-agent--passive-emacs-path
+                 "/ssh:other:/tmp/name.el" anchor))
+    (should (equal (pi-coding-agent--passive-emacs-path
+                    "prompts/fix.md" anchor)
+                   "/ssh:pi-host:/home/pi/project/prompts/fix.md"))))
+
+(ert-deftest pi-coding-agent-test-emacs-directory-normalizes-remote-inbound-directory ()
+  "Inbound directories are normalized to Emacs paths with trailing slash."
+  (should (equal (pi-coding-agent--emacs-directory
+                  "/home/pi/project" "/ssh:pi-host:/tmp/session.jsonl")
+                 "/ssh:pi-host:/home/pi/project/")))
+
+(ert-deftest pi-coding-agent-test-emacs-directory-preserves-multi-hop-route ()
+  "Directory normalization keeps full multi-hop TRAMP prefixes."
+  (should (equal (pi-coding-agent--emacs-directory
+                  "/home/pi/project"
+                  "/ssh:bastion|sudo:root@pi-host:/tmp/session.jsonl")
+                 "/ssh:bastion|sudo:root@pi-host:/home/pi/project/")))
+
+(ert-deftest pi-coding-agent-test-process-local-path-strips-tramp-outbound-paths ()
+  "Outbound paths are converted into process-local paths for Pi."
+  (let ((anchor "/ssh:pi-host:/home/pi/project/"))
+    (should (equal (pi-coding-agent--process-local-path
+                    "/ssh:pi-host:/var/pi/session.jsonl" anchor)
+                   "/var/pi/session.jsonl"))
+    (should (equal (pi-coding-agent--process-local-path
+                    "/ssh:bastion|sudo:root@pi-host:/var/pi/session.jsonl"
+                    "/ssh:bastion|sudo:root@pi-host:/home/pi/project/")
+                   "/var/pi/session.jsonl"))
+    (should (equal (pi-coding-agent--process-local-path
+                    "/var/pi/session.jsonl" anchor)
+                   "/var/pi/session.jsonl"))
+    (should (equal (pi-coding-agent--process-local-path
+                    "sessions/current.jsonl" anchor)
+                   "/home/pi/project/sessions/current.jsonl"))
+    (should (equal (pi-coding-agent--process-local-path
+                    "~/pi/session.jsonl" anchor)
+                   "~/pi/session.jsonl"))
+    (should-error (pi-coding-agent--process-local-path
+                   "~root/pi/session.jsonl" anchor)
+                  :type 'user-error)
+    (should-not (pi-coding-agent--process-local-path "" anchor))))
+
+(ert-deftest pi-coding-agent-test-process-local-path-rejects-other-remote ()
+  "Outbound remote paths must stay on the session remote."
+  (let ((anchor "/ssh:pi-host:/home/pi/project/"))
+    (should-error (pi-coding-agent--process-local-path
+                   "/ssh:other:/var/pi/session.jsonl" anchor)
+                  :type 'user-error)
+    (should-error (pi-coding-agent--process-local-path
+                   "/scp:pi-host:/var/pi/session.jsonl" anchor)
+                  :type 'user-error)))
+
+(ert-deftest pi-coding-agent-test-process-local-path-rejects-remote-for-local-anchor ()
+  "Outbound TRAMP paths are not stripped for a local Pi process."
+  (should-error (pi-coding-agent--process-local-path
+                 "/ssh:pi-host:/var/pi/session.jsonl" "/tmp/project/")
+                :type 'user-error))
+
+(ert-deftest pi-coding-agent-test-ensure-compatible-remote-path-rejects-local-anchor ()
+  "Remote compatibility helper rejects TRAMP paths for local anchors."
+  (should-not (pi-coding-agent--ensure-compatible-remote-path
+               "/tmp/session.jsonl" "/ssh:pi-host:/home/pi/project/"))
+  (should-error (pi-coding-agent--ensure-compatible-remote-path
+                 "/ssh:pi-host:/tmp/session.jsonl" "/tmp/project/")
+                :type 'user-error)
+  (should-not (pi-coding-agent--ensure-compatible-remote-path
+               "/ssh:pi-host:/tmp/session.jsonl"
+               "/ssh:pi-host:/home/pi/project/")))
+
+(ert-deftest pi-coding-agent-test-process-local-path-preserves-remote-home-paths ()
+  "Remote outbound home paths stay process-local without guessed expansion."
+  (let ((anchor "/ssh:pi-host:/home/pi/project/"))
+    (should (equal (pi-coding-agent--process-local-path "~" anchor) "~"))
+    (should (equal (pi-coding-agent--process-local-path "~/out.html" anchor)
+                   "~/out.html"))
+    (should-error (pi-coding-agent--process-local-path "~root/out.html" anchor)
+                  :type 'user-error)
+    (should-error (pi-coding-agent--process-local-path
+                   "/ssh:pi-host:~root/out.html" anchor)
+                  :type 'user-error)))
+
+(ert-deftest pi-coding-agent-test-process-local-path-preserves-home-without-tramp-handler ()
+  "Remote outbound home paths never expand against Emacs's local home."
+  (let ((anchor "/ssh:pi-host:/home/pi/project/")
+        (file-name-handler-alist nil))
+    (should (equal (pi-coding-agent--process-local-path "~/out.html" anchor)
+                   "~/out.html"))
+    (should (equal (pi-coding-agent--process-local-path
+                    "/ssh:pi-host:/tmp/out.html" anchor)
+                   "/tmp/out.html"))))
+
+(ert-deftest pi-coding-agent-test-process-local-path-expands-local-home-paths ()
+  "Local outbound home paths are expanded before Pi receives JSON."
+  (should (equal (pi-coding-agent--process-local-path
+                  "~/out.html" "/tmp/pi-project/")
+                 (expand-file-name "~/out.html"))))
+
+(ert-deftest pi-coding-agent-test-process-local-path-expands-local-relative-paths ()
+  "Local outbound relative paths expand under the local anchor."
+  (should (equal (pi-coding-agent--process-local-path
+                  "sessions/current.jsonl" "/tmp/pi-project/")
+                 "/tmp/pi-project/sessions/current.jsonl")))
+
 ;;;; Process Cleanup Tests
 
 (ert-deftest pi-coding-agent-test-process-exit-clears-pending ()
@@ -319,6 +496,59 @@
                     (should (equal (plist-get json :id) "req_1")))))
             (delete-process fake-proc)))
       (kill-buffer output-buffer))))
+
+(ert-deftest pi-coding-agent-test-remote-rpc-queue-flushes-after-ready-marker ()
+  "Remote RPC writes queue until the ready marker, then flush FIFO."
+  (let ((pi-coding-agent--request-id-counter 0)
+        (sent nil)
+        (fake-proc (start-process "cat" nil "cat")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'process-send-string)
+                   (lambda (_proc string) (push string sent))))
+          (process-put fake-proc 'pi-coding-agent-awaiting-ready-marker t)
+          (pi-coding-agent--rpc-async fake-proc '(:type "get_state") #'ignore)
+          (pi-coding-agent--rpc-async fake-proc '(:type "get_commands") #'ignore)
+          (should-not sent)
+          (should (= (length (process-get fake-proc
+                                          'pi-coding-agent-outbound-queue))
+                     2))
+          (pi-coding-agent--process-filter
+           fake-proc (concat pi-coding-agent--remote-ready-marker "\n"))
+          (should (process-get fake-proc 'pi-coding-agent-ready))
+          (should-not (process-get fake-proc
+                                   'pi-coding-agent-awaiting-ready-marker))
+          (should-not (process-get fake-proc 'pi-coding-agent-outbound-queue))
+          (should (equal (mapcar (lambda (string)
+                                   (plist-get
+                                    (json-parse-string (string-trim string)
+                                                       :object-type 'plist)
+                                    :type))
+                                 (nreverse sent))
+                         '("get_state" "get_commands"))))
+      (delete-process fake-proc))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-response-queues-until-ready-marker ()
+  "Extension UI responses share the remote ready queue."
+  (let ((sent nil)
+        (fake-proc (start-process "cat" nil "cat")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'process-send-string)
+                   (lambda (_proc string) (push string sent))))
+          (process-put fake-proc 'pi-coding-agent-awaiting-ready-marker t)
+          (pi-coding-agent--send-extension-ui-response
+           fake-proc '(:type "extension_ui_response" :id "ui_1" :value "ok"))
+          (should-not sent)
+          (should (= (length (process-get fake-proc
+                                          'pi-coding-agent-outbound-queue))
+                     1))
+          (pi-coding-agent--process-filter
+           fake-proc (concat pi-coding-agent--remote-ready-marker "\n"))
+          (should-not (process-get fake-proc 'pi-coding-agent-outbound-queue))
+          (let ((json (json-parse-string (string-trim (car sent))
+                                         :object-type 'plist)))
+            (should (equal (plist-get json :type) "extension_ui_response"))
+            (should (equal (plist-get json :id) "ui_1"))))
+      (delete-process fake-proc))))
 
 ;;;; Request ID Management Tests
 
@@ -633,6 +863,48 @@ Display is handled by the display handler, not by state updates."
       (should (eq (plist-get state :status) 'idle))
       (should (plist-get state :model)))))
 
+(ert-deftest pi-coding-agent-test-state-extract-normalizes-remote-session-file ()
+  "State extraction converts inbound remote process-local session files."
+  (let ((response '(:type "response"
+                    :command "get_state"
+                    :success t
+                    :data (:isStreaming :false
+                           :isCompacting :false
+                           :sessionFile "/home/pi/.pi/sessions/current.jsonl"))))
+    (let ((state (pi-coding-agent--extract-state-from-response
+                  response
+                  "/ssh:pi-host:/home/pi/project/")))
+      (should (equal (plist-get state :session-file)
+                     "/ssh:pi-host:/home/pi/.pi/sessions/current.jsonl")))))
+
+(ert-deftest pi-coding-agent-test-state-extract-normalizes-relative-session-file ()
+  "State extraction resolves inbound relative session files under the anchor."
+  (let ((response '(:type "response"
+                    :command "get_state"
+                    :success t
+                    :data (:isStreaming :false
+                           :isCompacting :false
+                           :sessionFile "sessions/current.jsonl"))))
+    (let ((state (pi-coding-agent--extract-state-from-response
+                  response
+                  "/ssh:pi-host:/home/pi/project/")))
+      (should (equal (plist-get state :session-file)
+                     "/ssh:pi-host:/home/pi/project/sessions/current.jsonl")))))
+
+(ert-deftest pi-coding-agent-test-state-extract-ignores-unsafe-session-file ()
+  "Unsafe passive sessionFile metadata is not stored as a navigable path."
+  (let* ((bad (concat "/tmp/a" (string ?\0) "b.jsonl"))
+         (response (list :type "response"
+                         :command "get_state"
+                         :success t
+                         :data (list :isStreaming :false
+                                     :isCompacting :false
+                                     :sessionId "bad-session"
+                                     :sessionFile bad))))
+    (let ((state (pi-coding-agent--extract-state-from-response response)))
+      (should (equal (plist-get state :session-id) "bad-session"))
+      (should-not (plist-get state :session-file)))))
+
 (ert-deftest pi-coding-agent-test-state-extract-status-idle ()
   "Extracted state has status idle when not streaming or compacting."
   (let ((response '(:type "response"
@@ -745,12 +1017,13 @@ Display is handled by the display handler, not by state updates."
 
 ;;;; Executable Customization Tests
 
-(defun pi-coding-agent-test--capture-process-launch (executable extra-args &optional trust-policy)
+(defun pi-coding-agent-test--capture-process-launch (executable extra-args &optional trust-policy directory)
   "Return the launch plist that `--start-process' passes to make-process.
-Mocks `make-process' to capture :command and :stderr, binding
+Mocks `make-process' to capture all arguments, binding
 `pi-coding-agent-executable' to EXECUTABLE,
-`pi-coding-agent-extra-args' to EXTRA-ARGS, and
-`pi-coding-agent-project-trust-policy' to TRUST-POLICY or `approve'."
+`pi-coding-agent-extra-args' to EXTRA-ARGS,
+`pi-coding-agent-project-trust-policy' to TRUST-POLICY or `approve',
+and starting in DIRECTORY or `/tmp/'."
   (let ((pi-coding-agent-executable executable)
         (pi-coding-agent-extra-args extra-args)
         (pi-coding-agent-project-trust-policy (or trust-policy 'approve))
@@ -760,10 +1033,12 @@ Mocks `make-process' to capture :command and :stderr, binding
         (progn
           (cl-letf (((symbol-function 'make-process)
                      (lambda (&rest args)
-                       (setq captured (list :command (plist-get args :command)
-                                            :stderr (plist-get args :stderr)))
+                       (setq captured
+                             (append args
+                                     (list :captured-default-directory
+                                           default-directory)))
                        dummy-proc)))
-            (ignore-errors (pi-coding-agent--start-process "/tmp/")))
+            (ignore-errors (pi-coding-agent--start-process (or directory "/tmp/"))))
           captured)
       (when-let* ((stderr-buf (plist-get captured :stderr)))
         (when (buffer-live-p stderr-buf)
@@ -802,6 +1077,45 @@ Mocks `make-process' to capture :command and :stderr, binding
   "start-process routes stderr away from the JSON-RPC stdout pipe."
   (let ((launch (pi-coding-agent-test--capture-process-launch '("pi") nil)))
     (should (bufferp (plist-get launch :stderr)))))
+
+(ert-deftest pi-coding-agent-test-start-process-uses-default-directory-file-handler ()
+  "start-process lets `default-directory' file handlers create the process."
+  (let ((launch (pi-coding-agent-test--capture-process-launch
+                 '("pi") nil 'approve "/ssh:test:/home/me/proj/")))
+    (should (eq (plist-get launch :file-handler) t))
+    (should (equal (plist-get launch :captured-default-directory)
+                   "/ssh:test:/home/me/proj/"))))
+
+(ert-deftest pi-coding-agent-test-start-process-remote-wraps-command-with-ready-marker ()
+  "Remote start command emits a ready marker and preserves original argv."
+  (let* ((launch (pi-coding-agent-test--capture-process-launch
+                  '("npx" "pi") '("-e" "/path/to/ext.ts")
+                  'approve "/ssh:test:/home/me/proj/"))
+         (command (plist-get launch :command))
+         (script (nth 2 command)))
+    (should (equal (nth 0 command) "sh"))
+    (should (equal (nth 1 command) "-c"))
+    (should (string-match-p (regexp-quote pi-coding-agent--remote-ready-marker)
+                            script))
+    (should (string-match-p (regexp-quote "exec \"$0\" \"$@\"") script))
+    (should (equal (nthcdr 3 command)
+                   '("npx" "pi" "--mode" "rpc"
+                     "-e" "/path/to/ext.ts" "--approve")))))
+
+(ert-deftest pi-coding-agent-test-start-process-disables-main-query ()
+  "start-process disables kill prompts for Emacs's main Pi process."
+  (let ((pi-coding-agent-executable '("sh" "-c" "sleep 5"))
+        (pi-coding-agent-extra-args nil)
+        (proc nil))
+    (unwind-protect
+        (progn
+          (setq proc (pi-coding-agent--start-process "/tmp/"))
+          (should (process-live-p proc))
+          (should-not (process-query-on-exit-flag proc)))
+      (when (processp proc)
+        (pi-coding-agent--cleanup-process-stderr-buffer proc)
+        (when (process-live-p proc)
+          (delete-process proc))))))
 
 (ert-deftest pi-coding-agent-test-start-process-disables-stderr-query ()
   "start-process disables kill prompts for Emacs's stderr pipe process."
@@ -916,6 +1230,62 @@ redisplay cycle instead of triggering N separate redraws."
           (should (eq captured-inhibit t)))
       (delete-process fake-proc))))
 
+(ert-deftest pi-coding-agent-test-process-filter-continues-after-callback-error ()
+  "A failing response callback does not drop later complete lines."
+  (let ((second-called nil)
+        (fake-proc (start-process "cat" nil "cat")))
+    (unwind-protect
+        (let ((pending (pi-coding-agent--get-pending-requests fake-proc))
+              (pending-types (pi-coding-agent--get-pending-command-types fake-proc)))
+          (puthash "req_1" (lambda (_response) (error "boom")) pending)
+          (puthash "req_2" (lambda (_response) (setq second-called t)) pending)
+          (puthash "req_1" "get_state" pending-types)
+          (puthash "req_2" "get_history" pending-types)
+          (cl-letf (((symbol-function 'message) (lambda (&rest _args) nil)))
+            (pi-coding-agent--process-filter
+             fake-proc
+             (concat "{\"type\":\"response\",\"id\":\"req_1\",\"success\":true}\n"
+                     "{\"type\":\"response\",\"id\":\"req_2\",\"success\":true}\n")))
+          (should second-called)
+          (should-not (gethash "req_1" pending))
+          (should-not (gethash "req_2" pending)))
+      (delete-process fake-proc))))
+
+(ert-deftest pi-coding-agent-test-process-filter-ready-marker-not-dispatched ()
+  "The remote ready marker is consumed before JSON/event dispatch."
+  (let ((events nil)
+        (fake-proc (start-process "cat" nil "cat")))
+    (unwind-protect
+        (progn
+          (process-put fake-proc 'pi-coding-agent-awaiting-ready-marker t)
+          (process-put fake-proc 'pi-coding-agent-display-handler
+                       (lambda (event) (push event events)))
+          (pi-coding-agent--process-filter
+           fake-proc (concat pi-coding-agent--remote-ready-marker "\n"))
+          (should (process-get fake-proc 'pi-coding-agent-ready))
+          (should-not events))
+      (delete-process fake-proc))))
+
+(ert-deftest pi-coding-agent-test-process-filter-chunked-ready-marker-flushes ()
+  "A ready marker split across filter calls still flushes queued writes."
+  (let ((sent nil)
+        (fake-proc (start-process "cat" nil "cat")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'process-send-string)
+                   (lambda (_proc string) (push string sent))))
+          (process-put fake-proc 'pi-coding-agent-awaiting-ready-marker t)
+          (pi-coding-agent--send-string fake-proc "first\n")
+          (let* ((marker pi-coding-agent--remote-ready-marker)
+                 (split (/ (length marker) 2)))
+            (pi-coding-agent--process-filter fake-proc (substring marker 0 split))
+            (should-not sent)
+            (should-not (process-get fake-proc 'pi-coding-agent-ready))
+            (pi-coding-agent--process-filter
+             fake-proc (concat (substring marker split) "\n")))
+          (should (process-get fake-proc 'pi-coding-agent-ready))
+          (should (equal (nreverse sent) '("first\n"))))
+      (delete-process fake-proc))))
+
 (ert-deftest pi-coding-agent-test-process-filter-keeps-partial-output-chunked ()
   "Process filter dispatches only complete JSON lines and clears chunk state."
   (let ((events nil)
@@ -944,6 +1314,34 @@ redisplay cycle instead of triggering N separate redraws."
           (should (null events))
           (should (null (process-get fake-proc
                                      'pi-coding-agent-partial-output-chunks))))
+      (delete-process fake-proc))))
+
+(ert-deftest pi-coding-agent-test-process-filter-get-state-ignores-nul-session-file ()
+  "A get_state response with NUL sessionFile does not escape the filter."
+  (let ((pi-coding-agent--status 'idle)
+        (pi-coding-agent--state nil)
+        (callback-called nil)
+        (fake-proc (start-process "cat" nil "cat")))
+    (unwind-protect
+        (progn
+          (puthash "req_state"
+                   (lambda (response)
+                     (setq callback-called t)
+                     (pi-coding-agent--update-state-from-response response))
+                   (pi-coding-agent--get-pending-requests fake-proc))
+          (puthash "req_state" "get_state"
+                   (pi-coding-agent--get-pending-command-types fake-proc))
+          (let ((err nil))
+            (condition-case caught
+                (pi-coding-agent--process-filter
+                 fake-proc
+                 "{\"type\":\"response\",\"id\":\"req_state\",\"command\":\"get_state\",\"success\":true,\"data\":{\"isStreaming\":false,\"isCompacting\":false,\"sessionId\":\"nul-session\",\"sessionFile\":\"/tmp/a\\u0000b.jsonl\"}}\n")
+              (error (setq err caught)))
+            (should-not err))
+          (should callback-called)
+          (should (equal (plist-get pi-coding-agent--state :session-id)
+                         "nul-session"))
+          (should-not (plist-get pi-coding-agent--state :session-file)))
       (delete-process fake-proc))))
 
 (provide 'pi-coding-agent-core-test)

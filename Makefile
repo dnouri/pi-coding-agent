@@ -77,7 +77,8 @@ deps: .deps-stamp
 # ============================================================
 
 SHELL = bash
-MAKE_SELECTOR = $(if $(SELECTOR),SELECTOR='$(SELECTOR)',)
+export SELECTOR
+ERT_RUN = --eval '(let ((selector (getenv "SELECTOR"))) (if (and selector (> (length selector) 0)) (progn (require (quote ert)) (unless (ert-select-tests selector t) (error "SELECTOR matched no tests: %s" selector)) (ert-run-tests-batch-and-exit selector)) (ert-run-tests-batch-and-exit t)))'
 GUI_SELECTOR_ARG = $(if $(SELECTOR),$(SELECTOR),)
 
 test: .deps-stamp
@@ -101,7 +102,7 @@ test: .deps-stamp
 		-l pi-coding-agent-gui-test-utils-test \
 		-l pi-coding-agent-integration-test-common-test \
 		-l pi-coding-agent-test \
-		$(if $(SELECTOR),--eval '(ert-run-tests-batch-and-exit "$(SELECTOR)")',-f ert-run-tests-batch-and-exit) \
+		$(ERT_RUN) \
 		>$$OUTPUT 2>&1; \
 	STATUS=$$?; \
 	if [ "$(VERBOSE)" = "1" ] || [ $$STATUS -ne 0 ]; then \
@@ -120,20 +121,20 @@ BATCH_TEST = $(BATCH) -L test --eval "(setq load-prefer-newer t)" \
 	-l pi-coding-agent
 
 test-core: .deps-stamp
-	@$(BATCH_TEST) -l pi-coding-agent-core-test -f ert-run-tests-batch-and-exit
+	@$(BATCH_TEST) -l pi-coding-agent-core-test $(ERT_RUN)
 test-ui: .deps-stamp
-	@$(BATCH_TEST) -l pi-coding-agent-ui-test -f ert-run-tests-batch-and-exit
+	@$(BATCH_TEST) -l pi-coding-agent-ui-test $(ERT_RUN)
 test-render: .deps-stamp
-	@$(BATCH_TEST) -l pi-coding-agent-render-test -f ert-run-tests-batch-and-exit
+	@$(BATCH_TEST) -l pi-coding-agent-render-test $(ERT_RUN)
 test-table: .deps-stamp
-	@$(BATCH_TEST) -l pi-coding-agent-table-test -f ert-run-tests-batch-and-exit
+	@$(BATCH_TEST) -l pi-coding-agent-table-test $(ERT_RUN)
 test-input: .deps-stamp
-	@$(BATCH_TEST) -l pi-coding-agent-input-test -f ert-run-tests-batch-and-exit
+	@$(BATCH_TEST) -l pi-coding-agent-input-test $(ERT_RUN)
 test-menu: .deps-stamp
-	@$(BATCH_TEST) -l pi-coding-agent-menu-test -f ert-run-tests-batch-and-exit
+	@$(BATCH_TEST) -l pi-coding-agent-menu-test $(ERT_RUN)
 
 test-build: .deps-stamp
-	@$(BATCH_TEST) -l pi-coding-agent-build-test -f ert-run-tests-batch-and-exit
+	@$(BATCH_TEST) -l pi-coding-agent-build-test $(ERT_RUN)
 
 test-unit: compile test
 
@@ -171,7 +172,7 @@ INTEGRATION_BATCH = $(BATCH) -L test \
 	--eval "(package-initialize)" \
 	$(LOCAL_LOAD_PATH) \
 	-l pi-coding-agent -l pi-coding-agent-integration-test \
-	$(if $(SELECTOR),--eval '(ert-run-tests-batch-and-exit "$(SELECTOR)")',-f ert-run-tests-batch-and-exit)
+	$(ERT_RUN)
 # Reuse CI's session directory when provided, but stay locally runnable by
 # creating and cleaning up a temporary session directory otherwise.
 REAL_INTEGRATION_RUN = \
@@ -192,8 +193,8 @@ REAL_INTEGRATION_RUN = \
 
 # Local default: fake lane first, then the slower real compatibility lane.
 test-integration:
-	@$(MAKE) --no-print-directory test-integration-fake $(MAKE_SELECTOR)
-	@$(MAKE) --no-print-directory test-integration-real $(MAKE_SELECTOR)
+	@$(MAKE) --no-print-directory test-integration-fake
+	@$(MAKE) --no-print-directory test-integration-real
 
 # Local: fake backend only (no pi install or Ollama needed)
 test-integration-fake: .deps-stamp
@@ -209,8 +210,8 @@ test-integration-real: .deps-stamp setup-pi
 
 # CI-shaped default: fast fake lane first, then the real backend lane.
 test-integration-ci:
-	@$(MAKE) --no-print-directory test-integration-fake $(MAKE_SELECTOR)
-	@$(MAKE) --no-print-directory test-integration-ci-real $(MAKE_SELECTOR)
+	@$(MAKE) --no-print-directory test-integration-fake
+	@$(MAKE) --no-print-directory test-integration-ci-real
 
 # CI: Ollama already running via services block for the real lane.
 test-integration-ci-real: .deps-stamp setup-pi

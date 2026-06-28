@@ -192,6 +192,7 @@ Modification hooks fire normally so jit-lock marks inserted text for
 fontification; tree-sitter re-parses at the C level on each insert."
   (when (and delta pi-coding-agent--streaming-marker)
     (let* ((inhibit-read-only t)
+           (delta (pi-coding-agent--render-safe-string delta))
            ;; Strip leading newlines from first content after header
            (delta (if (and pi-coding-agent--message-start-marker
                           (= (marker-position pi-coding-agent--message-start-marker)
@@ -524,7 +525,8 @@ clamped so the window remains filled when possible."
   "Display streaming thinking DELTA in the current thinking block.
 Normalizes boundary and paragraph whitespace while streaming."
   (when (and delta pi-coding-agent--streaming-marker)
-    (let ((inhibit-read-only t))
+    (let ((delta (pi-coding-agent--render-safe-string delta))
+          (inhibit-read-only t))
       (if (and pi-coding-agent--thinking-start-marker
                pi-coding-agent--thinking-marker)
           (progn
@@ -599,6 +601,7 @@ follow-up as a fresh prompt.")
   "Return non-nil when a queued follow-up may become the next prompt."
   (and pi-coding-agent--followup-queue
        (eq pi-coding-agent--status 'idle)
+       (not (pi-coding-agent--session-transition-active-p))
        (not (pi-coding-agent--prompt-start-wait-active-p))
        (null pi-coding-agent--local-user-message)))
 
@@ -926,7 +929,8 @@ Shows success or final failure with raw error."
   (let ((key (plist-get event :statusKey))
         (text (plist-get event :statusText)))
     (when text
-      (setq text (ansi-color-filter-apply text)))
+      (setq text (ansi-color-filter-apply
+                  (pi-coding-agent--render-safe-string text))))
     (if text
         (setq pi-coding-agent--extension-status
               (cons (cons key text)
@@ -939,7 +943,8 @@ Shows success or final failure with raw error."
   "Handle setWorkingMessage method from EVENT."
   (let ((msg (plist-get event :message)))
     (when msg
-      (setq msg (ansi-color-filter-apply msg)))
+      (setq msg (ansi-color-filter-apply
+                 (pi-coding-agent--render-safe-string msg))))
     (setq pi-coding-agent--working-message msg)
     (force-mode-line-update t)))
 
@@ -1021,10 +1026,12 @@ which asks upfront before any buffers are touched."
     (pi-coding-agent--cancel-followup-drain-timer)
     (pi-coding-agent--invalidate-prompt-start-wait)
     (pi-coding-agent--set-activity-phase "idle" 'teardown t)
-    (when pi-coding-agent--process
-      (pi-coding-agent--unregister-display-handler pi-coding-agent--process)
-      (when (process-live-p pi-coding-agent--process)
-        (delete-process pi-coding-agent--process)))
+    (dolist (proc (delete-dups (delq nil (list pi-coding-agent--process
+                                               pi-coding-agent--session-transition-process))))
+      (when (processp proc)
+        (pi-coding-agent--unregister-display-handler proc)
+        (when (process-live-p proc)
+          (delete-process proc))))
     (when (and pi-coding-agent--input-buffer (buffer-live-p pi-coding-agent--input-buffer))
       (let ((input-buf pi-coding-agent--input-buffer))
         (pi-coding-agent--set-input-buffer nil) ; break cycle before kill
@@ -1044,6 +1051,7 @@ which asks upfront before any buffers are touched."
              (proc (buffer-local-value 'pi-coding-agent--process chat-buf)))
         (pi-coding-agent--set-chat-buffer nil) ; break cycle before kill
         (when (and proc (process-live-p proc))
+          (pi-coding-agent--skip-process-kill-confirmation proc)
           (set-process-query-on-exit-flag proc nil))
         (kill-buffer chat-buf)))))
 
@@ -1208,8 +1216,8 @@ Updates buffer-local state and renders display updates."
        ;; args can be partial.  Execution start carries the real args.
        (pi-coding-agent--display-tool-update-header
         (plist-get event :toolName) args block)
-       (when-let* ((path (pi-coding-agent--tool-path args)))
-         (pi-coding-agent--tool-block-set-path block path))))
+       (pi-coding-agent--tool-block-sync-path-metadata
+        block (pi-coding-agent--tool-arg-path args))))
     ("tool_execution_end"
      (pi-coding-agent--set-activity-phase "thinking")
      (let* ((tool-call-id (plist-get event :toolCallId))
@@ -1361,6 +1369,8 @@ are left alone."
   end-marker
   order
   path
+  raw-path
+  path-error
   offset
   line-map
   last-tail)
@@ -1468,6 +1478,10 @@ needed for compatibility, the current non-keyed pending block."
                  (pi-coding-agent--tool-block-header-end block))
     (overlay-put ov 'pi-coding-agent-tool-path
                  (pi-coding-agent--tool-block-path block))
+    (overlay-put ov 'pi-coding-agent-tool-raw-path
+                 (pi-coding-agent--tool-block-raw-path block))
+    (overlay-put ov 'pi-coding-agent-tool-path-error
+                 (pi-coding-agent--tool-block-path-error block))
     (overlay-put ov 'pi-coding-agent-tool-offset
                  (pi-coding-agent--tool-block-offset block))
     (overlay-put ov 'pi-coding-agent-line-map
@@ -1476,10 +1490,149 @@ needed for compatibility, the current non-keyed pending block."
                  (pi-coding-agent--tool-block-last-tail block)))
   block)
 
-(defun pi-coding-agent--tool-block-set-path (block path)
-  "Store PATH metadata on BLOCK and its overlay."
+(defun pi-coding-agent--tool-emacs-path (path)
+  "Return Pi tool PATH normalized for Emacs in the current chat session."
+  (pi-coding-agent--emacs-path
+   path
+   (pi-coding-agent--chat-session-directory)))
+
+(defun pi-coding-agent--tool-arg-get (args prop)
+  "Return PROP from ARGS without signaling during passive rendering."
+  (when (listp args)
+    (condition-case nil
+        (plist-get args prop)
+      (error nil))))
+
+(defun pi-coding-agent--tool-arg-member (args prop)
+  "Return non-nil when PROP is present in ARGS, without signaling."
+  (when (listp args)
+    (condition-case nil
+        (plist-member args prop)
+      (error nil))))
+
+(defun pi-coding-agent--tool-arg-path (args)
+  "Extract path metadata from ARGS without signaling."
+  (or (pi-coding-agent--tool-arg-get args :path)
+      (pi-coding-agent--tool-arg-get args :file_path)))
+
+(defun pi-coding-agent--tool-path-string (path)
+  "Return PATH when it is a nonempty NUL-free string, otherwise nil."
+  (and (stringp path)
+       (not (string-empty-p path))
+       (not (pi-coding-agent--path-string-contains-nul-p path))
+       path))
+
+(defun pi-coding-agent--render-safe-string (value &optional nil-value)
+  "Return VALUE as a string safe for render string APIs.
+Nil becomes NIL-VALUE, or the empty string when NIL-VALUE is nil.
+This helper does not escape display controls; callers that render metadata in
+headers should also use `pi-coding-agent--escape-control-chars-for-display'."
+  (cond
+   ((stringp value) value)
+   ((null value) (or nil-value ""))
+   (t
+    (condition-case nil
+        (format "%s" value)
+      (error "#<unprintable>")))))
+
+(defun pi-coding-agent--content-block-list (content)
+  "Return CONTENT as a list of plist blocks, or nil when malformed."
+  (cond
+   ((vectorp content)
+    (cl-remove-if-not #'consp (append content nil)))
+   ((and (listp content)
+         (or (null content) (consp (car content))))
+    (cl-remove-if-not #'consp content))
+   (t nil)))
+
+(defun pi-coding-agent--unicode-escape-char (char)
+  "Return a display escape for Unicode CHAR."
+  (if (<= char #xffff)
+      (format "\\u%04X" char)
+    (format "\\U%08X" char)))
+
+(defun pi-coding-agent--escape-control-chars-for-display (text &optional preserve-newlines)
+  "Return TEXT with control and format chars escaped for safe display.
+When PRESERVE-NEWLINES is non-nil, leave newline separators untouched.
+This helper is display-only; callers must keep raw metadata separately."
+  (when (stringp text)
+    (mapconcat
+     (lambda (char)
+       (let ((category (get-char-code-property char 'general-category)))
+         (cond
+          ((eq char ?\n) (if preserve-newlines "\n" "\\n"))
+          ((eq char ?\r) "\\r")
+          ((eq char ?\t) "\\t")
+          ((or (< char 32) (= char #x7f))
+           (format "\\x%02X" char))
+          ((or (eq category 'Cc)
+               (eq category 'Cf))
+           (pi-coding-agent--unicode-escape-char char))
+          (t (char-to-string char)))))
+     text
+     "")))
+
+(defun pi-coding-agent--tool-display-value-string (value &optional placeholder)
+  "Return VALUE escaped for one-line tool header display.
+Nil becomes PLACEHOLDER.  Non-string values are stringified first so malformed
+backend metadata cannot make passive rendering signal."
+  (cond
+   ((stringp value)
+    (pi-coding-agent--escape-control-chars-for-display value))
+   ((null value) placeholder)
+   (t
+    (pi-coding-agent--escape-control-chars-for-display
+     (pi-coding-agent--render-safe-string value)))))
+
+(defun pi-coding-agent--tool-display-path-string (path)
+  "Return PATH escaped for one-line tool header display, or nil.
+NUL-containing and non-string paths remain absent, so malformed path metadata
+renders with the normal absent-path placeholder."
+  (when-let* ((path (pi-coding-agent--tool-path-string path)))
+    (pi-coding-agent--escape-control-chars-for-display path)))
+
+(defun pi-coding-agent--tool-render-path-metadata (path)
+  "Return passive render metadata for backend tool PATH.
+The returned plist may contain:
+
+`:path'       normalized Emacs path safe for navigation, or nil;
+`:raw-path'   original backend path string, or nil;
+`:path-error' user-facing error string when PATH was present but unsafe.
+
+Never signal for invalid backend metadata; keep strict validation inside
+`pi-coding-agent--tool-emacs-path' and record any failure here."
+  (cond
+   ((null path) nil)
+   ((not (stringp path))
+    (list :path-error "Tool path metadata is not a string"))
+   ((string-empty-p path) nil)
+   (t
+    (condition-case err
+        (list :path (pi-coding-agent--tool-emacs-path path)
+              :raw-path path)
+      (error
+       (list :raw-path path
+             :path-error (pi-coding-agent--escape-control-chars-for-display
+                          (error-message-string err))))))))
+
+(defun pi-coding-agent--tool-render-path (path)
+  "Return PATH normalized for passive tool rendering, or nil.
+Never signal for invalid backend metadata."
+  (plist-get (pi-coding-agent--tool-render-path-metadata path) :path))
+
+(defun pi-coding-agent--tool-block-sync-path-metadata (block path)
+  "Sync PATH-derived navigation metadata on BLOCK and its overlay.
+A nil, missing, or empty PATH clears stale safe-path, raw-path, and error
+metadata.  Invalid PATH values clear the safe path and store controlled raw
+path/error metadata for `pi-coding-agent-visit-file'."
   (when block
-    (setf (pi-coding-agent--tool-block-path block) path)
+    (let ((metadata (pi-coding-agent--tool-render-path-metadata path)))
+      (setf (pi-coding-agent--tool-block-path block)
+            (plist-get metadata :path)
+            (pi-coding-agent--tool-block-raw-path block)
+            (plist-get metadata :raw-path)
+            (pi-coding-agent--tool-block-path-error block)
+            (plist-get metadata :path-error)))
     (pi-coding-agent--tool-block-refresh-overlay block))
   block)
 
@@ -1505,17 +1658,18 @@ needed for compatibility, the current non-keyed pending block."
   block)
 
 (defun pi-coding-agent--tool-block-create
-    (tool-name args &optional tool-call-id order preview-state)
+    (tool-name args &optional tool-call-id order preview-state path-metadata-policy)
   "Insert a live tool block for TOOL-NAME with ARGS and return it.
 When TOOL-CALL-ID is non-nil, register the block in the keyed live
 registry.  ORDER records the intended block ordering metadata.
-When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
+When PREVIEW-STATE is `streaming', generic tool headers omit ARGS.
+When PATH-METADATA-POLICY is `defer', leave navigation metadata absent
+until an authoritative tool execution/history event supplies it."
   (let* ((block-order (pi-coding-agent--reserve-tool-block-order order))
          (next-block (and order
                           (pi-coding-agent--tool-block-next-after-order
                            block-order)))
          (header-display (pi-coding-agent--tool-header tool-name args preview-state))
-         (path (pi-coding-agent--tool-path args))
          (block nil)
          (inhibit-read-only t))
     (pi-coding-agent--with-scroll-preservation
@@ -1544,9 +1698,11 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
                            :overlay ov
                            :header-end header-end
                            :end-marker end-marker
-                           :order block-order
-                           :path path))
-              (pi-coding-agent--tool-block-refresh-overlay block))))))
+                           :order block-order))
+              (if (eq path-metadata-policy 'defer)
+                  (pi-coding-agent--tool-block-refresh-overlay block)
+                (pi-coding-agent--tool-block-sync-path-metadata
+                 block (pi-coding-agent--tool-arg-path args))))))))
     (setq pi-coding-agent--pending-tool-overlay
           (pi-coding-agent--tool-block-overlay block))
     (pi-coding-agent--tool-block-register block)))
@@ -1641,10 +1797,17 @@ When PREVIEW-STATE is `streaming', generic tools show only their
 name and do not parse or pretty-print ARGS.  Built-in tools ignore
 PREVIEW-STATE and keep their compact streaming headers.
 Uses `font-lock-face' to survive tree-sitter refontification."
-  (let ((path (pi-coding-agent--tool-path args)))
-    (pcase tool-name
+  (let* ((raw-tool-name tool-name)
+         (tool-name (or (pi-coding-agent--tool-display-value-string
+                         tool-name "tool")
+                        "tool"))
+         (path (pi-coding-agent--tool-display-path-string
+                (pi-coding-agent--tool-arg-path args))))
+    (pcase raw-tool-name
       ("bash"
-       (let ((cmd (or (plist-get args :command) "...")))
+       (let ((cmd (pi-coding-agent--tool-display-value-string
+                   (pi-coding-agent--tool-arg-get args :command)
+                   "...")))
          (concat (propertize "$" 'font-lock-face 'pi-coding-agent-tool-name)
                  (propertize (concat " " cmd) 'font-lock-face 'pi-coding-agent-tool-command))))
       ((or "read" "write" "edit")
@@ -1654,7 +1817,11 @@ Uses `font-lock-face' to survive tree-sitter refontification."
        (let ((name (propertize tool-name 'font-lock-face 'pi-coding-agent-tool-name)))
          (if (eq preview-state 'streaming)
              name
-           (let* ((json-pretty (pi-coding-agent--pretty-print-json args))
+           (let* ((json-pretty (condition-case nil
+                                   (when-let* ((json (pi-coding-agent--pretty-print-json args)))
+                                     (pi-coding-agent--escape-control-chars-for-display
+                                      json t))
+                                 (error nil)))
                   (json-compact (when json-pretty
                                   (mapconcat #'string-trim
                                              (split-string json-pretty "\n") " ")))
@@ -1669,13 +1836,14 @@ Uses `font-lock-face' to survive tree-sitter refontification."
                name))))))))
 
 (defun pi-coding-agent--display-tool-start
-    (tool-name args &optional tool-call-id order preview-state)
+    (tool-name args &optional tool-call-id order preview-state path-metadata-policy)
   "Insert a tool header for TOOL-NAME with ARGS and return its live block.
 When TOOL-CALL-ID is non-nil, register the block in the keyed live
 registry.  ORDER records ordering metadata for future reconciliation.
-When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
+When PREVIEW-STATE is `streaming', generic tool headers omit ARGS.
+PATH-METADATA-POLICY is forwarded to `pi-coding-agent--tool-block-create'."
   (pi-coding-agent--tool-block-create
-   tool-name args tool-call-id order preview-state))
+   tool-name args tool-call-id order preview-state path-metadata-policy))
 
 (defun pi-coding-agent--display-tool-update-header
     (tool-name args &optional block preview-state)
@@ -1735,20 +1903,22 @@ streaming state changed."
          (existing-block (pi-coding-agent--tool-block-get tool-call-id))
          (block (or existing-block
                     (pi-coding-agent--display-tool-start
-                     tool-name args tool-call-id content-index preview-state))))
+                     tool-name args tool-call-id content-index preview-state
+                     'defer))))
     (setq pi-coding-agent--pending-tool-overlay
           (pi-coding-agent--tool-block-overlay block))
     (when (and existing-block event-entry-p)
       (pi-coding-agent--display-tool-update-header
        tool-name args block preview-state))
     (when (and event-entry-p (equal tool-name "write"))
-      (let ((content-entry (and args (plist-member args :content))))
+      (let ((content-entry (pi-coding-agent--tool-arg-member args :content)))
         (when content-entry
           (pi-coding-agent--display-tool-streaming-text
-           (or (plist-get args :content) "")
+           (or (pi-coding-agent--tool-arg-get args :content) "")
            pi-coding-agent-tool-preview-lines
            (pi-coding-agent--path-to-language
-            (pi-coding-agent--tool-path args))
+            (pi-coding-agent--tool-path-string
+             (pi-coding-agent--tool-arg-path args)))
            block))))
     block))
 
@@ -1785,11 +1955,13 @@ Optimized for the common case of a single text block."
         (if (and (= (length content-blocks) 1)
                  (equal (plist-get first-block :type) "text"))
             ;; Fast path: single text block (common case)
-            (or (plist-get first-block :text) "")
+            (pi-coding-agent--render-safe-string
+             (plist-get first-block :text))
           ;; Slow path: multiple blocks, need to filter and concat
           (mapconcat (lambda (c)
                        (if (equal (plist-get c :type) "text")
-                           (or (plist-get c :text) "")
+                           (pi-coding-agent--render-safe-string
+                            (plist-get c :text))
                          ""))
                      content-blocks "")))
     ""))
@@ -1870,7 +2042,7 @@ When LANG is non-nil, wrap the tail in a markdown fenced code block so
 that `md-ts-mode' language injection handles syntax highlighting.
 Skips redraw when only the trailing partial line changed (the preview
 shows complete lines only)."
-  (when (stringp raw-text)
+  (let ((raw-text (pi-coding-agent--render-safe-string raw-text)))
     (when-let* ((block (or block (pi-coding-agent--current-tool-block))))
       (let* (;; For language-aware streaming, only show complete lines
              ;; (exclude trailing partial line) to keep the preview
@@ -1947,29 +2119,36 @@ When BLOCK is nil, fall back to the current compatibility tool block and,
 if none exists, render the result at point without a live overlay."
   (let* ((block (or block (pi-coding-agent--current-tool-block)))
          (is-error (eq t is-error))
+         (content-blocks (pi-coding-agent--content-block-list content))
          (text-blocks (seq-filter (lambda (c) (equal (plist-get c :type) "text"))
-                                  content))
-         (raw-output (mapconcat (lambda (c) (or (plist-get c :text) ""))
+                                  content-blocks))
+         (raw-output (mapconcat (lambda (c)
+                                  (pi-coding-agent--render-safe-string
+                                   (plist-get c :text)))
                                 text-blocks "\n"))
          ;; Determine language for syntax highlighting
-         (lang (when-let* ((path (pi-coding-agent--tool-path args)))
-                 (pi-coding-agent--path-to-language path)))
-         ;; For edit tool with diff, we'll apply diff overlays after insertion
-         (is-edit-diff (and (equal tool-name "edit")
-                            (not is-error)
-                            (plist-get details :diff)))
+         (lang (pi-coding-agent--path-to-language
+                (pi-coding-agent--tool-path-string
+                 (pi-coding-agent--tool-arg-path args))))
+         (edit-diff (and (equal tool-name "edit")
+                         (pi-coding-agent--tool-arg-get details :diff)))
+         ;; For edit tool with a string diff, we'll apply diff overlays after insertion.
+         (is-edit-diff (and (not is-error)
+                            (stringp edit-diff)))
          (display-content
           (ansi-color-filter-apply
-           (pcase tool-name
-             ("edit" (or (plist-get details :diff) raw-output))
-             ("write" (or (plist-get args :content) raw-output))
-             ((or "bash" "read") raw-output)
-             (_ (if-let* ((details-json
-                          (pi-coding-agent--pretty-print-json details)))
-                    (concat raw-output "\n\n"
-                            (pi-coding-agent--propertize-details-region
-                             details-json))
-                  raw-output)))))
+           (pi-coding-agent--render-safe-string
+            (pcase tool-name
+              ("edit" (or edit-diff raw-output))
+              ("write" (or (pi-coding-agent--tool-arg-get args :content)
+                           raw-output))
+              ((or "bash" "read") raw-output)
+              (_ (if-let* ((details-json
+                           (pi-coding-agent--pretty-print-json details)))
+                     (concat raw-output "\n\n"
+                             (pi-coding-agent--propertize-details-region
+                              details-json))
+                   raw-output))))))
          (preview-limit (pcase tool-name
                           ("bash" pi-coding-agent-bash-preview-lines)
                           (_ pi-coding-agent-tool-preview-lines)))
@@ -2003,9 +2182,9 @@ if none exists, render the result at point without a live overlay."
               ;; Note: no [error] badge — error content in the block is sufficient,
               ;; and the overlay face already shifts to pi-coding-agent-tool-block-error.
               (when (and (equal tool-name "read")
-                         (plist-get args :offset))
+                         (pi-coding-agent--tool-arg-get args :offset))
                 (pi-coding-agent--tool-block-set-offset
-                 block (plist-get args :offset)))
+                 block (pi-coding-agent--tool-arg-get args :offset)))
               (when-let* ((line-map (plist-get truncation :line-map)))
                 (pi-coding-agent--tool-block-set-line-map block line-map))
               (pi-coding-agent--tool-overlay-finalize
@@ -2536,16 +2715,32 @@ whether to open in another window.  With prefix arg TOGGLE, invert
 that behavior."
   (interactive "P")
   (if-let* ((ov (seq-find (lambda (o) (overlay-get o 'pi-coding-agent-tool-block))
-                          (overlays-at (point))))
-            (path (overlay-get ov 'pi-coding-agent-tool-path)))
-      (if-let* ((line (pi-coding-agent--tool-line-at-point ov)))
-          (let ((use-other-window (if toggle
-                                      (not pi-coding-agent-visit-file-other-window)
-                                    pi-coding-agent-visit-file-other-window)))
-            (funcall (if use-other-window #'find-file-other-window #'find-file) path)
-            (goto-char (point-min))
-            (forward-line (1- line)))
-        (user-error "No file line at point"))
+                          (overlays-at (point)))))
+      (let* ((stored-path (overlay-get ov 'pi-coding-agent-tool-path))
+             (path-error (overlay-get ov 'pi-coding-agent-tool-path-error))
+             (path (cond
+                    ((not stored-path) nil)
+                    ((not (stringp stored-path))
+                     (setq path-error "Tool path metadata is not a string")
+                     nil)
+                    (t
+                     (condition-case err
+                         (pi-coding-agent--tool-emacs-path stored-path)
+                       (error
+                        (setq path-error (error-message-string err))
+                        nil))))))
+        (if path
+            (if-let* ((line (pi-coding-agent--tool-line-at-point ov)))
+                (let ((use-other-window
+                       (if toggle
+                           (not pi-coding-agent-visit-file-other-window)
+                         pi-coding-agent-visit-file-other-window)))
+                  (funcall (if use-other-window #'find-file-other-window #'find-file)
+                           path)
+                  (goto-char (point-min))
+                  (forward-line (1- line)))
+              (user-error "No file line at point"))
+          (user-error "%s" (or path-error "No file at point"))))
     (user-error "No file at point")))
 
 ;;;; Diff Overlay Highlighting
@@ -2604,7 +2799,7 @@ TIMESTAMP is optional time when compaction occurred."
              (propertize (format "Compacted from %s tokens\n\n"
                                  (pi-coding-agent--format-number (or tokens-before 0)))
                          'face 'pi-coding-agent-tool-name)
-             (or summary "") "\n"))
+             (pi-coding-agent--render-safe-string summary) "\n"))
     (with-current-buffer (pi-coding-agent--get-chat-buffer)
       (pi-coding-agent--decorate-tables-unless-deferred start (point-max)))))
 
@@ -2816,16 +3011,18 @@ RESULTS maps toolCallId strings to matching toolResult messages."
         (unless (string-empty-p content)
           (pi-coding-agent--render-history-text content)))
        ((vectorp content)
-        (dotimes (i (length content))
-          (let* ((block (aref content i))
-                 (block-type (plist-get block :type)))
+        (dolist (block (pi-coding-agent--content-block-list content))
+          (let ((block-type (plist-get block :type)))
             (pcase block-type
               ("text"
-               (push (or (plist-get block :text) "") pending-text))
+               (push (pi-coding-agent--render-safe-string
+                      (plist-get block :text))
+                     pending-text))
               ("thinking"
                (flush-text)
                (pi-coding-agent--render-history-thinking
-                (plist-get block :thinking)))
+                (pi-coding-agent--render-safe-string
+                 (plist-get block :thinking))))
               ("toolCall"
                (flush-text)
                (pi-coding-agent--render-history-tool

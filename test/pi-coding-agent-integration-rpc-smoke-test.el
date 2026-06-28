@@ -19,8 +19,8 @@
 
 (pi-coding-agent-integration-deftest
     (rpc-smoke-process-query-on-exit)
-  "The backend process keeps query-on-exit enabled for session buffers."
-  (should (process-query-on-exit-flag proc)))
+  "The backend process disables query-on-exit for session buffers."
+  (should-not (process-query-on-exit-flag proc)))
 
 (pi-coding-agent-integration-deftest
     (rpc-smoke-get-state-succeeds)

@@ -80,30 +80,61 @@ but %s is loaded.
 
 ;;;; Slash Commands via RPC
 
-(defun pi-coding-agent--normalize-command (cmd)
+(defun pi-coding-agent--normalize-command (cmd &optional anchor)
   "Normalize a command plist from the RPC wire format.
 Lift `sourceInfo.scope' to `:location' and `sourceInfo.path' to
-`:path' when present, then drop the raw `:sourceInfo' key.
+`:path' when present, mapping Pi's temporary scope to the menu's path bucket,
+then drop the raw `:sourceInfo' key.  Path values from
+Pi are normalized to Emacs paths using ANCHOR or `default-directory'.  Unsafe
+passive backend path metadata is ignored rather than stored as navigable state.
 Returns CMD (modified in place)."
   (when-let* ((info (plist-get cmd :sourceInfo)))
     (when-let* ((scope (plist-get info :scope)))
-      (plist-put cmd :location scope))
+      (plist-put cmd :location
+                 (if (equal scope "temporary") "path" scope)))
     (when-let* ((path (plist-get info :path)))
       (plist-put cmd :path path))
     (cl-remf cmd :sourceInfo))
+  (when-let* ((path (plist-get cmd :path)))
+    (if-let* ((emacs-path (pi-coding-agent--passive-emacs-path path anchor)))
+        (plist-put cmd :path emacs-path)
+      (cl-remf cmd :path)))
   cmd)
 
-(defun pi-coding-agent--fetch-commands (proc callback)
+(defun pi-coding-agent--fetch-commands (proc callback &optional anchor)
   "Fetch available commands via RPC, call CALLBACK with result.
-PROC is the pi process.  CALLBACK receives the command list on success."
+PROC is the pi process.  CALLBACK receives the command list on success.
+ANCHOR is the session directory used to normalize command source paths."
   (pi-coding-agent--rpc-async proc '(:type "get_commands")
     (lambda (response)
       (when (eq (plist-get response :success) t)
         (let* ((data (plist-get response :data))
                (commands-vec (plist-get data :commands))
-               (commands (mapcar #'pi-coding-agent--normalize-command
+               (commands (mapcar (lambda (cmd)
+                                   (pi-coding-agent--normalize-command
+                                    cmd anchor))
                                  (append commands-vec nil))))
           (funcall callback commands))))))
+
+(defun pi-coding-agent--refresh-commands-ignoring-errors
+    (proc chat-buf generation anchor)
+  "Refresh CHAT-BUF commands from PROC without owning transition completion.
+Synchronous command-fetch errors are reported but do not finish GENERATION;
+state/history latches remain responsible for unlocking session switches once
+those refreshes have been scheduled."
+  (condition-case err
+      (pi-coding-agent--fetch-commands
+       proc
+       (lambda (commands)
+         (when (pi-coding-agent--session-transition-current-p
+                chat-buf proc generation)
+           (with-current-buffer chat-buf
+             (pi-coding-agent--set-commands commands)
+             (pi-coding-agent--rebuild-commands-menu))))
+       anchor)
+    (error
+     (message "Pi: Failed to refresh commands - %s"
+              (error-message-string err)))))
 
 ;;;; Session Management
 
@@ -202,10 +233,12 @@ directory."
                                              :session-file))
                     ((stringp session-file))
                     ((not (string-empty-p session-file))))
-          (file-name-directory
-           (expand-file-name session-file
-                             (pi-coding-agent--chat-session-directory
-                              chat-buf))))))))
+          (when-let* ((emacs-session-file
+                       (pi-coding-agent--emacs-path
+                        session-file
+                        (pi-coding-agent--chat-session-directory chat-buf))))
+            (pi-coding-agent--route-preserving-file-name-directory
+             emacs-session-file)))))))
 
 (defun pi-coding-agent--with-session-list-directory (proc chat-buf callback)
   "Call CALLBACK with the session list directory for CHAT-BUF.
@@ -326,10 +359,11 @@ most recent session_info entry if present."
 
 (defun pi-coding-agent--session-file-cwd-or-error (path)
   "Return the recorded cwd from session file PATH, or signal `user-error'.
-The returned directory is expanded and has a trailing slash.  PATH must be a
-readable pi session file whose session header contains a non-empty absolute cwd
-that names an existing directory."
-  (let ((session-file (expand-file-name path)))
+The returned directory is an Emacs path with a trailing slash.  For remote
+session files, the recorded process-local cwd is anchored to PATH's TRAMP
+prefix.  PATH must be a readable pi session file whose session header contains
+a non-empty absolute cwd that names an existing directory."
+  (let ((session-file (pi-coding-agent--route-preserving-expand-file-name path)))
     (unless (file-readable-p session-file)
       (user-error "Session file is not readable: %s" session-file))
     (let ((metadata (pi-coding-agent--session-metadata session-file)))
@@ -338,10 +372,16 @@ that names an existing directory."
       (let ((cwd (plist-get metadata :cwd)))
         (unless (and (stringp cwd) (not (string-empty-p cwd)))
           (user-error "Session file has no usable cwd: %s" session-file))
+        (when (file-remote-p cwd)
+          (user-error "Session file cwd must be process-local, not remote: %s\nSession file: %s"
+                      cwd session-file))
+        (when (pi-coding-agent--remote-home-path-p cwd)
+          (user-error "Session file cwd must be absolute, not home-relative: %s\nSession file: %s"
+                      cwd session-file))
         (unless (file-name-absolute-p cwd)
           (user-error "Session file cwd is not absolute: %s\nSession file: %s"
                       cwd session-file))
-        (let ((expanded-cwd (file-name-as-directory (expand-file-name cwd))))
+        (let ((expanded-cwd (pi-coding-agent--emacs-directory cwd session-file)))
           (unless (file-directory-p expanded-cwd)
             (user-error "Stored session cwd is not an existing directory: %s\nSession file: %s"
                         expanded-cwd session-file))
@@ -458,6 +498,8 @@ Call this when starting a new session to ensure no stale state persists."
   (pi-coding-agent--set-activity-phase "idle" 'reset t)
   (pi-coding-agent--clear-unsupported-extension-ui-warnings)
   (pi-coding-agent--invalidate-history-loads)
+  (pi-coding-agent--finish-session-transition
+   pi-coding-agent--session-transition-generation)
   ;; Use accessors for cross-module state
   (pi-coding-agent--cancel-followup-drain-timer)
   (pi-coding-agent--invalidate-prompt-start-wait)
@@ -484,35 +526,41 @@ Used when starting a new session."
         (pi-coding-agent--reset-session-state)
         (goto-char (point-max))))))
 
-(defun pi-coding-agent--load-session-history (proc callback &optional chat-buf)
+(defun pi-coding-agent--load-session-history
+    (proc callback &optional chat-buf completion-callback)
   "Load and display session history from PROC.
-Calls CALLBACK with message count when done.
+Calls CALLBACK with message count when history is applied successfully.
 CHAT-BUF is the target buffer; if nil, uses `pi-coding-agent--get-chat-buffer'.
-Note: When called from async callbacks, pass CHAT-BUF explicitly."
+Optional COMPLETION-CALLBACK is called after a current RPC response is handled,
+even when the response failed or was not safe to render.  Note: When called
+from async callbacks, pass CHAT-BUF explicitly."
   (let ((chat-buf (or chat-buf (pi-coding-agent--get-chat-buffer))))
     (when (and chat-buf (buffer-live-p chat-buf))
       (with-current-buffer chat-buf
         (let ((generation (pi-coding-agent--invalidate-history-loads)))
           (pi-coding-agent--rpc-async proc '(:type "get_messages")
                          (lambda (response)
-                           (when (and (eq (plist-get response :success) t)
-                                      (buffer-live-p chat-buf))
-                             (with-current-buffer chat-buf
-                               (when (and (eq pi-coding-agent--process proc)
-                                          (= generation
-                                             pi-coding-agent--history-load-generation)
-                                          (pi-coding-agent--canonical-rerender-safe-p))
-                                 (let* ((messages (plist-get (plist-get response :data)
-                                                             :messages))
-                                        (count (if (vectorp messages)
-                                                   (length messages)
-                                                 0)))
-                                   (pi-coding-agent--display-session-history
-                                    messages chat-buf)
-                                   ;; Refresh header after loading history (resume/fork).
-                                   (pi-coding-agent--refresh-header)
-                                   (when callback
-                                     (funcall callback count)))))))))))))
+                           (unwind-protect
+                               (when (and (eq (plist-get response :success) t)
+                                          (buffer-live-p chat-buf))
+                                 (with-current-buffer chat-buf
+                                   (when (and (eq pi-coding-agent--process proc)
+                                              (= generation
+                                                 pi-coding-agent--history-load-generation)
+                                              (pi-coding-agent--canonical-rerender-safe-p))
+                                     (let* ((messages (plist-get (plist-get response :data)
+                                                                 :messages))
+                                            (count (if (vectorp messages)
+                                                       (length messages)
+                                                     0)))
+                                       (pi-coding-agent--display-session-history
+                                        messages chat-buf)
+                                       ;; Refresh header after loading history (resume/fork).
+                                       (pi-coding-agent--refresh-header)
+                                       (when callback
+                                         (funcall callback count))))))
+                             (when completion-callback
+                               (funcall completion-callback response))))))))))
 
 (defun pi-coding-agent--session-transition-ready-p (chat-buf action)
   "Return non-nil when CHAT-BUF may ACTION another session.
@@ -530,40 +578,92 @@ ACTION should be a short verb such as resume or fork for user messages."
       nil)
      (t t))))
 
-(defun pi-coding-agent--refresh-session-state (proc chat-buf &optional session-file)
+(defun pi-coding-agent--make-session-transition-latch
+    (chat-buf proc generation count)
+  "Return a callback to finish transition GENERATION after COUNT invocations.
+Only completions that still belong to CHAT-BUF, PROC, and GENERATION count, so
+stale callbacks from older session switches cannot unlock newer transitions."
+  (let ((remaining count)
+        (finished nil))
+    (lambda (&rest _)
+      (when (and (not finished)
+                 (pi-coding-agent--session-transition-current-p
+                  chat-buf proc generation))
+        (setq remaining (1- remaining))
+        (when (<= remaining 0)
+          (setq finished t)
+          (when (buffer-live-p chat-buf)
+            (with-current-buffer chat-buf
+              (pi-coding-agent--finish-session-transition generation))))))))
+
+(defun pi-coding-agent--refresh-transition-state-and-history
+    (proc chat-buf generation &optional session-file history-callback)
+  "Refresh state and history for CHAT-BUF through PROC in parallel.
+The transition remains active until both the state and history RPC callbacks
+for GENERATION have completed or failed.  Synchronous scheduling errors finish
+the transition before being re-signaled so the UI cannot stay wedged."
+  (let ((latch (pi-coding-agent--make-session-transition-latch
+                chat-buf proc generation 2)))
+    (condition-case err
+        (progn
+          (pi-coding-agent--refresh-session-state
+           proc chat-buf session-file generation latch)
+          (pi-coding-agent--load-session-history
+           proc history-callback chat-buf latch))
+      (error
+       (when (pi-coding-agent--session-transition-current-p
+              chat-buf proc generation)
+         (with-current-buffer chat-buf
+           (pi-coding-agent--finish-session-transition generation)))
+       (signal (car err) (cdr err))))))
+
+(defun pi-coding-agent--refresh-session-state
+    (proc chat-buf &optional session-file generation completion-callback)
   "Refresh session state for CHAT-BUF from PROC.
 SESSION-FILE seeds the session-name cache when the switching action already
-knows the selected file.  Stale callbacks from older session transitions are
-ignored so they cannot overwrite the active session identity."
+knows the selected file.  Optional GENERATION ties the refresh to an existing
+session transition; otherwise this function starts and finishes its own guard.
+Optional COMPLETION-CALLBACK runs after a current get_state response is
+handled, even when the response failed."
   (when (buffer-live-p chat-buf)
     (with-current-buffer chat-buf
       (pi-coding-agent--set-canonical-messages nil)
       (when session-file
         (pi-coding-agent--update-session-name-from-file session-file))
-      (let ((generation (pi-coding-agent--begin-session-transition)))
+      (let* ((own-generation (null generation))
+             (generation (or generation
+                             (pi-coding-agent--begin-session-transition))))
         (pi-coding-agent--rpc-async proc '(:type "get_state")
           (lambda (response)
-            (when (and (eq (plist-get response :success) t)
-                       (pi-coding-agent--session-transition-current-p
-                        chat-buf proc generation))
-              (pi-coding-agent--apply-state-response chat-buf response)
-              (when (buffer-live-p chat-buf)
-                (with-current-buffer chat-buf
-                  (unless session-file
-                    (when-let* ((current-session-file
-                                 (plist-get pi-coding-agent--state :session-file)))
-                      (pi-coding-agent--update-session-name-from-file
-                       current-session-file)))
-                  (force-mode-line-update t))))))))))
+            (when (pi-coding-agent--session-transition-current-p
+                   chat-buf proc generation)
+              (unwind-protect
+                  (when (eq (plist-get response :success) t)
+                    (pi-coding-agent--apply-state-response chat-buf response)
+                    (when (buffer-live-p chat-buf)
+                      (with-current-buffer chat-buf
+                        (unless session-file
+                          (when-let* ((current-session-file
+                                       (plist-get pi-coding-agent--state
+                                                  :session-file)))
+                            (pi-coding-agent--update-session-name-from-file
+                             current-session-file)))
+                        (force-mode-line-update t))))
+                (when completion-callback
+                  (funcall completion-callback response))
+                (when (and own-generation (buffer-live-p chat-buf))
+                  (with-current-buffer chat-buf
+                    (pi-coding-agent--finish-session-transition
+                     generation)))))))))))
 
 ;;;###autoload
 (defun pi-coding-agent-reload ()
   "Reload the current session by restarting the pi process.
 Useful for reloading extensions, skills, prompts, and themes after
 editing them, or when the pi process has died or become unresponsive.
-Kills any existing process, starts fresh, switches back to the cached
-session file, refreshes session state and commands, and rebuilds the
-chat buffer from session history."
+Starts a fresh process, switches it back to the cached session file, then
+replaces the old process, refreshes state and commands, and rebuilds the chat
+buffer from session history."
   (interactive)
   (let* ((chat-buf (pi-coding-agent--get-chat-buffer))
          (session-file (and chat-buf
@@ -578,59 +678,130 @@ chat buffer from session history."
      (t
       (message "Pi: Reloading...")
       (with-current-buffer chat-buf
-        (when pi-coding-agent--process
-          (pi-coding-agent--unregister-display-handler pi-coding-agent--process)
-          (when (process-live-p pi-coding-agent--process)
-            (delete-process pi-coding-agent--process)))
-        (setq pi-coding-agent--status 'idle)
-        (let* ((dir (pi-coding-agent--session-directory))
-               (new-proc (pi-coding-agent--start-process dir)))
-          (pi-coding-agent--set-process new-proc)
-          (when (processp new-proc)
-            (set-process-buffer new-proc chat-buf)
-            (process-put new-proc 'pi-coding-agent-chat-buffer chat-buf)
-            (pi-coding-agent--register-display-handler new-proc)
-            (pi-coding-agent--rpc-async
-             new-proc
-             (list :type "switch_session" :sessionPath session-file)
-             (lambda (response)
-               (if (eq (plist-get response :success) t)
-                   (progn
-                     (pi-coding-agent--refresh-session-state
-                      new-proc chat-buf session-file)
-                     (pi-coding-agent--load-session-history
-                      new-proc
-                      (lambda (_count)
-                        (message "Pi: Session reloaded"))
-                      chat-buf)
-                     (pi-coding-agent--fetch-commands
-                      new-proc
-                      (lambda (commands)
-                        (when (buffer-live-p chat-buf)
-                          (with-current-buffer chat-buf
-                            (pi-coding-agent--set-commands commands)
-                            (pi-coding-agent--rebuild-commands-menu))))))
-                 (message "Pi: Failed to reload - %s"
-                          (or (plist-get response :error) "unknown error"))))))))))))
+        (let ((dir (pi-coding-agent--session-directory)))
+          (unless (and (stringp dir)
+                       (not (string-empty-p dir))
+                       (file-name-absolute-p dir))
+            (user-error "Pi: Cannot reload from invalid session directory: %s"
+                        dir))
+          (let ((session-path (pi-coding-agent--process-local-path
+                               session-file dir))
+                (old-proc pi-coding-agent--process))
+            (setq pi-coding-agent--status 'idle)
+            (let* ((new-proc (pi-coding-agent--start-process dir))
+                   (generation (pi-coding-agent--begin-session-transition
+                                new-proc)))
+              (when (processp new-proc)
+                (set-process-buffer new-proc chat-buf)
+                (process-put new-proc 'pi-coding-agent-chat-buffer chat-buf)
+                (pi-coding-agent--register-display-handler new-proc)
+                (pi-coding-agent--rpc-async
+                 new-proc
+                 (list :type "switch_session" :sessionPath session-path)
+                 (lambda (response)
+                   (when (pi-coding-agent--session-transition-current-p
+                          chat-buf new-proc generation)
+                     (let* ((data (plist-get response :data))
+                            (cancelled (plist-get data :cancelled)))
+                       (if (and (eq (plist-get response :success) t)
+                                (pi-coding-agent--json-false-p cancelled))
+                           (let ((refresh-scheduled nil))
+                             (condition-case err
+                                 (progn
+                                   (when (and (processp old-proc)
+                                              (not (eq old-proc new-proc)))
+                                     (pi-coding-agent--skip-process-kill-confirmation
+                                      old-proc)
+                                     (pi-coding-agent--unregister-display-handler
+                                      old-proc)
+                                     (when (process-live-p old-proc)
+                                       (delete-process old-proc)))
+                                   (when (buffer-live-p chat-buf)
+                                     (with-current-buffer chat-buf
+                                       (pi-coding-agent--set-process new-proc)))
+                                   (pi-coding-agent--refresh-transition-state-and-history
+                                    new-proc chat-buf generation session-file
+                                    (lambda (_count)
+                                      (message "Pi: Session reloaded")))
+                                   (setq refresh-scheduled t))
+                               (error
+                                (when (pi-coding-agent--session-transition-current-p
+                                       chat-buf new-proc generation)
+                                  (with-current-buffer chat-buf
+                                    (pi-coding-agent--finish-session-transition
+                                     generation)))
+                                (message "Pi: Failed to reload - %s"
+                                         (error-message-string err))))
+                             (when refresh-scheduled
+                               (pi-coding-agent--refresh-commands-ignoring-errors
+                                new-proc chat-buf generation dir)))
+                         (pi-coding-agent--unregister-display-handler new-proc)
+                         (when (process-live-p new-proc)
+                           (delete-process new-proc))
+                         (if (and cancelled
+                                  (not (pi-coding-agent--json-false-p cancelled)))
+                             (message "Pi: Reload cancelled")
+                           (message "Pi: Failed to reload - %s"
+                                    (or (plist-get response :error)
+                                        "unknown error")))
+                         (when (buffer-live-p chat-buf)
+                           (with-current-buffer chat-buf
+                             (pi-coding-agent--finish-session-transition
+                              generation)))))))))))))))))
 
 (defun pi-coding-agent--resume-selected-session (proc chat-buf selected-path)
   "Resume SELECTED-PATH using PROC and rebuild CHAT-BUF from its history."
-  (pi-coding-agent--rpc-async
-   proc
-   (list :type "switch_session" :sessionPath selected-path)
-   (lambda (response)
-     (let* ((data (plist-get response :data))
-            (cancelled (plist-get data :cancelled)))
-       (if (and (eq (plist-get response :success) t)
-                (pi-coding-agent--json-false-p cancelled))
-           (progn
-             (pi-coding-agent--refresh-session-state proc chat-buf selected-path)
-             (pi-coding-agent--load-session-history
-              proc
-              (lambda (count)
-                (message "Pi: Resumed session (%d messages)" count))
-              chat-buf))
-         (message "Pi: Failed to resume session"))))))
+  (let* ((target-dir (pi-coding-agent--session-file-cwd-or-error selected-path))
+         (session (and (buffer-live-p chat-buf)
+                       (pi-coding-agent--chat-session-name chat-buf)))
+         (existing-target (pi-coding-agent--find-session target-dir session)))
+    (when (and existing-target (not (eq existing-target chat-buf)))
+      (user-error "Pi session already open for: %s" target-dir))
+    (let* ((session-path (if (buffer-live-p chat-buf)
+                             (with-current-buffer chat-buf
+                               (pi-coding-agent--process-local-path
+                                selected-path
+                                (pi-coding-agent--chat-session-directory chat-buf)))
+                           (pi-coding-agent--process-local-path selected-path)))
+           (generation (when (buffer-live-p chat-buf)
+                         (with-current-buffer chat-buf
+                           (pi-coding-agent--begin-session-transition proc)))))
+      (pi-coding-agent--rpc-async
+       proc
+       (list :type "switch_session" :sessionPath session-path)
+       (lambda (response)
+         (when (pi-coding-agent--session-transition-current-p
+                chat-buf proc generation)
+           (let* ((data (plist-get response :data))
+                  (cancelled (plist-get data :cancelled)))
+             (if (and (eq (plist-get response :success) t)
+                      (pi-coding-agent--json-false-p cancelled))
+                 (let ((refresh-scheduled nil))
+                   (condition-case err
+                       (progn
+                         (when (buffer-live-p chat-buf)
+                           (with-current-buffer chat-buf
+                             (pi-coding-agent--retarget-session-buffers
+                              target-dir)))
+                         (pi-coding-agent--refresh-transition-state-and-history
+                          proc chat-buf generation selected-path
+                          (lambda (count)
+                            (message "Pi: Resumed session (%d messages)" count)))
+                         (setq refresh-scheduled t))
+                     (error
+                      (when (pi-coding-agent--session-transition-current-p
+                             chat-buf proc generation)
+                        (with-current-buffer chat-buf
+                          (pi-coding-agent--finish-session-transition generation)))
+                      (message "Pi: Failed to resume session - %s"
+                               (error-message-string err))))
+                   (when refresh-scheduled
+                     (pi-coding-agent--refresh-commands-ignoring-errors
+                      proc chat-buf generation target-dir)))
+               (message "Pi: Failed to resume session")
+               (when (buffer-live-p chat-buf)
+                 (with-current-buffer chat-buf
+                   (pi-coding-agent--finish-session-transition generation)))))))))))
 
 (defun pi-coding-agent--resume-session-from-directory (proc chat-buf session-dir)
   "Prompt for a session from SESSION-DIR, then resume it using PROC.
@@ -973,20 +1144,31 @@ Optional CUSTOM-INSTRUCTIONS provide guidance for the compaction summary."
   "Export session to HTML file.
 Optional OUTPUT-PATH specifies where to save; nil uses pi's default."
   (interactive
-   (list (let ((path (read-string "Export path (RET for default): ")))
+   (list (let ((path (read-string
+                      "Export path on session host (RET for default): ")))
            (and (not (string-empty-p path)) path))))
   (when-let* ((proc (pi-coding-agent--get-process)))
-    (pi-coding-agent--rpc-async proc
-                   (if output-path
-                       (list :type "export_html" :outputPath
-                             (expand-file-name output-path))
-                     '(:type "export_html"))
-                   (lambda (response)
-                     (if (eq (plist-get response :success) t)
-                         (let* ((data (plist-get response :data))
-                                (path (plist-get data :path)))
-                           (message "Pi: Exported to %s" path))
-                       (message "Pi: Export failed"))))))
+    (let* ((chat-buf (pi-coding-agent--get-chat-buffer))
+           (anchor (when (buffer-live-p chat-buf)
+                     (with-current-buffer chat-buf
+                       (pi-coding-agent--chat-session-directory chat-buf))))
+           (process-output-path
+            (pi-coding-agent--process-local-path output-path anchor)))
+      (pi-coding-agent--rpc-async
+       proc
+       (if process-output-path
+           (list :type "export_html" :outputPath process-output-path)
+         '(:type "export_html"))
+       (lambda (response)
+         (if (eq (plist-get response :success) t)
+             (let* ((data (plist-get response :data))
+                    (path (plist-get data :path))
+                    (emacs-path (pi-coding-agent--passive-emacs-path
+                                 path anchor)))
+               (if emacs-path
+                   (message "Pi: Exported to %s" emacs-path)
+                 (message "Pi: Exported, but Pi did not return a usable path")))
+           (message "Pi: Export failed")))))))
 
 (defun pi-coding-agent-copy-last-message ()
   "Copy last assistant message to kill ring."
@@ -1133,26 +1315,48 @@ a preview, then forks.  Only works when the session is idle."
 Sends the fork RPC, then on success: refreshes state, reloads history,
 and pre-fills the input buffer with the forked message text.
 Captures chat and input buffers at call time (before the async RPC)."
-  (let ((chat-buf (pi-coding-agent--get-chat-buffer))
-        (input-buf (pi-coding-agent--get-input-buffer)))
+  (let* ((chat-buf (pi-coding-agent--get-chat-buffer))
+         (input-buf (pi-coding-agent--get-input-buffer))
+         (generation (when (buffer-live-p chat-buf)
+                       (with-current-buffer chat-buf
+                         (pi-coding-agent--begin-session-transition proc)))))
     (pi-coding-agent--rpc-async proc (list :type "fork" :entryId entry-id)
       (lambda (response)
-        (if (eq (plist-get response :success) t)
-            (let* ((data (plist-get response :data))
-                   (text (plist-get data :text)))
-              (pi-coding-agent--refresh-session-state proc chat-buf)
-              ;; Reload and display the forked session
-              (pi-coding-agent--load-session-history
-               proc
-               (lambda (count)
-                 (message "Pi: Branched to new session (%d messages)" count))
-               chat-buf)
-              ;; Pre-fill input with the forked message text
-              (when (buffer-live-p input-buf)
-                (with-current-buffer input-buf
-                  (erase-buffer)
-                  (when text (insert text)))))
-          (message "Pi: Branch failed"))))))
+        (when (pi-coding-agent--session-transition-current-p
+               chat-buf proc generation)
+          (if (eq (plist-get response :success) t)
+              (let ((refresh-scheduled nil)
+                    text)
+                (condition-case err
+                    (progn
+                      (setq text (plist-get (plist-get response :data) :text))
+                      (pi-coding-agent--refresh-transition-state-and-history
+                       proc chat-buf generation nil
+                       (lambda (count)
+                         (message "Pi: Branched to new session (%d messages)" count)))
+                      (setq refresh-scheduled t))
+                  (error
+                   (when (pi-coding-agent--session-transition-current-p
+                          chat-buf proc generation)
+                     (with-current-buffer chat-buf
+                       (pi-coding-agent--finish-session-transition generation)))
+                   (message "Pi: Branch failed - %s"
+                            (error-message-string err))))
+                ;; Pre-fill input with the forked message text.  Sending stays
+                ;; blocked by the transition until state and history settle.
+                (when refresh-scheduled
+                  (condition-case err
+                      (when (buffer-live-p input-buf)
+                        (with-current-buffer input-buf
+                          (erase-buffer)
+                          (when text (insert text))))
+                    (error
+                     (message "Pi: Failed to prefill fork prompt - %s"
+                              (error-message-string err))))))
+            (message "Pi: Branch failed")
+            (when (buffer-live-p chat-buf)
+              (with-current-buffer chat-buf
+                (pi-coding-agent--finish-session-transition generation)))))))))
 
 (defun pi-coding-agent--show-fork-selector (proc messages)
   "Show selector for MESSAGES and fork on selection.
@@ -1270,11 +1474,16 @@ Uses commands from pi's `get_commands' RPC."
   "Refresh commands from pi via RPC."
   (interactive)
   (if-let* ((proc (pi-coding-agent--get-process)))
-      (pi-coding-agent--fetch-commands proc
-        (lambda (commands)
-          (pi-coding-agent--set-commands commands)
-          (pi-coding-agent--rebuild-commands-menu)
-          (message "Pi: Refreshed %d commands" (length commands))))
+      (let* ((chat-buf (pi-coding-agent--get-chat-buffer))
+             (anchor (when (buffer-live-p chat-buf)
+                       (with-current-buffer chat-buf
+                         (pi-coding-agent--chat-session-directory chat-buf)))))
+        (pi-coding-agent--fetch-commands proc
+          (lambda (commands)
+            (pi-coding-agent--set-commands commands)
+            (pi-coding-agent--rebuild-commands-menu)
+            (message "Pi: Refreshed %d commands" (length commands)))
+          anchor))
     (message "Pi: No active process")))
 
 ;;;; Command Submenus (Templates, Extensions, Skills)
@@ -1354,6 +1563,15 @@ Descriptions are truncated to fit the current frame width."
                 (cl-incf key)))))))
     (nreverse children)))
 
+(defun pi-coding-agent--edit-command-source (path)
+  "Visit command source PATH, normalizing Pi paths for the current session."
+  (let* ((chat-buf (pi-coding-agent--command-chat-buffer-or-error))
+         (anchor (with-current-buffer chat-buf
+                   (pi-coding-agent--chat-session-directory chat-buf)))
+         (emacs-path (or (pi-coding-agent--emacs-path path anchor)
+                         path)))
+    (find-file-other-window emacs-path)))
+
 (defun pi-coding-agent--make-submenu-edit-children (source)
   "Build edit suffixes for commands with SOURCE.
 Returns a list suitable for `transient-parse-suffixes'.
@@ -1373,7 +1591,7 @@ skipped but still consume a key position."
                           (truncate-string-to-width name 12)
                           `(lambda ()
                              (interactive)
-                             (find-file-other-window ,path)))
+                             (pi-coding-agent--edit-command-source ,path)))
                     children)))
           (cl-incf key))))
     (nreverse children)))

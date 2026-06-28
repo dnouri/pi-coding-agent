@@ -93,7 +93,7 @@ trust flag selected by `pi-coding-agent-project-trust-policy'.
 
 For npx users:
   (setq pi-coding-agent-executable
-        \\='(\"npx\" \"-y\" \"@earendil-works/pi-coding-agent@0.79.1\"))"
+        \\='(\"npx\" \"-y\" \"@earendil-works/pi-coding-agent@latest\"))"
   :type '(repeat string)
   :group 'pi-coding-agent)
 
@@ -230,8 +230,8 @@ For example:
 (defcustom pi-coding-agent-quit-without-confirmation nil
   "Whether `pi-coding-agent-quit' skips confirmation for a live process.
 When non-nil, quitting a session never asks whether a running pi process
-should be terminated.  When nil, `pi-coding-agent-quit' prompts before
-killing a live process that still has its query-on-exit flag enabled."
+should be terminated.  When nil, `pi-coding-agent-quit' and direct buffer
+kills prompt before killing a live process."
   :type 'boolean
   :group 'pi-coding-agent)
 
@@ -489,8 +489,9 @@ Checks both :path and :file_path keys for compatibility."
 
 (defun pi-coding-agent--path-to-language (path)
   "Return language name for PATH based on file extension.
-Returns \"text\" for unrecognized extensions to ensure consistent fencing."
-  (when path
+Returns \"text\" for unrecognized extensions to ensure consistent fencing.
+Return nil when PATH is not a string."
+  (when (stringp path)
     (let ((ext (downcase (or (file-name-extension path) ""))))
       (or (cdr (assoc ext pi-coding-agent--extension-language-alist))
           "text"))))
@@ -695,6 +696,9 @@ still uses this name to find the live conversation.")
 Project lookup, window toggling, and path completion use this directory even
 when the buffer is also backed by a transcript file elsewhere.")
 
+(defvar-local pi-coding-agent--canonical-session-name nil
+  "Optional named-session suffix for this chat buffer.")
+
 (defvar pi-coding-agent--chat-buffer)
 
 (defun pi-coding-agent--chat-session-buffer-name (&optional buffer)
@@ -712,12 +716,18 @@ recorded yet."
     (or pi-coding-agent--canonical-session-directory
         default-directory)))
 
+(defun pi-coding-agent--chat-session-name (&optional buffer)
+  "Return the optional named-session suffix for chat BUFFER."
+  (with-current-buffer (or buffer (current-buffer))
+    pi-coding-agent--canonical-session-name))
+
 (defun pi-coding-agent--set-chat-session-identity (dir &optional session)
   "Record the stable session identity for the current chat buffer.
 DIR is the session directory and SESSION is the optional named-session suffix."
   (setq pi-coding-agent--canonical-buffer-name
         (pi-coding-agent--buffer-name :chat dir session)
         pi-coding-agent--canonical-session-directory dir
+        pi-coding-agent--canonical-session-name session
         default-directory dir))
 
 (defun pi-coding-agent--restore-chat-buffer-read-only ()
@@ -745,6 +755,7 @@ This is a read-only buffer showing the conversation history."
   (setq-local pi-coding-agent--thinking-block-order-counter 0)
   (setq-local pi-coding-agent--history-load-generation 0)
   (setq-local pi-coding-agent--session-transition-generation 0)
+  (setq-local pi-coding-agent--session-transition-active nil)
   ;; Disable hl-line-mode: its post-command-hook overlay update causes
   ;; scroll oscillation in buffers with invisible text + variable heights.
   (setq-local global-hl-line-mode nil)
@@ -767,6 +778,8 @@ This is a read-only buffer showing the conversation history."
             #'pi-coding-agent--maybe-refresh-hot-tail-tables nil t)
   (add-hook 'window-size-change-functions
             #'pi-coding-agent--maybe-rebalance-windows)
+  (add-hook 'kill-buffer-query-functions
+            #'pi-coding-agent--session-kill-buffer-query nil t)
   (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-on-kill nil t))
 
 (put 'pi-coding-agent-chat-mode 'mode-class 'special)
@@ -803,8 +816,8 @@ removing the instructional header that would otherwise appear."
 Inside pi buffers, uses the chat buffer's stable session directory so manual
 transcript saves do not retarget the live session.  Elsewhere, uses the
 current project root when available, falling back to `default-directory'.
-Always returns an expanded absolute path (no ~ abbreviation)."
-  (expand-file-name
+Always returns an expanded absolute path; remote TRAMP home text is preserved."
+  (pi-coding-agent--route-preserving-expand-file-name
    (cond
     ((derived-mode-p 'pi-coding-agent-chat-mode)
      (pi-coding-agent--chat-session-directory))
@@ -836,7 +849,8 @@ Uses abbreviated directory for readability in buffer lists."
   (let ((type-str (pcase type
                     (:chat "chat")
                     (:input "input")))
-        (abbrev-dir (abbreviate-file-name dir)))
+        (abbrev-dir (pi-coding-agent--route-preserving-abbreviate-file-name
+                     dir)))
     (if (and session (not (string-empty-p session)))
         (format "*pi-coding-agent-%s:%s<%s>*" type-str abbrev-dir session)
       (format "*pi-coding-agent-%s:%s*" type-str abbrev-dir))))
@@ -881,7 +895,8 @@ by session setup code."
 (defun pi-coding-agent--normalize-directory (dir)
   "Normalize DIR for exact path comparisons.
 Returns an expanded absolute path with a trailing slash."
-  (file-name-as-directory (expand-file-name dir)))
+  (pi-coding-agent--route-preserving-file-name-as-directory
+   (pi-coding-agent--route-preserving-expand-file-name dir)))
 
 (defun pi-coding-agent-project-buffers ()
   "Return pi chat buffers for the current project directory.
@@ -1014,19 +1029,38 @@ callbacks cannot rebuild the chat buffer over newer session state.")
 
 (defvar-local pi-coding-agent--session-transition-generation 0
   "Monotonic generation for async session-transition callbacks.
-Each session switch, fork, or reset bumps this counter so stale `get_state'
-callbacks cannot apply older session identity or header state over a newer
-session view.")
+Each session switch, fork, or reset bumps this counter so stale callbacks
+cannot apply older session identity or header state over a newer session view.")
+
+(defvar-local pi-coding-agent--session-transition-active nil
+  "Non-nil while a session switch or fork RPC is in flight.")
+
+(defvar-local pi-coding-agent--session-transition-process nil
+  "Process allowed to complete the active session transition.")
 
 (defun pi-coding-agent--set-session-transition-generation (generation)
   "Set session-transition GENERATION for the current chat buffer."
   (setq pi-coding-agent--session-transition-generation generation))
 
-(defun pi-coding-agent--begin-session-transition ()
-  "Invalidate pending session-transition callbacks and return the new generation."
+(defun pi-coding-agent--begin-session-transition (&optional proc)
+  "Invalidate pending session-transition callbacks and return the new generation.
+Optional PROC may complete the transition before it becomes the current process."
   (let ((next (1+ (or pi-coding-agent--session-transition-generation 0))))
     (pi-coding-agent--set-session-transition-generation next)
+    (setq pi-coding-agent--session-transition-active t
+          pi-coding-agent--session-transition-process proc)
     next))
+
+(defun pi-coding-agent--finish-session-transition (generation)
+  "Mark session transition GENERATION finished when it is still current."
+  (when (= generation pi-coding-agent--session-transition-generation)
+    (setq pi-coding-agent--session-transition-active nil
+          pi-coding-agent--session-transition-process nil)))
+
+(defun pi-coding-agent--session-transition-active-p (&optional chat-buf)
+  "Return non-nil when CHAT-BUF is switching sessions or forking."
+  (with-current-buffer (or chat-buf (current-buffer))
+    (and pi-coding-agent--session-transition-active t)))
 
 (defun pi-coding-agent--session-transition-current-p (chat-buf proc generation)
   "Return non-nil when CHAT-BUF still expects PROC at GENERATION.
@@ -1034,7 +1068,8 @@ This keeps async session-transition callbacks from older switches, forks, or
 resets from overwriting the current chat buffer state."
   (and (buffer-live-p chat-buf)
        (with-current-buffer chat-buf
-         (and (eq pi-coding-agent--process proc)
+         (and (or (eq pi-coding-agent--process proc)
+                  (eq pi-coding-agent--session-transition-process proc))
               (= generation pi-coding-agent--session-transition-generation)))))
 
 (defvar-local pi-coding-agent--streaming-marker nil
@@ -1269,10 +1304,11 @@ When set but different from pi's message, we display pi's version
 (defun pi-coding-agent--session-busy-p (&optional chat-buf)
   "Return non-nil when CHAT-BUF has active or locally pending work.
 When CHAT-BUF is nil, inspect the current buffer.  This includes Pi-owned
-activity from `pi-coding-agent--status' and Emacs-owned prompt preflight and
-follow-up drain waits."
+activity from `pi-coding-agent--status' plus session transitions, prompt
+preflight, and follow-up drain waits."
   (with-current-buffer (or chat-buf (current-buffer))
     (or (memq pi-coding-agent--status '(sending streaming compacting))
+        (pi-coding-agent--session-transition-active-p)
         (pi-coding-agent--prompt-start-wait-active-p)
         (pi-coding-agent--followup-drain-pending-p))))
 
@@ -1389,6 +1425,49 @@ Works from either chat or input buffer."
       pi-coding-agent--process
     (and pi-coding-agent--chat-buffer
          (buffer-local-value 'pi-coding-agent--process pi-coding-agent--chat-buffer))))
+
+(defun pi-coding-agent--session-live-process-p (proc)
+  "Return non-nil when PROC is a live process object."
+  (and (processp proc) (process-live-p proc)))
+
+(defun pi-coding-agent--process-kill-confirmation-required-p (proc)
+  "Return non-nil when killing PROC should ask the user first."
+  (and (pi-coding-agent--session-live-process-p proc)
+       (not pi-coding-agent-quit-without-confirmation)
+       (not (process-get proc 'pi-coding-agent-skip-kill-confirmation))))
+
+(defun pi-coding-agent--skip-process-kill-confirmation (proc)
+  "Suppress pi's own kill confirmation for PROC during intentional teardown."
+  (when (processp proc)
+    (process-put proc 'pi-coding-agent-skip-kill-confirmation t)))
+
+(defun pi-coding-agent--session-kill-buffer-query ()
+  "Ask before killing a session buffer would terminate a live pi process."
+  (let ((proc (pi-coding-agent--get-process)))
+    (or (not (pi-coding-agent--process-kill-confirmation-required-p proc))
+        (yes-or-no-p "Pi session has a running process; kill it? "))))
+
+(defun pi-coding-agent--retarget-session-buffers (dir)
+  "Retarget the current chat/input session buffers to DIR."
+  (let* ((chat-buf (pi-coding-agent--get-chat-buffer))
+         (session (and (buffer-live-p chat-buf)
+                       (pi-coding-agent--chat-session-name chat-buf)))
+         (input-buf (and (buffer-live-p chat-buf)
+                         (buffer-local-value 'pi-coding-agent--input-buffer
+                                             chat-buf)))
+         (existing (pi-coding-agent--find-session dir session)))
+    (unless (buffer-live-p chat-buf)
+      (user-error "No pi session buffer"))
+    (when (and existing (not (eq existing chat-buf)))
+      (user-error "Pi session already open for: %s" dir))
+    (with-current-buffer chat-buf
+      (pi-coding-agent--set-chat-session-identity dir session)
+      (rename-buffer pi-coding-agent--canonical-buffer-name))
+    (when (buffer-live-p input-buf)
+      (with-current-buffer input-buf
+        (setq default-directory dir)
+        (rename-buffer (pi-coding-agent--buffer-name :input dir session))
+        (pi-coding-agent--set-chat-buffer chat-buf)))))
 
 ;;;; Display
 
@@ -1662,23 +1741,132 @@ Returns nil if MS is nil."
 
 (defun pi-coding-agent--pi-install-command ()
   "Return the npm command to install the supported pi CLI."
-  (format "npm install -g %s@%s"
-          pi-coding-agent--pi-package
-          pi-coding-agent--minimum-pi-version))
+  (format "npm install -g %s" pi-coding-agent--pi-package))
 
-(defun pi-coding-agent--check-pi ()
-  "Check if pi binary is available.
+(defun pi-coding-agent--dependency-directory (&optional directory)
+  "Return the directory where process dependencies should be checked.
+Use DIRECTORY when non-nil.  In pi buffers, prefer the active session
+directory; otherwise use `default-directory'."
+  (or directory
+      (if (derived-mode-p 'pi-coding-agent-chat-mode
+                          'pi-coding-agent-input-mode)
+          (pi-coding-agent--session-directory)
+        default-directory)))
+
+(defun pi-coding-agent--multi-hop-remote-prefix-p (prefix)
+  "Return non-nil when PREFIX is a TRAMP multi-hop route."
+  (and (stringp prefix)
+       (string-search "|" prefix)))
+
+(defun pi-coding-agent--remote-exec-path-directory
+    (entry directory remote-prefix)
+  "Return ENTRY from the function `exec-path' under remote DIRECTORY.
+REMOTE-PREFIX is DIRECTORY's full TRAMP prefix.  Nil and empty entries mean the
+remote DIRECTORY itself.  Process-local absolute entries are re-prefixed with
+REMOTE-PREFIX so multi-hop routes are not collapsed by generic file helpers."
+  (cond
+   ((or (null entry) (equal entry ""))
+    (pi-coding-agent--route-preserving-file-name-as-directory directory))
+   ((not (stringp entry))
+    nil)
+   ((pi-coding-agent--remote-prefix-for-path entry)
+    (when (equal (pi-coding-agent--remote-prefix-for-path entry)
+                 remote-prefix)
+      (pi-coding-agent--route-preserving-file-name-as-directory entry)))
+   ((file-name-absolute-p entry)
+    (pi-coding-agent--route-preserving-file-name-as-directory
+     (concat remote-prefix entry)))
+   (t
+    (pi-coding-agent--route-preserving-file-name-as-directory
+     (pi-coding-agent--route-preserving-expand-file-name entry directory)))))
+
+(defun pi-coding-agent--remote-executable-path
+    (program directory remote-prefix)
+  "Return PROGRAM as an Emacs path in remote DIRECTORY.
+REMOTE-PREFIX is DIRECTORY's full TRAMP prefix."
+  (cond
+   ((pi-coding-agent--remote-prefix-for-path program)
+    (and (equal (pi-coding-agent--remote-prefix-for-path program)
+                remote-prefix)
+         program))
+   ((file-name-absolute-p program)
+    (concat remote-prefix program))
+   (t
+    (pi-coding-agent--route-preserving-expand-file-name program directory))))
+
+(defun pi-coding-agent--remote-executable-file-p (path)
+  "Return non-nil when remote PATH names an executable file.
+This intentionally uses ordinary file predicates so TRAMP performs real I/O in
+normal operation; tests should stub this predicate or `file-executable-p' for
+fake hosts."
+  (ignore-errors (file-executable-p path)))
+
+(defun pi-coding-agent--remote-executable-find (program directory)
+  "Find PROGRAM on remote DIRECTORY while preserving its full TRAMP route.
+This is a focused replacement for `executable-find' on multi-hop remotes,
+where generic file-name operations can collapse `/ssh:bastion|sudo:host:' to
+`/sudo:host:'.  It binds `default-directory' to DIRECTORY, asks the function
+`exec-path' for the process-local remote PATH, and returns the first executable
+candidate re-prefixed with DIRECTORY's full TRAMP route."
+  (let* ((remote-prefix (pi-coding-agent--remote-prefix directory))
+         (directory (pi-coding-agent--route-preserving-file-name-as-directory
+                     (pi-coding-agent--route-preserving-expand-file-name
+                      directory)))
+         (path-entries (let ((default-directory directory))
+                         (exec-path)))
+         (suffixes (or exec-suffixes '(""))))
+    (when (and (stringp program)
+               (not (string-empty-p program))
+               remote-prefix)
+      (catch 'found
+        (if (string-search "/" program)
+            (dolist (suffix suffixes)
+              (when-let* ((candidate
+                           (pi-coding-agent--remote-executable-path
+                            (concat program suffix)
+                            directory remote-prefix))
+                          ((pi-coding-agent--remote-executable-file-p
+                            candidate)))
+                (throw 'found candidate)))
+          (dolist (entry path-entries)
+            (when-let* ((dir (pi-coding-agent--remote-exec-path-directory
+                              entry directory remote-prefix)))
+              (dolist (suffix suffixes)
+                (let ((candidate
+                       (pi-coding-agent--route-preserving-expand-file-name
+                        (concat program suffix) dir)))
+                  (when (pi-coding-agent--remote-executable-file-p candidate)
+                    (throw 'found candidate)))))))))))
+
+(defun pi-coding-agent--check-pi (&optional directory)
+  "Check if pi binary is available in DIRECTORY's execution context.
+Bind `default-directory' to DIRECTORY and use that execution context.  For
+multi-hop remote directories, ask the function `exec-path' for remote PATH
+entries and re-prefix candidates; otherwise delegate to `executable-find'.
 Returns t if available, nil otherwise."
-  (and (executable-find (car pi-coding-agent-executable)) t))
+  (let* ((directory (pi-coding-agent--dependency-directory directory))
+         (default-directory directory)
+         (program (car pi-coding-agent-executable))
+         (remote-prefix (pi-coding-agent--remote-prefix directory)))
+    (and program
+         (if (pi-coding-agent--multi-hop-remote-prefix-p remote-prefix)
+             (pi-coding-agent--remote-executable-find program directory)
+           (executable-find program t))
+         t)))
 
-(defun pi-coding-agent--check-dependencies ()
+(defun pi-coding-agent--check-dependencies (&optional directory)
   "Check all required dependencies.
-Displays warnings for missing dependencies."
-  (unless (pi-coding-agent--check-pi)
-    (display-warning 'pi (format "%s not found in PATH. Install with: %s"
-                                 (car pi-coding-agent-executable)
-                                 (pi-coding-agent--pi-install-command))
-                     :error))
+When DIRECTORY is non-nil, perform process dependency checks there.  Displays
+warnings for missing dependencies."
+  (let ((directory (pi-coding-agent--dependency-directory directory)))
+    (unless (pi-coding-agent--check-pi directory)
+      (display-warning 'pi (format "%s not found in %s. Install with: %s"
+                                   (car pi-coding-agent-executable)
+                                   (if-let* ((remote-prefix (pi-coding-agent--remote-prefix directory)))
+                                       (format "remote PATH (%s)" remote-prefix)
+                                     "PATH")
+                                   (pi-coding-agent--pi-install-command))
+                       :error)))
   (pi-coding-agent--maybe-install-essential-grammars)
   (pi-coding-agent--maybe-warn-incompatible-markdown-grammar)
   (pi-coding-agent--maybe-install-optional-grammars))
@@ -1740,22 +1928,28 @@ Displays warnings for missing dependencies."
       (when (buffer-live-p stderr-buf)
         (kill-buffer stderr-buf)))))
 
-(defun pi-coding-agent--run-pi-version-once-async (callback)
-  "Run `pi --version' asynchronously and call CALLBACK with version or nil."
+(defun pi-coding-agent--run-pi-version-once-async (callback &optional directory)
+  "Run `pi --version' asynchronously and call CALLBACK with version or nil.
+Run in DIRECTORY, defaulting to `default-directory'.  Process creation uses
+`default-directory' file handlers when present, with separate stdout and stderr
+buffers."
   (let ((stdout-buf (generate-new-buffer " *pi-coding-agent-version-stdout*"))
-        (stderr-buf (generate-new-buffer " *pi-coding-agent-version-stderr*")))
+        (stderr-buf (generate-new-buffer " *pi-coding-agent-version-stderr*"))
+        (directory (or directory default-directory)))
     (condition-case nil
-        (let ((proc (make-process
-                     :name "pi-version"
-                     :command `(,@pi-coding-agent-executable "--version")
-                     :connection-type 'pipe
-                     :buffer stdout-buf
-                     :stderr stderr-buf
-                     :noquery t
-                     :sentinel
-                     (lambda (proc _event)
-                       (when (memq (process-status proc) '(exit signal))
-                         (pi-coding-agent--finish-pi-version-process proc))))))
+        (let* ((default-directory directory)
+               (proc (make-process
+                      :name "pi-version"
+                      :command `(,@pi-coding-agent-executable "--version")
+                      :connection-type 'pipe
+                      :file-handler t
+                      :buffer stdout-buf
+                      :stderr stderr-buf
+                      :noquery t
+                      :sentinel
+                      (lambda (proc _event)
+                        (when (memq (process-status proc) '(exit signal))
+                          (pi-coding-agent--finish-pi-version-process proc))))))
           (process-put proc 'pi-coding-agent-version-callback callback)
           (process-put proc 'pi-coding-agent-version-stdout-buf stdout-buf)
           (process-put proc 'pi-coding-agent-version-stderr-buf stderr-buf)
@@ -1769,20 +1963,24 @@ Displays warnings for missing dependencies."
 
 (defun pi-coding-agent--request-pi-version-async (callback)
   "Resolve pi CLI version asynchronously and call CALLBACK with string or nil."
-  (run-at-time pi-coding-agent--version-probe-delay nil
-               #'pi-coding-agent--run-pi-version-once-async
-               callback))
+  (let ((directory default-directory))
+    (run-at-time pi-coding-agent--version-probe-delay nil
+                 #'pi-coding-agent--run-pi-version-once-async
+                 callback directory)))
 
 (defun pi-coding-agent--probe-process-version-async (chat-buf)
   "Probe and cache CLI version for CHAT-BUF's process.
 Stores the result in CHAT-BUF and emits a minibuffer notice when available."
-  (pi-coding-agent--request-pi-version-async
-   (lambda (version)
-     (when (and version (buffer-live-p chat-buf))
-       (with-current-buffer chat-buf
-         (setq pi-coding-agent--process-version version)
-         (message "Pi: version %s" version)
-         (pi-coding-agent--warn-if-pi-version-outdated version))))))
+  (when (buffer-live-p chat-buf)
+    (with-current-buffer chat-buf
+      (let ((default-directory (pi-coding-agent--chat-session-directory chat-buf)))
+        (pi-coding-agent--request-pi-version-async
+         (lambda (version)
+           (when (and version (buffer-live-p chat-buf))
+             (with-current-buffer chat-buf
+               (setq pi-coding-agent--process-version version)
+               (message "Pi: version %s" version)
+               (pi-coding-agent--warn-if-pi-version-outdated version)))))))))
 
 (defun pi-coding-agent--format-startup-header ()
   "Format the startup header string with styled separator."
@@ -2005,7 +2203,9 @@ Safely handles dead buffers by checking liveness first."
              (buffer-live-p chat-buf))
     (with-current-buffer chat-buf
       (let* ((old-session-id (plist-get pi-coding-agent--state :session-id))
-             (new-state (pi-coding-agent--extract-state-from-response response))
+             (new-state (pi-coding-agent--extract-state-from-response
+                         response
+                         (pi-coding-agent--chat-session-directory chat-buf)))
              (new-session-id (plist-get new-state :session-id)))
         (when (and old-session-id
                    new-session-id

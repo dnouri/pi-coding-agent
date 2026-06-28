@@ -34,7 +34,8 @@
 ;;
 ;; Requirements:
 ;;   - Emacs 29.1 or later (tree-sitter support required)
-;;   - pi coding agent @earendil-works/pi-coding-agent 0.79.1 or later, installed and in PATH
+;;   - pi coding agent @earendil-works/pi-coding-agent 0.79.1 or later,
+;;     installed and in PATH on the host where Pi runs
 ;;   - tree-sitter grammars for markdown and markdown-inline
 ;;
 ;; pi-coding-agent uses `md-ts-mode` for its own chat and input buffers;
@@ -100,9 +101,10 @@ Returns the chat buffer."
       (pi-coding-agent--set-input-buffer input-buf)
       ;; Start process if not already running
       (unless (and pi-coding-agent--process (process-live-p pi-coding-agent--process))
+        (pi-coding-agent--check-dependencies dir)
         (pi-coding-agent--set-process (pi-coding-agent--start-process dir))
         (setq new-session t)
-        ;; Associate process with chat buffer for built-in kill confirmation
+        ;; Associate process events and ownership with this chat buffer.
         (when (processp pi-coding-agent--process)
           (set-process-buffer pi-coding-agent--process chat-buf)
           (process-put pi-coding-agent--process 'pi-coding-agent-chat-buffer chat-buf)
@@ -132,7 +134,8 @@ Returns the chat buffer."
                 (when (buffer-live-p buf)
                   (with-current-buffer buf
                     (pi-coding-agent--set-commands commands)
-                    (pi-coding-agent--rebuild-commands-menu))))))))
+                    (pi-coding-agent--rebuild-commands-menu))))
+              dir))))
       ;; Display startup header for new sessions
       (when new-session
         (pi-coding-agent--display-startup-header)))
@@ -153,7 +156,7 @@ Returns the chat buffer."
   (when (derived-mode-p 'dired-mode)
     (when-let* ((file (dired-get-filename nil t)))
       (and (file-regular-p file)
-           (expand-file-name file)))))
+           (pi-coding-agent--route-preserving-expand-file-name file)))))
 
 (defun pi-coding-agent--regular-jsonl-file-p (file)
   "Return non-nil if FILE is a cheap local JSONL file candidate."
@@ -181,7 +184,9 @@ Returns the chat buffer."
 (defun pi-coding-agent--read-session-file-name ()
   "Read an existing pi session file name from the minibuffer."
   (let* ((default-file (pi-coding-agent--session-file-prompt-default))
-         (default-dir (and default-file (file-name-directory default-file)))
+         (default-dir (and default-file
+                           (pi-coding-agent--route-preserving-file-name-directory
+                            default-file)))
          (initial (and default-file (file-name-nondirectory default-file)))
          ;; `read-file-name' otherwise uses the current buffer's visited file
          ;; as a hidden default when DEFAULT-FILENAME and INITIAL are nil.
@@ -202,7 +207,6 @@ frame, keeps layout unchanged and focuses the input window."
   (interactive
    (list (when current-prefix-arg
            (read-string "Session name: "))))
-  (pi-coding-agent--check-dependencies)
   (let (chat-buf input-buf)
     (if (and (derived-mode-p 'pi-coding-agent-chat-mode 'pi-coding-agent-input-mode)
              (not session))
@@ -224,9 +228,10 @@ names an existing directory.  Interactively, prompt for an existing file.  In
 Dired, default to the regular file at point; otherwise, default to the current
 visited local regular readable .jsonl file when there is one."
   (interactive (list (pi-coding-agent--read-session-file-name)))
-  (let* ((session-file (expand-file-name session-file))
+  (let* ((session-file (pi-coding-agent--route-preserving-expand-file-name
+                        session-file))
          (dir (pi-coding-agent--session-file-cwd-or-error session-file)))
-    (pi-coding-agent--check-dependencies)
+    (pi-coding-agent--check-dependencies dir)
     (let* ((chat-buf (pi-coding-agent--setup-session dir))
            (input-buf (buffer-local-value 'pi-coding-agent--input-buffer
                                           chat-buf))
@@ -243,7 +248,6 @@ If pi windows are visible in the current frame, hide them.
 If hidden there but a session exists, show them.
 If no session exists, signal an error."
   (interactive)
-  (pi-coding-agent--check-dependencies)
   (let* ((chat-buf (if (derived-mode-p 'pi-coding-agent-chat-mode 'pi-coding-agent-input-mode)
                        (pi-coding-agent--get-chat-buffer)
                      (car (pi-coding-agent-project-buffers))))

@@ -69,7 +69,7 @@ is the shortest path to a usable session.
 - Emacs 29.1 or later, built with tree-sitter support
 - Node.js 22.19 or later for the pi CLI
 - [[https://pi.dev][pi coding agent]] =@earendil-works/pi-coding-agent@0.79.1= or later,
-  installed and in =PATH=
+  installed and in =PATH= on the host where Pi runs
 - Pi CLI authentication: a provider API key, or a one-time =/login= run
   in a terminal (see [[*Install pi and authenticate][Install pi and authenticate]])
 - A C compiler if Emacs needs to compile tree-sitter grammars
@@ -144,8 +144,9 @@ process without losing the conversation.
 
 =pi-coding-agent= runs the command in =pi-coding-agent-executable=,
 which defaults to =("pi")=.  If Emacs cannot find =pi=, install the
-CLI with the npm command from Quick Start, adjust Emacs's =exec-path=,
-or customize =pi-coding-agent-executable=.  An example:
+CLI with the npm command from Quick Start on the host where Pi runs,
+adjust the relevant search path, or customize
+=pi-coding-agent-executable=.  An example:
 
 #+begin_src emacs-lisp
 ;; npx users:
@@ -187,6 +188,26 @@ incorrectly, remove the old =libtree-sitter-markdown= from
 =treesit-extra-load-path=, your Emacs tree-sitter directory, or your
 system packages, then restart Emacs or run =M-x
 pi-coding-agent-install-grammars=.
+
+*** Remote projects over TRAMP
+
+When the current project is a TRAMP directory, =pi-coding-agent=
+starts the Pi CLI on the remote host.  Install =pi= there.
+
+Authentication and configuration are remote too: run =pi= and =/login=
+on that host, or set provider environment variables for the remote
+process.  Paths such as =~/.pi/agent/auth.json= and absolute entries in
+=pi-coding-agent-executable= are interpreted on the host where Pi runs.
+
+For Emacs to find the command on the remote host, its directory must be
+in TRAMP's remote search path; Emacs's local =exec-path= is not used.
+Use an absolute path in =pi-coding-agent-executable=, or add the
+executable's absolute remote directory to =tramp-remote-path=:
+
+#+begin_src emacs-lisp
+(with-eval-after-load 'tramp
+  (add-to-list 'tramp-remote-path "/home/you/bin"))
+#+end_src
 
 *** Transient is too old
 
@@ -601,7 +622,7 @@ If you prefer not to install the Pi CLI globally, customize
 
 #+begin_src emacs-lisp
 (setq pi-coding-agent-executable
-      '("npx" "-y" "@earendil-works/pi-coding-agent@0.79.1"))
+      '("npx" "-y" "@earendil-works/pi-coding-agent@latest"))
 #+end_src
 
 #+html: <a id="development"></a>

@@ -232,13 +232,7 @@ For backward search: go to current input (nil index)."
 
 (defun pi-coding-agent--input-kill-buffer-query ()
   "Ask before killing input when its linked chat owns a live process."
-  (let ((proc (and (buffer-live-p pi-coding-agent--chat-buffer)
-                   (buffer-local-value 'pi-coding-agent--process
-                                       pi-coding-agent--chat-buffer))))
-    (or (not (and (processp proc)
-                  (process-live-p proc)
-                  (process-query-on-exit-flag proc)))
-        (yes-or-no-p "Pi session has a running process; kill it? "))))
+  (pi-coding-agent--session-kill-buffer-query))
 
 (define-derived-mode pi-coding-agent-input-mode text-mode "Pi-Input"
   "Major mode for composing pi prompts.
@@ -316,9 +310,14 @@ The /compact command is handled locally; other slash commands sent to pi."
   (interactive)
   (let* ((text (string-trim (buffer-string)))
          (chat-buf (pi-coding-agent--get-chat-buffer))
+         (transitioning (and chat-buf
+                             (pi-coding-agent--session-transition-active-p
+                              chat-buf)))
          (busy (and chat-buf (pi-coding-agent--session-busy-p chat-buf))))
     (cond
      ((string-empty-p text) nil)
+     (transitioning
+      (message "Pi: Cannot send while session is switching"))
      ((and busy (pi-coding-agent--builtin-command-text-p text))
       (message "Pi: Cannot queue /%s while Pi is busy"
                (pi-coding-agent--builtin-command-name text)))
@@ -362,13 +361,12 @@ cancels, the session remains intact."
                  (buffer-local-value 'pi-coding-agent--process chat-buf)))
          (proc-live (and proc (process-live-p proc)))
          (input-windows nil))
-    (when (and proc-live
-               (process-query-on-exit-flag proc)
-               (not pi-coding-agent-quit-without-confirmation)
+    (when (and (pi-coding-agent--process-kill-confirmation-required-p proc)
                (not (yes-or-no-p "Pi session has a running process; quit anyway? ")))
       (user-error "Quit cancelled"))
-    ;; Disable query flag to prevent double-ask on buffer kill
+    ;; Suppress Emacs and pi buffer-kill prompts after explicit confirmation.
     (when proc-live
+      (pi-coding-agent--skip-process-kill-confirmation proc)
       (set-process-query-on-exit-flag proc nil))
     (when (buffer-live-p input-buf)
       (setq input-windows (get-buffer-window-list input-buf nil t)))
@@ -505,13 +503,19 @@ Triggers when @ is typed, provides completion of project files."
 
 (defun pi-coding-agent--path-completions (path)
   "Return file completion candidates for PATH, or nil if directory invalid."
-  (let* ((dir (file-name-directory path))
-         (base (file-name-nondirectory path))
-         (expanded-dir (expand-file-name (or dir "") (pi-coding-agent--session-directory))))
-    (when (file-directory-p expanded-dir)
-      (mapcar (lambda (f) (concat (or dir "") f))
-              (cl-remove-if (lambda (f) (member f '("." ".." "./" "../")))
-                            (file-name-all-completions base expanded-dir))))))
+  (condition-case nil
+      (let* ((dir (pi-coding-agent--route-preserving-file-name-directory path))
+             (base (file-name-nondirectory path))
+             (session-dir (pi-coding-agent--session-directory))
+             (expanded-dir (if dir
+                               (pi-coding-agent--route-preserving-file-name-as-directory
+                                (pi-coding-agent--emacs-path dir session-dir))
+                             session-dir)))
+        (when (file-directory-p expanded-dir)
+          (mapcar (lambda (f) (concat (or dir "") f))
+                  (cl-remove-if (lambda (f) (member f '("." ".." "./" "../")))
+                                (file-name-all-completions base expanded-dir)))))
+    (error nil)))
 
 (defun pi-coding-agent--path-capf ()
   "Completion-at-point function for file paths.
@@ -529,8 +533,7 @@ Skips / at buffer start to allow slash command completion."
           :exclusive 'no
           :annotation-function
           (lambda (c)
-            (if (file-directory-p (expand-file-name c (pi-coding-agent--session-directory)))
-                " (dir)" " (file)")))))
+            (if (string-suffix-p "/" c) " (dir)" " (file)")))))
 
 ;;;; Editor Features: Message Queuing
 
@@ -568,6 +571,8 @@ automatic overflow retry turn finishes."
         (when chat-buf
           (let ((status (buffer-local-value 'pi-coding-agent--status chat-buf)))
             (cond
+             ((pi-coding-agent--session-transition-active-p chat-buf)
+              (message "Pi: Cannot send steering while session is switching"))
              ((and (eq status 'idle)
                    (not (pi-coding-agent--session-busy-p chat-buf)))
               (message "Pi: Nothing to interrupt - use C-c C-c to send"))
