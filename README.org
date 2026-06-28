@@ -10,12 +10,12 @@
 #+html: <a href="https://github.com/dnouri/pi-coding-agent/actions/workflows/melpazoid.yml"><img alt="melpazoid" src="https://github.com/dnouri/pi-coding-agent/actions/workflows/melpazoid.yml/badge.svg"/></a>
 
 #+html: <p><em>Jump to:</em> <a href="#quick-start">Quick start</a> ·
-#+html: <a href="#how-it-compares">Comparison</a> ·
 #+html: <a href="#everyday-workflow">Everyday workflow</a>
 #+html: (<a href="#composing-prompts">composing prompts</a>,
 #+html: <a href="#reading-output">reading output</a>,
 #+html: <a href="#sessions-and-context">sessions</a>,
 #+html: <a href="#common-keys">shortcuts</a>) ·
+#+html: <a href="#how-it-compares">Comparison</a> ·
 #+html: <a href="#advanced-features-and-configuration">Advanced</a> ·
 #+html: <a href="#development">Development</a></p>
 
@@ -27,36 +27,13 @@ in an ergonomic Emacs interface: a Markdown chat buffer for the
 conversation and a separate prompt buffer where you compose the next
 message.
 
-The main advantage may be that your prompt is no longer trapped in a
+The immediate advantage is that your prompt is no longer trapped in a
 terminal text box.  You can edit it like any other Emacs buffer,
 scroll through the chat without losing focus, navigate and copy from
 previous output with ease, and use the key bindings and editing habits
 you already have.
 
 #+html: <a href="https://danielnouri.org/media/pi-coding-agent-demo.mp4"><img src="https://danielnouri.org/media/pi-coding-agent-preview.gif" alt="pi-coding-agent demo - click to play" width="600" height="600"></a>
-
-#+html: <a id="how-it-compares"></a>
-* How does it compare to other Emacs LLM helpers? 🧭
-
-=pi-coding-agent= is a Pi frontend and provides a tight integration
-through the RPC protocol.  Here's a quick overview of other popular
-Emacs packages for AI assisted coding:
-
-- [[https://github.com/karthink/gptel][gptel]] is a general LLM workbench for Emacs.  It works from ordinary
-  buffers, saves chats as files, rewrites regions, attaches context,
-  calls tools, and can use MCP through =mcp.el=.  Core =gptel= ships
-  no tools by default; add-ons such as [[https://github.com/karthink/gptel-agent][gptel-agent]] and [[https://github.com/kmontag/macher][macher]] add
-  agentic and project-editing workflows.
-
-- [[https://github.com/xenodium/agent-shell][agent-shell]] is an ACP shell for many coding agents, including
-  Claude, Codex, Gemini, Goose, OpenCode, Cursor, Copilot, and Pi
-  through =pi-acp=.  The Pi adapter covers a lot of ground but may
-  miss some of the more specific features of Pi such as busy-run
-  steering, forks, and extension UI.
-
-- [[https://github.com/editor-code-assistant/eca-emacs][eca-emacs]] is the Emacs client for the [[https://eca.dev/][ECA server]].  Its Emacs UI
-  leans toward an IDE experience, with inline completion and a
-  rewrite/diff flow.
 
 #+html: <a id="quick-start"></a>
 * Quick start 🚀
@@ -307,6 +284,58 @@ and error thresholds.
 | =n= / =p=        | chat    | 🐾 Navigate user messages                     |
 | =f=              | chat    | 🌿 Fork from the turn at point                |
 | =q=              | chat    | 👋 Quit session                               |
+
+#+html: <a id="how-it-compares"></a>
+* How does it compare to other Emacs LLM helpers? 🧭
+
+=pi-coding-agent= is the Emacs frontend for Pi.  Pi is an open,
+extensible coding-agent harness with many model providers, local and
+custom models, reusable skills, prompt templates, TypeScript
+extensions, custom tools, custom providers, packages, compaction,
+JSON/RPC modes, and an SDK.  This package talks to Pi over RPC, so
+Emacs receives structured messages and tool events instead of working
+with terminal text.  That is what makes the workflow above possible
+without embedding Pi's terminal UI.
+
+Choice guide:
+
+- =pi-coding-agent=: best when you want the Pi runtime (providers,
+  sessions, extensions, skills, templates, custom tools, and custom
+  providers) with an Emacs-native user interface.  It is not a general
+  Emacs LLM library and not a universal shell for every agent; it is a
+  focused frontend for Pi.
+
+- [[https://github.com/karthink/gptel][gptel]] and [[https://github.com/karthink/gptel-agent][gptel-agent]]: =gptel= is reusable Emacs LLM
+  infrastructure: any-buffer chat and rewrites, file-backed chats,
+  context attachment, multiple backends, tool use, MCP through
+  =mcp.el=, and APIs for custom workflows.  =gptel-agent= is the
+  agentic harness built on top of it, with local file tools, Bash,
+  web tools, Emacs tools, confirmations, prompts, and sub-agents.
+
+- [[https://github.com/MatthewZMD/aidermacs][Aidermacs]]: an Emacs frontend for Aider.  It runs Aider through
+  =comint= or =vterm= and adds Emacs commands for Aider sessions,
+  explicit editable/read-only file context, repo-map refresh, code,
+  ask, architect, and help modes, =.aider.conf.yml= configuration,
+  and Ediff review of AI-generated changes.
+
+- [[https://github.com/manzaltu/claude-code-ide.el][claude-code-ide.el]]: an Emacs integration for Claude Code CLI
+  through MCP.  It starts Claude Code for the current project using
+  =vterm=, =eat=, or =ghostel=, manages project sessions, tracks the
+  active file and selection, exposes diagnostics and Emacs tools such
+  as xref, tree-sitter, imenu, project, and custom Elisp functions,
+  and shows proposed edits through Ediff.
+
+- [[https://github.com/xenodium/agent-shell][agent-shell]]: a native Emacs shell for ACP-driven agents.  It
+  relies on =acp.el= and works with agents such as Gemini CLI, Claude
+  Agent, Auggie, Mistral Vibe, GitHub Copilot, and Pi through the
+  =pi-acp= adapter.  It is the broader choice when one Emacs UI should
+  talk to several ACP agents.
+
+- [[https://github.com/editor-code-assistant/eca-emacs][eca-emacs]]: the Emacs client for the ECA server.  It connects to
+  an external =eca= process and provides dedicated chat buffers,
+  =@=-context, chat/tool approval commands, model and agent selection,
+  MCP settings, inline completion, rewrite overlays, and diff or Ediff
+  review.
 
 #+html: <a id="advanced-features-and-configuration"></a>
 * Advanced features and configuration ⚙️
