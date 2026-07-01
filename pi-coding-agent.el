@@ -127,7 +127,8 @@ Returns the chat buffer."
                     (with-current-buffer buf
                       (pi-coding-agent--display-startup-error
                        (plist-get response :error)
-                       (plist-get response :stderr)))))))
+                       (plist-get response :stderr)
+                       (plist-get response :exitCode)))))))
             ;; Fetch commands via RPC (independent of get_state)
             (pi-coding-agent--fetch-commands proc
               (lambda (commands)

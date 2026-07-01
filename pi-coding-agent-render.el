@@ -834,8 +834,30 @@ Shows success or final failure with raw error."
                             'face 'pi-coding-agent-error-notice)
            "\n")))
 
-(defun pi-coding-agent--display-startup-error (error-msg &optional stderr)
-  "Display a pi startup ERROR-MSG and optional STDERR."
+(defconst pi-coding-agent--startup-env-node-hint
+  (concat "Probable cause: Pi's Node launcher cannot see `node`.\n\n"
+          "Emacs found the configured Pi launcher, but it uses `/usr/bin/env node`, "
+          "which searches the subprocess PATH, not only Emacs `exec-path`. "
+          "Put Node's bin directory on the PATH seen by Emacs-created "
+          "processes, or set `pi-coding-agent-executable` to a wrapper "
+          "that does.")
+  "Hint shown when Pi's Node launcher cannot find node at startup.")
+
+(defun pi-coding-agent--startup-env-node-error-p (exit-code stderr)
+  "Return non-nil when EXIT-CODE and STDERR look like env failing to find node."
+  (and (equal exit-code 127)
+       (stringp stderr)
+       (let ((case-fold-search nil))
+         (catch 'found
+           (dolist (line (split-string stderr "[\r\n]+" t))
+             (when (and (string-match-p "\\(?:\\`\\|/\\)env:" line)
+                        (string-match-p
+                         "\\(?:\\`\\|[^[:alnum:]_]\\)node\\(?:[^[:alnum:]_]\\|\\'\\)"
+                         line))
+               (throw 'found t)))))))
+
+(defun pi-coding-agent--display-startup-error (error-msg &optional stderr exit-code)
+  "Display a pi startup ERROR-MSG, optional STDERR, and EXIT-CODE."
   (pi-coding-agent--append-to-chat
    (concat "\n"
            (propertize "✗ pi failed to start"
@@ -848,7 +870,9 @@ Shows success or final failure with raw error."
                      "\n```text\n"
                      stderr
                      (unless (string-suffix-p "\n" stderr) "\n")
-                     "```\n")))))
+                     "```\n"))
+           (when (pi-coding-agent--startup-env-node-error-p exit-code stderr)
+             (concat "\n" pi-coding-agent--startup-env-node-hint "\n")))))
 
 (defun pi-coding-agent--display-extension-error (event)
   "Display extension error from extension_error EVENT."

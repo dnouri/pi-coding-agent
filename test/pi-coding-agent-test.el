@@ -919,6 +919,36 @@ still mock the RPC boundary, so the process is never used for I/O."
         (delete-process proc))
       (pi-coding-agent-test--kill-session-buffers root))))
 
+(ert-deftest pi-coding-agent-test-setup-session-shows-startup-env-node-hint ()
+  "Initial env/node startup failures should explain subprocess PATH."
+  (let ((root (pi-coding-agent-test--make-temp-directory
+               "pi-coding-agent-test-startup-env-node-"))
+        (proc (start-process "pi-coding-agent-startup-env-node" nil "cat"))
+        (chat nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                  ((symbol-function 'pi-coding-agent--start-process) (lambda (_) proc))
+                  ((symbol-function 'pi-coding-agent--fetch-commands) (lambda (&rest _) nil))
+                  ((symbol-function 'pi-coding-agent--rpc-async)
+                   (lambda (_proc cmd callback)
+                     (should (equal (plist-get cmd :type) "get_state"))
+                     (funcall callback
+                              '(:type "response"
+                                :command "get_state"
+                                :success :false
+                                :error "Process exited: exited abnormally with code 127"
+                                :stderr "/usr/bin/env: node: No such file or directory"
+                                :exitCode 127)))))
+          (setq chat (pi-coding-agent--setup-session root nil))
+          (should (buffer-live-p chat))
+          (with-current-buffer chat
+            (should (string-match-p "failed to start" (buffer-string)))
+            (should (string-match-p "Node launcher" (buffer-string)))
+            (should (string-match-p "subprocess PATH" (buffer-string)))))
+      (when (process-live-p proc)
+        (delete-process proc))
+      (pi-coding-agent-test--kill-session-buffers root))))
+
 (ert-deftest pi-coding-agent-test-from-chat-buffer-noop-when-both-visible ()
   "From chat, `pi-coding-agent' avoids redisplay and focuses input."
   (let ((root "/tmp/pi-coding-agent-test-chat-visible/")

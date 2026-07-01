@@ -1162,6 +1162,23 @@ and starting in DIRECTORY or `/tmp/'."
       (when (process-live-p proc)
         (delete-process proc)))))
 
+(ert-deftest pi-coding-agent-test-process-exit-includes-exit-code ()
+  "Process exit errors include the process exit code."
+  (let ((fake-proc (start-process "pi-coding-agent-exit-code" nil
+                                  "sh" "-c" "exit 127"))
+        (response nil))
+    (unwind-protect
+        (progn
+          (while (process-live-p fake-proc)
+            (accept-process-output fake-proc 0.05))
+          (puthash "req_1" (lambda (r) (setq response r))
+                   (pi-coding-agent--get-pending-requests fake-proc))
+          (pi-coding-agent--handle-process-exit
+           fake-proc "exited abnormally with code 127")
+          (should (equal (plist-get response :exitCode) 127)))
+      (when (process-live-p fake-proc)
+        (delete-process fake-proc)))))
+
 (ert-deftest pi-coding-agent-test-process-exit-includes-stderr-excerpt ()
   "Process exit errors include stderr when available."
   (let ((fake-proc (start-process "pi-coding-agent-exit" nil "cat"))

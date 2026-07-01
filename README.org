@@ -131,6 +131,12 @@ adjust the relevant search path, or customize
         '("npx" "-y" "@earendil-works/pi-coding-agent@latest"))
 #+end_src
 
+If startup says something like =env: node: No such file or directory=,
+Emacs found the Pi launcher, but that launcher uses =/usr/bin/env node=.
+=env= searches the subprocess =PATH=, not only Emacs =exec-path=.  Put
+Node's bin directory on the =PATH= seen by Emacs/Pi, then reload the
+session.
+
 *** Project-local Pi resources
 
 Pi does not show its project trust prompt in RPC mode.  To make Emacs
