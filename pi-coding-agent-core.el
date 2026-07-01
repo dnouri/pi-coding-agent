@@ -523,10 +523,12 @@ containing EVENT, then clears this process's pending request tables."
   (let* ((pending (process-get proc 'pi-coding-agent-pending-requests))
          (pending-types (process-get proc 'pi-coding-agent-pending-command-types))
          (stderr (pi-coding-agent--process-stderr-excerpt proc))
+         (exit-code (process-exit-status proc))
          (error-response
           (append (list :type "response"
                         :success :false
-                        :error (format "Process exited: %s" (string-trim event)))
+                        :error (format "Process exited: %s" (string-trim event))
+                        :exitCode exit-code)
                   (when stderr
                     (list :stderr stderr)))))
     (unwind-protect

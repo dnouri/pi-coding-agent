@@ -1837,6 +1837,34 @@ since we don't display them locally. Let pi's message_start handle it."
     (should (string-match-p "InvalidArgumentError" (buffer-string)))
     (should (string-match-p "stderr" (buffer-string)))))
 
+(ert-deftest pi-coding-agent-test-display-startup-error-env-node-hint ()
+  "Startup env/node failures should explain subprocess PATH."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-startup-error
+     "Process exited: exited abnormally with code 127"
+     "env: ‘node’: File o directory non esistente\n"
+     127)
+    (let ((text (buffer-string)))
+      (should (string-match-p (regexp-quote "Probable cause: Pi's Node launcher")
+                              text))
+      (should (string-match-p (regexp-quote "uses `/usr/bin/env node`")
+                              text))
+      (should (string-match-p (regexp-quote "subprocess PATH") text)))))
+
+(ert-deftest pi-coding-agent-test-display-startup-error-no-env-node-hint ()
+  "Unrelated startup exit 127 failures should not show the node PATH hint."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-startup-error
+     "Process exited: exited abnormally with code 127"
+     "/usr/bin/env: ‘python’: Datei oder Verzeichnis nicht gefunden\n"
+     127)
+    (let ((text (buffer-string)))
+      (should-not (string-match-p (regexp-quote "Probable cause: Pi's Node launcher")
+                                  text))
+      (should-not (string-match-p (regexp-quote "subprocess PATH") text)))))
+
 (ert-deftest pi-coding-agent-test-display-extension-error ()
   "extension_error event shows extension name and error."
   (with-temp-buffer
