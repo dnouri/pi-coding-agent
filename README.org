@@ -133,9 +133,15 @@ adjust the relevant search path, or customize
 
 If startup says something like =env: node: No such file or directory=,
 Emacs found the Pi launcher, but that launcher uses =/usr/bin/env node=.
-=env= searches the subprocess =PATH=, not only Emacs =exec-path=.  Put
-Node's bin directory on the =PATH= seen by Emacs/Pi, then reload the
-session.
+=env= searches the subprocess =PATH=, not only Emacs =exec-path=.
+
+If you configure Node from init.el, update both:
+
+#+begin_src emacs-lisp
+(let ((node-bin "/home/you/.local/share/pi-node/node-v22.23.1-linux-x64/bin"))
+  (add-to-list 'exec-path node-bin)
+  (setenv "PATH" (concat node-bin path-separator (or (getenv "PATH") ""))))
+#+end_src
 
 *** Project-local Pi resources
 
