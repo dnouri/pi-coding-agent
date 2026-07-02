@@ -15,6 +15,7 @@
 #+html: <a href="#reading-output">reading output</a>,
 #+html: <a href="#sessions-and-context">sessions</a>,
 #+html: <a href="#common-keys">shortcuts</a>) ·
+#+html: <a href="#troubleshooting">Troubleshooting</a> ·
 #+html: <a href="#how-it-compares">Comparison</a> ·
 #+html: <a href="#advanced-features-and-configuration">Advanced</a> ·
 #+html: <a href="#development">Development</a></p>
@@ -106,104 +107,6 @@ You may also define a shorter command name:
 
 After that, =M-x pi= starts or focuses the current project's pi
 session.
-
-** Troubleshooting and first-run notes 🩺
-
-*** No model is available
-
-Make sure the [[https://pi.dev/docs/latest/providers][Pi CLI is authenticated]] before expecting models to
-appear: set a provider API key, or run =pi= in a terminal once and use
-=/login=.  Then make the running session pick up the new credentials:
-press =C-c C-p R= (or =M-x pi-coding-agent-reload=) to restart the Pi
-process without losing the conversation.
-
-*** Missing pi executable
-
-=pi-coding-agent= runs the command in =pi-coding-agent-executable=,
-which defaults to =("pi")=.  If Emacs cannot find =pi=, install the
-CLI with the npm command from Quick Start on the host where Pi runs,
-adjust the relevant search path, or customize
-=pi-coding-agent-executable=.  An example:
-
-#+begin_src emacs-lisp
-;; npx users:
-(setopt pi-coding-agent-executable
-        '("npx" "-y" "@earendil-works/pi-coding-agent@latest"))
-#+end_src
-
-If startup says something like =env: node: No such file or directory=,
-Emacs found the Pi launcher, but that launcher uses =/usr/bin/env node=.
-=env= searches the subprocess =PATH=, not only Emacs =exec-path=.
-
-If you configure Node from init.el, update both:
-
-#+begin_src emacs-lisp
-(let ((node-bin "/home/you/.local/share/pi-node/node-v22.23.1-linux-x64/bin"))
-  (add-to-list 'exec-path node-bin)
-  (setenv "PATH" (concat node-bin path-separator (or (getenv "PATH") ""))))
-#+end_src
-
-*** Project-local Pi resources
-
-Pi does not show its project trust prompt in RPC mode.  To make Emacs
-sessions behave like the usual trusted project workflow,
-=pi-coding-agent= passes =--approve= by default so project-local
-=.pi= prompts, skills, settings, themes, and extensions are active.
-
-Set =pi-coding-agent-project-trust-policy= to =default= to pass no
-trust flag and let Pi use its saved trust decisions and
-=defaultProjectTrust=:
-
-#+begin_src emacs-lisp
-;; Let Pi decide project trust from ~/.pi/agent/trust.json
-;; and its global defaultProjectTrust setting.
-(setopt pi-coding-agent-project-trust-policy 'default)
-#+end_src
-
-Set it to =no-approve= to pass =--no-approve= and ignore
-project-local Pi files for Emacs sessions.
-
-*** Grammar installation fails
-
-Grammar installation needs a working C compiler.  Install =gcc= or
-=cc=, then run:
-
-#+begin_src
-M-x pi-coding-agent-install-grammars
-#+end_src
-
-If an old system Markdown grammar is loaded and tables render
-incorrectly, remove the old =libtree-sitter-markdown= from
-=treesit-extra-load-path=, your Emacs tree-sitter directory, or your
-system packages, then restart Emacs or run =M-x
-pi-coding-agent-install-grammars=.
-
-*** Remote projects over TRAMP
-
-When the current project is a TRAMP directory, =pi-coding-agent=
-starts the Pi CLI on the remote host.  Install =pi= there.
-
-Authentication and configuration are remote too: run =pi= and =/login=
-on that host, or set provider environment variables for the remote
-process.  Paths such as =~/.pi/agent/auth.json= and absolute entries in
-=pi-coding-agent-executable= are interpreted on the host where Pi runs.
-
-For Emacs to find the command on the remote host, its directory must be
-in TRAMP's remote search path; Emacs's local =exec-path= is not used.
-Use an absolute path in =pi-coding-agent-executable=, or add the
-executable's absolute remote directory to =tramp-remote-path=:
-
-#+begin_src emacs-lisp
-(with-eval-after-load 'tramp
-  (add-to-list 'tramp-remote-path "/home/you/bin"))
-#+end_src
-
-*** Transient is too old
-
-Emacs may load its bundled =transient= before the newer MELPA package.
-If the menu complains about =transient=, set
-=package-install-upgrade-built-in= to =t=, install or upgrade
-=transient= from MELPA, and restart Emacs.
 
 #+html: <a id="everyday-workflow"></a>
 * Everyday workflow 🧭
@@ -317,6 +220,123 @@ and error thresholds.
 | =n= / =p=        | chat    | 🐾 Navigate user messages                     |
 | =f=              | chat    | 🌿 Fork from the turn at point                |
 | =q=              | chat    | 👋 Quit session                               |
+
+#+html: <a id="troubleshooting"></a>
+* Troubleshooting and first-run notes 🩺
+
+#+html: <details>
+#+html: <summary><strong>No models are available: authenticate the Pi CLI</strong></summary>
+
+Make sure the [[https://pi.dev/docs/latest/providers][Pi CLI is authenticated]] before expecting models to
+appear: set a provider API key, or run =pi= in a terminal once and use
+=/login=.  Then make the running session pick up the new credentials:
+press =C-c C-p R= (or =M-x pi-coding-agent-reload=) to restart the Pi
+process without losing the conversation.
+
+#+html: </details>
+
+#+html: <details>
+#+html: <summary><strong>Emacs cannot find the <code>pi</code> executable</strong></summary>
+
+=pi-coding-agent= runs the command in =pi-coding-agent-executable=,
+which defaults to =("pi")=.  If Emacs cannot find =pi=, install the
+CLI with the npm command from Quick Start on the host where Pi runs,
+adjust the relevant search path, or customize
+=pi-coding-agent-executable=.  An example:
+
+#+begin_src emacs-lisp
+;; npx users:
+(setopt pi-coding-agent-executable
+        '("npx" "-y" "@earendil-works/pi-coding-agent@latest"))
+#+end_src
+
+If startup says something like =env: node: No such file or directory=,
+Emacs found the Pi launcher, but that launcher uses =/usr/bin/env node=.
+=env= searches the subprocess =PATH=, not only Emacs =exec-path=.
+
+If you configure Node from init.el, update both:
+
+#+begin_src emacs-lisp
+(let ((node-bin "/home/you/.local/share/pi-node/node-v22.23.1-linux-x64/bin"))
+  (add-to-list 'exec-path node-bin)
+  (setenv "PATH" (concat node-bin path-separator (or (getenv "PATH") ""))))
+#+end_src
+
+#+html: </details>
+
+#+html: <details>
+#+html: <summary><strong>Project-local <code>.pi</code> resources are not active</strong></summary>
+
+Pi does not show its project trust prompt in RPC mode.  To make Emacs
+sessions behave like the usual trusted project workflow,
+=pi-coding-agent= passes =--approve= by default so project-local
+=.pi= prompts, skills, settings, themes, and extensions are active.
+
+Set =pi-coding-agent-project-trust-policy= to =default= to pass no
+trust flag and let Pi use its saved trust decisions and
+=defaultProjectTrust=:
+
+#+begin_src emacs-lisp
+;; Let Pi decide project trust from ~/.pi/agent/trust.json
+;; and its global defaultProjectTrust setting.
+(setopt pi-coding-agent-project-trust-policy 'default)
+#+end_src
+
+Set it to =no-approve= to pass =--no-approve= and ignore
+project-local Pi files for Emacs sessions.
+
+#+html: </details>
+
+#+html: <details>
+#+html: <summary><strong>Tree-sitter grammar installation fails</strong></summary>
+
+Grammar installation needs a working C compiler.  Install =gcc= or
+=cc=, then run:
+
+#+begin_src
+M-x pi-coding-agent-install-grammars
+#+end_src
+
+If an old system Markdown grammar is loaded and tables render
+incorrectly, remove the old =libtree-sitter-markdown= from
+=treesit-extra-load-path=, your Emacs tree-sitter directory, or your
+system packages, then restart Emacs or run =M-x
+pi-coding-agent-install-grammars=.
+
+#+html: </details>
+
+#+html: <details>
+#+html: <summary><strong>TRAMP projects run Pi on the remote host</strong></summary>
+
+When the current project is a TRAMP directory, =pi-coding-agent=
+starts the Pi CLI on the remote host.  Install =pi= there.
+
+Authentication and configuration are remote too: run =pi= and =/login=
+on that host, or set provider environment variables for the remote
+process.  Paths such as =~/.pi/agent/auth.json= and absolute entries in
+=pi-coding-agent-executable= are interpreted on the host where Pi runs.
+
+For Emacs to find the command on the remote host, its directory must be
+in TRAMP's remote search path; Emacs's local =exec-path= is not used.
+Use an absolute path in =pi-coding-agent-executable=, or add the
+executable's absolute remote directory to =tramp-remote-path=:
+
+#+begin_src emacs-lisp
+(with-eval-after-load 'tramp
+  (add-to-list 'tramp-remote-path "/home/you/bin"))
+#+end_src
+
+#+html: </details>
+
+#+html: <details>
+#+html: <summary><strong>Emacs loads an old <code>transient</code> package</strong></summary>
+
+Emacs may load its bundled =transient= before the newer MELPA package.
+If the menu complains about =transient=, set
+=package-install-upgrade-built-in= to =t=, install or upgrade
+=transient= from MELPA, and restart Emacs.
+
+#+html: </details>
 
 #+html: <a id="how-it-compares"></a>
 * How does it compare to other Emacs LLM helpers? 🧭
