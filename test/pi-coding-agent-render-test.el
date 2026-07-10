@@ -3475,6 +3475,346 @@ With hot-tail-turn-count 1, only the most recent headed turn stays hot."
 
 ;;; File Navigation (visit-file)
 
+(ert-deftest pi-coding-agent-test-file-target-tool-contract-local-anywhere-in-block ()
+  "Tool targets expose explicit path forms anywhere in their block."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+    (pi-coding-agent--display-tool-start
+     "read" '(:path "src/app.py" :offset 10))
+    (pi-coding-agent--display-tool-end
+     "read" '(:path "src/app.py" :offset 10)
+     '((:type "text" :text "line one\nline two")) nil nil)
+    (let* ((ov (seq-find (lambda (overlay)
+                           (overlay-get overlay 'pi-coding-agent-tool-block))
+                         (overlays-in (point-min) (point-max))))
+           (bounds (cons (overlay-start ov) (overlay-end ov))))
+      (goto-char (overlay-start ov))
+      (let ((target (pi-coding-agent--file-target-at-point)))
+        (should (eq :tool (plist-get target :source)))
+        (should (equal "src/app.py" (plist-get target :raw)))
+        (should (equal "src/app.py" (plist-get target :display)))
+        (should (equal "/tmp/project/src/app.py"
+                       (plist-get target :emacs-path)))
+        (should (equal "/tmp/project/src/app.py"
+                       (plist-get target :shell-path)))
+        (should-not (plist-get target :line))
+        (should-not (plist-get target :column))
+        (should-not (plist-get target :range))
+        (should (equal bounds (plist-get target :bounds))))
+      (goto-char (point-min))
+      (search-forward "line two")
+      (should (= 11 (plist-get (pi-coding-agent--file-target-at-point)
+                               :line))))))
+
+(ert-deftest pi-coding-agent-test-file-target-tool-ignores-invalid-line-offset ()
+  "Malformed optional offsets do not invalidate an authoritative tool path."
+  (dolist (offset '("oops" 0 -1))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-tool-start
+       "read" (list :path "src/app.py" :offset 10))
+      (pi-coding-agent--display-tool-end
+       "read" (list :path "src/app.py" :offset 10)
+       '((:type "text" :text "line one")) nil nil)
+      (goto-char (point-min))
+      (search-forward "line one")
+      (let ((overlay (pi-coding-agent--tool-overlay-at-point)))
+        (overlay-put overlay 'pi-coding-agent-tool-offset offset)
+        (let ((target (pi-coding-agent--file-target-at-point)))
+          (should (eq :tool (plist-get target :source)))
+          (should (equal "src/app.py" (plist-get target :raw)))
+          (should-not (plist-get target :line)))))))
+
+(ert-deftest pi-coding-agent-test-file-target-tool-preserves-multi-hop-path-boundary ()
+  "Tool targets keep TRAMP paths for Emacs and local paths for Pi's shell."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity
+     "/ssh:bastion|sudo:root@pi-host:/home/pi/project/")
+    (pi-coding-agent--display-tool-start "read" '(:path "src/app.py"))
+    (goto-char (overlay-start pi-coding-agent--pending-tool-overlay))
+    (let ((target (pi-coding-agent--file-target-at-point)))
+      (should (equal "src/app.py" (plist-get target :raw)))
+      (should (equal "/ssh:bastion|sudo:root@pi-host:/home/pi/project/src/app.py"
+                     (plist-get target :emacs-path)))
+      (should (equal "/home/pi/project/src/app.py"
+                     (plist-get target :shell-path))))))
+
+(ert-deftest pi-coding-agent-test-file-target-tool-invalid-path-wins-over-text ()
+  "Invalid authoritative metadata errors instead of using tool-body text."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity
+     "/ssh:localhost:/tmp/project/")
+    (let ((path "/ssh:127.0.0.1:/tmp/project/src/bad.txt"))
+      (pi-coding-agent--display-tool-start "read" (list :path path))
+      (pi-coding-agent--display-tool-end
+       "read" (list :path path)
+       '((:type "text" :text "src/fallback.el")) nil nil)
+      (goto-char (point-min))
+      (search-forward "src/fallback.el")
+      (let ((err (should-error (pi-coding-agent--file-target-at-point)
+                               :type 'user-error)))
+        (should (string-match-p "not on this session host"
+                                (error-message-string err)))))))
+
+(ert-deftest pi-coding-agent-test-file-target-tool-without-path-wins-over-text ()
+  "Absent tool metadata returns nil instead of using tool-body text."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-start "custom" nil)
+    (pi-coding-agent--display-tool-end
+     "custom" nil '((:type "text" :text "src/fallback.el")) nil nil)
+    (goto-char (point-min))
+    (search-forward "src/fallback.el")
+    (should-not (pi-coding-agent--file-target-at-point))))
+
+(ert-deftest pi-coding-agent-test-file-target-tool-rejects-nul-and-non-string-paths ()
+  "Malformed tool paths remain controlled resolver errors."
+  (dolist (case (list (list (concat "/tmp/bad" (string ?\0) "name.el") "NUL")
+                      (list '(:not "a string") "not a string")))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-tool-start "read" (list :path (car case)))
+      (goto-char (overlay-start pi-coding-agent--pending-tool-overlay))
+      (let ((err (should-error (pi-coding-agent--file-target-at-point)
+                               :type 'user-error)))
+        (should (string-match-p (cadr case) (error-message-string err)))))))
+
+(ert-deftest pi-coding-agent-test-file-target-tool-display-is-safe-and-lookup-is-passive ()
+  "Target display escapes controls without file checks or buffer changes."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((path "/tmp/a\tb.el"))
+      (pi-coding-agent--display-tool-start "read" (list :path path))
+      (goto-char (overlay-start pi-coding-agent--pending-tool-overlay))
+      (set-buffer-modified-p nil)
+      (let ((tick (buffer-chars-modified-tick))
+            (overlays (overlays-in (point-min) (point-max)))
+            (target (pi-coding-agent--file-target-at-point)))
+        (should (equal path (plist-get target :raw)))
+        (should (equal "/tmp/a\\tb.el" (plist-get target :display)))
+        (should (= tick (buffer-chars-modified-tick)))
+        (should (equal overlays (overlays-in (point-min) (point-max))))
+        (should-not (buffer-modified-p))))))
+
+(ert-deftest pi-coding-agent-test-file-target-text-contract-and-session-anchor ()
+  "Plain targets expose locations and use the canonical session directory."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+    (setq default-directory "/tmp/accidental/")
+    (let ((inhibit-read-only t))
+      (insert "See (src/foo.el:12:3), please."))
+    (goto-char (point-min))
+    (search-forward "src/foo.el")
+    (let ((target (pi-coding-agent--file-target-at-point)))
+      (should (eq :text (plist-get target :source)))
+      (should (equal "src/foo.el:12:3" (plist-get target :raw)))
+      (should (equal "src/foo.el:12:3" (plist-get target :display)))
+      (should (equal "/tmp/session/src/foo.el"
+                     (plist-get target :emacs-path)))
+      (should (equal "/tmp/session/src/foo.el"
+                     (plist-get target :shell-path)))
+      (should (= 12 (plist-get target :line)))
+      (should (= 3 (plist-get target :column)))
+      (should-not (plist-get target :range))
+      (should (equal "src/foo.el:12:3"
+                     (buffer-substring-no-properties
+                      (car (plist-get target :bounds))
+                      (cdr (plist-get target :bounds))))))))
+
+(ert-deftest pi-coding-agent-test-file-target-text-accepts-strict-path-forms ()
+  "Plain lookup accepts only the strict unquoted path forms."
+  (dolist (case `(("src/foo.el" . "/tmp/session/src/foo.el")
+                  ("www.example.com/x" . "/tmp/session/www.example.com/x")
+                  ("./reports/out.html" . "/tmp/session/reports/out.html")
+                  ("/tmp/out.html" . "/tmp/out.html")
+                  ("~/out.html" . ,(expand-file-name "~/out.html"))))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+      (let ((inhibit-read-only t))
+        (insert (car case)))
+      (goto-char (+ (point-min) 2))
+      (let ((target (pi-coding-agent--file-target-at-point)))
+        (should (equal (car case) (plist-get target :raw)))
+        (should (equal (cdr case) (plist-get target :emacs-path)))))))
+
+(ert-deftest pi-coding-agent-test-file-target-text-quotes-and-location-suffixes ()
+  "Quoted paths may contain spaces and carry strict source locations."
+  (dolist (case '(("`src/foo.el:12:3`" "src/foo.el:12:3"
+                   "/tmp/session/src/foo.el" 12 3 nil)
+                  ("'src/foo with space.html:8'" "src/foo with space.html:8"
+                   "/tmp/session/src/foo with space.html" 8 nil nil)
+                  ("`src/foo with space.html#L12-L20`"
+                   "src/foo with space.html#L12-L20"
+                   "/tmp/session/src/foo with space.html" 12 nil (12 . 20))))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+      (let ((inhibit-read-only t))
+        (insert (car case)))
+      (goto-char (+ (point-min) 2))
+      (let ((target (pi-coding-agent--file-target-at-point)))
+        (should (equal (nth 1 case) (plist-get target :raw)))
+        (should (equal (nth 2 case) (plist-get target :emacs-path)))
+        (should (equal (nth 3 case) (plist-get target :line)))
+        (should (equal (nth 4 case) (plist-get target :column)))
+        (should (equal (nth 5 case) (plist-get target :range)))))))
+
+(ert-deftest pi-coding-agent-test-file-target-text-single-quotes-have-word-boundaries ()
+  "Apostrophes in prose do not invent a larger quoted file target."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "Don't open src/old.el because it's stale; use 'src/new file.el'."))
+    (goto-char (point-min))
+    (search-forward "src/old.el")
+    (should (equal "src/old.el"
+                   (plist-get (pi-coding-agent--file-target-at-point) :raw)))
+    (search-forward "src/new file.el")
+    (should (equal "src/new file.el"
+                   (plist-get (pi-coding-agent--file-target-at-point) :raw)))))
+
+(ert-deftest pi-coding-agent-test-file-target-text-rejects-quoted-prose-and-commands ()
+  "Quoted prose and shell snippets are not mistaken for paths with spaces."
+  (dolist (case '(("She said 'open src/foo.el'." . "src/foo.el")
+                  ("Run `cat src/bar.el`." . "src/bar.el")
+                  ("Ignore 'src/foo.el is stale'." . "src/foo.el")
+                  ("Run `src/foo.el --verbose`." . "src/foo.el")))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t))
+        (insert (car case)))
+      (goto-char (point-min))
+      (search-forward (cdr case))
+      (should-not (pi-coding-agent--file-target-at-point)))))
+
+(ert-deftest pi-coding-agent-test-file-target-text-rejects-html-closing-tags ()
+  "An HTML closing tag is not an angle-wrapped absolute file path."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "Generated markup: (</body>) then [</some/component>]."))
+    (goto-char (point-min))
+    (search-forward "/body")
+    (should-not (pi-coding-agent--file-target-at-point))
+    (search-forward "/some/component")
+    (should-not (pi-coding-agent--file-target-at-point))))
+
+(ert-deftest pi-coding-agent-test-file-target-text-strips-wrappers-and-punctuation ()
+  "Markdown wrappers and ordinary trailing punctuation are not path text."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+    (let ((inhibit-read-only t))
+      (insert "Open [src/foo.el], then ./reports/out.html."))
+    (goto-char (point-min))
+    (search-forward "src/foo.el")
+    (let ((target (pi-coding-agent--file-target-at-point)))
+      (should (equal "src/foo.el" (plist-get target :raw)))
+      (should (equal "src/foo.el"
+                     (buffer-substring-no-properties
+                      (car (plist-get target :bounds))
+                      (cdr (plist-get target :bounds))))))
+    (search-forward "./reports/out.html")
+    (let ((target (pi-coding-agent--file-target-at-point)))
+      (should (equal "./reports/out.html" (plist-get target :raw)))
+      (should (equal "/tmp/session/reports/out.html"
+                     (plist-get target :emacs-path))))))
+
+(ert-deftest pi-coding-agent-test-file-target-text-is-current-line-and-at-point-only ()
+  "Lookup neither crosses lines nor chooses another token on the line."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "Away from src/first.el here\nsecond line src/second.el"))
+    (goto-char (point-min))
+    (should-not (pi-coding-agent--file-target-at-point))
+    (search-forward "here")
+    (should-not (pi-coding-agent--file-target-at-point))
+    (forward-line 1)
+    (search-forward "src/second.el")
+    (should (equal "src/second.el"
+                   (plist-get (pi-coding-agent--file-target-at-point) :raw)))))
+
+(ert-deftest pi-coding-agent-test-file-target-text-point-boundaries-are-exact ()
+  "Lookup accepts both token boundaries, but no position beyond them."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "x src/foo.el y"))
+    (search-backward "src/foo.el")
+    (let ((start (point))
+          (end (+ (point) (length "src/foo.el"))))
+      (dolist (position (list start end))
+        (goto-char position)
+        (should (equal "src/foo.el"
+                       (plist-get (pi-coding-agent--file-target-at-point) :raw))))
+      (dolist (position (list (1- start) (1+ end)))
+        (goto-char position)
+        (should-not (pi-coding-agent--file-target-at-point))))))
+
+(ert-deftest pi-coding-agent-test-file-target-text-rejects-non-path-grammar ()
+  "URLs, emails, bare words, and malformed suffixes are not targets."
+  (dolist (text '("https://example.com/x.html"
+                  "user@example.com"
+                  "user@example.com/src/file.el"
+                  "README.md"
+                  "src//file.el"
+                  "../src/file.el"
+                  "C:\\src\\file.el"
+                  "src/file.el:0"
+                  "src/file.el:12:0"
+                  "src/file.el:12:3:4"
+                  "src/file.el#L20-L12"))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t))
+        (insert text))
+      (goto-char (+ (point-min) (/ (length text) 2)))
+      (should-not (pi-coding-agent--file-target-at-point)))))
+
+(ert-deftest pi-coding-agent-test-file-target-text-preserves-multi-hop-boundary ()
+  "Plain remote targets keep TRAMP paths separate from process-local paths."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity
+     "/ssh:bastion|sudo:root@pi-host:/home/pi/project/")
+    (let ((inhibit-read-only t))
+      (insert "src/app.py:5"))
+    (goto-char (+ (point-min) 3))
+    (let ((target (pi-coding-agent--file-target-at-point)))
+      (should (equal "/ssh:bastion|sudo:root@pi-host:/home/pi/project/src/app.py"
+                     (plist-get target :emacs-path)))
+      (should (equal "/home/pi/project/src/app.py"
+                     (plist-get target :shell-path)))
+      (should (= 5 (plist-get target :line))))))
+
+(ert-deftest pi-coding-agent-test-file-target-text-lookup-is-passive ()
+  "Plain lookup performs no file checks and does not modify its buffer."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "src/missing.el"))
+    (goto-char (+ (point-min) 3))
+    (set-buffer-modified-p nil)
+    (let ((tick (buffer-chars-modified-tick))
+          (text (buffer-string))
+          (overlays (overlays-in (point-min) (point-max)))
+          (warning-suppress-types '((emacs))))
+      (cl-letf (((symbol-function 'file-exists-p)
+                 (lambda (&rest _) (ert-fail "Resolver must not check existence")))
+                ((symbol-function 'file-readable-p)
+                 (lambda (&rest _) (ert-fail "Resolver must not check readability"))))
+        (should (pi-coding-agent--file-target-at-point)))
+      (should (= tick (buffer-chars-modified-tick)))
+      (should (equal text (buffer-string)))
+      (should (equal overlays (overlays-in (point-min) (point-max))))
+      (should-not (buffer-modified-p)))))
+
 (defun pi-coding-agent-test--open-target-buffer (line-count)
   "Create and return a fake visited buffer with LINE-COUNT lines."
   (set-buffer (get-buffer-create "*pi-coding-agent-test-target*"))
