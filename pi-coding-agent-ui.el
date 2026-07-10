@@ -668,6 +668,27 @@ Returns the position of the heading line start, or nil if not found."
 
 ;;;; Copy Visible Text
 
+(defun pi-coding-agent--visible-text-span-p (position)
+  "Return non-nil when buffer text at POSITION contributes visible text.
+This deliberately follows the package's existing visible-copy semantics:
+active `invisible' text and text whose `display' property is the empty string
+are omitted; nonempty display replacements and overlay display strings are not
+expanded into synthetic buffer characters."
+  (let ((invisible (get-text-property position 'invisible))
+        (display (get-text-property position 'display)))
+    (and (not (and invisible (invisible-p invisible)))
+         (not (equal display "")))))
+
+(defun pi-coding-agent--position-inside-omitted-text-p (position beg end)
+  "Return non-nil when POSITION has no visible boundary in BEG..END.
+A position strictly inside one omitted run, or between adjacent omitted property
+runs, is hidden because neither neighboring character contributes visible text.
+The outer run boundaries remain usable as adjacent visible positions."
+  (and (< position end)
+       (> position beg)
+       (not (pi-coding-agent--visible-text-span-p position))
+       (not (pi-coding-agent--visible-text-span-p (1- position)))))
+
 (defun pi-coding-agent--visible-text (beg end)
   "Return visible text between BEG and END, preserving text properties.
 Skips characters with `invisible' property matching `buffer-invisibility-spec'
@@ -677,24 +698,70 @@ display overlay strings render faithfully (bold, italic, code, etc.)."
   (let ((result nil)
         (pos beg))
     (while (< pos end)
-      (let* ((inv (get-text-property pos 'invisible))
-             (disp (get-text-property pos 'display))
-             (next (min (next-single-char-property-change pos 'invisible nil end)
-                        (next-single-char-property-change pos 'display nil end))))
-        (cond
-         ((and inv (invisible-p inv)) nil)
-         ((equal disp "") nil)
-         (t (push (buffer-substring pos next) result)))
+      (let ((next (min
+                   (next-single-char-property-change pos 'invisible nil end)
+                   (next-single-char-property-change pos 'display nil end))))
+        (when (pi-coding-agent--visible-text-span-p pos)
+          (push (buffer-substring pos next) result))
         (setq pos next)))
     (apply #'concat (nreverse result))))
+
+(defun pi-coding-agent--visible-text-with-position-map (beg end position)
+  "Project visible buffer text from BEG to END and map POSITION into it.
+Return a plist with `:text', `:positions', and `:index'.
+`:positions' is a vector parallel to `:text': element N is the exact buffer
+position of visible character N.  `:index' is the visible boundary at POSITION,
+namely the number of projected characters whose source positions precede it.
+A nonempty visible half-open range [A,B) maps back to the real buffer envelope
+from `(aref POSITIONS A)' through one past `(aref POSITIONS (1- B))'.  This
+preserves hidden inline spans inside a visible candidate while excluding hidden
+prefixes and suffixes from its bounds.
+
+The caller owns bounding BEG and END; this helper never widens or fontifies the
+buffer.  Its visibility rule is exactly `pi-coding-agent--visible-text''s and,
+like that function, does not interpret overlay display replacement strings."
+  (unless (and (<= beg position) (<= position end))
+    (error "Position %s is outside visible input range %s..%s"
+           position beg end))
+  (let ((chunks nil)
+        (source-positions (make-vector (- end beg) nil))
+        (visible-count 0)
+        (pos beg)
+        index index-set)
+    (while (< pos end)
+      (let ((next (min
+                   (next-single-char-property-change pos 'invisible nil end)
+                   (next-single-char-property-change pos 'display nil end))))
+        (if (pi-coding-agent--visible-text-span-p pos)
+            (progn
+              (push (buffer-substring-no-properties pos next) chunks)
+              (unless index-set
+                (when (<= position next)
+                  (setq index (+ visible-count
+                                 (max 0 (min (- position pos)
+                                             (- next pos)))))
+                  (setq index-set t)))
+              (let ((source pos))
+                (while (< source next)
+                  (aset source-positions visible-count source)
+                  (setq source (1+ source)
+                        visible-count (1+ visible-count)))))
+          (unless index-set
+            (when (<= position next)
+              (setq index visible-count
+                    index-set t))))
+        (setq pos next)))
+    (list :text (apply #'concat (nreverse chunks))
+          :positions (cl-subseq source-positions 0 visible-count)
+          :index (or index visible-count))))
 
 (defun pi-coding-agent--filter-buffer-substring (beg end &optional delete)
   "Filter function for `filter-buffer-substring-function' in chat buffers.
 When `pi-coding-agent-copy-raw-markdown' is nil, returns only visible
 text between BEG and END.  If DELETE is non-nil, also removes the region.
-Otherwise delegates to the default filter."
+Raw copying keeps Markdown characters but strips internal render properties."
   (if pi-coding-agent-copy-raw-markdown
-      (buffer-substring--filter beg end delete)
+      (substring-no-properties (buffer-substring--filter beg end delete))
     (prog1 (substring-no-properties (pi-coding-agent--visible-text beg end))
       (when delete (delete-region beg end)))))
 

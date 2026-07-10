@@ -1369,14 +1369,17 @@ Returns a plist with:
               :line-map line-map-vec)))))
 
 (defun pi-coding-agent--clear-render-artifacts ()
-  "Delete pi-owned render overlays in the current chat buffer.
-This removes completed/pending tool overlays and diff overlays before
-buffer reset or history rebuild, then clears keyed live-tool state,
-cached execution args, and the compatibility pending overlay slot so
-buffer state and overlay state stay consistent.  Tree-sitter overlays
-are left alone."
+  "Delete pi-owned render artifacts in the current chat buffer.
+This removes completed/pending tool overlays, diff overlays, and lightweight
+cold-tool metadata before buffer reset or history rebuild, then clears keyed
+live-tool state, cached execution args, and the compatibility pending overlay
+slot so buffer and render state stay consistent.  Tree-sitter overlays are
+left alone."
   (remove-overlays (point-min) (point-max) 'pi-coding-agent-tool-block t)
   (remove-overlays (point-min) (point-max) 'pi-coding-agent-diff-overlay t)
+  (let ((inhibit-read-only t))
+    (remove-text-properties
+     (point-min) (point-max) '(pi-coding-agent-cold-tool-block nil)))
   (setq pi-coding-agent--pending-tool-overlay nil
         pi-coding-agent--tool-block-order-counter 0
         pi-coding-agent--thinking-block-order-counter 0)
@@ -2492,8 +2495,19 @@ command falls back to `outline-cycle' for turn folding."
 ;;
 ;; Completed tool blocks outside the hot tail (older than the most
 ;; recent `pi-coding-agent-hot-tail-turn-count' headed turns) are
-;; cooled into plain text.  The cold form keeps the header and visible
-;; preview but drops overlays, buttons, and syntax-tagged rendering.
+;; cooled into plain text.  The cold form keeps the header, visible
+;; preview, and lightweight authoritative target metadata, but drops
+;; overlays, buttons, full-content payloads, and syntax-tagged rendering.
+
+(defun pi-coding-agent--ensure-cold-tool-property-nonsticky ()
+  "Keep cold tool authority from spreading across insertion boundaries."
+  (unless (eq t (alist-get 'pi-coding-agent-cold-tool-block
+                           text-property-default-nonsticky))
+    (setq-local text-property-default-nonsticky
+                (cons '(pi-coding-agent-cold-tool-block . t)
+                      (assq-delete-all
+                       'pi-coding-agent-cold-tool-block
+                       (copy-sequence text-property-default-nonsticky))))))
 
 (defun pi-coding-agent--tool-overlay-live-p (overlay)
   "Return non-nil when OVERLAY's tool block is still in the live registry."
@@ -2539,20 +2553,43 @@ therefore cool into their visible preview only."
                   (substring wrapped-body 0 -1)
                 wrapped-body))))))))
 
+(defun pi-coding-agent--cold-tool-target-metadata
+    (overlay header-end collapsed)
+  "Return lightweight target metadata for cold tool OVERLAY.
+HEADER-END is the current absolute end of its header.  COLLAPSED is non-nil
+when the visible body is a mapped preview.  The result deliberately excludes
+buttons, full content, markers, and absolute buffer positions."
+  (let ((record (pi-coding-agent--tool-block-from-overlay overlay)))
+    (list :order (and record (pi-coding-agent--tool-block-order record))
+          :tool-name (overlay-get overlay 'pi-coding-agent-tool-name)
+          :path (overlay-get overlay 'pi-coding-agent-tool-path)
+          :raw-path (overlay-get overlay 'pi-coding-agent-tool-raw-path)
+          :path-error (overlay-get overlay 'pi-coding-agent-tool-path-error)
+          :offset (overlay-get overlay 'pi-coding-agent-tool-offset)
+          ;; Only collapsed previews need the small visible-line map.
+          :line-map (and collapsed
+                         (overlay-get overlay 'pi-coding-agent-line-map))
+          :header-length (- header-end (overlay-start overlay)))))
+
 (defun pi-coding-agent--tool-overlay-cold-metadata (overlay)
   "Return cold-history metadata for completed tool OVERLAY.
-The result is a plist with `:visible-body' and, for currently collapsed
-blocks only, `:hidden-count'.  Expanded blocks return no hidden-count
-because cold history must stay preview-only."
+The result carries its visible body, lightweight target metadata and, for a
+currently collapsed block, its hidden count.  Expanded blocks return no hidden
+count because cold history must stay preview-only."
   (when-let* ((visible-body (pi-coding-agent--tool-overlay-visible-body overlay))
               (header-end (marker-position
                            (overlay-get overlay 'pi-coding-agent-header-end))))
     (let* ((button (pi-coding-agent--find-toggle-button-in-region
                     header-end (overlay-end overlay)))
-           (hidden-count (and button
-                              (not (button-get button 'pi-coding-agent-expanded))
+           (collapsed (and button
+                           (not (button-get button
+                                            'pi-coding-agent-expanded))))
+           (hidden-count (and collapsed
                               (button-get button 'hidden-count))))
       (list :visible-body visible-body
+            :target-metadata
+            (pi-coding-agent--cold-tool-target-metadata
+             overlay header-end collapsed)
             :hidden-count (and (integerp hidden-count)
                                (> hidden-count 0)
                                hidden-count)))))
@@ -2568,6 +2605,7 @@ diff annotations."
                              (overlay-get overlay 'pi-coding-agent-header-end))))
       (let* ((inhibit-read-only t)
              (hidden-count (plist-get metadata :hidden-count))
+             (target-metadata (plist-get metadata :target-metadata))
              (cold-body (concat
                          (pi-coding-agent--wrap-in-src-block visible-body nil)
                          "\n"
@@ -2577,11 +2615,17 @@ diff annotations."
              (ov-start (overlay-start overlay))
              (ov-end (overlay-end overlay)))
         (remove-overlays ov-start ov-end 'pi-coding-agent-diff-overlay t)
+        (remove-text-properties
+         ov-start ov-end '(pi-coding-agent-cold-tool-block nil))
         (delete-overlay overlay)
         (save-excursion
           (goto-char header-end)
           (delete-region header-end ov-end)
-          (insert cold-body))
+          (insert cold-body)
+          (pi-coding-agent--ensure-cold-tool-property-nonsticky)
+          (add-text-properties
+           ov-start (point)
+           `(pi-coding-agent-cold-tool-block ,target-metadata)))
         t))))
 
 (defun pi-coding-agent--cool-completed-tool-blocks (overlays)
@@ -2699,30 +2743,24 @@ non-collapsible blocks return nil."
                    (overlay-end overlay))))
     (not (button-get btn 'pi-coding-agent-expanded))))
 
-(defun pi-coding-agent--tool-line-at-point (overlay)
-  "Calculate file line number at point for tool OVERLAY.
-For edit diffs: parse line number from added, removed, or context rows.
-For read/write: use line-map only in collapsed preview mode; otherwise
-count directly from the rendered code block.  Invalid read offsets return nil."
-  (let* ((tool-name (overlay-get overlay 'pi-coding-agent-tool-name))
-         (stored-offset (overlay-get overlay 'pi-coding-agent-tool-offset))
-         (offset (cond
-                  ((not (equal tool-name "read")) 1)
-                  ((null stored-offset) 1)
-                  ((and (integerp stored-offset) (> stored-offset 0))
-                   stored-offset)))
-         (line-map (overlay-get overlay 'pi-coding-agent-line-map))
-         (header-end (overlay-get overlay 'pi-coding-agent-header-end))
-         (use-line-map (and line-map
-                            header-end
-                            (pi-coding-agent--tool-overlay-collapsed-p overlay))))
+(defun pi-coding-agent--tool-line-from-metadata
+    (tool-name stored-offset line-map header-end use-line-map)
+  "Calculate the file line at point from tool rendering metadata.
+TOOL-NAME and STORED-OFFSET identify tool semantics.  LINE-MAP maps visible
+preview rows when USE-LINE-MAP is non-nil.  HEADER-END bounds fence parsing.
+Invalid read offsets and positions without a meaningful file row return nil."
+  (let ((offset (cond
+                 ((not (equal tool-name "read")) 1)
+                 ((null stored-offset) 1)
+                 ((and (integerp stored-offset) (> stored-offset 0))
+                  stored-offset))))
     (if (equal tool-name "edit")
         ;; Edit navigation uses the explicit line number in diff rows.
         (pi-coding-agent--diff-line-at-point)
       (when offset
         (or
          ;; Collapsed preview strips blank lines, so use line-map there.
-         (when use-line-map
+         (when (and use-line-map line-map header-end)
            (save-excursion
              (let* ((current-line (line-number-at-pos))
                     (header-line (line-number-at-pos header-end))
@@ -2731,9 +2769,22 @@ count directly from the rendered code block.  Invalid read offsets return nil."
                (when (and (>= map-index 0) (< map-index (length line-map)))
                  (+ (aref line-map map-index) (1- offset))))))
          ;; Expanded/full output preserves blank lines: derive from code block.
-         (when-let* ((block-line
+         (when-let* ((header-end header-end)
+                     (block-line
                       (pi-coding-agent--code-block-line-at-point header-end)))
            (+ block-line (1- offset))))))))
+
+(defun pi-coding-agent--tool-line-at-point (overlay)
+  "Calculate the file line number at point for hot tool OVERLAY."
+  (let ((line-map (overlay-get overlay 'pi-coding-agent-line-map))
+        (header-end (overlay-get overlay 'pi-coding-agent-header-end)))
+    (pi-coding-agent--tool-line-from-metadata
+     (overlay-get overlay 'pi-coding-agent-tool-name)
+     (overlay-get overlay 'pi-coding-agent-tool-offset)
+     line-map
+     header-end
+     (and line-map header-end
+          (pi-coding-agent--tool-overlay-collapsed-p overlay)))))
 
 (defun pi-coding-agent--make-file-target
     (source raw emacs-path &optional line column range bounds)
@@ -2745,23 +2796,53 @@ The returned plist has this contract:
   `:raw'        is the original metadata or text candidate;
   `:display'    is that candidate escaped for prompts and messages;
   `:emacs-path' is the normalized path for Emacs file operations;
-  `:shell-path' is the process-local path for shell operations;
+  `:shell-path' is the unquoted path in the local or TRAMP shell namespace;
+  `:shell-path-error' explains why no safe shell path can be represented;
+  `:shell-directory' is the canonical directory selecting that shell host;
   `:line', `:column', and `:range' are optional source locations;
   `:bounds'     is an optional cons of buffer positions.
 
 Optional LINE, COLUMN, RANGE, and BOUNDS supply those location fields.
-Shell paths are derived against the canonical chat session directory.
-Constructing a target does not check whether its file exists."
-  (let ((anchor (pi-coding-agent--chat-session-directory)))
+Representable shell paths are absolute or remote-home-rooted, so leading-dash
+relative names cannot become options.  A shell-only conversion error is stored
+rather than signaled, leaving `:emacs-path' usable by Emacs-only consumers.
+Shell consumers must use `pi-coding-agent--file-target-shell-path' or the
+exactly-once quoted `pi-coding-agent--file-target-shell-argument'; `:shell-path'
+is not command text.  Constructing a target does not check file existence."
+  (let ((anchor (pi-coding-agent--chat-session-directory))
+        shell-path shell-path-error)
+    (condition-case err
+        (setq shell-path
+              (pi-coding-agent--shell-command-path emacs-path anchor))
+      (user-error
+       (setq shell-path-error (error-message-string err))))
     (list :source source
           :raw raw
           :display (pi-coding-agent--escape-control-chars-for-display raw)
           :emacs-path emacs-path
-          :shell-path (pi-coding-agent--process-local-path emacs-path anchor)
+          :shell-path shell-path
+          :shell-path-error shell-path-error
+          :shell-directory anchor
           :line line
           :column column
           :range range
           :bounds bounds)))
+
+(defun pi-coding-agent--file-target-shell-path (target)
+  "Return TARGET's unquoted shell-local path, or signal `user-error'.
+Shell conversion failures are delayed until this shell-action boundary so
+Emacs-only target consumers can always use a valid `:emacs-path'."
+  (or (plist-get target :shell-path)
+      (user-error "%s" (or (plist-get target :shell-path-error)
+                            "File target has no shell path"))))
+
+(defun pi-coding-agent--file-target-shell-argument (target)
+  "Return TARGET safely quoted exactly once as one shell operand.
+The result is suitable for a `shell-command' run with TARGET's
+`:shell-directory' as `default-directory'."
+  (pi-coding-agent--shell-quote-path
+   (pi-coding-agent--file-target-shell-path target)
+   (plist-get target :shell-directory)))
 
 (defun pi-coding-agent--strict-text-file-path-p (path quoted)
   "Return non-nil when PATH has the strict plain-text file grammar.
@@ -2801,39 +2882,86 @@ prose and command tails.  Empty, dot, and dot-dot components are rejected."
                       component)))
               components))))))
 
+(defconst pi-coding-agent--max-text-file-candidate-length 4096
+  "Maximum number of characters in a plain-text file candidate.
+This matches the common conservative PATH_MAX scale while bounding regexp
+input, allocation, and at-point scans even for generated chat lines.  It is a
+character bound because Emacs buffer and string positions count characters.")
+
+(defconst pi-coding-agent--text-file-input-radius
+  (+ 2 (* 2 pi-coding-agent--max-text-file-candidate-length))
+  "Maximum source-text radius inspected around a file-target point.
+One candidate length covers candidate text; the second retains bounded wrapper,
+escape-parity, hidden-markup, and quote-authority context.")
+
 (defun pi-coding-agent--parse-text-file-candidate (raw quoted start end)
   "Parse strict plain-text file candidate RAW between START and END.
 QUOTED permits spaces in the path.  START and END are caller-owned offsets
 returned unchanged as `:bounds'.  Return nil unless all of RAW matches the
 path grammar, optionally followed by `:LINE', `:LINE:COLUMN', or
-`#LSTART-LEND'.  This helper only parses strings and performs no file I/O."
-  (let ((path raw)
-        line column range)
-    (cond
-     ((string-match
-       "\\`\\(.*\\):\\([1-9][0-9]*\\):\\([1-9][0-9]*\\)\\'" raw)
-      (setq path (match-string 1 raw)
-            line (string-to-number (match-string 2 raw))
-            column (string-to-number (match-string 3 raw))))
-     ((string-match "\\`\\(.*\\):\\([1-9][0-9]*\\)\\'" raw)
-      (setq path (match-string 1 raw)
-            line (string-to-number (match-string 2 raw))))
-     ((string-match
-       "\\`\\(.*\\)#L\\([1-9][0-9]*\\)-L\\([1-9][0-9]*\\)\\'" raw)
-      (let ((first (string-to-number (match-string 2 raw)))
-            (last (string-to-number (match-string 3 raw))))
-        (when (<= first last)
-          (setq path (match-string 1 raw)
-                line first
-                range (cons first last))))))
-    (when (and (or (not (string-match-p "#L" raw)) range)
-               (pi-coding-agent--strict-text-file-path-p path quoted))
-      (list :raw raw
-            :path path
-            :line line
-            :column column
-            :range range
-            :bounds (cons start end)))))
+`#LSTART-LEND'.  A `:LINE' or `:LINE:COLUMN' may itself be followed by one
+terminal diagnostic-separator colon.  That separator is excluded from `:raw'
+and `:bounds'; arbitrary path colons and no-space diagnostic prose remain
+invalid.  Candidates longer than
+`pi-coding-agent--max-text-file-candidate-length' are rejected before any
+regexp runs.  This pure helper performs no buffer access or file I/O."
+  (when (and (stringp raw)
+             (<= (length raw)
+                 pi-coding-agent--max-text-file-candidate-length))
+    (let ((case-fold-search nil)
+          (path raw)
+          (candidate-raw raw)
+          (candidate-end end)
+          line column range diagnostic-separator)
+      (cond
+       ((string-match
+         "\\`\\(.*\\):\\([1-9][0-9]*\\):\\([1-9][0-9]*\\)\\(:\\)?\\'"
+         raw)
+        (setq path (match-string 1 raw)
+              line (string-to-number (match-string 2 raw))
+              column (string-to-number (match-string 3 raw))
+              diagnostic-separator (match-beginning 4)))
+       ((string-match
+         "\\`\\(.*\\):\\([1-9][0-9]*\\)\\(:\\)?\\'" raw)
+        (setq path (match-string 1 raw)
+              line (string-to-number (match-string 2 raw))
+              diagnostic-separator (match-beginning 3)))
+       ((string-match
+         "\\`\\(.*\\)#L\\([1-9][0-9]*\\)-L\\([1-9][0-9]*\\)\\'" raw)
+        (let ((first (string-to-number (match-string 2 raw)))
+              (last (string-to-number (match-string 3 raw))))
+          (when (<= first last)
+            (setq path (match-string 1 raw)
+                  line first
+                  range (cons first last))))))
+      (when diagnostic-separator
+        (setq candidate-raw (substring raw 0 -1)
+              candidate-end (1- end)))
+      (when (and (or (not (string-match-p "#L" raw)) range)
+                 (pi-coding-agent--strict-text-file-path-p path quoted))
+        (list :raw candidate-raw
+              :path path
+              :line line
+              :column column
+              :range range
+              :diagnostic-separator (and diagnostic-separator t)
+              :bounds (cons start candidate-end))))))
+
+(defun pi-coding-agent--text-file-diagnostic-context-p
+    (candidate text lexical-end following-index)
+  "Return non-nil when CANDIDATE has valid diagnostic context in TEXT.
+Ordinary candidates always pass.  A diagnostic separator must be the actual
+last character of the lexical candidate ending at LEXICAL-END, followed at
+FOLLOWING-INDEX by exactly one ASCII space and non-whitespace diagnostic text.
+Callers place FOLLOWING-INDEX after any authoritative quote wrapper."
+  (or (not (plist-get candidate :diagnostic-separator))
+      (let ((separator (cdr (plist-get candidate :bounds))))
+        (and (= (1+ separator) lexical-end)
+             (< (1+ following-index) (length text))
+             (eq (aref text separator) ?:)
+             (eq (aref text following-index) ?\s)
+             (not (pi-coding-agent--text-file-whitespace-p
+                   (aref text (1+ following-index))))))))
 
 (defun pi-coding-agent--single-quote-boundary-p (text index opening)
   "Return non-nil when the quote at INDEX in TEXT is a wrapper boundary.
@@ -2847,105 +2975,419 @@ punctuation, or a closing Markdown wrapper after it."
               (string-to-list
                (if opening " \t([{<" " \t.,;!?)]}>"))))))
 
-(defun pi-coding-agent--quoted-text-file-candidates (text)
-  "Return strict single-quoted and backticked file candidates in TEXT.
-Candidate bounds exclude the quote characters.  Single quotes must be wrapper
-boundaries rather than apostrophes in words.  TEXT is normally one line."
-  (let (candidates)
-    (dolist (quote '(?` ?'))
-      (let ((regexp (regexp-quote (char-to-string quote)))
-            (start 0))
-        (while (string-match regexp text start)
-          (let ((opening (match-beginning 0)))
-            (if (and (eq quote ?')
-                     (not (pi-coding-agent--single-quote-boundary-p
-                           text opening t)))
-                (setq start (1+ opening))
-              (if (string-match regexp text (1+ opening))
-                  (let ((closing (match-beginning 0)))
-                    (when (or (eq quote ?`)
-                              (pi-coding-agent--single-quote-boundary-p
-                               text closing nil))
-                      (let ((begin (1+ opening))
-                            (end closing))
-                        (when-let* ((candidate
-                                     (pi-coding-agent--parse-text-file-candidate
-                                      (substring text begin end)
-                                      t begin end)))
-                          (push candidate candidates))))
-                    (setq start (1+ closing)))
-                (setq start (1+ opening))))))))
-    candidates))
+(defun pi-coding-agent--escaped-text-quote-p (text index)
+  "Return non-nil when the quote at INDEX in TEXT is backslash-escaped.
+An overlong backslash run is conservatively treated as escaped."
+  (let ((cursor (1- index))
+        (remaining pi-coding-agent--max-text-file-candidate-length)
+        (slashes 0))
+    (while (and (>= cursor 0) (> remaining 0)
+                (eq (aref text cursor) ?\\))
+      (setq slashes (1+ slashes)
+            cursor (1- cursor)
+            remaining (1- remaining)))
+    (or (and (= remaining 0) (>= cursor 0)
+             (eq (aref text cursor) ?\\))
+        (cl-oddp slashes))))
 
-(defun pi-coding-agent--unquoted-text-file-candidates (text)
-  "Return strict unquoted file candidates in TEXT.
-Whitespace bounds tokens.  A small explicit set of Markdown opening wrappers
-and ordinary trailing punctuation is excluded from candidate bounds."
-  (let ((start 0)
-        candidates)
-    (while (string-match "[^ 	\n\r]+" text start)
-      (let* ((begin (match-beginning 0))
-             (end (match-end 0))
-             (token-end end)
-             html-closing-tag)
-        (while (and (< begin end)
-                    (memq (aref text begin) '(?\( ?\[ ?\{)))
-          (setq begin (1+ begin)))
-        (setq html-closing-tag
-              (and (< (1+ begin) end)
-                   (eq (aref text begin) ?<)
-                   (eq (aref text (1+ begin)) ?/)))
-        (while (and (< begin end) (eq (aref text begin) ?<))
-          (setq begin (1+ begin)))
-        (while (and (< begin end)
-                    (memq (aref text (1- end))
-                          (string-to-list ".,;!?)]}>")))
-          (setq end (1- end)))
-        (let ((raw (substring text begin end)))
-          ;; Quote-aware parsing owns tokens containing either supported quote.
-          (unless (or html-closing-tag (string-match-p "[`']" raw))
-            (when-let* ((candidate
-                         (pi-coding-agent--parse-text-file-candidate
-                          raw nil begin end)))
-              (push candidate candidates))))
-        (setq start token-end)))
-    candidates))
+(defun pi-coding-agent--text-wrapper-quote-p (text index quote opening)
+  "Return non-nil when TEXT at INDEX is a usable QUOTE wrapper.
+OPENING selects the boundary direction.  Backslash-escaped quotes are literal.
+Single quotes use prose boundaries; backticks use the same conservative
+orientation, except an unescaped backtick after an even backslash run may open."
+  (and (eq (aref text index) quote)
+       (not (pi-coding-agent--escaped-text-quote-p text index))
+       (or (pi-coding-agent--single-quote-boundary-p text index opening)
+           (and opening (eq quote ?`) (> index 0)
+                (eq (aref text (1- index)) ?\\)))))
+
+(defun pi-coding-agent--text-wrapper-bounds-at-index (text index quote)
+  "Return non-crossing QUOTE wrapper bounds around INDEX in TEXT.
+The returned cons excludes delimiters.  Backtick delimiter runs pair only with
+runs of the same length, so ordinary Markdown double-backtick spans work while
+embedded shorter runs remain content.  Single quotes remain one-character
+prose wrappers.  Pairing scans only bounded TEXT from left to right.  A new
+unambiguous opener supersedes an unmatched opener; a matching closer, including
+a whitespace-ambiguous delimiter, closes the active opener.  Thus completed
+spans on either side of INDEX cannot cross-pair, while an unrelated unmatched
+earlier opener cannot poison a later local pair.  Overlong contents still
+return bounds so the wrapper remains authoritative-invalid rather than exposing
+an inner path token."
+  (let ((cursor 0)
+        (limit (length text))
+        opening found)
+    (while (and (not found) (< cursor limit))
+      (if (or (not (eq (aref text cursor) quote))
+              (pi-coding-agent--escaped-text-quote-p text cursor))
+          (setq cursor (1+ cursor))
+        (let* ((run-start cursor)
+               (run-end
+                (if (eq quote ?`)
+                    (progn
+                      (while (and (< cursor limit)
+                                  (eq (aref text cursor) quote))
+                        (setq cursor (1+ cursor)))
+                      cursor)
+                  (1+ cursor)))
+               (run-length (- run-end run-start))
+               (opens (pi-coding-agent--text-wrapper-quote-p
+                       text run-start quote t))
+               (closes (pi-coding-agent--text-wrapper-quote-p
+                        text (1- run-end) quote nil)))
+          (cond
+           ((null opening)
+            (when opens
+              (setq opening (list run-start run-end run-length))))
+           ((and closes (= run-length (nth 2 opening)))
+            (when (<= (nth 1 opening) index run-start)
+              (setq found (cons (nth 1 opening) run-start)))
+            (setq opening nil))
+           (opens
+            (setq opening (list run-start run-end run-length))))
+          (setq cursor run-end))))
+    found))
+
+(defun pi-coding-agent--text-wrapper-extent (text bounds quote)
+  "Return BOUNDS expanded to include surrounding QUOTE delimiters in TEXT."
+  (let ((start (1- (car bounds)))
+        (end (cdr bounds)))
+    (when (eq quote ?`)
+      (while (and (> start 0) (eq (aref text (1- start)) quote))
+        (setq start (1- start)))
+      (while (and (< end (length text)) (eq (aref text end) quote))
+        (setq end (1+ end))))
+    (cons start (if (eq quote ?`) end (1+ end)))))
+
+(defun pi-coding-agent--quoted-text-file-candidate-at-index (text index)
+  "Return a quoted file candidate surrounding INDEX in TEXT, or nil.
+Only the nearest unescaped wrapper pair of each supported kind is considered,
+so unrelated or unmatched earlier wrappers cannot poison local lookup.
+Markdown backtick spans take authority over nested prose single quotes."
+  (catch 'authoritative-wrapper
+    (dolist (quote '(?` ?'))
+      (when-let* ((bounds
+                   (pi-coding-agent--text-wrapper-bounds-at-index
+                    text index quote)))
+        (throw
+         'authoritative-wrapper
+         (when-let* ((candidate
+                      (pi-coding-agent--parse-text-file-candidate
+                       (substring text (car bounds) (cdr bounds))
+                       t (car bounds) (cdr bounds)))
+                     (candidate-bounds (plist-get candidate :bounds))
+                     ((<= (car candidate-bounds) index
+                          (cdr candidate-bounds)))
+                     ((pi-coding-agent--text-file-diagnostic-context-p
+                       candidate text (cdr bounds) (1+ (cdr bounds)))))
+           (plist-put candidate :extent
+                      (pi-coding-agent--text-wrapper-extent
+                       text bounds quote))))))))
+
+(defun pi-coding-agent--inside-text-wrapper-p (text index)
+  "Return non-nil when INDEX is inside a supported wrapper in TEXT."
+  (seq-some (lambda (quote)
+              (pi-coding-agent--text-wrapper-bounds-at-index
+               text index quote))
+            '(?' ?`)))
+
+(defun pi-coding-agent--text-file-whitespace-p (character)
+  "Return non-nil when CHARACTER delimits an unquoted candidate."
+  (memq character '(?\s ?\t ?\n ?\r)))
+
+(defun pi-coding-agent--unquoted-text-file-candidate-at-index (text index)
+  "Return the whitespace-bounded candidate at INDEX in TEXT, or nil.
+Scanning stops after `pi-coding-agent--max-text-file-candidate-length'
+characters in either direction.  Markdown wrappers and trailing punctuation
+are excluded exactly as in the strict first-slice grammar."
+  (let* ((length (length text))
+         (probe (cond
+                 ((and (< index length)
+                       (not (pi-coding-agent--text-file-whitespace-p
+                             (aref text index))))
+                  index)
+                 ((and (> index 0)
+                       (not (pi-coding-agent--text-file-whitespace-p
+                             (aref text (1- index)))))
+                  (1- index)))))
+    (when probe
+      (let ((begin probe)
+            (end (1+ probe))
+            (remaining pi-coding-agent--max-text-file-candidate-length)
+            overlong token-begin token-end)
+        (while (and (> begin 0)
+                    (not (pi-coding-agent--text-file-whitespace-p
+                          (aref text (1- begin))))
+                    (> remaining 0))
+          (setq begin (1- begin)
+                remaining (1- remaining)))
+        (when (and (> begin 0)
+                   (not (pi-coding-agent--text-file-whitespace-p
+                         (aref text (1- begin)))))
+          (setq overlong t))
+        (setq remaining pi-coding-agent--max-text-file-candidate-length)
+        (while (and (< end length)
+                    (not (pi-coding-agent--text-file-whitespace-p
+                          (aref text end)))
+                    (> remaining 0))
+          (setq end (1+ end)
+                remaining (1- remaining)))
+        (when (and (< end length)
+                   (not (pi-coding-agent--text-file-whitespace-p
+                         (aref text end))))
+          (setq overlong t))
+        (unless (or overlong
+                    (> (- end begin)
+                       pi-coding-agent--max-text-file-candidate-length))
+          (setq token-begin begin
+                token-end end)
+          (let (html-closing-tag)
+            (while (and (< begin end)
+                        (memq (aref text begin) '(?\( ?\[ ?\{)))
+              (setq begin (1+ begin)))
+            (setq html-closing-tag
+                  (and (< (1+ begin) end)
+                       (eq (aref text begin) ?<)
+                       (eq (aref text (1+ begin)) ?/)))
+            (while (and (< begin end) (eq (aref text begin) ?<))
+              (setq begin (1+ begin)))
+            (while (and (< begin end)
+                        (memq (aref text (1- end))
+                              (string-to-list ".,;!?)]}>")))
+              (setq end (1- end)))
+            (when (and (<= begin index end)
+                       (not html-closing-tag))
+              (let ((raw (substring text begin end)))
+                ;; Quote-aware parsing owns tokens containing supported quotes.
+                (unless (string-match-p "[`']" raw)
+                  (when-let* ((candidate
+                               (pi-coding-agent--parse-text-file-candidate
+                                raw nil begin end))
+                              (candidate-bounds
+                               (plist-get candidate :bounds))
+                              ((<= begin index (cdr candidate-bounds)))
+                              ((or
+                                (not (plist-get
+                                      candidate :diagnostic-separator))
+                                (and (= end token-end)
+                                     (pi-coding-agent--text-file-diagnostic-context-p
+                                      candidate text end token-end)))))
+                    (plist-put candidate :extent
+                               (cons token-begin token-end))))))))))))
 
 (defun pi-coding-agent--text-file-candidate-at-index (text index)
   "Return the strict file candidate at INDEX in one-line TEXT, or nil.
 Lookup is exact rather than nearest-on-line: INDEX must fall within, or at the
-exclusive end boundary of, the candidate text."
-  (seq-find
-   (lambda (candidate)
-     (let ((bounds (plist-get candidate :bounds)))
-       (and (<= (car bounds) index)
-            (<= index (cdr bounds)))))
-   (append (pi-coding-agent--quoted-text-file-candidates text)
-           (pi-coding-agent--unquoted-text-file-candidates text))))
+exclusive end boundary of, the candidate text.  Work and allocations are
+bounded around INDEX; unrelated candidates are never collected or parsed."
+  (when (and (stringp text) (integerp index)
+             (<= 0 index) (<= index (length text)))
+    (or (pi-coding-agent--quoted-text-file-candidate-at-index text index)
+        (pi-coding-agent--unquoted-text-file-candidate-at-index text index))))
+
+(defun pi-coding-agent--bounded-line-window-at-point ()
+  "Return bounded current-line window metadata around point.
+The plist contains `:start', `:end', `:start-complete', and `:end-complete'.
+Complete edges are real line or buffer boundaries; incomplete edges are the
+explicit candidate scan limit.  No operation searches farther than that limit."
+  (let* ((origin (point))
+         (lower (max (point-min)
+                     (- origin pi-coding-agent--text-file-input-radius)))
+         (upper (min (point-max)
+                     (+ origin pi-coding-agent--text-file-input-radius)))
+         start end start-complete end-complete)
+    (save-excursion
+      (goto-char origin)
+      (if (search-backward "\n" lower t)
+          (setq start (1+ (point))
+                start-complete t)
+        (setq start lower
+              start-complete (= lower (point-min))))
+      (goto-char origin)
+      (if (search-forward "\n" upper t)
+          (setq end (1- (point))
+                end-complete t)
+        (setq end upper
+              end-complete (= upper (point-max)))))
+    (list :start start :end end
+          :start-complete start-complete :end-complete end-complete)))
+
+(defun pi-coding-agent--raw-text-file-candidate-visible-p
+    (candidate window-start)
+  "Return non-nil when raw CANDIDATE text is visible at WINDOW-START.
+Wrapper delimiters are outside candidate bounds.  Hidden text inside the raw
+candidate instead belongs to visible projection, which will derive a candidate
+from what the user actually sees."
+  (let* ((bounds (plist-get candidate :bounds))
+         (start (+ window-start (car bounds)))
+         (end (+ window-start (cdr bounds))))
+    (equal (plist-get candidate :raw)
+           (substring-no-properties
+            (pi-coding-agent--visible-text start end)))))
+
+(defun pi-coding-agent--raw-diagnostic-context-visible-p
+    (candidate window-start)
+  "Return non-nil when CANDIDATE's context at WINDOW-START is visible.
+Hidden Markdown may not fabricate the separator, required space, or first
+diagnostic character.  Ordinary non-diagnostic candidates always pass."
+  (or (not (plist-get candidate :diagnostic-separator))
+      (let* ((bounds (plist-get candidate :bounds))
+             (separator (+ window-start (cdr bounds)))
+             (following
+              (+ window-start
+                 (cdr (or (plist-get candidate :extent) bounds)))))
+        (and (pi-coding-agent--visible-text-span-p separator)
+             (pi-coding-agent--visible-text-span-p following)
+             (pi-coding-agent--visible-text-span-p (1+ following))))))
+
+(defun pi-coding-agent--target-closing-markdown-source-p (start end)
+  "Return non-nil when omitted source in START..END only closes target markup.
+Accept emphasis/code delimiter runs or one link-label close plus a simple hidden
+destination and trailing delimiters.  This intentionally narrow grammar keeps
+unrelated invisible text from fabricating diagnostic context."
+  (let ((source (buffer-substring-no-properties start end)))
+    (or (string-empty-p source)
+        (string-match-p "\\`[*_`]+\\'" source)
+        (string-match-p
+         "\\`]\\(?:([^ \t\r\n()]*)\\)?[*_`]*\\'" source))))
+
+(defun pi-coding-agent--visible-diagnostic-context-source-p
+    (candidate visible-input)
+  "Return non-nil when projected CANDIDATE has literal diagnostic text.
+VISIBLE-INPUT supplies its visible-to-source position map.  Only narrow
+source-proven target-closing Markdown may lie between the separator and its
+visible space.  The first diagnostic character must immediately follow that
+space in source.  Thus unrelated hidden markup cannot fabricate the grammar."
+  (or (not (plist-get candidate :diagnostic-separator))
+      (let* ((separator (cdr (plist-get candidate :bounds)))
+             (positions (plist-get visible-input :positions))
+             (separator-source (aref positions separator))
+             (space-source (aref positions (1+ separator)))
+             (diagnostic-source (aref positions (+ separator 2))))
+        (and (= diagnostic-source (1+ space-source))
+             (pi-coding-agent--target-closing-markdown-source-p
+              (1+ separator-source) space-source)))))
+
+(defun pi-coding-agent--visible-file-candidate-buffer-bounds
+    (candidate visible-input)
+  "Map nonempty visible CANDIDATE bounds through VISIBLE-INPUT.
+Return the real buffer envelope.  Internal hidden markup remains inside that
+envelope, while hidden delimiters and link destinations remain outside it."
+  (let* ((bounds (plist-get candidate :bounds))
+         (start (car bounds))
+         (end (cdr bounds))
+         (positions (plist-get visible-input :positions)))
+    (when (< start end)
+      (cons (aref positions start)
+            (1+ (aref positions (1- end)))))))
+
+(defun pi-coding-agent--markdown-code-span-at-point-p (start end)
+  "Return non-nil when point is fontified as inline code in START..END.
+Check both sides of a visible boundary.  This preserves authoritative code-span
+semantics when its delimiters are outside the bounded resolver window."
+  (seq-some
+   (lambda (position)
+     (let ((face (and (<= start position) (< position end)
+                      (get-char-property position 'face))))
+       (or (eq face 'md-ts-code)
+           (and (listp face) (memq 'md-ts-code face)))))
+   (list (point) (1- (point)))))
 
 (defun pi-coding-agent--text-file-target-at-point ()
-  "Return a strict plain-text file target on the current line, or nil.
-This at-point layer is deliberately thin: it snapshots only the current line,
-delegates parsing to pure string helpers, then resolves the path against the
-canonical chat session directory."
-  (let* ((line-start (line-beginning-position))
-         (line-end (line-end-position))
-         (text (buffer-substring-no-properties line-start line-end))
-         (index (- (point) line-start)))
-    (when-let* ((candidate
-                 (pi-coding-agent--text-file-candidate-at-index text index))
-                (raw (plist-get candidate :raw))
-                (path (plist-get candidate :path))
-                (anchor (pi-coding-agent--chat-session-directory))
-                (emacs-path (pi-coding-agent--emacs-path path anchor)))
-      (let ((bounds (plist-get candidate :bounds)))
+  "Return a strict markup-visible file target on the current line, or nil.
+This buffer layer snapshots a fixed-size window around point.  Supported raw
+quote wrappers complete within that snapshot remain authoritative, including
+invalid quoted prose or commands; fontified Markdown code remains authoritative
+when its delimiters lie outside the snapshot.  Otherwise it first uses an
+already-visible raw token, then projects backing buffer text according to
+fontified chat markup, maps point into that projection, delegates pure candidate
+parsing, and maps candidate bounds back to real buffer positions.  It never
+widens, fontifies, or scans the whole current line.  Hidden
+link destinations and syntax do not become candidate text.
+
+The projection follows backing-buffer text properties, not synthetic overlay
+replacement strings such as wrapped table displays, which lack character-level
+source positions."
+  (let* ((window (pi-coding-agent--bounded-line-window-at-point))
+         (window-start (plist-get window :start))
+         (window-end (plist-get window :end))
+         (text (buffer-substring-no-properties window-start window-end))
+         (index (- (point) window-start))
+         (wrapped (or (pi-coding-agent--inside-text-wrapper-p text index)
+                      (pi-coding-agent--markdown-code-span-at-point-p
+                       window-start window-end)))
+         candidate bounds input-length)
+    ;; A failed wrapper parse owns the result: never expose an inner path from
+    ;; fontified `cat src/foo.el' or single-quoted prose.  Without a wrapper, a
+    ;; normal visible token takes the cheap path before projection is allocated.
+    (unless (pi-coding-agent--position-inside-omitted-text-p
+             (point) window-start window-end)
+      (let* ((raw-candidate
+              (if wrapped
+                  (pi-coding-agent--quoted-text-file-candidate-at-index
+                   text index)
+                (pi-coding-agent--text-file-candidate-at-index text index)))
+             (raw-text-visible
+              (and raw-candidate
+                   (pi-coding-agent--raw-text-file-candidate-visible-p
+                    raw-candidate window-start)))
+             (raw-context-visible
+              (and raw-candidate
+                   (pi-coding-agent--raw-diagnostic-context-visible-p
+                    raw-candidate window-start)))
+             (raw-visible (and raw-text-visible raw-context-visible))
+             ;; An otherwise visible diagnostic candidate with hidden separator
+             ;; context is authoritative-invalid.  If instead target markup is
+             ;; hidden, normal visible projection remains authoritative.
+             (hidden-diagnostic-context
+              (and raw-candidate raw-text-visible
+                   (plist-get raw-candidate :diagnostic-separator)
+                   (not raw-context-visible))))
+        (when raw-visible
+          (let ((raw-bounds (plist-get raw-candidate :bounds)))
+            (setq candidate raw-candidate
+                  bounds (cons (+ window-start (car raw-bounds))
+                               (+ window-start (cdr raw-bounds)))
+                  input-length (length text))))
+        (when (and (not candidate) (not wrapped)
+                   (not hidden-diagnostic-context))
+          (let* ((visible-input
+                  (pi-coding-agent--visible-text-with-position-map
+                   window-start window-end (point)))
+                 (visible-text (plist-get visible-input :text))
+                 (visible-candidate
+                  (pi-coding-agent--text-file-candidate-at-index
+                   visible-text (plist-get visible-input :index))))
+            (when (and visible-candidate
+                       (pi-coding-agent--visible-diagnostic-context-source-p
+                        visible-candidate visible-input))
+              (setq candidate visible-candidate
+                    bounds
+                    (pi-coding-agent--visible-file-candidate-buffer-bounds
+                     visible-candidate visible-input)
+                    input-length (length visible-text))))))
+      (when-let* ((candidate candidate)
+                  ;; Lexical extent includes wrappers and punctuation trimmed
+                  ;; from returned bounds, so clipped windows cannot fabricate
+                  ;; an apparently complete candidate.
+                  (extent (or (plist-get candidate :extent)
+                              (plist-get candidate :bounds)))
+                  (complete-start
+                   (or (> (car extent) 0)
+                       (plist-get window :start-complete)))
+                  (complete-end
+                   (or (< (cdr extent) input-length)
+                       (plist-get window :end-complete)))
+                  (bounds bounds)
+                  (raw (plist-get candidate :raw))
+                  (path (plist-get candidate :path))
+                  (anchor (pi-coding-agent--chat-session-directory))
+                  (emacs-path (pi-coding-agent--emacs-path path anchor)))
         (pi-coding-agent--make-file-target
          :text raw emacs-path
          (plist-get candidate :line)
          (plist-get candidate :column)
          (plist-get candidate :range)
-         (cons (+ line-start (car bounds))
-               (+ line-start (cdr bounds))))))))
+         bounds)))))
 
 (defun pi-coding-agent--tool-overlay-at-point ()
   "Return the tool block overlay at point, or nil."
@@ -2953,34 +3395,81 @@ canonical chat session directory."
               (overlay-get overlay 'pi-coding-agent-tool-block))
             (overlays-at (point))))
 
+(defun pi-coding-agent--tool-file-target-from-metadata
+    (stored-path raw-path path-error bounds line-function)
+  "Return an authoritative tool target from stored metadata, or nil.
+STORED-PATH, RAW-PATH, and PATH-ERROR retain the render-time path decision.
+BOUNDS identify the owning hot or cold block.  LINE-FUNCTION is called only
+for a valid path.  A stored error signals `user-error'; explicit path absence
+returns nil."
+  (cond
+   (stored-path
+    (unless (stringp stored-path)
+      (user-error "Tool path metadata is not a string"))
+    (let* ((emacs-path (pi-coding-agent--tool-emacs-path stored-path))
+           (raw (if (stringp raw-path) raw-path stored-path)))
+      (pi-coding-agent--make-file-target
+       :tool raw emacs-path (funcall line-function) nil nil bounds)))
+   (path-error
+    (user-error "%s" path-error))))
+
 (defun pi-coding-agent--tool-file-target (overlay)
-  "Return the authoritative file target for tool OVERLAY, or nil.
-Signal the stored `user-error' when OVERLAY has invalid path metadata."
-  (let ((stored-path (overlay-get overlay 'pi-coding-agent-tool-path))
-        (raw-path (overlay-get overlay 'pi-coding-agent-tool-raw-path))
-        (path-error (overlay-get overlay 'pi-coding-agent-tool-path-error)))
-    (cond
-     (stored-path
-      (unless (stringp stored-path)
-        (user-error "Tool path metadata is not a string"))
-      (let* ((emacs-path (pi-coding-agent--tool-emacs-path stored-path))
-             (raw (if (stringp raw-path) raw-path stored-path)))
-        (pi-coding-agent--make-file-target
-         :tool raw emacs-path
-         (pi-coding-agent--tool-line-at-point overlay)
-         nil nil
-         (cons (overlay-start overlay) (overlay-end overlay)))))
-     (path-error
-      (user-error "%s" path-error)))))
+  "Return the authoritative file target for hot tool OVERLAY, or nil."
+  (pi-coding-agent--tool-file-target-from-metadata
+   (overlay-get overlay 'pi-coding-agent-tool-path)
+   (overlay-get overlay 'pi-coding-agent-tool-raw-path)
+   (overlay-get overlay 'pi-coding-agent-tool-path-error)
+   (cons (overlay-start overlay) (overlay-end overlay))
+   (lambda () (pi-coding-agent--tool-line-at-point overlay))))
+
+(defun pi-coding-agent--cold-tool-block-at-point ()
+  "Return lightweight cold-tool metadata and bounds at point, or nil."
+  (when-let* ((metadata
+               (get-text-property (point)
+                                  'pi-coding-agent-cold-tool-block)))
+    (let ((start (or (previous-single-property-change
+                      (1+ (point)) 'pi-coding-agent-cold-tool-block
+                      nil (point-min))
+                     (point-min)))
+          (end (or (next-single-property-change
+                    (point) 'pi-coding-agent-cold-tool-block
+                    nil (point-max))
+                   (point-max))))
+      (list :metadata metadata :bounds (cons start end)))))
+
+(defun pi-coding-agent--cold-tool-line-at-point (cold-block)
+  "Calculate the meaningful file line at point for COLD-BLOCK."
+  (let* ((metadata (plist-get cold-block :metadata))
+         (bounds (plist-get cold-block :bounds))
+         (header-length (plist-get metadata :header-length))
+         (header-end (and (integerp header-length)
+                          (+ (car bounds) header-length)))
+         (line-map (plist-get metadata :line-map)))
+    (pi-coding-agent--tool-line-from-metadata
+     (plist-get metadata :tool-name)
+     (plist-get metadata :offset)
+     line-map header-end line-map)))
+
+(defun pi-coding-agent--cold-tool-file-target (cold-block)
+  "Return the authoritative file target for COLD-BLOCK, or nil."
+  (let ((metadata (plist-get cold-block :metadata)))
+    (pi-coding-agent--tool-file-target-from-metadata
+     (plist-get metadata :path)
+     (plist-get metadata :raw-path)
+     (plist-get metadata :path-error)
+     (plist-get cold-block :bounds)
+     (lambda () (pi-coding-agent--cold-tool-line-at-point cold-block)))))
 
 (defun pi-coding-agent--file-target-at-point ()
   "Return the file target at point, or nil.
-Tool metadata is authoritative inside tool blocks.  Invalid metadata signals
-its controlled `user-error', and absent metadata returns nil without falling
-back to text parsing."
+Hot overlays and lightweight cold-block properties are authoritative inside
+tool blocks.  Invalid metadata signals its controlled `user-error', and absent
+metadata returns nil without falling back to text parsing."
   (if-let* ((overlay (pi-coding-agent--tool-overlay-at-point)))
       (pi-coding-agent--tool-file-target overlay)
-    (pi-coding-agent--text-file-target-at-point)))
+    (if-let* ((cold-block (pi-coding-agent--cold-tool-block-at-point)))
+        (pi-coding-agent--cold-tool-file-target cold-block)
+      (pi-coding-agent--text-file-target-at-point))))
 
 (defun pi-coding-agent-visit-file (&optional toggle)
   "Visit the file associated with the tool block at point.

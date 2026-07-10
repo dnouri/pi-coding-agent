@@ -163,6 +163,16 @@ connection."
   (and (pi-coding-agent--remote-home-path-p path)
        (not (pi-coding-agent--plain-remote-home-path-p path))))
 
+(defun pi-coding-agent--safe-shell-remote-home-path-p (path)
+  "Return non-nil when PATH has a portable remote-shell home prefix.
+Accept plain `~' and POSIX portable named-user forms such as `~root/path'.
+Reject shell-significant and reserved expansion forms before an unquoted tilde
+prefix can cross the shell-host path boundary."
+  (and (stringp path)
+       (string-match-p
+        "\\`\\(?:~\\|~[[:alpha:]_][[:alnum:]_.-]*\\)\\(?:/\\|\\'\\)"
+        path)))
+
 (defun pi-coding-agent--remote-prefix-for-path (path)
   "Return PATH's full TRAMP remote prefix, or nil."
   (and (stringp path)
@@ -281,6 +291,85 @@ process filters or callbacks."
   (if-let* ((prefix (pi-coding-agent--remote-prefix-for-path path)))
       (substring path (length prefix))
     (file-local-name path)))
+
+(defun pi-coding-agent--shell-command-path (path &optional anchor)
+  "Return unquoted PATH in the shell host's file-name namespace.
+The shell host is selected by ANCHOR or `default-directory': local paths stay
+local, while paths under a remote ANCHOR are for the remote shell started by
+Emacs's `shell-command' file-name handler.  Relative paths become absolute,
+matching TRAMP prefixes (including multi-hop routes) are removed, and remote
+`~/' and `~USER/' forms remain unexpanded for that shell.  Local home paths are
+expanded by Emacs.  Exactly one recognized Emacs file-name quote layer is
+removed.  Explicit remote local names must then be absolute or home-rooted;
+empty and relative forms are rejected rather than reinterpreted lexically.
+
+This is deliberately separate from `pi-coding-agent--process-local-path', whose
+outbound JSON contract is specific to Pi RPC and rejects named remote homes.
+This pure conversion neither checks file existence nor contacts a remote host.
+Malformed or incompatible remote paths signal `user-error'."
+  (when-let* ((emacs-path (pi-coding-agent--emacs-path path anchor)))
+    (let* ((remote-anchor (pi-coding-agent--remote-prefix anchor))
+           (localname (file-name-unquote
+                       (pi-coding-agent--local-name-for-process emacs-path))))
+      (cond
+       ((not remote-anchor)
+        (if (file-name-absolute-p localname)
+            localname
+          (let ((file-name-handler-alist nil))
+            (expand-file-name
+             localname
+             (file-name-unquote (or anchor default-directory))))))
+       ((string-prefix-p "/" localname)
+        localname)
+       ((pi-coding-agent--safe-shell-remote-home-path-p localname)
+        localname)
+       ((pi-coding-agent--remote-home-path-p localname)
+        (user-error "Unsafe shell home prefix in path: %S" localname))
+       (t
+        (user-error "Remote shell path is not absolute or home-rooted: %S"
+                    localname))))))
+
+(defun pi-coding-agent--shell-quote-path (path &optional anchor)
+  "Quote shell-local PATH exactly once for a shell under ANCHOR.
+PATH should be the result of `pi-coding-agent--shell-command-path'.  A remote
+`~/' or portable `~USER/' prefix is left unquoted so the remote shell can
+expand it; only the remaining path is POSIX-quoted.  Other remote paths use
+POSIX quoting in full, while local paths use the platform's normal
+`shell-quote-argument' behavior.  A terminal ampersand gets an adjacent empty
+quoted fragment because `shell-command' otherwise treats it as an async marker
+without parsing the shell escape.  Unsafe home prefixes and malformed paths
+signal `user-error'."
+  (pi-coding-agent--ensure-usable-path-string path)
+  (unless (and (stringp path) (not (string-empty-p path)))
+    (user-error "Shell path is empty or not a string"))
+  (let* ((remote-anchor (pi-coding-agent--remote-prefix anchor))
+         (quoted
+          (if (and remote-anchor
+                   (pi-coding-agent--remote-home-path-p path))
+              (if (string-match
+                   "\\`\\(~\\|~[[:alpha:]_][[:alnum:]_.-]*\\)\\(?:/\\|\\'\\)"
+                   path)
+                  (let* ((prefix (match-string 1 path))
+                         (prefix-end (match-end 1))
+                         (slash-p (and (< prefix-end (length path))
+                                       (eq (aref path prefix-end) ?/)))
+                         (rest (and slash-p
+                                    (substring path (1+ prefix-end)))))
+                    (if slash-p
+                        (concat prefix "/"
+                                (if (string-empty-p rest)
+                                    ""
+                                  (shell-quote-argument rest t)))
+                      prefix))
+                (user-error "Unsafe shell home prefix in path: %S" path))
+            (shell-quote-argument path (and remote-anchor t)))))
+    ;; `shell-command' detects a final ampersand lexically, without honoring
+    ;; shell escaping.  Concatenate an empty quoted fragment so a filename
+    ;; ending in `&' remains one operand but cannot switch execution to async.
+    (if (string-suffix-p "&" quoted)
+        (concat quoted
+                (shell-quote-argument "" (and remote-anchor t)))
+      quoted)))
 
 (defun pi-coding-agent--process-local-path (path &optional anchor)
   "Return outbound PATH as the process-local path Pi should receive.

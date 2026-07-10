@@ -219,6 +219,12 @@
       (should (string-match-p "NUL" (error-message-string err))))
     (let ((err (should-error (pi-coding-agent--process-local-path bad anchor)
                              :type 'user-error)))
+      (should (string-match-p "NUL" (error-message-string err))))
+    (let ((err (should-error (pi-coding-agent--shell-command-path bad anchor)
+                             :type 'user-error)))
+      (should (string-match-p "NUL" (error-message-string err))))
+    (let ((err (should-error (pi-coding-agent--shell-quote-path bad anchor)
+                             :type 'user-error)))
       (should (string-match-p "NUL" (error-message-string err))))))
 
 (ert-deftest pi-coding-agent-test-passive-emacs-path-ignores-unsafe-metadata ()
@@ -329,6 +335,122 @@
   (should (equal (pi-coding-agent--process-local-path
                   "sessions/current.jsonl" "/tmp/pi-project/")
                  "/tmp/pi-project/sessions/current.jsonl")))
+
+(ert-deftest pi-coding-agent-test-shell-command-path-normalizes-for-emacs-shell-host ()
+  "Shell paths are local to the host where Emacs starts `shell-command'."
+  (let ((home-path (expand-file-name "~/a b.el")))
+    (dolist (case
+             `(("src/a b.el" "/tmp/pi project/"
+                "/tmp/pi project/src/a b.el")
+               ("/tmp/a b.el" "/tmp/pi project/" "/tmp/a b.el")
+               ("~/a b.el" "/tmp/pi project/" ,home-path)
+               ("/:/tmp/a b.el" "/tmp/pi project/" "/tmp/a b.el")
+               ("/:relative" "/tmp/pi project/"
+                "/tmp/pi project/relative")
+               ("src/a b.el" "/ssh:pi-host:/home/pi/project/"
+                "/home/pi/project/src/a b.el")
+               ("/ssh:pi-host:/tmp/a b.el"
+                "/ssh:pi-host:/home/pi/project/" "/tmp/a b.el")
+               ("~/a b.el" "/ssh:pi-host:/home/pi/project/" "~/a b.el")
+               ("~root/a b.el" "/ssh:pi-host:/home/pi/project/"
+                "~root/a b.el")
+               ("/ssh:pi-host:/:/tmp/a b.el"
+                "/ssh:pi-host:/home/pi/project/" "/tmp/a b.el")
+               ("/ssh:bastion|sudo:root@pi-host:/tmp/a b.el"
+                "/ssh:bastion|sudo:root@pi-host:/home/pi/project/"
+                "/tmp/a b.el")
+               ("/ssh:bastion|sudo:root@pi-host:~daemon/a b.el"
+                "/ssh:bastion|sudo:root@pi-host:/home/pi/project/"
+                "~daemon/a b.el")
+               ("/ssh:bastion|sudo:root@pi-host:/:/tmp/a b.el"
+                "/ssh:bastion|sudo:root@pi-host:/home/pi/project/"
+                "/tmp/a b.el")))
+      (should (equal (pi-coding-agent--shell-command-path
+                      (nth 0 case) (nth 1 case))
+                     (nth 2 case))))))
+
+(ert-deftest pi-coding-agent-test-shell-command-path-rejects-incompatible-remotes ()
+  "Shell conversion never strips a different TRAMP route."
+  (should-error
+   (pi-coding-agent--shell-command-path
+    "/ssh:other:/tmp/a.el" "/ssh:pi-host:/home/pi/project/")
+   :type 'user-error)
+  (should-error
+   (pi-coding-agent--shell-command-path
+    "/sudo:root@pi-host:/tmp/a.el"
+    "/ssh:bastion|sudo:root@pi-host:/home/pi/project/")
+   :type 'user-error)
+  (should-error
+   (pi-coding-agent--shell-command-path
+    "/ssh:pi-host:/tmp/a.el" "/tmp/project/")
+   :type 'user-error))
+
+(ert-deftest pi-coding-agent-test-shell-command-path-rejects-unrooted-tramp-local-names ()
+  "Explicit TRAMP local names must not become unsafe shell operands."
+  (dolist (case '(("/ssh:pi-host:-rf"
+                   "/ssh:pi-host:/home/pi/project/")
+                  ("/ssh:pi-host:" "/ssh:pi-host:/home/pi/project/")
+                  ("/ssh:bastion|sudo:root@pi-host:-rf"
+                   "/ssh:bastion|sudo:root@pi-host:/home/pi/project/")
+                  ("/ssh:bastion|sudo:root@pi-host:"
+                   "/ssh:bastion|sudo:root@pi-host:/home/pi/project/")
+                  ("~root;printf PWNED/a.el"
+                   "/ssh:pi-host:/home/pi/project/")
+                  ("~+" "/ssh:pi-host:/home/pi/project/")
+                  ("~-/a.el" "/ssh:pi-host:/home/pi/project/")
+                  ("~0/a.el" "/ssh:pi-host:/home/pi/project/")))
+    (should-error
+     (pi-coding-agent--shell-command-path (nth 0 case) (nth 1 case))
+     :type 'user-error)))
+
+(ert-deftest pi-coding-agent-test-shell-quote-path-preserves-remote-home-expansion ()
+  "Quoting leaves only a safe remote tilde prefix visible to the shell."
+  (let ((remote "/ssh:pi-host:/home/pi/project/")
+        (multi "/ssh:bastion|sudo:root@pi-host:/home/pi/project/"))
+    (should (equal (pi-coding-agent--shell-quote-path "~/a b.el" remote)
+                   (concat "~/" (shell-quote-argument "a b.el" t))))
+    (should (equal (pi-coding-agent--shell-quote-path
+                    "~root/a b.el" remote)
+                   (concat "~root/" (shell-quote-argument "a b.el" t))))
+    (should (equal (pi-coding-agent--shell-quote-path
+                    "~daemon/a b.el" multi)
+                   (concat "~daemon/" (shell-quote-argument "a b.el" t))))
+    (should (equal (pi-coding-agent--shell-quote-path
+                    "~root/a\nb.el" remote)
+                   (concat "~root/" (shell-quote-argument "a\nb.el" t))))
+    (should (equal (pi-coding-agent--shell-quote-path
+                    "/tmp/a b.el" remote)
+                   (shell-quote-argument "/tmp/a b.el" t)))
+    (should (equal (pi-coding-agent--shell-quote-path
+                    "/tmp/a b.el" "/tmp/project/")
+                   (shell-quote-argument "/tmp/a b.el")))))
+
+(ert-deftest pi-coding-agent-test-shell-quote-path-rejects-unsafe-home-prefix ()
+  "Shell-significant and reserved named-home prefixes are never exposed."
+  (dolist (path '("~root;printf PWNED/a.el" "~+" "~-/a.el"
+                  "~0/a.el" "~+0/a.el"))
+    (should-error
+     (pi-coding-agent--shell-quote-path
+      path "/ssh:pi-host:/home/pi/project/")
+     :type 'user-error)))
+
+(ert-deftest pi-coding-agent-test-shell-quote-path-hides-terminal-ampersand-from-emacs ()
+  "Quoted operands cannot trigger `shell-command' trailing-& detection."
+  (dolist (case '(("/tmp/report&" "/tmp/project/" nil)
+                  ("/tmp/report&" "/ssh:pi-host:/home/pi/project/" t)
+                  ("~/report&" "/ssh:pi-host:/home/pi/project/" t)))
+    (let* ((path (nth 0 case))
+           (anchor (nth 1 case))
+           (posix (nth 2 case))
+           (quoted (pi-coding-agent--shell-quote-path path anchor))
+           (ordinary (if (string-prefix-p "~/" path)
+                         (concat "~/"
+                                 (shell-quote-argument
+                                  (substring path 2) t))
+                       (shell-quote-argument path posix))))
+      (should (equal quoted
+                     (concat ordinary (shell-quote-argument "" posix))))
+      (should-not (string-suffix-p "&" quoted)))))
 
 ;;;; Process Cleanup Tests
 

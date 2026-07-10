@@ -964,6 +964,26 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
     (should (equal (pi-coding-agent--visible-text (point-min) (point-max))
                    "Just plain text with no markup"))))
 
+(ert-deftest pi-coding-agent-test-visible-text-position-map-preserves-source-envelope ()
+  "Visible character indices map exactly across omitted property spans."
+  (with-temp-buffer
+    (insert "aXXbcYYd")
+    (put-text-property 2 4 'invisible 'md-ts--markup)
+    (put-text-property 6 8 'invisible 'md-ts--markup)
+    (let ((at-boundary
+           (pi-coding-agent--visible-text-with-position-map 1 9 6))
+          (inside-hidden
+           (pi-coding-agent--visible-text-with-position-map 1 9 7)))
+      (should (equal "abcd" (plist-get at-boundary :text)))
+      (should (equal [1 4 5 8] (plist-get at-boundary :positions)))
+      (should (= 3 (plist-get at-boundary :index)))
+      (should (= 3 (plist-get inside-hidden :index)))
+      ;; Visible [1,3) is "bc" and maps to the real half-open envelope 4..6.
+      (let ((positions (plist-get at-boundary :positions)))
+        (should (equal (cons (aref positions 1)
+                             (1+ (aref positions 2)))
+                       '(4 . 6)))))))
+
 (ert-deftest pi-coding-agent-test-copy-raw-markdown-defcustom-default ()
   "pi-coding-agent-copy-raw-markdown defcustom defaults to nil."
   (should (eq pi-coding-agent-copy-raw-markdown nil)))
