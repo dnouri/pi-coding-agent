@@ -4167,35 +4167,1683 @@ With hot-tail-turn-count 1, only the most recent headed turn stays hot."
                         (car (plist-get target :bounds))
                         (cdr (plist-get target :bounds)))))))))
 
-(ert-deftest pi-coding-agent-test-file-target-text-resolves-visible-link-label-only ()
-  "A strict visible link label wins; its hidden destination is never input."
+(ert-deftest pi-coding-agent-test-file-target-link-multiline-local-host ()
+  "Raw and fontified multiline labels resolve from the complete inline host."
+  (dolist (fontified '(nil t))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+      (let ((inhibit-read-only t))
+        (insert "[First line\nsecond line](docs/multiline.md)"))
+      (when fontified (font-lock-ensure))
+      (dolist (needle '("First" "second"))
+        (goto-char (point-min))
+        (search-forward needle)
+        (let ((target (pi-coding-agent--file-target-at-point)))
+          (should (eq :link (plist-get target :source)))
+          (should (equal "docs/multiline.md" (plist-get target :raw)))
+          (should (equal "/tmp/session/docs/multiline.md"
+                         (plist-get target :emacs-path))))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-multiline-external-owns-label ()
+  "Raw and fontified multiline external links suppress strict label fallback."
+  (dolist (fontified '(nil t))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t))
+        (insert "[src/fallback.el\ncontinued](https://example.com/out.md)"))
+      (when fontified (font-lock-ensure))
+      (goto-char (point-min))
+      (search-forward "src/fallback.el")
+      (should (eq :owned-invalid
+                  (plist-get
+                   (pi-coding-agent--semantic-link-file-target-at-point)
+                   :status)))
+      (should-not (pi-coding-agent--file-target-at-point)))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-oversized-label-local-destination ()
+  "A label wider than the old 16,388-character window retains its destination."
+  (dolist (fontified '(nil t))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+      (let ((inhibit-read-only t))
+        (insert "[" (make-string 20000 ?x) "](docs/oversized.md)"))
+      (when fontified (font-lock-ensure))
+      (goto-char (+ (point-min) 10000))
+      (let ((target (pi-coding-agent--file-target-at-point)))
+        (should (eq :link (plist-get target :source)))
+        (should (equal "docs/oversized.md" (plist-get target :raw)))
+        (should (equal "/tmp/session/docs/oversized.md"
+                       (plist-get target :emacs-path)))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-oversized-label-url-owns-path-text ()
+  "A URL link with both label edges outside the old window cannot expose a path."
+  (dolist (fontified '(nil t))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t))
+        (insert "[" (make-string 10000 ?x) " src/fallback.el "
+                (make-string 10000 ?y) "](https://example.com/out.md)"))
+      (when fontified (font-lock-ensure))
+      (goto-char (point-min))
+      (search-forward "src/fallback.el")
+      (goto-char (match-beginning 0))
+      (should (eq :owned-invalid
+                  (plist-get
+                   (pi-coding-agent--semantic-link-file-target-at-point)
+                   :status)))
+      (should-not (pi-coding-agent--file-target-at-point)))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-fake-syntax-in-multiline-contexts ()
+  "Code spans, fenced code, and HTML attributes never invent destinations."
+  (dolist (text '("`prefix\n[src/fallback.el](docs/code-span.md)\nsuffix`"
+                  "```markdown\n[src/fallback.el](docs/fenced.md)\n```"
+                  "before <span\n data-link=\"[src/fallback.el](docs/attribute.md)\">\nafter"))
+    (dolist (fontified '(nil t))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (let ((inhibit-read-only t)) (insert text))
+        (when fontified (font-lock-ensure))
+        (goto-char (point-min))
+        (search-forward "src/fallback.el")
+        (goto-char (match-beginning 0))
+        (should (eq :not-a-link
+                    (plist-get
+                     (pi-coding-agent--semantic-link-file-target-at-point)
+                     :status)))
+        (should-not (pi-coding-agent--file-target-at-point))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-exact-cap-host-is-parseable ()
+  "A complete host exactly at 262,144 characters is not treated as over-cap."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert (make-string
+               pi-coding-agent--max-semantic-link-host-length ?x)))
+    (goto-char (+ (point-min)
+                  (/ pi-coding-agent--max-semantic-link-host-length 2)))
+    (let (parsed-host)
+      (cl-letf (((symbol-function
+                  'pi-coding-agent--semantic-link-owner-at-point)
+                 (lambda (host)
+                   (setq parsed-host host)
+                   nil)))
+        (should (eq :not-a-link
+                    (plist-get
+                     (pi-coding-agent--semantic-link-file-target-at-point)
+                     :status))))
+      (should (= pi-coding-agent--max-semantic-link-host-length
+                 (- (plist-get parsed-host :end)
+                    (plist-get parsed-host :start)))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-over-cap-host-fails-closed ()
+  "A complete inline host beyond the semantic cap suppresses all text fallback."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert (make-string 140000 ?x) " src/fallback.el "
+              (make-string 140000 ?y)))
+    (should (> (- (point-max) (point-min))
+               pi-coding-agent--max-semantic-link-host-length))
+    (goto-char (point-min))
+    (search-forward "src/fallback.el")
+    (goto-char (match-beginning 0))
+    (cl-letf (((symbol-function 'pi-coding-agent--semantic-link-captures)
+               (lambda (&rest _)
+                 (ert-fail "Over-cap host must not reach inline parsing")))
+              ((symbol-function 'pi-coding-agent--text-file-target-at-point)
+               (lambda ()
+                 (ert-fail "Over-cap host must not reach text fallback"))))
+      (let ((resolution
+             (pi-coding-agent--semantic-link-file-target-at-point)))
+        (should (eq :owned-invalid (plist-get resolution :status)))
+        (should (eq :host-over-cap (plist-get resolution :reason))))
+      (should-not (pi-coding-agent--file-target-at-point)))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-malformed-scanner-balances-destinations ()
+  "Escaped and nested closes do not end malformed ownership prematurely."
+  (dolist (text '("[src/label.el](bad\\) docs/wrong.el tail) src/after.el"
+                  "[src/label.el](bad(nested) docs/wrong.el tail) src/after.el"))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t)) (insert text))
+      (goto-char (point-min))
+      (search-forward "docs/wrong.el")
+      (goto-char (match-beginning 0))
+      (should (eq :owned-invalid
+                  (plist-get
+                   (pi-coding-agent--semantic-link-file-target-at-point)
+                   :status)))
+      (should-not (pi-coding-agent--file-target-at-point))
+      (search-forward "src/after.el")
+      (goto-char (match-beginning 0))
+      (should (eq :not-a-link
+                  (plist-get
+                   (pi-coding-agent--semantic-link-file-target-at-point)
+                   :status)))
+      (should (equal "src/after.el"
+                     (plist-get (pi-coding-agent--file-target-at-point) :raw))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-malformed-scanner-work-is-linear ()
+  "Many incomplete shortcuts consume only linear malformed-scan work."
+  (let* ((count 600)
+         (source (apply #'concat (make-list count "[a](")))
+         (scanned 0)
+         (original
+          (symbol-function 'pi-coding-agent--semantic-link-malformed-end)))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t)) (insert source))
+      (goto-char (1- (point-max)))
+      (cl-letf (((symbol-function
+                  'pi-coding-agent--semantic-link-malformed-end)
+                 (lambda (start limit)
+                   (setq scanned (+ scanned (- limit start)))
+                   (funcall original start limit))))
+        (should (eq :owned-invalid
+                    (plist-get
+                     (pi-coding-agent--semantic-link-file-target-at-point)
+                     :status))))
+      (should (<= scanned (* 2 (length source)))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-malformed-image-owns-tail ()
+  "Malformed inline image recovery uses the same balanced ownership boundary."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "![src/label.el](bad(nested) docs/wrong.el) src/after.el"))
+    (goto-char (point-min))
+    (search-forward "docs/wrong.el")
+    (goto-char (match-beginning 0))
+    (should (eq :owned-invalid
+                (plist-get
+                 (pi-coding-agent--semantic-link-file-target-at-point)
+                 :status)))
+    (should-not (pi-coding-agent--file-target-at-point))
+    (search-forward "src/after.el")
+    (goto-char (match-beginning 0))
+    (should (equal "src/after.el"
+                   (plist-get (pi-coding-agent--file-target-at-point) :raw)))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-reference-image-does-not-own-following-parens ()
+  "Complete reference images do not borrow following ordinary parentheses."
+  (dolist (text '("![alt][id](see src/after.el)"
+                  "![alt][](see src/after.el)"))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t)) (insert text))
+      (goto-char (point-min))
+      (search-forward "src/after.el")
+      (goto-char (match-beginning 0))
+      (should (eq :not-a-link
+                  (plist-get
+                   (pi-coding-agent--semantic-link-file-target-at-point)
+                   :status)))
+      (should (equal "src/after.el"
+                     (plist-get (pi-coding-agent--file-target-at-point) :raw))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-malformed-scanner-does-not-over-own ()
+  "Illegal late angle/title openers do not hide the real outer boundary."
+  (dolist (text '("[src/label.el](bad<unterminated docs/wrong.el) src/after.el"
+                  "[src/label.el](bad prose \"unterminated) src/after.el"
+                  "[src/label.el](<bad>\"unterminated) src/after.el"
+                  "[src/label.el](<bad>junk \"unterminated) src/after.el"))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t)) (insert text))
+      (goto-char (point-min))
+      (search-forward "src/after.el")
+      (goto-char (match-beginning 0))
+      (should (eq :not-a-link
+                  (plist-get
+                   (pi-coding-agent--semantic-link-file-target-at-point)
+                   :status)))
+      (should (equal "src/after.el"
+                     (plist-get (pi-coding-agent--file-target-at-point) :raw))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-captures-are-detached ()
+  "Semantic capture results remain safe after their short-lived parser dies."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t)) (insert "[Report](docs/out.md)"))
+    (goto-char (+ (point-min) 3))
+    (let* ((host (pi-coding-agent--semantic-link-host-at-point))
+           (captures (pi-coding-agent--semantic-link-captures
+                      (plist-get host :start) (plist-get host :end))))
+      (should captures)
+      (dolist (capture captures)
+        (should (plist-get capture :type))
+        (should-not (seq-some #'treesit-node-p capture))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-malformed-angle-stops-at-line-end ()
+  "An invalid multiline angle destination cannot own text after its outer close."
+  (dolist (text '("[src/label.el](<bad\n) src/after.el"
+                  "[src/label.el](<bad\\\n) src/after.el"))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t)) (insert text))
+      (goto-char (point-min))
+      (search-forward "src/after.el")
+      (goto-char (match-beginning 0))
+      (should (eq :not-a-link
+                  (plist-get
+                   (pi-coding-agent--semantic-link-file-target-at-point)
+                   :status)))
+      (let ((target (pi-coding-agent--file-target-at-point)))
+        (should (eq :text (plist-get target :source)))
+        (should (equal "src/after.el" (plist-get target :raw)))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-malformed-title-honors-escapes ()
+  "An escaped title quote cannot end malformed ownership prematurely."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "[src/label.el](bad \"title \\\" ) still\" docs/wrong.el tail) src/after.el"))
+    (goto-char (point-min))
+    (search-forward "docs/wrong.el")
+    (goto-char (match-beginning 0))
+    (should (eq :owned-invalid
+                (plist-get
+                 (pi-coding-agent--semantic-link-file-target-at-point)
+                 :status)))
+    (should-not (pi-coding-agent--file-target-at-point))
+    (goto-char (point-min))
+    (search-forward "src/after.el")
+    (goto-char (match-beginning 0))
+    (should (eq :text
+                (plist-get (pi-coding-agent--file-target-at-point) :source)))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-malformed-scanner-angle-and-title ()
+  "Angle destinations and quoted-title closes stay inside malformed ownership."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "[src/label.el](<bad)angle> \"title ) here\" docs/wrong.el) src/after.el"))
+    (goto-char (point-min))
+    (search-forward "docs/wrong.el")
+    (goto-char (match-beginning 0))
+    (should (eq :owned-invalid
+                (plist-get
+                 (pi-coding-agent--semantic-link-file-target-at-point)
+                 :status)))
+    (should-not (pi-coding-agent--file-target-at-point))
+    (search-forward "src/after.el")
+    (goto-char (match-beginning 0))
+    (should (equal "src/after.el"
+                   (plist-get (pi-coding-agent--file-target-at-point) :raw)))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-streamed-escaped-close-completes ()
+  "An escaped close stays owned while streaming and later outer close completes."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (pi-coding-agent--set-chat-session-identity "/tmp/session/")
     (let ((inhibit-read-only t))
-      (insert "See **note** then [src/visible.el:7](src/hidden.el)."))
-    (font-lock-ensure)
+      (insert "[Report](docs/a.md#frag\\)ment"))
     (goto-char (point-min))
-    (search-forward "src/visible.el:7")
-    (let ((label-start (match-beginning 0))
-          (label-end (match-end 0)))
-      ;; Point at either visible boundary is on/adjacent to the label even
-      ;; though the end boundary is also the start of hidden link syntax.
-      (dolist (position (list label-start label-end))
-        (goto-char position)
+    (search-forward "ment")
+    (goto-char (match-beginning 0))
+    (should (eq :owned-invalid
+                (plist-get
+                 (pi-coding-agent--semantic-link-file-target-at-point)
+                 :status)))
+    (should-not (pi-coding-agent--file-target-at-point))
+    (let ((inhibit-read-only t))
+      (goto-char (point-max))
+      (insert ")"))
+    (goto-char (+ (point-min) 3))
+    (let ((target (pi-coding-agent--file-target-at-point)))
+      (should (eq :link (plist-get target :source)))
+      (should (equal "docs/a.md#frag\\)ment" (plist-get target :raw)))
+      (should (equal "/tmp/session/docs/a.md"
+                     (plist-get target :emacs-path)))
+      (should (equal "frag\\)ment" (plist-get target :fragment))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-malformed-true-boundary-points ()
+  "Ownership reaches the real outer close but not a following plain target."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "[src/label.el](bad(nested) docs/wrong.el tail) src/after.el"))
+    (goto-char (point-min))
+    (search-forward "tail")
+    (should (eq :owned-invalid
+                (plist-get
+                 (pi-coding-agent--semantic-link-file-target-at-point)
+                 :status)))
+    (search-forward "src/after.el")
+    (goto-char (match-beginning 0))
+    (should (eq :not-a-link
+                (plist-get
+                 (pi-coding-agent--semantic-link-file-target-at-point)
+                 :status)))
+    (should (equal "src/after.el"
+                   (plist-get (pi-coding-agent--file-target-at-point) :raw)))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-table-cell-host ()
+  "The established pipe-table-cell inline host resolves semantic links."
+  (dolist (fontified '(nil t))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+      (let ((inhibit-read-only t))
+        (insert "| Name | File |\n| --- | --- |\n| [Report](docs/table.md) | ok |"))
+      (when fontified (font-lock-ensure))
+      (goto-char (point-min))
+      (search-forward "Report")
+      (goto-char (match-beginning 0))
+      (let ((target (pi-coding-agent--file-target-at-point)))
+        (should (eq :link (plist-get target :source)))
+        (should (equal "/tmp/session/docs/table.md"
+                       (plist-get target :emacs-path)))))))
+
+(defun pi-coding-agent-test--insert-semantic-link-variant (text variant)
+  "Insert semantic-link TEXT using raw, fontified, streamed, or reloaded VARIANT."
+  (pcase variant
+    ('raw
+     (let ((inhibit-read-only t)) (insert text)))
+    ('fontified
+     (let ((inhibit-read-only t)) (insert text))
+     (font-lock-ensure))
+    ('streamed
+     (pi-coding-agent--display-agent-start)
+     (let ((middle (/ (length text) 2)))
+       (pi-coding-agent--display-message-delta (substring text 0 middle))
+       (pi-coding-agent--display-message-delta (substring text middle))))
+    ('reloaded
+     (pi-coding-agent--display-history-messages
+      (vector (list :role "assistant" :content text
+                    :timestamp 1704067200000))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-nested-label-projection ()
+  "Nested label markup projects rendered text and exact actionable source."
+  (let ((source
+         "[A *em* **strong** `code` \\* ![*alt*](images/inner.png) Z](docs/out.md)")
+        (expected-label "A em strong code * alt Z"))
+    (dolist (fontified '(nil t))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+        (let ((inhibit-read-only t)) (insert source))
+        (when fontified (font-lock-ensure))
+        (let* ((label-start (1+ (point-min)))
+               (label-end (save-excursion
+                            (goto-char (point-min))
+                            (search-forward " Z]")
+                            (1- (point))))
+               (hidden nil))
+          ;; Every emitted character class, including an escape and nested
+          ;; image alt text, activates the outer destination.
+          (dolist (needle '("A" "em" "strong" "code" "\\*" "alt" "Z"))
+            (goto-char (point-min))
+            (search-forward needle)
+            (let ((position (if (equal needle "\\*")
+                                (1- (point))
+                              (match-beginning 0))))
+              (goto-char position)
+              (let ((target (pi-coding-agent--file-target-at-point)))
+                (should (eq :link (plist-get target :source)))
+                (should (equal "docs/out.md" (plist-get target :raw)))
+                (should (equal expected-label (plist-get target :label)))
+                (should (equal (cons label-start label-end)
+                               (plist-get target :bounds))))))
+          ;; Emphasis/strong/code delimiters and the escape introducer are
+          ;; source markup, not actionable label characters.
+          (dolist (token '("*em*" "**strong**" "`code`"))
+            (goto-char (point-min))
+            (search-forward token)
+            (let ((start (match-beginning 0))
+                  (end (match-end 0)))
+              (pcase token
+                ("*em*" (setq hidden (append (list start (1- end)) hidden)))
+                ("**strong**"
+                 (setq hidden (append (list start (1+ start)
+                                            (- end 2) (1- end)) hidden)))
+                ("`code`" (setq hidden (append (list start (1- end)) hidden))))))
+          (goto-char (point-min))
+          (search-forward "\\*")
+          (push (match-beginning 0) hidden)
+          ;; All nested-image syntax and destination source is hidden except
+          ;; the recursively projected alt characters themselves.
+          (goto-char (point-min))
+          (search-forward "![*alt*](images/inner.png)")
+          (let ((start (match-beginning 0))
+                (end (match-end 0)))
+            (setq hidden
+                  (append (list start (1+ start) (+ start 2) (+ start 6)
+                                (+ start 7) (+ start 8) (1- end))
+                          (number-sequence (+ start 9) (- end 2))
+                          hidden)))
+          (dolist (position hidden)
+            (goto-char position)
+            (should-not (pi-coding-agent--file-target-at-point))))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-nested-label-is-control-safe ()
+  "Projected labels escape controls identically before and after fontification."
+  (dolist (fontified '(nil t))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t))
+        (insert "[safe\n*line*\u200E](docs/out.md)"))
+      (when fontified (font-lock-ensure))
+      (goto-char (point-min))
+      (search-forward "line")
+      (goto-char (match-beginning 0))
+      (let ((target (pi-coding-agent--file-target-at-point)))
+        (should (equal "safe\\nline\\u200E" (plist-get target :label)))
+        (should (equal "safe\n*line*\u200E"
+                       (buffer-substring-no-properties
+                        (car (plist-get target :bounds))
+                        (cdr (plist-get target :bounds)))))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-nested-image-owner-precedence ()
+  "An outer hyperlink owns nested image alt text in every render lifecycle."
+  (dolist (variant '(raw fontified streamed reloaded))
+    (dolist (case '(("[![Alt](images/inner.png)](docs/outer.md)"
+                     "docs/outer.md" "/tmp/session/docs/outer.md")
+                    ("[![Alt](images/inner.png)](https://example.com/out)"
+                     nil nil)
+                    ("[![Alt](images/inner.png)](README.md)" nil nil)
+                    ("[![Alt](images/inner.png)](#preview)" nil nil)
+                    ("![Alt](images/inner.png)"
+                     "images/inner.png" "/tmp/session/images/inner.png")))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+        (pi-coding-agent-test--insert-semantic-link-variant (car case) variant)
+        (goto-char (point-min))
+        (search-forward "Alt")
+        (goto-char (match-beginning 0))
+        (if (nth 1 case)
+            (let ((target (pi-coding-agent--file-target-at-point)))
+              (should (eq :link (plist-get target :source)))
+              (should (equal (nth 1 case) (plist-get target :raw)))
+              (should (equal (nth 2 case) (plist-get target :emacs-path)))
+              (should (equal "Alt" (plist-get target :label))))
+          (should-not (pi-coding-agent--file-target-at-point)))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-nested-reference-projection ()
+  "Nested reference markup renders only its visible description."
+  (dolist (case '(("![[Alt][id]](images/out.png)" "images/out.png")
+                  ("![[Alt][]](images/out.png)" "images/out.png")
+                  ("[![Alt][id]](docs/out.md)" "docs/out.md")))
+    (dolist (fontified '(nil t))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+        (let ((inhibit-read-only t)) (insert (car case)))
+        (when fontified (font-lock-ensure))
+        (goto-char (point-min))
+        (search-forward "Alt")
+        (goto-char (match-beginning 0))
+        (let ((label-bounds (cons (match-beginning 0) (match-end 0)))
+              (target (pi-coding-agent--file-target-at-point)))
+          (should (equal (nth 1 case) (plist-get target :raw)))
+          (should (equal "Alt" (plist-get target :label)))
+          (should (equal label-bounds (plist-get target :bounds))))
+        (goto-char (point-min))
+        (search-forward (if (string-match-p "\\[id\\]" (car case))
+                            "id" "[]"))
+        (goto-char (match-beginning 0))
+        (should-not (pi-coding-agent--file-target-at-point))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-valid-outer-owns-malformed-child ()
+  "Malformed nested constructs cannot override a valid outer destination."
+  (dolist (case '(("![[Alt](bad destination.md)](images/outer.png)"
+                   "images/outer.png")
+                  ("[![Alt](bad destination.md)](docs/outer.md)"
+                   "docs/outer.md")))
+    (dolist (fontified '(nil t))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+        (let ((inhibit-read-only t)) (insert (car case)))
+        (when fontified (font-lock-ensure))
+        (goto-char (point-min))
+        (search-forward "Alt")
+        (goto-char (match-beginning 0))
         (let ((target (pi-coding-agent--file-target-at-point)))
-          (should (equal "src/visible.el:7" (plist-get target :raw)))
-          (should (equal "/tmp/session/src/visible.el"
-                         (plist-get target :emacs-path)))
-          (should (= 7 (plist-get target :line)))
-          (should (equal (cons label-start label-end)
-                         (plist-get target :bounds))))))
-    ;; A programmatic point physically inside the invisible destination must
-    ;; not be reinterpreted as the visually adjacent label.
+          (should (eq :link (plist-get target :source)))
+          (should (equal (nth 1 case) (plist-get target :raw))))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-malformed-child-stays-visible ()
+  "Literal malformed image source remains actionable outer-label text."
+  (let ((source "[![Alt](bad destination.md)](docs/outer.md)")
+        (expected-label "![Alt](bad destination.md)"))
+    (dolist (variant '(raw fontified streamed reloaded))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+        (pi-coding-agent-test--insert-semantic-link-variant source variant)
+        (dolist (case '(("!" 0) ("![" 1) ("Alt" 0)
+                        ("bad destination.md" 0)))
+          (goto-char (point-min))
+          (search-forward (car case))
+          (goto-char (+ (match-beginning 0) (nth 1 case)))
+          (let ((target (pi-coding-agent--file-target-at-point)))
+            (should (eq :link (plist-get target :source)))
+            (should (equal "docs/outer.md" (plist-get target :raw)))
+            (should (equal expected-label (plist-get target :label)))
+            (should (equal expected-label
+                           (buffer-substring-no-properties
+                            (car (plist-get target :bounds))
+                            (cdr (plist-get target :bounds)))))))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-unresolved-nested-shortcut ()
+  "An unresolved nested shortcut stays literal inside a valid outer link."
+  (dolist (variant '(raw fontified streamed reloaded))
+    (dolist (case '(("[src/foo.el [b] c](docs/out.md)"
+                     "docs/out.md" "src/foo.el [b] c")
+                    ("[src/foo.el [b] c](https://example.com/out)"
+                     nil nil)))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+        (pi-coding-agent-test--insert-semantic-link-variant (car case) variant)
+        (goto-char (point-min))
+        (search-forward "src/foo.el")
+        (goto-char (match-beginning 0))
+        (if (nth 1 case)
+            (dolist (needle '("src/foo.el" "[b]" " c]"))
+              (goto-char (point-min))
+              (search-forward needle)
+              (goto-char (match-beginning 0))
+              (when (equal needle " c]") (forward-char 1))
+              (let ((target (pi-coding-agent--file-target-at-point)))
+                (should (eq :link (plist-get target :source)))
+                (should (equal (nth 1 case) (plist-get target :raw)))
+                (should (equal (nth 2 case) (plist-get target :label)))))
+          (should (eq :owned-invalid
+                      (plist-get
+                       (pi-coding-agent--semantic-link-file-target-at-point)
+                       :status)))
+          (should-not (pi-coding-agent--file-target-at-point)))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-shortcut-recovery-respects-code-spans ()
+  "Code-span brackets neither invent nor break recovered outer ownership."
+  (dolist (case '(("`[fake` [b] suffix](docs/out.md)" "b" :not-a-link)
+                  ("[prefix `fake]` [src/leak.el] suffix](https://example.com/out)"
+                   "src/leak.el" :owned-invalid)))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t)) (insert (car case)))
+      (goto-char (point-min))
+      (search-forward (nth 1 case))
+      (goto-char (match-beginning 0))
+      (should (eq (nth 2 case)
+                  (plist-get
+                   (pi-coding-agent--semantic-link-file-target-at-point)
+                   :status)))
+      (should-not (pi-coding-agent--file-target-at-point)))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-shortcut-recovery-respects-html ()
+  "Inline HTML brackets neither invent nor break recovered outer ownership."
+  (dolist (case '(("<span title=\"[fake\"> [b] suffix](docs/out.md)"
+                   "b" :not-a-link)
+                  ("[prefix <span title=\"fake]\"> [src/leak.el] suffix](https://example.com/out)"
+                   "src/leak.el" :owned-invalid)))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t)) (insert (car case)))
+      (goto-char (point-min))
+      (search-forward (nth 1 case))
+      (goto-char (match-beginning 0))
+      (should (eq (nth 2 case)
+                  (plist-get
+                   (pi-coding-agent--semantic-link-file-target-at-point)
+                   :status)))
+      (should-not (pi-coding-agent--file-target-at-point)))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-html-label-markup-is-inert ()
+  "HTML tags are hidden label markup rather than actionable rendered text."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+    (let ((inhibit-read-only t))
+      (insert "[<span title=\"hidden\">src/foo.el</span>](docs/out.md)"))
+    (let ((target (progn (goto-char (point-min))
+                         (search-forward "src/foo.el")
+                         (goto-char (match-beginning 0))
+                         (pi-coding-agent--file-target-at-point))))
+      (should (equal "docs/out.md" (plist-get target :raw)))
+      (should (equal "src/foo.el" (plist-get target :label))))
+    (dolist (needle '("span" "title" "/span"))
+      (goto-char (point-min))
+      (search-forward needle)
+      (goto-char (match-beginning 0))
+      (should-not (pi-coding-agent--file-target-at-point)))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-shortcut-recovery-masks-malformed-child ()
+  "Malformed nested source stays literal without invalidating recovered outer links."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+    (let ((inhibit-read-only t))
+      (insert "[outer [inner [a] x](bad destination.md) [b] tail](docs/outer.md)"))
+    (dolist (needle '("outer" "inner" "a" "b" "tail"))
+      (goto-char (point-min))
+      (search-forward needle)
+      (goto-char (match-beginning 0))
+      (let ((target (pi-coding-agent--file-target-at-point)))
+        (should (equal "docs/outer.md" (plist-get target :raw)))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-recovery-respects-escaped-image-marker ()
+  "An escaped bang cannot fabricate an outer image around nested shortcuts."
+  (dolist (fontified '(nil t))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+      (let ((inhibit-read-only t))
+        (insert "\\![[Inner](docs/in.md) [b]](docs/out.md)"))
+      (when fontified (font-lock-ensure))
+      (goto-char (point-min))
+      (search-forward "Inner")
+      (goto-char (match-beginning 0))
+      (should (equal "docs/in.md"
+                     (plist-get
+                      (pi-coding-agent--file-target-at-point) :raw)))
+      (goto-char (point-min))
+      (search-forward "b")
+      (goto-char (match-beginning 0))
+      (should-not (pi-coding-agent--file-target-at-point)))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-recovery-keeps-valid-inner-link ()
+  "Recovery cannot fabricate a forbidden outer link around a valid inner link."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+    (let ((inhibit-read-only t))
+      (insert "[[Inner](docs/in.md) [b]](docs/out.md)"))
     (goto-char (point-min))
-    (search-forward "src/hidden.el")
-    (goto-char (- (point) 3))
+    (search-forward "Inner")
+    (goto-char (match-beginning 0))
+    (should (equal "docs/in.md"
+                   (plist-get (pi-coding-agent--file-target-at-point) :raw)))
+    (goto-char (point-min))
+    (search-forward "b")
+    (goto-char (match-beginning 0))
     (should-not (pi-coding-agent--file-target-at-point))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-recovery-keeps-reference-inner ()
+  "Completed reference links block fabricated recovered outer hyperlinks."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "[[Inner][id] [b]](docs/out.md)\n\n[id]: docs/in.md"))
+    (goto-char (point-min))
+    (search-forward "Inner")
+    (goto-char (match-beginning 0))
+    (should (eq :owned-invalid
+                (plist-get
+                 (pi-coding-agent--semantic-link-file-target-at-point)
+                 :status)))
+    (should-not (pi-coding-agent--file-target-at-point))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-recovery-ignores-dest-brackets ()
+  "Brackets in completed destinations cannot corrupt outer recovery balance."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+    (let ((inhibit-read-only t))
+      (insert "[![Alt](<https://x/a]b>) [q]](docs/out.md)"))
+    (dolist (needle '("Alt" "q"))
+      (goto-char (point-min))
+      (search-forward needle)
+      (goto-char (match-beginning 0))
+      (should (equal "docs/out.md"
+                     (plist-get
+                      (pi-coding-agent--file-target-at-point) :raw))))))
+
+(ert-deftest pi-coding-agent-test-file-target-image-recovery-owns-nested-link ()
+  "A recovered valid outer image owns a nested link containing a shortcut."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+    (let ((inhibit-read-only t))
+      (insert "![[foo [b] tail](docs/link.md)](images/out.png)"))
+    (dolist (needle '("foo" "b" "tail"))
+      (goto-char (point-min))
+      (search-forward needle)
+      (goto-char (match-beginning 0))
+      (should (equal "images/out.png"
+                     (plist-get
+                      (pi-coding-agent--file-target-at-point) :raw))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-shortcut-stack-is-linear ()
+  "Deep opener stacks are not copied once for every captured shortcut."
+  (let* ((count 3000)
+         (source (concat (make-string count ?\[)
+                         (apply #'concat (make-list count "[a] "))
+                         (make-string count ?\])))
+         (original (symbol-function 'copy-sequence))
+         (copied-list-elements 0))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t)) (insert source))
+      (goto-char (+ (point-min) count 1))
+      (cl-letf (((symbol-function 'copy-sequence)
+                 (lambda (sequence)
+                   (when (listp sequence)
+                     (setq copied-list-elements
+                           (+ copied-list-elements (length sequence))))
+                   (funcall original sequence))))
+        (pi-coding-agent--semantic-link-file-target-at-point))
+      (should (< copied-list-elements (* count 10))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-shortcut-recovery-is-linear ()
+  "Many nested unresolved shortcuts recover one outer tail in linear work."
+  (let* ((count 600)
+         (source (concat "[prefix "
+                         (apply #'concat (make-list count "[a] "))
+                         "suffix](docs/out.md)"))
+         (original
+          (symbol-function 'pi-coding-agent--semantic-link-malformed-end))
+         (scanner-calls 0))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+      (let ((inhibit-read-only t)) (insert source))
+      (goto-char (+ (point-min) 2))
+      (cl-letf (((symbol-function
+                  'pi-coding-agent--semantic-link-malformed-end)
+                 (lambda (start end)
+                   (setq scanner-calls (1+ scanner-calls))
+                   (funcall original start end))))
+        (let ((target (pi-coding-agent--file-target-at-point)))
+          (should (equal "docs/out.md" (plist-get target :raw)))
+          (should (string-prefix-p "prefix [a] [a] "
+                                   (plist-get target :label)))))
+      (should (= 1 scanner-calls)))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-distinct-recovery-is-linear ()
+  "Distinct incomplete candidates do not repeatedly scan the remaining host."
+  (let* ((count 600)
+         (source (apply #'concat (make-list count "[x [a]](")))
+         (original
+          (symbol-function 'pi-coding-agent--semantic-link-malformed-end))
+         (scanned 0))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t)) (insert source))
+      (goto-char (+ (point-min) 1))
+      (cl-letf (((symbol-function
+                  'pi-coding-agent--semantic-link-malformed-end)
+                 (lambda (start end)
+                   (setq scanned (+ scanned (- end start)))
+                   (funcall original start end))))
+        (should (eq :owned-invalid
+                    (plist-get
+                     (pi-coding-agent--semantic-link-file-target-at-point)
+                     :status))))
+      (should (<= scanned (* 2 (length source)))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-deep-nested-label-is-bounded ()
+  "Deep semantic label nesting avoids recursive projection and repeated walks."
+  (let ((label "Alt"))
+    (dotimes (_ 200)
+      (setq label (format "![%s](images/inner.png)" label)))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+      (let ((inhibit-read-only t))
+        (insert "[" label "](docs/outer.md)"))
+      (goto-char (point-min))
+      (search-forward "Alt")
+      (goto-char (match-beginning 0))
+      (let ((target (pi-coding-agent--file-target-at-point)))
+        (should (equal "docs/outer.md" (plist-get target :raw)))
+        (should (equal "Alt" (plist-get target :label)))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-shortcut-outer-owns-nested-image ()
+  "An unsupported shortcut hyperlink suppresses its nested local image."
+  (dolist (fontified '(nil t))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t))
+        (insert "[![Alt](images/inner.png)]"))
+      (when fontified (font-lock-ensure))
+      (goto-char (point-min))
+      (search-forward "Alt")
+      (goto-char (match-beginning 0))
+      (should (eq :owned-invalid
+                  (plist-get
+                   (pi-coding-agent--semantic-link-file-target-at-point)
+                   :status)))
+      (should-not (pi-coding-agent--file-target-at-point)))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-reference-outer-owns-nested-image ()
+  "Unsupported reference hyperlinks suppress nested local image activation."
+  (dolist (source '("[![Alt](images/inner.png)][ref]"
+                    "[![Alt](images/inner.png)][]"))
+    (dolist (fontified '(nil t))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (let ((inhibit-read-only t)) (insert source))
+        (when fontified (font-lock-ensure))
+        (goto-char (point-min))
+        (search-forward "Alt")
+        (goto-char (match-beginning 0))
+        (should (eq :owned-invalid
+                    (plist-get
+                     (pi-coding-agent--semantic-link-file-target-at-point)
+                     :status)))
+        (should-not (pi-coding-agent--file-target-at-point))))))
+
+(ert-deftest pi-coding-agent-test-file-target-image-owns-nested-label-constructs ()
+  "A standalone outer image owns nested links and images in its description."
+  (dolist (case '(("![[Alt](docs/inner.md)](images/outer.png)"
+                   "docs/inner.md")
+                  ("![![Alt](images/inner.png)](images/outer.png)"
+                   "images/inner.png")))
+    (dolist (fontified '(nil t))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+        (let ((inhibit-read-only t)) (insert (car case)))
+        (when fontified (font-lock-ensure))
+        (goto-char (point-min))
+        (search-forward "Alt")
+        (goto-char (match-beginning 0))
+        (let ((target (pi-coding-agent--file-target-at-point)))
+          (should (equal "images/outer.png" (plist-get target :raw)))
+          (should (equal "/tmp/session/images/outer.png"
+                         (plist-get target :emacs-path)))
+          (should (equal "Alt" (plist-get target :label))))
+        (goto-char (point-min))
+        (search-forward (nth 1 case))
+        (goto-char (match-beginning 0))
+        (should-not (pi-coding-agent--file-target-at-point))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-nested-image-hidden-source-is-inert ()
+  "Inner and outer image/link markup and destinations never activate."
+  (let ((source "[![Alt](images/inner.png)](docs/outer.md)"))
+    (dolist (variant '(raw fontified streamed reloaded))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+        (pi-coding-agent-test--insert-semantic-link-variant source variant)
+        (goto-char (point-min))
+        (search-forward source)
+        (let* ((start (match-beginning 0))
+               (alt-start (+ start 3))
+               (alt-end (+ alt-start 3)))
+          (goto-char alt-start)
+          (should (equal "docs/outer.md"
+                         (plist-get (pi-coding-agent--file-target-at-point) :raw)))
+          (dolist (position
+                   (append (number-sequence start (1- alt-start))
+                           (number-sequence alt-end (+ start 27))
+                           (number-sequence (+ start 28) (1- (+ start (length source))))))
+            (goto-char position)
+            (should-not (pi-coding-agent--file-target-at-point))))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-exact-real-case ()
+  "The motivating inline local Markdown link resolves by its destination."
+  (dolist (fontified '(nil t))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+      (let ((inhibit-read-only t))
+        (insert "[Markdown](tmp/quant-report-2026-07-10.md)"))
+      (when fontified (font-lock-ensure))
+      (goto-char (+ (point-min) 3))
+      (let ((target (pi-coding-agent--file-target-at-point)))
+        (should (eq :link (plist-get target :source)))
+        (should (equal "tmp/quant-report-2026-07-10.md"
+                       (plist-get target :raw)))
+        (should (equal "tmp/quant-report-2026-07-10.md"
+                       (plist-get target :display)))
+        (should (equal "Markdown" (plist-get target :label)))
+        (should (equal "/tmp/session/tmp/quant-report-2026-07-10.md"
+                       (plist-get target :emacs-path)))
+        (should (equal "/tmp/session/tmp/quant-report-2026-07-10.md"
+                       (plist-get target :shell-path)))
+        (should-not (plist-get target :fragment))
+        (should (equal "Markdown"
+                       (buffer-substring-no-properties
+                        (car (plist-get target :bounds))
+                        (cdr (plist-get target :bounds)))))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-destination-owns-visible-label ()
+  "A local destination wins over a differing path-like visible label."
+  (dolist (fontified '(nil t))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+      (let ((inhibit-read-only t))
+        (insert "See [src/visible.el:7](docs/actual.md \"A title\")."))
+      (when fontified (font-lock-ensure))
+      (goto-char (point-min))
+      (search-forward "src/visible.el:7")
+      (let ((label-start (match-beginning 0))
+            (label-end (match-end 0)))
+        ;; Each rendered character's leading source boundary resolves.  The
+        ;; trailing label boundary is physically the hidden closing bracket and
+        ;; is therefore no longer actionable.
+        (dolist (position (list label-start (1- label-end)))
+          (goto-char position)
+          (let ((target (pi-coding-agent--file-target-at-point)))
+            (should (eq :link (plist-get target :source)))
+            (should (equal "docs/actual.md" (plist-get target :raw)))
+            (should (equal "/tmp/session/docs/actual.md"
+                           (plist-get target :emacs-path)))
+            (should-not (plist-get target :line))
+            (should (equal (cons label-start label-end)
+                           (plist-get target :bounds)))))
+        (dolist (position (list (1- label-start) label-end))
+          (goto-char position)
+          (should-not (pi-coding-agent--file-target-at-point))))
+      ;; Raw and fontified destination/title/markup source is semantic-owned,
+      ;; never a strict visible-text fallback.
+      (dolist (needle '("docs/actual.md" "A title"))
+        (goto-char (point-min))
+        (search-forward needle)
+        (goto-char (match-beginning 0))
+        (should-not (pi-coding-agent--file-target-at-point))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-image-label-uses-destination ()
+  "An inline image resolves its local destination from visible alt text."
+  (dolist (fontified '(nil t))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+      (let ((inhibit-read-only t))
+        (insert "![Preview](images/quant-report.png)"))
+      (when fontified (font-lock-ensure))
+      (goto-char (+ (point-min) 4))
+      (let ((target (pi-coding-agent--file-target-at-point)))
+        (should (eq :link (plist-get target :source)))
+        (should (equal "images/quant-report.png" (plist-get target :raw)))
+        (should (equal "Preview" (plist-get target :label)))
+        (should (equal "/tmp/session/images/quant-report.png"
+                       (plist-get target :emacs-path)))
+        (should (equal "Preview"
+                       (buffer-substring-no-properties
+                        (car (plist-get target :bounds))
+                        (cdr (plist-get target :bounds))))))
+      (goto-char (point-min))
+      (search-forward "images/quant-report.png")
+      (should-not (pi-coding-agent--file-target-at-point)))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-angle-space-and-fragment-contract ()
+  "Angle destinations may use strict spaces; fragments stay non-filesystem."
+  (dolist (case '(("[Report](<reports/quant report.md>)"
+                   "<reports/quant report.md>" "reports/quant report.md" nil)
+                  ("[Report](reports/quant.md#methodology)"
+                   "reports/quant.md#methodology" "reports/quant.md"
+                   "methodology")))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+      (let ((inhibit-read-only t)) (insert (nth 0 case)))
+      (goto-char (+ (point-min) 3))
+      (let ((target (pi-coding-agent--file-target-at-point)))
+        (should (eq :link (plist-get target :source)))
+        (should (equal (nth 1 case) (plist-get target :raw)))
+        (should (equal (concat "/tmp/session/" (nth 2 case))
+                       (plist-get target :emacs-path)))
+        (should (equal (nth 3 case) (plist-get target :fragment)))
+        (should-not (plist-get target :line))
+        (should-not (plist-get target :range))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-empty-label-is-inert ()
+  "Valid links and images without emitted label text stay owned and inert."
+  (dolist (text '("[](docs/a.md)" "![](images/a.png)"))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t)) (insert text))
+      (goto-char (point-min))
+      (search-forward "]")
+      (goto-char (1- (point)))
+      (should (eq :owned-invalid
+                  (plist-get
+                   (pi-coding-agent--semantic-link-file-target-at-point)
+                   :status)))
+      (should-not (pi-coding-agent--file-target-at-point)))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-non-file-destinations-own-label ()
+  "Recognized non-file links suppress path-like visible-text fallback."
+  (dolist (text '("[src/fallback.el](https://example.com/file.md)"
+                  "[src/fallback.el](mailto:user@example.com)"
+                  "[src/fallback.el](//example.com/file.md)"
+                  "[src/fallback.el](#heading)"
+                  "[src/fallback.el]()"
+                  "[src/fallback.el](README.md)"
+                  "[src/fallback.el][definition]"
+                  "[src/fallback.el][]"
+                  "![src/fallback.el][image-definition]"))
+    (dolist (fontified '(nil t))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (let ((inhibit-read-only t)) (insert text))
+        (when fontified (font-lock-ensure))
+        (goto-char (+ (point-min) 5))
+        (should-not (pi-coding-agent--file-target-at-point))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-malformed-inline-owns-source ()
+  "Malformed inline syntax cannot expose a path-like label or destination."
+  (dolist (text '("[src/label.el](docs/incomplete.md"
+                  "[src/label.el](docs/bad destination.md)"))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t)) (insert text))
+      (dolist (needle '("src/label.el" "docs/"))
+        (goto-char (point-min))
+        (search-forward needle)
+        (goto-char (match-beginning 0))
+        (should-not (pi-coding-agent--file-target-at-point))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-streaming-becomes-complete ()
+  "An incomplete streamed link is invalid, then resolves when completed."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+    (let ((inhibit-read-only t))
+      (insert "[Markdown](tmp/quant-report.md"))
+    (goto-char (+ (point-min) 3))
+    (should-not (pi-coding-agent--file-target-at-point))
+    (font-lock-ensure)
+    (should-not (pi-coding-agent--file-target-at-point))
+    (let ((inhibit-read-only t))
+      (goto-char (point-max))
+      (insert ")"))
+    (goto-char (+ (point-min) 3))
+    (let ((before (pi-coding-agent--file-target-at-point)))
+      (should (eq :link (plist-get before :source)))
+      (should (equal "/tmp/session/tmp/quant-report.md"
+                     (plist-get before :emacs-path))))
+    (font-lock-flush)
+    (font-lock-ensure)
+    (let ((after (pi-coding-agent--file-target-at-point)))
+      (should (eq :link (plist-get after :source)))
+      (should (equal "/tmp/session/tmp/quant-report.md"
+                     (plist-get after :emacs-path))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-shortcut-keeps-strict-text-contract ()
+  "Unresolved shortcut syntax remains an ordinary strict bracket wrapper."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+    (let ((inhibit-read-only t)) (insert "Open [src/shortcut.el] now"))
+    (goto-char (+ (point-min) 8))
+    (let ((target (pi-coding-agent--file-target-at-point)))
+      (should (eq :text (plist-get target :source)))
+      (should (equal "src/shortcut.el" (plist-get target :raw))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-preserves-remote-boundaries ()
+  "Semantic local links reuse canonical remote and multi-hop path boundaries."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity
+     "/ssh:bastion|sudo:root@pi-host:/home/pi/project/")
+    (let ((inhibit-read-only t)) (insert "[Report](reports/out.md)"))
+    (goto-char (+ (point-min) 3))
+    (let ((target (pi-coding-agent--file-target-at-point)))
+      (should (equal "/ssh:bastion|sudo:root@pi-host:/home/pi/project/reports/out.md"
+                     (plist-get target :emacs-path)))
+      (should (equal "/home/pi/project/reports/out.md"
+                     (plist-get target :shell-path))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-tri-state-is-explicit ()
+  "Semantic ownership distinguishes absence, validity, and owned invalidity."
+  (dolist (case '(("ordinary prose" :not-a-link)
+                  ("[Report](reports/out.md)" :owned-valid)
+                  ("[src/fallback.el](https://example.com/x)"
+                   :owned-invalid)
+                  ("[src/fallback.el][id]" :owned-invalid)))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t)) (insert (car case)))
+      (goto-char (+ (point-min) (if (string-prefix-p "[" (car case)) 3 2)))
+      (let ((resolution
+             (pi-coding-agent--semantic-link-file-target-at-point)))
+        (should (eq (nth 1 case) (plist-get resolution :status)))
+        (should (eq (eq (nth 1 case) :owned-valid)
+                    (and (plist-get resolution :target) t)))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-selects-canonical-host-parser ()
+  "A restricted Markdown parser cannot shadow the canonical host parser."
+  (dolist (fontified '(nil t))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t))
+        (insert "Wrong host paragraph.\n\n"
+                "[src/fallback.el](https://example.com/file.md)"))
+      (when fontified (font-lock-ensure))
+      (let ((restricted (treesit-parser-create 'markdown nil t)))
+        (unwind-protect
+            (progn
+              ;; A newly created no-reuse parser is first in parser-list order,
+              ;; but its actual included range covers only the wrong host.
+              (goto-char (point-min))
+              (search-forward "src/fallback.el")
+              (goto-char (match-beginning 0))
+              (treesit-parser-set-included-ranges
+               restricted (list (cons (1- (point)) (+ (point) 5))))
+              (should (seq-some
+                       (lambda (range)
+                         (<= (car range) (point) (cdr range)))
+                       (treesit-parser-included-ranges restricted)))
+              (should (eq :owned-invalid
+                          (plist-get
+                           (pi-coding-agent--semantic-link-file-target-at-point)
+                           :status)))
+              (should-not (pi-coding-agent--file-target-at-point)))
+          (treesit-parser-delete restricted))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-requires-trustworthy-host-parser ()
+  "Missing canonical Markdown state fails closed instead of exposing a label."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "Wrong host paragraph.\n\n"
+              "[src/fallback.el](https://example.com/file.md)"))
+    (let* ((canonical
+            (seq-find
+             (lambda (parser)
+               (and (eq (treesit-parser-language parser) 'markdown)
+                    (null (treesit-parser-included-ranges parser))))
+             (treesit-parser-list)))
+           (restricted (treesit-parser-create 'markdown nil t)))
+      (unwind-protect
+          (progn
+            (treesit-parser-set-included-ranges
+             restricted (list (cons (point-min) 22)))
+            (treesit-parser-delete canonical)
+            (goto-char (point-min))
+            (search-forward "src/fallback.el")
+            (goto-char (match-beginning 0))
+            (cl-letf (((symbol-function
+                        'pi-coding-agent--text-file-target-at-point)
+                       (lambda ()
+                         (ert-fail "Parser failure must not reach fallback"))))
+              (should-error (pi-coding-agent--file-target-at-point)
+                            :type
+                            'pi-coding-agent-semantic-link-parser-error)))
+        (treesit-parser-delete restricted)))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-parser-failures-fail-closed ()
+  "Tree root and capture failures are controlled, never semantic absence."
+  (dolist (failed-function '(treesit-parser-root-node
+                             treesit-query-capture
+                             treesit-parser-list
+                             treesit-parser-included-ranges))
+    (dolist (signal-type '(error user-error))
+      (dolist (fontified '(nil t))
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (let ((inhibit-read-only t))
+            (insert "[src/fallback.el](https://example.com/file.md)"))
+          (when fontified (font-lock-ensure))
+          (goto-char (+ (point-min) 5))
+          (cl-letf (((symbol-function failed-function)
+                     (lambda (&rest _)
+                       (signal signal-type
+                               (list (format "Injected tree-sitter %s failure"
+                                             failed-function)))))
+                    ((symbol-function 'pi-coding-agent--text-file-target-at-point)
+                     (lambda ()
+                       (ert-fail "Parser failure must not reach fallback"))))
+            (should-error (pi-coding-agent--file-target-at-point)
+                          :type
+                          'pi-coding-agent-semantic-link-parser-error)))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-respects-markdown-host-context ()
+  "Inline-looking source in a fenced block is not a semantic Markdown link."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "```markdown\n[src/fallback.el](docs/not-a-link.md)\n```"))
+    (goto-char (point-min))
+    (search-forward "src/fallback.el")
+    (should (eq :not-a-link
+                (plist-get
+                 (pi-coding-agent--semantic-link-file-target-at-point)
+                 :status)))
+    (should-not (pi-coding-agent--file-target-at-point))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-decodes-supported-escape ()
+  "Tree-recognized punctuation escaping stays within strict path grammar."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+    (let ((inhibit-read-only t)) (insert "[Report](reports/a\\_b.md)"))
+    (goto-char (+ (point-min) 3))
+    (let ((target (pi-coding-agent--file-target-at-point)))
+      (should (equal "reports/a\\_b.md" (plist-get target :raw)))
+      (should (equal "/tmp/session/reports/a_b.md"
+                     (plist-get target :emacs-path))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-stays-below-hot-and-cold-tools ()
+  "Tool authority wins over semantic-looking body source before and after cooling."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/session/")
+    (pi-coding-agent--display-tool-start "read" '(:path "src/tool.el"))
+    (pi-coding-agent--display-tool-end
+     "read" '(:path "src/tool.el")
+     '((:type "text" :text "[Report](reports/not-owned.md)")) nil nil)
+    (goto-char (point-min))
+    (search-forward "Report")
+    (let ((hot (pi-coding-agent--file-target-at-point)))
+      (should (eq :tool (plist-get hot :source)))
+      (should (equal "src/tool.el" (plist-get hot :raw))))
+    (pi-coding-agent--cool-completed-tool-blocks
+     (pi-coding-agent-test--all-tool-overlays))
+    (goto-char (point-min))
+    (search-forward "Report")
+    (let ((cold (pi-coding-agent--file-target-at-point)))
+      (should (eq :tool (plist-get cold :source)))
+      (should (equal "src/tool.el" (plist-get cold :raw))))))
+
+(defun pi-coding-agent-test--all-treesit-parsers ()
+  "Return all current-buffer parsers on supported Emacs versions."
+  (if (>= emacs-major-version 30)
+      (treesit-parser-list nil nil t)
+    (treesit-parser-list)))
+
+(defun pi-coding-agent-test--semantic-parser-state ()
+  "Snapshot parser and local-overlay identities, ranges, and timestamps."
+  (list
+   :parsers
+   (mapcar (lambda (parser)
+             (cons parser (treesit-parser-included-ranges parser)))
+           (treesit-parser-list))
+   :overlays
+   (mapcar
+    (lambda (overlay)
+      (let ((parser (overlay-get overlay 'treesit-parser)))
+        (list overlay (overlay-start overlay) (overlay-end overlay)
+              parser (treesit-parser-included-ranges parser)
+              (overlay-get overlay 'treesit-parser-ov-timestamp))))
+    (seq-filter
+     (lambda (overlay) (overlay-get overlay 'treesit-parser))
+     (append (car (overlay-lists)) (cdr (overlay-lists)))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-lookup-cleans-host-endpoints ()
+  "Raw lookup at exclusive host bounds and point-max leaks no parser state."
+  (dolist (position '(start end))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t)) (insert "[Report](reports/out.md)"))
+      (goto-char (if (eq position 'start) (point-min) (point-max)))
+      (let ((before (pi-coding-agent-test--semantic-parser-state)))
+        (dotimes (_ 2)
+          (pi-coding-agent--semantic-link-file-target-at-point)
+          (should (equal before
+                         (pi-coding-agent-test--semantic-parser-state))))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-preserves-preexisting-local-parser ()
+  "Lookup preserves a preexisting md-ts local parser at its exclusive end."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t)) (insert "[Report](reports/out.md)"))
+    (font-lock-ensure)
+    (let* ((before (pi-coding-agent-test--semantic-parser-state))
+           (local-overlays (plist-get before :overlays)))
+      (should local-overlays)
+      (should (seq-some (lambda (entry)
+                          (= (nth 2 entry) (point-max)))
+                        local-overlays))
+      (goto-char (point-max))
+      (dotimes (_ 2)
+        (pi-coding-agent--semantic-link-file-target-at-point)
+        (should (equal before
+                       (pi-coding-agent-test--semantic-parser-state)))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-preserves-stale-local-parser ()
+  "Lookup does not let md-ts replace a preexisting stale local parser."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "[Report](reports/out.md)\n\nOther paragraph."))
+    (font-lock-ensure)
+    ;; Make the local parser's md-ts timestamp stale without refontifying.
+    (let ((inhibit-read-only t))
+      (goto-char (point-max))
+      (insert "!"))
+    (goto-char (+ (point-min) 3))
+    (let ((before (pi-coding-agent-test--semantic-parser-state))
+          (original-captures
+           (symbol-function 'pi-coding-agent--semantic-link-captures)))
+      (should (plist-get before :overlays))
+      (cl-letf (((symbol-function 'pi-coding-agent--semantic-link-captures)
+                 (lambda (start end)
+                   ;; Force the lazy range-discovery path that would recreate
+                   ;; an exposed stale md-ts local parser.
+                   (treesit-update-ranges start end)
+                   (funcall original-captures start end))))
+        (dotimes (_ 2)
+          (should (eq :owned-valid
+                      (plist-get
+                       (pi-coding-agent--semantic-link-file-target-at-point)
+                       :status)))
+          (should (equal before
+                         (pi-coding-agent-test--semantic-parser-state))))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-uses-emacs-29-parser-api ()
+  "The resolver creates its parser through the Emacs 29 three-argument API."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t)) (insert "[Report](reports/out.md)"))
+    (goto-char (+ (point-min) 3))
+    (let ((original-create (symbol-function 'treesit-parser-create)))
+      (cl-letf (((symbol-function 'treesit-parser-create)
+                 (lambda (language &optional buffer no-reuse)
+                   (funcall original-create language buffer no-reuse))))
+        (should (eq :owned-valid
+                    (plist-get
+                     (pi-coding-agent--semantic-link-file-target-at-point)
+                     :status)))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-preserves-foreign-new-parser ()
+  "Cleanup preserves an unrelated parser created during semantic lookup."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t)) (insert "[Report](reports/out.md)"))
+    (goto-char (+ (point-min) 3))
+    (let ((original-query (symbol-function 'treesit-query-capture))
+          foreign-parser foreign-ranges)
+      (unwind-protect
+          (progn
+            (cl-letf (((symbol-function 'treesit-query-capture)
+                       (lambda (&rest arguments)
+                         (unless foreign-parser
+                           (setq foreign-parser
+                                 (treesit-parser-create
+                                  'json nil t)
+                                 foreign-ranges
+                                 (list (cons (point-min) (point-max))))
+                           (treesit-parser-set-included-ranges
+                            foreign-parser foreign-ranges))
+                         (apply original-query arguments))))
+              (should (eq :owned-valid
+                          (plist-get
+                           (pi-coding-agent--semantic-link-file-target-at-point)
+                           :status))))
+            (should (memq foreign-parser (treesit-parser-list)))
+            (should (equal foreign-ranges
+                           (treesit-parser-included-ranges foreign-parser))))
+        (when (and foreign-parser
+                   (memq foreign-parser (treesit-parser-list)))
+          (treesit-parser-delete foreign-parser))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-preserves-incomplete-parser-overlay ()
+  "Lookup does not let md-ts adopt a preexisting partial parser overlay."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t)) (insert "[Report](reports/out.md)"))
+    (goto-char (+ (point-min) 3))
+    (let* ((parser (treesit-parser-create 'markdown-inline nil t))
+           (overlay (make-overlay (point-min) (point-max)))
+           (original-captures
+            (symbol-function 'pi-coding-agent--semantic-link-captures)))
+      (treesit-parser-set-included-ranges
+       parser (list (cons (point-min) (point-max))))
+      (overlay-put overlay 'treesit-parser parser)
+      (unwind-protect
+          (progn
+            (cl-letf (((symbol-function
+                        'pi-coding-agent--semantic-link-captures)
+                       (lambda (start end)
+                         (treesit-update-ranges start end)
+                         (funcall original-captures start end))))
+              (should (eq :owned-valid
+                          (plist-get
+                           (pi-coding-agent--semantic-link-file-target-at-point)
+                           :status))))
+            (should (eq parser (overlay-get overlay 'treesit-parser)))
+            (should-not (overlay-get overlay 'treesit-host-parser))
+            (should-not (overlay-get overlay 'treesit-parser-ov-timestamp)))
+        (when (overlay-buffer overlay) (delete-overlay overlay))
+        (when (memq parser (pi-coding-agent-test--all-treesit-parsers))
+          (treesit-parser-delete parser))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-disables-local-range-updater ()
+  "Lookup never runs md-ts local range discovery or its synchronous callbacks."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t)) (insert "[Report](reports/out.md)"))
+    (goto-char (+ (point-min) 3))
+    (let ((original-updater
+           (symbol-function 'md-ts--treesit--update-ranges-local))
+          (original-captures
+           (symbol-function 'pi-coding-agent--semantic-link-captures))
+          marker)
+      (unwind-protect
+          (cl-letf (((symbol-function 'md-ts--treesit--update-ranges-local)
+                     (lambda (&rest args)
+                       (unless marker
+                         (setq marker (make-overlay (point-min) (point-min))))
+                       (apply original-updater args)))
+                    ((symbol-function 'pi-coding-agent--semantic-link-captures)
+                     (lambda (start end)
+                       (treesit-update-ranges start end)
+                       (funcall original-captures start end))))
+            (should (eq :owned-valid
+                        (plist-get
+                         (pi-coding-agent--semantic-link-file-target-at-point)
+                         :status)))
+            (should-not marker))
+        (when (and marker (overlay-buffer marker))
+          (delete-overlay marker))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-preserves-foreign-inline-overlay ()
+  "Cleanup preserves an unrelated inline parser overlay created during lookup."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t)) (insert "[Report](reports/out.md)"))
+    (goto-char (+ (point-min) 3))
+    (let ((original-captures
+           (symbol-function 'pi-coding-agent--semantic-link-captures))
+          foreign-parser foreign-overlay)
+      (unwind-protect
+          (progn
+            (cl-letf (((symbol-function
+                        'pi-coding-agent--semantic-link-captures)
+                       (lambda (&rest arguments)
+                         (unless foreign-parser
+                           (setq foreign-parser
+                                 (treesit-parser-create 'markdown-inline nil t)
+                                 foreign-overlay
+                                 (make-overlay (point-min) (point-max)))
+                           (treesit-parser-set-included-ranges
+                            foreign-parser
+                            (list (cons (point-min) (point-max))))
+                           (overlay-put foreign-overlay
+                                        'treesit-parser foreign-parser)
+                           (overlay-put
+                            foreign-overlay 'treesit-host-parser
+                            (pi-coding-agent--semantic-link-markdown-host-parser))
+                           (overlay-put foreign-overlay
+                                        'treesit-parser-ov-timestamp 1))
+                         (apply original-captures arguments))))
+              (should (eq :owned-valid
+                          (plist-get
+                           (pi-coding-agent--semantic-link-file-target-at-point)
+                           :status))))
+            (should (overlay-buffer foreign-overlay))
+            (should (memq foreign-parser
+                          (pi-coding-agent-test--all-treesit-parsers))))
+        (when (overlay-buffer foreign-overlay)
+          (delete-overlay foreign-overlay))
+        (when (and foreign-parser
+                   (memq foreign-parser
+                         (pi-coding-agent-test--all-treesit-parsers)))
+          (treesit-parser-delete foreign-parser))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-avoids-cleanup-classification ()
+  "Cleanup uses registered identities without fallible metadata rescanning."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t)) (insert "[Report](reports/out.md)"))
+    (goto-char (+ (point-min) 3))
+    (let ((before-parsers (pi-coding-agent-test--all-treesit-parsers))
+          (before-overlays (overlay-lists))
+          (original-captures
+           (symbol-function 'pi-coding-agent--semantic-link-captures))
+          (original-cleanup
+           (symbol-function
+            'pi-coding-agent--semantic-link-cleanup-parser-state))
+          (original-language (symbol-function 'treesit-parser-language))
+          cleaning failed)
+      (cl-letf
+          (((symbol-function 'pi-coding-agent--semantic-link-captures)
+            (lambda (start end)
+              (treesit-update-ranges start end)
+              (funcall original-captures start end)))
+           ((symbol-function
+             'pi-coding-agent--semantic-link-cleanup-parser-state)
+            (lambda (state)
+              (setq cleaning t)
+              (unwind-protect
+                  (funcall original-cleanup state)
+                (setq cleaning nil))))
+           ((symbol-function 'treesit-parser-language)
+            (lambda (parser)
+              (when (and cleaning (not failed)
+                         (not (memq parser before-parsers)))
+                (setq failed t)
+                (error "Injected cleanup classification failure"))
+              (funcall original-language parser))))
+        (should (eq :owned-valid
+                    (plist-get
+                     (pi-coding-agent--semantic-link-file-target-at-point)
+                     :status))))
+      (should-not failed)
+      (should (equal before-parsers
+                     (pi-coding-agent-test--all-treesit-parsers)))
+      (should (equal before-overlays (overlay-lists))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-creates-no-local-parser-state ()
+  "Even an explicit range update inside lookup cannot create local state."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t)) (insert "[Report](reports/out.md)"))
+    (goto-char (+ (point-min) 3))
+    (let ((before-parsers (pi-coding-agent-test--all-treesit-parsers))
+          (before-overlays (overlay-lists))
+          (original-captures
+           (symbol-function 'pi-coding-agent--semantic-link-captures)))
+      (cl-letf (((symbol-function 'pi-coding-agent--semantic-link-captures)
+                 (lambda (start end)
+                   (treesit-update-ranges start end)
+                   (funcall original-captures start end))))
+        (should (eq :owned-valid
+                    (plist-get
+                     (pi-coding-agent--semantic-link-file-target-at-point)
+                     :status))))
+      (should (equal before-parsers
+                     (pi-coding-agent-test--all-treesit-parsers)))
+      (should (equal before-overlays (overlay-lists))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-retries-resolver-parser-cleanup ()
+  "A failed direct parser deletion is retried by identity during cleanup."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t)) (insert "[Report](reports/out.md)"))
+    (goto-char (+ (point-min) 3))
+    (let ((before (treesit-parser-list))
+          (original-delete (symbol-function 'treesit-parser-delete))
+          failed-parser
+          (failed-parser-delete-attempts 0))
+      (cl-letf (((symbol-function 'treesit-parser-delete)
+                 (lambda (parser)
+                   (if (and (not failed-parser)
+                            (eq (treesit-parser-language parser)
+                                'markdown-inline))
+                       (progn
+                         (setq failed-parser parser
+                               failed-parser-delete-attempts 1)
+                         (error "Injected direct parser deletion failure"))
+                     (when (eq parser failed-parser)
+                       (setq failed-parser-delete-attempts
+                             (1+ failed-parser-delete-attempts)))
+                     (funcall original-delete parser)))))
+        (should-error (pi-coding-agent--semantic-link-file-target-at-point)
+                      :type
+                      'pi-coding-agent-semantic-link-parser-error))
+      (should failed-parser)
+      (should (= 2 failed-parser-delete-attempts))
+      (should-not (memq failed-parser (treesit-parser-list)))
+      (should (equal before (treesit-parser-list))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-cleanup-error-restores-overlay ()
+  "A controlled cleanup failure still restores preexisting overlay state."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t)) (insert "[Report](reports/out.md)"))
+    (font-lock-ensure)
+    (goto-char (+ (point-min) 3))
+    (let* ((before (pi-coding-agent-test--semantic-parser-state))
+           (local-parser (nth 3 (car (plist-get before :overlays))))
+           (original-cleanup
+            (symbol-function
+             'pi-coding-agent--semantic-link-cleanup-parser-state))
+           (original-ranges
+            (symbol-function 'treesit-parser-included-ranges))
+           cleanup-entered)
+      (should local-parser)
+      (cl-letf
+          (((symbol-function
+             'pi-coding-agent--semantic-link-cleanup-parser-state)
+            (lambda (state)
+              (setq cleanup-entered t)
+              (cl-letf (((symbol-function 'treesit-parser-included-ranges)
+                         (lambda (parser)
+                           (if (eq parser local-parser)
+                               (error "Injected cleanup range failure")
+                             (funcall original-ranges parser)))))
+                (funcall original-cleanup state)))))
+        (should-error (pi-coding-agent--semantic-link-file-target-at-point)
+                      :type
+                      'pi-coding-agent-semantic-link-parser-error))
+      (should cleanup-entered)
+      (should (equal before
+                     (pi-coding-agent-test--semantic-parser-state))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-widens-for-complete-host ()
+  "Buffer narrowing cannot expose a semantic link label as strict text."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "xx [src/visible.el](https://example.com) yy"))
+    (goto-char (point-min))
+    (search-forward "src/visible.el")
+    (narrow-to-region (match-beginning 0) (match-end 0))
+    (goto-char (point-min))
+    (let ((start (point-min))
+          (end (point-max)))
+      (should (eq :owned-invalid
+                  (plist-get
+                   (pi-coding-agent--semantic-link-file-target-at-point)
+                   :status)))
+      (should-not (pi-coding-agent--file-target-at-point))
+      (should (= start (point-min)))
+      (should (= end (point-max))))))
+
+(ert-deftest pi-coding-agent-test-file-target-link-lookup-is-passive ()
+  "Semantic lookup performs no file I/O or observable buffer mutation."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t)) (insert "[Report](reports/missing.md)"))
+    (goto-char (+ (point-min) 3))
+    (set-buffer-modified-p nil)
+    (let ((tick (buffer-chars-modified-tick))
+          (text (buffer-string))
+          (overlays (overlays-in (point-min) (point-max)))
+          (parsers (treesit-parser-list))
+          (warning-suppress-types '((emacs))))
+      (cl-letf (((symbol-function 'file-exists-p)
+                 (lambda (&rest _) (ert-fail "Resolver must not check existence")))
+                ((symbol-function 'file-readable-p)
+                 (lambda (&rest _) (ert-fail "Resolver must not check readability"))))
+        (should (pi-coding-agent--file-target-at-point)))
+      (should (= tick (buffer-chars-modified-tick)))
+      (should (equal text (buffer-string)))
+      (should (equal overlays (overlays-in (point-min) (point-max))))
+      (should (equal parsers (treesit-parser-list)))
+      (should-not (buffer-modified-p)))))
 
 (ert-deftest pi-coding-agent-test-file-target-text-maps-inline-hidden-markup ()
   "Inline hidden emphasis can form one path with a real source envelope."
@@ -4316,11 +5964,15 @@ With hot-tail-turn-count 1, only the most recent headed turn stays hot."
       (should-not (pi-coding-agent--file-target-at-point)))))
 
 (ert-deftest pi-coding-agent-test-file-target-text-short-target-on-huge-line-is-bounded ()
-  "A nearby short target resolves without copying an unrelated huge line."
+  "A short target in a complete under-cap host keeps text parsing candidate-local."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (let ((inhibit-read-only t))
       (insert (make-string 100000 ?x) " src/near.el"))
+    ;; Semantic absence is established from the complete canonical host; only
+    ;; the subsequent strict text projection retains the old 16,388 window.
+    (should (< (- (point-max) (point-min))
+               pi-coding-agent--max-semantic-link-host-length))
     (goto-char (- (point-max) 4))
     (let* ((window (pi-coding-agent--bounded-line-window-at-point))
            (original (symbol-function 'buffer-substring-no-properties)))
