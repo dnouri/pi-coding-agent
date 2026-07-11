@@ -47,8 +47,10 @@
 
 ;; Forward references for functions in other modules
 (declare-function pi-coding-agent-compact "pi-coding-agent-menu" (&optional custom-instructions))
+;; Declare the Emacs 29 minimum API.  Adding Emacs 30's optional TAG here makes
+;; its byte compiler pad three-argument calls, producing incompatible bytecode.
 (declare-function treesit-parser-create "treesit.c"
-                  (language &optional buffer no-reuse tag))
+                  (language &optional buffer no-reuse))
 (declare-function treesit-parser-delete "treesit.c" (parser))
 (declare-function treesit-parser-list "treesit.c"
                   (&optional buffer language tag))
@@ -2863,6 +2865,62 @@ The result is suitable for a `shell-command' run with TARGET's
    (pi-coding-agent--file-target-shell-path target)
    (plist-get target :shell-directory)))
 
+(defun pi-coding-agent--isolated-shell-star-p (command index)
+  "Return non-nil when COMMAND has an unquoted isolated `*' at INDEX.
+Isolation follows Dired's space-or-tab boundary rule.  Unlike Dired, quoted or
+backslash-escaped stars remain literal shell syntax rather than placeholders."
+  (and (eq (aref command index) ?*)
+       (or (zerop index)
+           (memq (aref command (1- index)) '(?\s ?\t)))
+       (or (= (1+ index) (length command))
+           (memq (aref command (1+ index)) '(?\s ?\t)))))
+
+(defun pi-coding-agent--shell-command-with-file (command argument)
+  "Return COMMAND with exactly one quoted file ARGUMENT supplied.
+ARGUMENT is already safe shell command text and is never quoted again.  Each
+unquoted, unescaped `*' isolated by spaces, tabs, or string boundaries is
+replaced with ARGUMENT.  Without a placeholder, ARGUMENT is appended before a
+terminal `&' so `shell-command' retains its native asynchronous semantics.
+Signal `user-error' rather than turning the file operand into an executable
+when COMMAND, excluding its terminal `&', is empty."
+  (let* ((async-start (and (string-match "[ \t]*&[ \t]*\\'" command)
+                           (match-beginning 0)))
+         (body-end (or async-start (length command))))
+    (when (string-empty-p (string-trim (substring command 0 body-end)))
+      (user-error "Shell command cannot be empty"))
+    (let ((index 0)
+          (last 0)
+          (quote nil)
+          (escaped nil)
+          parts)
+      (while (< index (length command))
+        (let ((char (aref command index)))
+          (cond
+           (escaped
+            (setq escaped nil))
+           ((and (not (eq quote ?')) (eq char ?\\))
+            (setq escaped t))
+           (quote
+            (when (eq char quote)
+              (setq quote nil)))
+           ((memq char '(?' ?\" ?`))
+            (setq quote char))
+           ((and (eq char ?*)
+                 (pi-coding-agent--isolated-shell-star-p command index))
+            (push (substring command last index) parts)
+            (push argument parts)
+            (setq last (1+ index)))))
+        (setq index (1+ index)))
+      (if parts
+          (progn
+            (push (substring command last) parts)
+            (apply #'concat (nreverse parts)))
+        (if async-start
+            (concat (substring command 0 async-start)
+                    " " argument
+                    (substring command async-start))
+          (concat command " " argument))))))
+
 (defun pi-coding-agent--strict-text-file-path-p (path quoted)
   "Return non-nil when PATH has the strict plain-text file grammar.
 PATH must be absolute, home-relative, explicitly relative with `./', or have
@@ -4506,6 +4564,46 @@ reference, or malformed link also never falls through to a path-like label."
         (`(:status :owned-invalid) nil)
         (`(:status :not-a-link)
          (pi-coding-agent--text-file-target-at-point))))))
+
+(defun pi-coding-agent--call-with-shell-directory (directory function)
+  "Call FUNCTION with DIRECTORY as the current shell working directory.
+Stay in the current buffer so its shell and process environment apply.  If a
+canonical chat session transition occurs during the call, keep that transition's
+new `default-directory' after the temporary binding unwinds."
+  (let ((session-directory (pi-coding-agent--chat-session-directory)))
+    (unwind-protect
+        (let ((default-directory directory))
+          (funcall function))
+      (let ((current-session-directory
+             (pi-coding-agent--chat-session-directory)))
+        (unless (equal session-directory current-session-directory)
+          (setq default-directory current-session-directory))))))
+
+(defun pi-coding-agent-shell-command-at-point ()
+  "Read and run a shell command on the file target at point.
+An isolated `*' in the command is replaced by the file argument; otherwise the
+argument is appended.  Prompting and execution use the target session's local
+or TRAMP working directory."
+  (interactive)
+  (let* ((target (or (pi-coding-agent--file-target-at-point)
+                     (user-error "No file at point")))
+         ;; Do this before opening the minibuffer: shell-only target failures
+         ;; must not consume input, and TARGET must remain a stable snapshot.
+         (argument (pi-coding-agent--file-target-shell-argument target))
+         (shell-directory (plist-get target :shell-directory))
+         (command
+          (pi-coding-agent--call-with-shell-directory
+           shell-directory
+           (lambda ()
+             (read-shell-command
+              (format "! on %s: " (plist-get target :display))))))
+         (shell-command-text
+          (pi-coding-agent--shell-command-with-file command argument)))
+    ;; Reuse the target snapshot even if the chat changed sessions while the
+    ;; prompt was active.
+    (pi-coding-agent--call-with-shell-directory
+     shell-directory
+     (lambda () (shell-command shell-command-text)))))
 
 (defun pi-coding-agent-visit-file (&optional toggle)
   "Visit the file associated with the tool block at point.

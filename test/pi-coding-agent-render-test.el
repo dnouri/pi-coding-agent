@@ -3864,6 +3864,461 @@ With hot-tail-turn-count 1, only the most recent headed turn stays hot."
         (should-error (pi-coding-agent--file-target-shell-argument target)
                       :type 'user-error)))))
 
+(ert-deftest pi-coding-agent-test-file-shell-command-rejects-empty-command ()
+  "A file operand alone never becomes the command to execute."
+  (dolist (command '("" " " "\t" "&" " \t&  "))
+    (should-error
+     (pi-coding-agent--shell-command-with-file command "'/tmp/report file'")
+     :type 'user-error)))
+
+(ert-deftest pi-coding-agent-test-file-shell-command-appends-quoted-operand-once ()
+  "Commands without a placeholder receive the already-quoted operand once."
+  (dolist (case '(("file" "'/tmp/report file'" "file '/tmp/report file'")
+                  ("printf '%s'" "'/tmp/a;$(bad)`tick'"
+                   "printf '%s' '/tmp/a;$(bad)`tick'")
+                  ("cat\t" "'/tmp/a\tb\nc'" "cat\t '/tmp/a\tb\nc'")))
+    (should (equal (pi-coding-agent--shell-command-with-file
+                    (nth 0 case) (nth 1 case))
+                   (nth 2 case)))))
+
+(ert-deftest pi-coding-agent-test-file-shell-command-substitutes-isolated-stars ()
+  "Only unquoted, unescaped, whitespace-isolated stars are placeholders."
+  (dolist (case '(("file *" "file ARG")
+                  ("cmp * *" "cmp ARG ARG")
+                  ("*" "ARG")
+                  ("echo foo*" "echo foo* ARG")
+                  ("echo '*'" "echo '*' ARG")
+                  ("echo \"*\"" "echo \"*\" ARG")
+                  ("echo \\*" "echo \\* ARG")
+                  ("echo *\"\"" "echo *\"\" ARG")
+                  ("echo ' * '" "echo ' * ' ARG")
+                  ("echo \" * \"" "echo \" * \" ARG")))
+    (should (equal (pi-coding-agent--shell-command-with-file
+                    (car case) "ARG")
+                   (cadr case)))))
+
+(ert-deftest pi-coding-agent-test-file-shell-command-preserves-terminal-ampersand ()
+  "An appended operand precedes native `shell-command' async syntax."
+  (dolist (case '(("file &" "file ARG &")
+                  ("file&" "file ARG&")
+                  ("file\t&  " "file ARG\t&  ")
+                  ("file * &" "file ARG &")
+                  ("cmp * *\t& " "cmp ARG ARG\t& ")))
+    (should (equal (pi-coding-agent--shell-command-with-file
+                    (car case) "ARG")
+                   (cadr case)))))
+
+(ert-deftest pi-coding-agent-test-file-shell-command-keeps-hostile-path-as-data ()
+  "Quoted ampersands and leading dashes stay inside one shell operand."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+    (dolist (path '("/tmp/report&" "/tmp/a b;$(bad)`tick\tline\nend"
+                    "/tmp/project/-danger"))
+      (let* ((target (pi-coding-agent--make-file-target :text path path))
+             (argument (pi-coding-agent--file-target-shell-argument target))
+             (command (pi-coding-agent--shell-command-with-file
+                       "printf '%s' &" argument)))
+        (should (equal command (concat "printf '%s' " argument " &")))))))
+
+(defun pi-coding-agent-test--run-shell-command-at-point
+    (input &optional during-read prefix)
+  "Run the file shell command with behavioral shell stubs.
+INPUT is returned by `read-shell-command', or signals `quit' when it is
+`:quit'.  DURING-READ runs while the prompt is active.  PREFIX becomes
+`current-prefix-arg'.  Return prompt, command, and their working directories."
+  (let (prompt prompt-directory command command-directory)
+    (cl-letf (((symbol-function 'read-shell-command)
+               (lambda (&rest args)
+                 ;; One argument preserves native shell history, completion,
+                 ;; and the absence of a guessed initial/default command.
+                 (should (= 1 (length args)))
+                 (setq prompt (car args)
+                       prompt-directory default-directory)
+                 (when during-read (funcall during-read))
+                 (if (eq input :quit)
+                     (signal 'quit nil)
+                   input)))
+              ((symbol-function 'shell-command)
+               (lambda (&rest args)
+                 ;; The command must not turn PREFIX into OUTPUT-BUFFER.
+                 (should (= 1 (length args)))
+                 (setq command (car args)
+                       command-directory default-directory)
+                 :shell-finished)))
+      (let ((current-prefix-arg prefix))
+        (call-interactively #'pi-coding-agent-shell-command-at-point)))
+    (list :prompt prompt :prompt-directory prompt-directory
+          :command command :command-directory command-directory)))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-no-target ()
+  "No target rejects with the public command's exact controlled error."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t) prompted executed)
+      (insert "ordinary prose")
+      (cl-letf (((symbol-function 'read-shell-command)
+                 (lambda (&rest _) (setq prompted t)))
+                ((symbol-function 'shell-command)
+                 (lambda (&rest _) (setq executed t))))
+        (let ((err (should-error (pi-coding-agent-shell-command-at-point)
+                                 :type 'user-error)))
+          (should (equal "No file at point" (error-message-string err)))))
+      (should-not prompted)
+      (should-not executed))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-delayed-error-before-prompt ()
+  "A shell-only target error is raised before prompting or execution."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity
+     "/ssh:pi-host:/home/pi/project/")
+    (pi-coding-agent--display-tool-start
+     "read" '(:path "/ssh:pi-host:~root;printf PWNED/a.el"))
+    (goto-char (overlay-start pi-coding-agent--pending-tool-overlay))
+    (cl-letf (((symbol-function 'read-shell-command)
+               (lambda (&rest _) (ert-fail "Must reject before prompting")))
+              ((symbol-function 'shell-command)
+               (lambda (&rest _) (ert-fail "Must reject before execution"))))
+      (let ((err (should-error (pi-coding-agent-shell-command-at-point)
+                               :type 'user-error)))
+        (should (string-match-p "Unsafe shell home prefix"
+                                (error-message-string err)))))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-blank-input-does-not-execute ()
+  "Blank minibuffer input is rejected by the Unit A command builder."
+  (dolist (input '("" " \t" " & "))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+      (let ((inhibit-read-only t)) (insert "src/app.el"))
+      (goto-char (+ (point-min) 2))
+      (cl-letf (((symbol-function 'read-shell-command) (lambda (&rest _) input))
+                ((symbol-function 'shell-command)
+                 (lambda (&rest _) (ert-fail "Blank input must not execute"))))
+        (should-error (pi-coding-agent-shell-command-at-point)
+                      :type 'user-error)))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-cancellation-does-not-execute ()
+  "Minibuffer cancellation propagates and never starts a shell command."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+    (let ((inhibit-read-only t)) (insert "src/app.el"))
+    (goto-char (+ (point-min) 2))
+    (cl-letf (((symbol-function 'read-shell-command)
+               (lambda (&rest _) (signal 'quit nil)))
+              ((symbol-function 'shell-command)
+               (lambda (&rest _) (ert-fail "Cancellation must not execute"))))
+      (condition-case nil
+          (progn
+            (pi-coding-agent-shell-command-at-point)
+            (ert-fail "Cancellation must propagate"))
+        (quit t)))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-safe-prompt-and-cwds ()
+  "The exact safe prompt and both shell working directories use the snapshot."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity
+     "/ssh:bastion|sudo:root@host:/srv/project/")
+    (setq default-directory "/tmp/accidental/")
+    (pi-coding-agent--display-tool-start "read" '(:path "reports/a\nb.el"))
+    (goto-char (overlay-start pi-coding-agent--pending-tool-overlay))
+    (let ((result (pi-coding-agent-test--run-shell-command-at-point "file")))
+      (should (equal "! on reports/a\\nb.el: " (plist-get result :prompt)))
+      (should (equal "/ssh:bastion|sudo:root@host:/srv/project/"
+                     (plist-get result :prompt-directory)))
+      (should (equal (plist-get result :prompt-directory)
+                     (plist-get result :command-directory)))
+      (should (equal (concat "file "
+                             (pi-coding-agent--shell-quote-path
+                              "/srv/project/reports/a\nb.el"
+                              "/ssh:bastion|sudo:root@host:/srv/project/"))
+                     (plist-get result :command))))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-preserves-buffer-shell-environment ()
+  "Prompting and execution retain the chat buffer's shell environment."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+    (let ((chat-buffer (current-buffer))
+          (inhibit-read-only t)
+          prompt-buffer command-buffer prompt-environment command-environment
+          prompt-shell command-shell)
+      (insert "src/app.el")
+      (goto-char (+ (point-min) 2))
+      (setq-local process-environment '("CHAT_FILE_ACTION_TEST=1"))
+      (setq-local shell-file-name "/chat/test-shell")
+      (cl-letf (((symbol-function 'read-shell-command)
+                 (lambda (&rest _)
+                   (setq prompt-buffer (current-buffer)
+                         prompt-environment process-environment
+                         prompt-shell shell-file-name)
+                   "file"))
+                ((symbol-function 'shell-command)
+                 (lambda (&rest _)
+                   (setq command-buffer (current-buffer)
+                         command-environment process-environment
+                         command-shell shell-file-name))))
+        (pi-coding-agent-shell-command-at-point))
+      (should (eq chat-buffer prompt-buffer))
+      (should (eq chat-buffer command-buffer))
+      (should (equal '("CHAT_FILE_ACTION_TEST=1") prompt-environment))
+      (should (equal prompt-environment command-environment))
+      (should (equal "/chat/test-shell" prompt-shell))
+      (should (equal prompt-shell command-shell)))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-builds-local-target-forms ()
+  "Local text targets flow through resolution, quoting, and the Unit A builder."
+  (dolist (case `(("src/app.el" 2 "/tmp/project/src/app.el")
+                  ("/tmp/report.el" 3 "/tmp/report.el")
+                  ("~/report.el" 2 ,(expand-file-name "~/report.el"))
+                  ("'reports/a b.el'" 5 "/tmp/project/reports/a b.el")
+                  ("./-danger.el" 3 "/tmp/project/-danger.el")))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+      (let ((inhibit-read-only t)) (insert (nth 0 case)))
+      (goto-char (+ (point-min) (nth 1 case)))
+      (let ((result (pi-coding-agent-test--run-shell-command-at-point
+                     "printf '%s' *")))
+        (should (equal (concat "printf '%s' "
+                               (shell-quote-argument (nth 2 case)))
+                       (plist-get result :command)))))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-excludes-text-locations ()
+  "Plain-text line, column, and range metadata never enter shell command text."
+  (dolist (source '("src/app.el:12:3" "src/app.el#L12-L20"))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+      (let ((inhibit-read-only t)) (insert source))
+      (goto-char (+ (point-min) 2))
+      (let ((result (pi-coding-agent-test--run-shell-command-at-point "file *")))
+        (should (equal "file /tmp/project/src/app.el"
+                       (plist-get result :command)))))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-link-uses-path-not-label-or-fragment ()
+  "A semantic link prompts with display data but executes only its file path."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+    (let ((inhibit-read-only t))
+      (insert "[download the report](./reports/out.pdf#page=2)"))
+    (goto-char (+ (point-min) 3))
+    (let ((result (pi-coding-agent-test--run-shell-command-at-point "file *")))
+      (should (equal "! on ./reports/out.pdf#page=2: "
+                     (plist-get result :prompt)))
+      (should (equal "file /tmp/project/reports/out.pdf"
+                     (plist-get result :command)))
+      (should-not (string-match-p "download\|page=2"
+                                  (plist-get result :command))))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-remote-target-forms ()
+  "Remote targets execute in their route with shell-local command operands."
+  (dolist
+      (case
+       '(("/ssh:host:/srv/project/" "src/app.el"
+          "/srv/project/src/app.el")
+         ("/ssh:host:/srv/project/" "/tmp/app.el" "/tmp/app.el")
+         ("/ssh:host:/srv/project/" "/ssh:host:/tmp/app.el" "/tmp/app.el")
+         ("/ssh:bastion|sudo:root@host:/srv/project/"
+          "/ssh:bastion|sudo:root@host:/tmp/app.el" "/tmp/app.el")
+         ("/ssh:host:/srv/project/" "~/a b.el" "~/a b.el")
+         ("/ssh:host:/srv/project/" "~root/a b.el" "~root/a b.el")))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity (nth 0 case))
+      (pi-coding-agent--display-tool-start "read" (list :path (nth 1 case)))
+      (goto-char (overlay-start pi-coding-agent--pending-tool-overlay))
+      (let ((result (pi-coding-agent-test--run-shell-command-at-point "file *")))
+        (should (equal (nth 0 case) (plist-get result :prompt-directory)))
+        (should (equal (nth 0 case) (plist-get result :command-directory)))
+        (should (equal (concat "file "
+                               (pi-coding-agent--shell-quote-path
+                                (nth 2 case) (nth 0 case)))
+                       (plist-get result :command)))))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-remote-errors-stay-controlled ()
+  "Mismatched routes and unsafe named homes retain resolver/shell errors."
+  (dolist (path '("/ssh:other:/tmp/app.el"
+                  "/ssh:host:~root;touch PWNED/app.el"))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/ssh:host:/srv/project/")
+      (pi-coding-agent--display-tool-start "read" (list :path path))
+      (goto-char (overlay-start pi-coding-agent--pending-tool-overlay))
+      (cl-letf (((symbol-function 'read-shell-command)
+                 (lambda (&rest _) (ert-fail "Errors precede prompting")))
+                ((symbol-function 'shell-command)
+                 (lambda (&rest _) (ert-fail "Errors precede execution"))))
+        (should-error (pi-coding-agent-shell-command-at-point)
+                      :type 'user-error)))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-prefix-is-ignored ()
+  "A prefix argument is never forwarded as a shell output-buffer argument."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+    (let ((inhibit-read-only t)) (insert "src/app.el"))
+    (goto-char (+ (point-min) 2))
+    (let ((result (pi-coding-agent-test--run-shell-command-at-point
+                   "file" nil '(16))))
+      (should (equal "file /tmp/project/src/app.el"
+                     (plist-get result :command))))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-snapshots-before-prompt ()
+  "Movement and streaming-like insertion during prompting cannot retarget."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+    (let ((inhibit-read-only t)) (insert "src/old.el and src/new.el"))
+    (goto-char (+ (point-min) 2))
+    (let* ((chat-buffer (current-buffer))
+           (resolver (symbol-function 'pi-coding-agent--file-target-at-point))
+           (resolve-count 0)
+           result)
+      (cl-letf (((symbol-function 'pi-coding-agent--file-target-at-point)
+                 (lambda ()
+                   (setq resolve-count (1+ resolve-count))
+                   (funcall resolver))))
+        (setq result
+              (pi-coding-agent-test--run-shell-command-at-point
+               "file *"
+               (lambda ()
+                 (with-current-buffer chat-buffer
+                   (let ((inhibit-read-only t))
+                     (goto-char (point-max))
+                     (insert " streaming delta")
+                     (goto-char (point-min))
+                     (search-forward "src/new.el")
+                     (pi-coding-agent--set-chat-session-identity
+                      "/tmp/retargeted/")))))))
+      (should (= 1 resolve-count))
+      (should (equal "file /tmp/project/src/old.el"
+                     (plist-get result :command)))
+      (should (equal "/tmp/project/"
+                     (plist-get result :command-directory)))
+      (should (equal "/tmp/retargeted/"
+                     (pi-coding-agent--chat-session-directory)))
+      (should (equal "/tmp/retargeted/" default-directory)))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-tool-authority-hot-and-cold ()
+  "Hot and cold tool targets work anywhere; absent/invalid metadata stays final."
+  (dolist (cold '(nil t))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+      (pi-coding-agent--display-tool-start "read" '(:path "src/tool.el"))
+      (pi-coding-agent--display-tool-end
+       "read" '(:path "src/tool.el")
+       '((:type "text" :text "src/body-fallback.el")) nil nil)
+      (let* ((overlay (car (pi-coding-agent-test--all-tool-overlays)))
+             (header-position (overlay-start overlay)))
+        (when cold
+          (pi-coding-agent--cool-completed-tool-blocks (list overlay)))
+        (goto-char header-position)
+        (search-forward "body-fallback")
+        (let ((positions (list header-position (1- (point)))))
+          (dolist (position positions)
+            (goto-char position)
+            (should (equal "file /tmp/project/src/tool.el"
+                           (plist-get
+                            (pi-coding-agent-test--run-shell-command-at-point "file")
+                            :command))))))))
+  (dolist (cold '(nil t))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+      (pi-coding-agent--display-tool-start "read" '(:offset 1))
+      (pi-coding-agent--display-tool-end
+       "read" '(:offset 1)
+       '((:type "text" :text "src/body-fallback.el")) nil nil)
+      (let ((overlay (car (pi-coding-agent-test--all-tool-overlays))))
+        (when cold
+          (pi-coding-agent--cool-completed-tool-blocks (list overlay)))
+        (goto-char (point-min))
+        (search-forward "src/body-fallback.el")
+        (cl-letf (((symbol-function 'read-shell-command)
+                   (lambda (&rest _) (ert-fail "Absent metadata owns block"))))
+          (let ((err (should-error (pi-coding-agent-shell-command-at-point)
+                                   :type 'user-error)))
+            (should (equal "No file at point" (error-message-string err))))))))
+  (dolist (cold '(nil t))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity
+       "/ssh:host:/tmp/project/")
+      (pi-coding-agent--display-tool-start
+       "read" '(:path "/ssh:other:/tmp/bad.el"))
+      (pi-coding-agent--display-tool-end
+       "read" '(:path "/ssh:other:/tmp/bad.el")
+       '((:type "text" :text "src/body-fallback.el")) nil nil)
+      (let ((overlay (car (pi-coding-agent-test--all-tool-overlays))))
+        (when cold
+          (pi-coding-agent--cool-completed-tool-blocks (list overlay)))
+        (goto-char (point-min))
+        (search-forward "src/body-fallback.el")
+        (cl-letf (((symbol-function 'read-shell-command)
+                   (lambda (&rest _) (ert-fail "Invalid metadata owns block"))))
+          (should-error (pi-coding-agent-shell-command-at-point)
+                        :type 'user-error))))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-preserves-parser-errors ()
+  "Authoritative semantic parser failures keep their controlled condition."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (cl-letf (((symbol-function 'pi-coding-agent--file-target-at-point)
+               (lambda ()
+                 (signal 'pi-coding-agent-semantic-link-parser-error '("boom"))))
+              ((symbol-function 'read-shell-command)
+               (lambda (&rest _) (ert-fail "Parser errors precede prompting"))))
+      (should-error (pi-coding-agent-shell-command-at-point)
+                    :type 'pi-coding-agent-semantic-link-parser-error))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-leaves-pi-state-unchanged ()
+  "Shell prompting/execution never mutates busy, session, tool, or follow-up state."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+    (let ((inhibit-read-only t)) (insert "src/app.el"))
+    (goto-char (+ (point-min) 2))
+    (let* ((streaming-marker (copy-marker (point-max) t))
+           (tool-cache (make-hash-table :test #'equal))
+           (live-tools (make-hash-table :test #'equal))
+           (pi-coding-agent--status 'streaming)
+           (pi-coding-agent--streaming-marker streaming-marker)
+           (pi-coding-agent--process 'fake-process)
+           (pi-coding-agent--session-transition-generation 7)
+           (pi-coding-agent--session-transition-active nil)
+           (pi-coding-agent--tool-args-cache tool-cache)
+           (pi-coding-agent--live-tool-blocks live-tools)
+           (pi-coding-agent--pending-tool-overlay 'tool-snapshot)
+           (pi-coding-agent--followup-queue '("newer" "older"))
+           (before (list pi-coding-agent--status
+                         pi-coding-agent--streaming-marker
+                         pi-coding-agent--process
+                         pi-coding-agent--session-transition-generation
+                         pi-coding-agent--session-transition-active
+                         pi-coding-agent--tool-args-cache
+                         pi-coding-agent--live-tool-blocks
+                         pi-coding-agent--pending-tool-overlay
+                         (copy-sequence pi-coding-agent--followup-queue))))
+      (should (pi-coding-agent--session-busy-p))
+      (pi-coding-agent-test--run-shell-command-at-point "file")
+      (should (pi-coding-agent--session-busy-p))
+      (should (equal before
+                     (list pi-coding-agent--status
+                           pi-coding-agent--streaming-marker
+                           pi-coding-agent--process
+                           pi-coding-agent--session-transition-generation
+                           pi-coding-agent--session-transition-active
+                           pi-coding-agent--tool-args-cache
+                           pi-coding-agent--live-tool-blocks
+                           pi-coding-agent--pending-tool-overlay
+                           pi-coding-agent--followup-queue))))))
+
 (ert-deftest pi-coding-agent-test-file-target-does-not-use-pi-rpc-path-boundary ()
   "Resolving an Emacs target does not call Pi's outbound RPC converter."
   (with-temp-buffer

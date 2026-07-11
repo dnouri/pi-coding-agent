@@ -54,6 +54,7 @@
 
 ;; pi-coding-agent-render.el (chat buffer commands)
 (declare-function pi-coding-agent-toggle-tool-section "pi-coding-agent-render")
+(declare-function pi-coding-agent-shell-command-at-point "pi-coding-agent-render")
 (declare-function pi-coding-agent-visit-file "pi-coding-agent-render")
 (declare-function pi-coding-agent--cleanup-on-kill "pi-coding-agent-render")
 (declare-function pi-coding-agent--restore-tool-properties "pi-coding-agent-render")
@@ -519,6 +520,7 @@ Return nil when PATH is not a string."
     (define-key map (kbd "f") #'pi-coding-agent-fork-at-point)
     (define-key map (kbd "TAB") #'pi-coding-agent-toggle-tool-section)
     (define-key map (kbd "<tab>") #'pi-coding-agent-toggle-tool-section)
+    (define-key map (kbd "!") #'pi-coding-agent-shell-command-at-point)
     (define-key map (kbd "RET") #'pi-coding-agent-visit-file)
     (define-key map (kbd "<return>") #'pi-coding-agent-visit-file)
     map)

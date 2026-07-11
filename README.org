@@ -182,6 +182,10 @@ opens the backing file at the matching line.  By default the file
 opens in the other window so the chat stays visible; use =C-u RET= to
 open it in the same window instead.
 
+Press =!= on one strict file target at point to enter a shell command.
+The prompt uses native shell-command history and completion, then runs
+the command against that one target.
+
 Press =TAB= on a turn header (=You= or =Assistant=) to fold or unfold
 that turn.  Use =n= and =p= in the chat buffer to jump between user
 messages, and =f= to fork the conversation from the turn at point.
@@ -219,6 +223,7 @@ and error thresholds.
 | =TAB=            | input   | 🪄 Complete paths, and =/= commands           |
 | =M+<prior/next>= | input   | 🛗 Scroll linked chat window                  |
 | =TAB=            | chat    | 🪗 Toggle thinking block, tool block, or turn |
+| =!=              | chat    | 🐚 Run a shell command on one file target     |
 | =RET=            | chat    | 🎯 Visit file at point from tool output       |
 | =n= / =p=        | chat    | 🐾 Navigate user messages                     |
 | =f=              | chat    | 🌿 Fork from the turn at point                |

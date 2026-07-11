@@ -669,6 +669,36 @@ Closes the category from issue #234: any instance without a usable
         (pi-coding-agent-test--kill-session-buffers root)
         (delete-other-windows)))))
 
+;;; Chat Keymap
+
+(ert-deftest pi-coding-agent-test-chat-mode-map-shell-command-at-point ()
+  "The chat `!' key runs one file command without changing other actions."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+    (let ((inhibit-read-only t))
+      (insert "src/report.el"))
+    (goto-char (+ (point-min) 2))
+    (let (prompt command command-directory)
+      (cl-letf (((symbol-function 'read-shell-command)
+                 (lambda (value)
+                   (setq prompt value)
+                   "file *"))
+                ((symbol-function 'shell-command)
+                 (lambda (value)
+                   (setq command value
+                         command-directory default-directory))))
+        (let ((binding (key-binding (kbd "!"))))
+          (should (eq binding #'pi-coding-agent-shell-command-at-point))
+          (call-interactively binding)))
+      (should (equal "! on src/report.el: " prompt))
+      (should (equal "file /tmp/project/src/report.el" command))
+      (should (equal "/tmp/project/" command-directory)))
+    (should (eq (lookup-key pi-coding-agent-chat-mode-map (kbd "RET"))
+                #'pi-coding-agent-visit-file))
+    (dolist (key '("&" "E" "o"))
+      (should-not (lookup-key pi-coding-agent-chat-mode-map (kbd key))))))
+
 ;;; Startup Header
 
 (ert-deftest pi-coding-agent-test-startup-header-shows-version ()
