@@ -63,6 +63,9 @@
                   (node beg end &optional named))
 (declare-function treesit-query-capture "treesit.c"
                   (node query &optional beg end node-only))
+(declare-function comint-output-filter "comint" (process string))
+(declare-function comint-term-environment "comint" ())
+(declare-function shell-mode "shell" ())
 
 (defconst pi-coding-agent--history-replay-gc-threshold (* 64 1024 1024)
   "Minimum `gc-cons-threshold' used while replaying full session history.")
@@ -2866,60 +2869,107 @@ The result is suitable for a `shell-command' run with TARGET's
    (plist-get target :shell-directory)))
 
 (defun pi-coding-agent--isolated-shell-star-p (command index)
-  "Return non-nil when COMMAND has an unquoted isolated `*' at INDEX.
-Isolation follows Dired's space-or-tab boundary rule.  Unlike Dired, quoted or
-backslash-escaped stars remain literal shell syntax rather than placeholders."
+  "Return non-nil when COMMAND has an isolated `*' at INDEX.
+This is Dired's shell-agnostic textual rule: both neighbors must independently
+be a string edge, an ASCII space, or a tab.  Quotes and backslashes have no
+special meaning; explicit marker placement is the user's responsibility."
   (and (eq (aref command index) ?*)
        (or (zerop index)
            (memq (aref command (1- index)) '(?\s ?\t)))
        (or (= (1+ index) (length command))
            (memq (aref command (1+ index)) '(?\s ?\t)))))
 
+(defun pi-coding-agent--simple-shell-command-p (body)
+  "Return non-nil when BODY is safe for automatic file-argument appending.
+This is an explicit fail-closed ASCII whitelist, not a shell parser:
+
+  BODY := H* COMMAND (H+ OPTION)* H*
+  H := ASCII space or tab
+  COMMAND := one or more of A-Z a-z 0-9 _ + . / -,
+             containing at least one of A-Z a-z 0-9 _ and not being a
+             path metatoken such as `.`, `..`, or `/`
+  OPTION := `-` followed by one or more of A-Z a-z 0-9 _ + . / : = , -
+
+Thus ordinary commands such as `file`, `cat`, `wc -l`, and path-like command
+words are accepted.  Arguments other than options, controls, non-ASCII space,
+quotes, escapes, comments, redirections, substitutions, and globs are rejected."
+  (when (and
+         (stringp body)
+         (string-match
+          (concat "\\`[ \t]*\\([A-Za-z0-9_+./-]+\\)"
+                  "\\(?:[ \t]+-[A-Za-z0-9_+./:=,-]+\\)*"
+                  "[ \t]*\\'")
+          body))
+    (let ((command (match-string 1 body)))
+      (and (string-match-p "[A-Za-z0-9_]" command)
+           (not (member command '("." ".." "/" "./" "../" "-" "--")))))))
+
+(defun pi-coding-agent--terminal-shell-async-start (command)
+  "Return start of COMMAND's narrow native async suffix, or nil.
+The suffix is one ampersand preceded by one or more ASCII spaces or tabs and
+followed only by ASCII spaces or tabs.  Scan backward once so malformed long
+near-suffixes cannot cause regular-expression backtracking."
+  (let ((index (length command)))
+    (while (and (> index 0)
+                (memq (aref command (1- index)) '(?\s ?\t)))
+      (setq index (1- index)))
+    (when (and (> index 0)
+               (eq (aref command (1- index)) ?&))
+      (let ((ampersand (1- index)))
+        (setq index ampersand)
+        (while (and (> index 0)
+                    (memq (aref command (1- index)) '(?\s ?\t)))
+          (setq index (1- index)))
+        (and (< index ampersand) index)))))
+
 (defun pi-coding-agent--shell-command-with-file (command argument)
-  "Return COMMAND with exactly one quoted file ARGUMENT supplied.
-ARGUMENT is already safe shell command text and is never quoted again.  Each
-unquoted, unescaped `*' isolated by spaces, tabs, or string boundaries is
-replaced with ARGUMENT.  Without a placeholder, ARGUMENT is appended before a
-terminal `&' so `shell-command' retains its native asynchronous semantics.
-Signal `user-error' rather than turning the file operand into an executable
-when COMMAND, excluding its terminal `&', is empty."
-  (let* ((async-start (and (string-match "[ \t]*&[ \t]*\\'" command)
-                           (match-beginning 0)))
-         (body-end (or async-start (length command))))
-    (when (string-empty-p (string-trim (substring command 0 body-end)))
+  "Return validated COMMAND with already-quoted file ARGUMENT supplied.
+ARGUMENT is safe shell text and is never quoted again.  Every `*' with
+string-edge, ASCII-space, or tab boundaries on both sides is replaced linearly;
+quotes and escapes do not alter this Dired-style textual marker grammar.  A
+marker permits explicit compound, control, and multiline shell syntax.
+
+Without a marker, append ARGUMENT only when the body satisfies
+`pi-coding-agent--simple-shell-command-p'.  Recognize asynchronous execution
+only as one terminal ` &' suffix whose ampersand is preceded by ASCII space or
+tab; strip that suffix before substitution and validation, then reattach it.
+Reject blank bodies and any other raw terminal ampersand before `shell-command'
+can classify it asynchronously."
+  (let ((async-start (pi-coding-agent--terminal-shell-async-start command))
+        async-suffix)
+    (when async-start
+      (setq async-suffix (substring command async-start)
+            command (substring command 0 async-start)))
+    (when (or (string-match-p "\\`[ \t]*\\'" command)
+              (and (not async-suffix)
+                   (string-match-p "\\`[ \t]*&[ \t]*\\'" command)))
       (user-error "Shell command cannot be empty"))
     (let ((index 0)
           (last 0)
-          (quote nil)
-          (escaped nil)
+          (marker-p nil)
           parts)
       (while (< index (length command))
-        (let ((char (aref command index)))
-          (cond
-           (escaped
-            (setq escaped nil))
-           ((and (not (eq quote ?')) (eq char ?\\))
-            (setq escaped t))
-           (quote
-            (when (eq char quote)
-              (setq quote nil)))
-           ((memq char '(?' ?\" ?`))
-            (setq quote char))
-           ((and (eq char ?*)
-                 (pi-coding-agent--isolated-shell-star-p command index))
-            (push (substring command last index) parts)
-            (push argument parts)
-            (setq last (1+ index)))))
+        (when (and (eq (aref command index) ?*)
+                   (pi-coding-agent--isolated-shell-star-p command index))
+          (setq marker-p t)
+          (push (substring command last index) parts)
+          (push argument parts)
+          (setq last (1+ index)))
         (setq index (1+ index)))
-      (if parts
-          (progn
-            (push (substring command last) parts)
-            (apply #'concat (nreverse parts)))
-        (if async-start
-            (concat (substring command 0 async-start)
-                    " " argument
-                    (substring command async-start))
-          (concat command " " argument))))))
+      (let ((body
+             (if marker-p
+                 (progn
+                   (push (substring command last) parts)
+                   (apply #'concat (nreverse parts)))
+               (unless (pi-coding-agent--simple-shell-command-p command)
+                 (user-error
+                  (concat "Compound shell commands require an isolated * "
+                          "file placeholder")))
+               (concat command " " argument))))
+        (when (string-match-p "&[ \t]*\\'" body)
+          (user-error
+           "Ambiguous terminal ampersand; use a terminal ` &' suffix"))
+        (concat body async-suffix)))))
 
 (defun pi-coding-agent--strict-text-file-path-p (path quoted)
   "Return non-nil when PATH has the strict plain-text file grammar.
@@ -3377,6 +3427,11 @@ semantics when its delimiters are outside the bounded resolver window."
 The `:active' sentinel distinguishes resolver lookup from direct helper tests.
 A parser remains registered only when its direct deletion fails, allowing outer
 cleanup to retry that exact identity without claiming unrelated new parsers.")
+
+(defvar pi-coding-agent--semantic-code-span-at-point nil
+  "Dynamically record code-span ownership during semantic resolution.
+The `:active' sentinel limits this side channel to the public resolver call;
+direct capture-helper tests do not mutate global state.")
 
 (defconst pi-coding-agent--semantic-link-query
   '(((inline_link) @link)
@@ -4116,6 +4171,24 @@ the mode's parser set."
                    (treesit-query-capture
                     (treesit-parser-root-node parser)
                     pi-coding-agent--semantic-link-query start end)))
+                 (_code-span
+                  (when (eq pi-coding-agent--semantic-code-span-at-point
+                            :active)
+                    (setq pi-coding-agent--semantic-code-span-at-point
+                          (and
+                           (seq-some
+                            (lambda (capture)
+                              (and
+                               (string= (plist-get capture :type) "code_span")
+                               (seq-some
+                                (lambda (position)
+                                  (<= (plist-get capture :start) position
+                                      (1- (plist-get capture :end))))
+                                (delete-dups
+                                 (list (point)
+                                       (max (point-min) (1- (point))))))))
+                            captures)
+                           t))))
                  (owner (pi-coding-agent--semantic-link-select-owner
                          captures start end (point))))
             (when owner
@@ -4323,6 +4396,7 @@ narrowing cannot clip semantic ownership; the caller's restriction is restored."
   (save-restriction
     (widen)
     (let ((pi-coding-agent--semantic-link-resolver-parsers (list :active))
+          (pi-coding-agent--semantic-code-span-at-point :active)
           state parse-result)
     (condition-case error-data
         (setq state (pi-coding-agent--semantic-link-parser-state))
@@ -4349,7 +4423,13 @@ narrowing cannot clip semantic ownership; the caller's restriction is restored."
                              ((and host (plist-get host :over-cap))
                               (list :status :owned-invalid
                                     :reason :host-over-cap))
-                             ((not owner) (list :status :not-a-link))
+                             ((not owner)
+                              (append
+                               (list :status :not-a-link)
+                               (and
+                                (eq pi-coding-agent--semantic-code-span-at-point
+                                    t)
+                                (list :markdown-code-span t))))
                              (t (list :status :owner :owner owner))))))
                       ;; The resolver queries only the canonical block tree and
                       ;; its own short-lived inline parser.  Disable md-ts range
@@ -4379,12 +4459,14 @@ narrowing cannot clip semantic ownership; the caller's restriction is restored."
           (list :status :owned-invalid))
       parse-result))))
 
-(defun pi-coding-agent--text-file-target-at-point ()
+(defun pi-coding-agent--text-file-target-at-point (&optional markdown-code-span)
   "Return a strict markup-visible file target on the current line, or nil.
-This buffer layer snapshots a fixed-size window around point.  Supported raw
-quote wrappers complete within that snapshot remain authoritative, including
-invalid quoted prose or commands; fontified Markdown code remains authoritative
-when its delimiters lie outside the snapshot.  Otherwise it first uses an
+MARKDOWN-CODE-SPAN means semantic parsing already established code-span
+ownership at point.  This buffer layer snapshots a fixed-size window around
+point.  Supported raw quote wrappers complete within that snapshot remain
+authoritative, including invalid quoted prose or commands; semantically owned
+or fontified Markdown code remains authoritative when its delimiters lie
+outside the snapshot.  Otherwise it first uses an
 already-visible raw token, then projects backing buffer text according to
 fontified chat markup, maps point into that projection, delegates pure candidate
 parsing, and maps candidate bounds back to real buffer positions.  It never
@@ -4399,7 +4481,8 @@ source positions."
          (window-end (plist-get window :end))
          (text (buffer-substring-no-properties window-start window-end))
          (index (- (point) window-start))
-         (wrapped (or (pi-coding-agent--inside-text-wrapper-p text index)
+         (wrapped (or markdown-code-span
+                      (pi-coding-agent--inside-text-wrapper-p text index)
                       (pi-coding-agent--markdown-code-span-at-point-p
                        window-start window-end)))
          candidate bounds input-length)
@@ -4562,8 +4645,218 @@ reference, or malformed link also never falls through to a path-like label."
       (pcase (pi-coding-agent--semantic-link-file-target-at-point)
         (`(:status :owned-valid :target ,target) target)
         (`(:status :owned-invalid) nil)
-        (`(:status :not-a-link)
-         (pi-coding-agent--text-file-target-at-point))))))
+        (`(:status :not-a-link . ,properties)
+         (pi-coding-agent--text-file-target-at-point
+          (plist-get properties :markdown-code-span)))))))
+
+(defconst pi-coding-agent--shell-execution-buffer-variables
+  '(process-environment exec-path shell-file-name shell-command-switch
+    process-connection-type coding-system-for-read coding-system-for-write
+    default-process-coding-system process-coding-system-alist
+    inherit-process-coding-system process-adaptive-read-buffering
+    async-shell-command-width comint-terminfo-terminal
+    tramp-remote-process-environment)
+  "Narrow process-launch variables captured for one shell execution.")
+
+(defconst pi-coding-agent--shell-execution-dynamic-variables
+  '(connection-local-profile-alist connection-local-criteria-alist
+    connection-local-default-application enable-connection-local-variables)
+  "Global connection-local configuration captured for one shell execution.")
+
+(defun pi-coding-agent--copy-shell-execution-value (value)
+  "Copy VALUE for an execution snapshot, including nested strings."
+  (cond
+   ((stringp value) (copy-sequence value))
+   ((consp value)
+    (cons (pi-coding-agent--copy-shell-execution-value (car value))
+          (pi-coding-agent--copy-shell-execution-value (cdr value))))
+   ((vectorp value)
+    (apply #'vector
+           (mapcar #'pi-coding-agent--copy-shell-execution-value value)))
+   (t value)))
+
+(defun pi-coding-agent--shell-execution-snapshot (directory)
+  "Snapshot shell execution state for DIRECTORY in the current chat buffer.
+The snapshot is taken before prompting and owns one command launch.  It includes
+DIRECTORY; effective process environment, executable path, shell and switch;
+process/coding values; and remote connection configuration used by native
+file-process dispatch.  Local asynchronous terminal variables are resolved now
+so an existing output buffer cannot replace the invocation environment."
+  (require 'comint)
+  (let* ((directory (copy-sequence directory))
+         (remote-p (file-remote-p directory))
+         (buffer-variables
+          (if remote-p
+              pi-coding-agent--shell-execution-buffer-variables
+            (remq 'tramp-remote-process-environment
+                  pi-coding-agent--shell-execution-buffer-variables)))
+         (buffer-values
+          (delq nil
+                (mapcar
+                 (lambda (variable)
+                   (and (boundp variable)
+                        (cons variable
+                              (pi-coding-agent--copy-shell-execution-value
+                               (symbol-value variable)))))
+                 buffer-variables)))
+         (base-environment
+          (pi-coding-agent--copy-shell-execution-value process-environment))
+         (default-directory directory)
+         (async-environment
+          (append
+           (and (natnump async-shell-command-width)
+                (list (format "COLUMNS=%d" async-shell-command-width)))
+           (comint-term-environment)
+           base-environment)))
+    (list
+     :directory directory
+     :buffer-values buffer-values
+     :async-process-environment async-environment
+     :dynamic-values
+     ;; A remote handler can recalculate effective values from these global
+     ;; tables.  Freeze them only for remote dispatch; local launches need no
+     ;; broad connection-profile capture.
+     (and remote-p
+          (delq nil
+                (mapcar
+                 (lambda (variable)
+                   (and (boundp variable)
+                        (cons variable
+                              (pi-coding-agent--copy-shell-execution-value
+                               (symbol-value variable)))))
+                 pi-coding-agent--shell-execution-dynamic-variables))))))
+
+(defun pi-coding-agent--call-with-shell-buffer-values (values function)
+  "Call FUNCTION after temporarily installing buffer-local VALUES.
+VALUES is an alist from an execution snapshot.  Restore both each value and its
+original localness after the launch attempt, including when installation fails."
+  (let ((buffer (current-buffer))
+        originals)
+    (unwind-protect
+        (progn
+          (dolist (entry values)
+            (let ((variable (car entry)))
+              (push (list variable
+                          (local-variable-p variable buffer)
+                          (boundp variable)
+                          (and (boundp variable) (symbol-value variable)))
+                    originals)
+              (set (make-local-variable variable) (cdr entry))))
+          (funcall function))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (dolist (original originals)
+            (cond
+             ((not (nth 1 original))
+              (kill-local-variable (car original)))
+             ((nth 2 original)
+              (set (make-local-variable (car original)) (nth 3 original)))
+             (t
+              (make-local-variable (car original))
+              (makunbound (car original))))))))))
+
+(defun pi-coding-agent--async-shell-mode ()
+  "Enter the native asynchronous shell output mode for this Emacs version."
+  (if (and (>= emacs-major-version 30)
+           (boundp 'async-shell-command-mode))
+      (funcall async-shell-command-mode)
+    (shell-mode)))
+
+(defun pi-coding-agent--async-shell-display-action (&optional deferred)
+  "Return native async display action, with version handling for DEFERRED.
+Immediate display uses `allow-no-window' on Emacs 29 and later.  Deferred
+first-output display gained that action in Emacs 30."
+  (and (or (not deferred) (>= emacs-major-version 30))
+       '(nil (allow-no-window . t))))
+
+(defun pi-coding-agent--start-snapshotted-async-shell-command
+    (snapshot command &optional output-buffer)
+  "Start local asynchronous COMMAND under SNAPSHOT with native shell UI.
+COMMAND has no terminal ampersand.  OUTPUT-BUFFER, when non-nil, is the buffer
+or name reused by native revert behavior.  This mirrors only the Emacs
+29.4/30.1 local async branch that surrounds process launch; compatibility
+helpers centralize their mode and display differences.  Preserve native buffer
+naming, conflict policy, output retention, process name, sentinel, filter,
+revert, and display behavior while replacing only process-launch values."
+  (let* ((buffer (get-buffer-create
+                  (or output-buffer shell-command-buffer-name-async
+                      "*Async Shell Command*")))
+         (buffer-name (buffer-name buffer))
+         (process (get-buffer-process buffer))
+         (directory (plist-get snapshot :directory)))
+    (when process
+      (cond
+       ((eq async-shell-command-buffer 'confirm-kill-process)
+        (shell-command--same-buffer-confirm "Kill it")
+        (kill-process process))
+       ((eq async-shell-command-buffer 'confirm-new-buffer)
+        (shell-command--same-buffer-confirm "Use a new buffer")
+        (setq buffer (generate-new-buffer buffer-name)))
+       ((eq async-shell-command-buffer 'new-buffer)
+        (setq buffer (generate-new-buffer buffer-name)))
+       ((eq async-shell-command-buffer 'confirm-rename-buffer)
+        (shell-command--same-buffer-confirm "Rename it")
+        (with-current-buffer buffer (rename-uniquely))
+        (setq buffer (get-buffer-create buffer-name)))
+       ((eq async-shell-command-buffer 'rename-buffer)
+        (with-current-buffer buffer (rename-uniquely))
+        (setq buffer (get-buffer-create buffer-name)))))
+    (with-current-buffer buffer
+      (shell-command-save-pos-or-erase)
+      (setq default-directory directory)
+      (require 'shell)
+      (let* ((values (copy-tree (plist-get snapshot :buffer-values)))
+             (environment-entry (assq 'process-environment values)))
+        (if environment-entry
+            (setcdr environment-entry
+                    (copy-sequence
+                     (plist-get snapshot :async-process-environment)))
+          (push (cons 'process-environment
+                      (copy-sequence
+                       (plist-get snapshot :async-process-environment)))
+                values))
+        (cl-progv (mapcar #'car values) (mapcar #'cdr values)
+          (setq process
+                (start-process-shell-command "Shell" buffer command))))
+      (setq mode-line-process '(":%s"))
+      (pi-coding-agent--async-shell-mode)
+      (setq-local revert-buffer-function
+                  (lambda (&rest _)
+                    (pi-coding-agent--start-snapshotted-async-shell-command
+                     snapshot command buffer)))
+      (set-process-sentinel process #'shell-command-sentinel)
+      (set-process-filter process #'comint-output-filter)
+      (if async-shell-command-display-buffer
+          (display-buffer buffer (pi-coding-agent--async-shell-display-action))
+        (let ((nonce (make-symbol "nonce")))
+          (add-function
+           :before (process-filter process)
+           (lambda (proc _string)
+             (let ((output (process-buffer proc)))
+               (when (buffer-live-p output)
+                 (remove-function (process-filter proc) nonce)
+                 (display-buffer
+                  output (pi-coding-agent--async-shell-display-action t)))))
+           `((name . ,nonce))))))))
+
+(defun pi-coding-agent--call-native-shell-command (snapshot command)
+  "Run COMMAND through native shell machinery under execution SNAPSHOT."
+  (let* ((dynamic-values (plist-get snapshot :dynamic-values))
+         (dynamic-symbols (mapcar #'car dynamic-values))
+         (dynamic-bindings (mapcar #'cdr dynamic-values)))
+    (cl-progv dynamic-symbols dynamic-bindings
+      (pi-coding-agent--call-with-shell-buffer-values
+       (plist-get snapshot :buffer-values)
+       (lambda ()
+         (let* ((default-directory (plist-get snapshot :directory))
+                (handler
+                 (find-file-name-handler
+                  (directory-file-name default-directory) 'shell-command)))
+           (if (and (not handler)
+                    (string-match "[ \t]*&[ \t]*\\'" command))
+               (pi-coding-agent--start-snapshotted-async-shell-command
+                snapshot (substring command 0 (match-beginning 0)))
+             (shell-command command))))))))
 
 (defun pi-coding-agent--call-with-shell-directory (directory function)
   "Call FUNCTION with DIRECTORY as the current shell working directory.
@@ -4580,10 +4873,14 @@ new `default-directory' after the temporary binding unwinds."
           (setq default-directory current-session-directory))))))
 
 (defun pi-coding-agent-shell-command-at-point ()
-  "Read and run a shell command on the file target at point.
-An isolated `*' in the command is replaced by the file argument; otherwise the
-argument is appended.  Prompting and execution use the target session's local
-or TRAMP working directory."
+  "Read and run a Dired-inspired command on the file target at point.
+One command word followed only by whitespace-delimited options beginning with
+`-' automatically receives the safely quoted target.  All other command text,
+including ordinary arguments, compound/control syntax, and multiple lines,
+must place a textual isolated `*' bounded on each side by a space, tab, or
+string edge.  A terminal whitespace-delimited ` &' uses asynchronous shell
+output.  Prompting and execution use a snapshot of the target session's local
+or TRAMP execution environment."
   (interactive)
   (let* ((target (or (pi-coding-agent--file-target-at-point)
                      (user-error "No file at point")))
@@ -4591,6 +4888,8 @@ or TRAMP working directory."
          ;; must not consume input, and TARGET must remain a stable snapshot.
          (argument (pi-coding-agent--file-target-shell-argument target))
          (shell-directory (plist-get target :shell-directory))
+         (execution-snapshot
+          (pi-coding-agent--shell-execution-snapshot shell-directory))
          (command
           (pi-coding-agent--call-with-shell-directory
            shell-directory
@@ -4603,7 +4902,9 @@ or TRAMP working directory."
     ;; prompt was active.
     (pi-coding-agent--call-with-shell-directory
      shell-directory
-     (lambda () (shell-command shell-command-text)))))
+     (lambda ()
+       (pi-coding-agent--call-native-shell-command
+        execution-snapshot shell-command-text)))))
 
 (defun pi-coding-agent-visit-file (&optional toggle)
   "Visit the file associated with the tool block at point.

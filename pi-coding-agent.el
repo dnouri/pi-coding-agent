@@ -64,7 +64,8 @@
 ;;   Chat buffer:
 ;;     n / p          Navigate messages
 ;;     TAB            Toggle completed thinking/tool section or fold turn
-;;     !              Prompt/run shell command on one strict file target at point
+;;     !              Run a Dired-inspired shell command on a strict file target
+;;                    (command + dash-options appends it; otherwise use *)
 ;;     RET            Visit file at point (from tool blocks)
 ;;     C-c C-k        Abort current operation
 ;;     C-c C-n        New session

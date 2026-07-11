@@ -3871,55 +3871,160 @@ With hot-tail-turn-count 1, only the most recent headed turn stays hot."
      (pi-coding-agent--shell-command-with-file command "'/tmp/report file'")
      :type 'user-error)))
 
-(ert-deftest pi-coding-agent-test-file-shell-command-appends-quoted-operand-once ()
-  "Commands without a placeholder receive the already-quoted operand once."
-  (dolist (case '(("file" "'/tmp/report file'" "file '/tmp/report file'")
-                  ("printf '%s'" "'/tmp/a;$(bad)`tick'"
-                   "printf '%s' '/tmp/a;$(bad)`tick'")
-                  ("cat\t" "'/tmp/a\tb\nc'" "cat\t '/tmp/a\tb\nc'")))
-    (should (equal (pi-coding-agent--shell-command-with-file
-                    (nth 0 case) (nth 1 case))
-                   (nth 2 case)))))
+(ert-deftest pi-coding-agent-test-simple-shell-command-grammar-is-explicit ()
+  "The no-marker whitelist accepts only one safe command plus safe options."
+  (should (string-match-p "BODY := H\\* COMMAND"
+                          (documentation
+                           'pi-coding-agent--simple-shell-command-p)))
+  (should (string-match-p
+           "options beginning with"
+           (documentation 'pi-coding-agent-shell-command-at-point)))
+  (dolist (command '("file" " cat\t" "wc -l" "file --brief"
+                     "/usr/bin/file --mime-type" "./bin/check -q"
+                     "tool.name --style=short -x/y:z,1"))
+    (should (pi-coding-agent--simple-shell-command-p command)))
+  (dolist (command '("." ".." "/" "-" "--" "wc lines" "FOO=bar file"
+                     "file --brief=yes extra" "file\n-l" "file -l"))
+    (should-not (pi-coding-agent--simple-shell-command-p command))))
 
-(ert-deftest pi-coding-agent-test-file-shell-command-substitutes-isolated-stars ()
-  "Only unquoted, unescaped, whitespace-isolated stars are placeholders."
+(ert-deftest pi-coding-agent-test-file-shell-command-appends-only-simple-commands ()
+  "No-marker commands append the already-quoted operand exactly once."
+  (dolist (case '(("file" "file ARG")
+                  ("cat\t" "cat\t ARG")
+                  ("wc -l" "wc -l ARG")
+                  ("/usr/bin/file --brief" "/usr/bin/file --brief ARG")))
+    (should (equal (pi-coding-agent--shell-command-with-file
+                    (car case) "ARG")
+                   (cadr case)))))
+
+(ert-deftest pi-coding-agent-test-file-shell-command-rejects-non-simple-auto-append ()
+  "Unsafe or ambiguous no-marker shell text fails closed before execution."
+  (dolist (command
+           '("true;" "true\n" "cat | wc" "cat || wc" "cat && wc"
+             "cat # comment" "cat > out" "cat 2>out" "cat < in"
+             "printf '%s'" "echo \"x\"" "echo \\x" "echo $x"
+             "echo ${x}" "echo $(id)" "echo `id`" "echo $'ansi'"
+             "echo $((1+2))" "echo *.el" "echo ?" "echo [ab]"
+             "cat <<EOF" "cat <<'EOF'" "echo 'unterminated"
+             "echo \"unterminated" "cmd&" "cmd \\&" "cmd &&" "cmd |&"))
+    (let ((err (should-error
+                (pi-coding-agent--shell-command-with-file command "ARG")
+                :type 'user-error)))
+      (should (equal
+               "Compound shell commands require an isolated * file placeholder"
+               (error-message-string err))))))
+
+(ert-deftest pi-coding-agent-test-file-shell-command-marker-is-textual-dired-style ()
+  "Every edge/space/tab-bounded star is a marker, independent of shell syntax."
   (dolist (case '(("file *" "file ARG")
                   ("cmp * *" "cmp ARG ARG")
                   ("*" "ARG")
-                  ("echo foo*" "echo foo* ARG")
-                  ("echo '*'" "echo '*' ARG")
-                  ("echo \"*\"" "echo \"*\" ARG")
-                  ("echo \\*" "echo \\* ARG")
-                  ("echo *\"\"" "echo *\"\" ARG")
-                  ("echo ' * '" "echo ' * ' ARG")
-                  ("echo \" * \"" "echo \" * \" ARG")))
+                  ("echo\t*\t" "echo\tARG\t")
+                  ("echo ' * '" "echo ' ARG '")
+                  ("echo \" * \"" "echo \" ARG \"")
+                  ("echo \\ *" "echo \\ ARG")
+                  ("printf 'unterminated *" "printf 'unterminated ARG")
+                  ("cat * | wc -l\necho done" "cat ARG | wc -l\necho done")
+                  ("cat * <<EOF\ndata\nEOF" "cat ARG <<EOF\ndata\nEOF")))
     (should (equal (pi-coding-agent--shell-command-with-file
                     (car case) "ARG")
-                   (cadr case)))))
+                   (cadr case))))
+  (dolist (command '("echo foo*" "echo *foo" "echo *\n" "echo\n*"
+                     "echo '*x'" "echo \\*" "echo *\"\""))
+    (should-error (pi-coding-agent--shell-command-with-file command "ARG")
+                  :type 'user-error)))
 
-(ert-deftest pi-coding-agent-test-file-shell-command-preserves-terminal-ampersand ()
-  "An appended operand precedes native `shell-command' async syntax."
+(ert-deftest pi-coding-agent-test-file-shell-command-marker-matches-dired-boundaries ()
+  "Our star boundaries equal Dired's on Emacs 29.4 and 30.1 source lanes."
+  (require 'dired-aux)
+  (dolist (case '(("*" . t) (" * " . t) ("\t*\t" . t)
+                  ("' * '" . t) ("\\ *" . t) ("x*" . nil)
+                  ("*x" . nil) ("\n* " . nil) (" *\n" . nil)))
+    (let ((command (car case))
+          (expected (cdr case)))
+      (should (eq (not (null (dired--star-or-qmark-p command "*")))
+                  expected))
+      (let ((found nil))
+        (dotimes (index (length command))
+          (when (and (eq (aref command index) ?*)
+                     (pi-coding-agent--isolated-shell-star-p command index))
+            (setq found t)))
+        (should (eq found expected))))))
+
+(ert-deftest pi-coding-agent-test-file-shell-command-native-async-classification ()
+  "Only a whitespace-delimited terminal single ampersand becomes native async."
   (dolist (case '(("file &" "file ARG &")
-                  ("file&" "file ARG&")
                   ("file\t&  " "file ARG\t&  ")
                   ("file * &" "file ARG &")
-                  ("cmp * *\t& " "cmp ARG ARG\t& ")))
-    (should (equal (pi-coding-agent--shell-command-with-file
-                    (car case) "ARG")
-                   (cadr case)))))
+                  ("cat * | wc -l &" "cat ARG | wc -l &")))
+    (let ((built (pi-coding-agent--shell-command-with-file (car case) "ARG")))
+      (should (equal built (cadr case)))
+      ;; This is the exact lexical classifier used by native `shell-command'.
+      (should (string-match-p "[ \t]*&[ \t]*\\'" built))))
+  (dolist (command '("file&" "file \\&" "file &&" "file |&"
+                     "file * \\&" "file * &&" "file * |&" "file * & &"))
+    (should-error (pi-coding-agent--shell-command-with-file command "ARG")
+                  :type 'user-error)))
+
+(ert-deftest pi-coding-agent-test-file-shell-command-scans-are-linear ()
+  "Malformed suffix and whitelist tails cannot trigger regexp retry blowups."
+  (let* ((padding (make-string 16000 ?\s))
+         (command (concat "cat *" padding "&" padding "x"))
+         (start (float-time))
+         (result (pi-coding-agent--shell-command-with-file command "ARG")))
+    (should (equal (substring result 0 7) "cat ARG"))
+    (should (< (- (float-time) start) 1.5)))
+  (let* ((options (mapconcat #'identity (make-list 26 "--") " "))
+         (command (concat "file " options " invalid"))
+         (start (float-time)))
+    (should-error (pi-coding-agent--shell-command-with-file command "ARG")
+                  :type 'user-error)
+    (should (< (- (float-time) start) 1.0))))
 
 (ert-deftest pi-coding-agent-test-file-shell-command-keeps-hostile-path-as-data ()
-  "Quoted ampersands and leading dashes stay inside one shell operand."
+  "Quoted controls, terminal ampersands, and leading dashes stay one operand."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (pi-coding-agent--set-chat-session-identity "/tmp/project/")
     (dolist (path '("/tmp/report&" "/tmp/a b;$(bad)`tick\tline\nend"
                     "/tmp/project/-danger"))
       (let* ((target (pi-coding-agent--make-file-target :text path path))
-             (argument (pi-coding-agent--file-target-shell-argument target))
-             (command (pi-coding-agent--shell-command-with-file
-                       "printf '%s' &" argument)))
-        (should (equal command (concat "printf '%s' " argument " &")))))))
+             (argument (pi-coding-agent--file-target-shell-argument target)))
+        (dolist (input '("file" "printf '%s' *"))
+          (let ((command (pi-coding-agent--shell-command-with-file
+                          input argument)))
+            (should (equal command
+                           (concat (if (equal input "file")
+                                       "file "
+                                     "printf '%s' ")
+                                   argument)))
+            (should-not (string-match-p "[ \t]*&[ \t]*\\'" command))))))))
+
+(ert-deftest pi-coding-agent-test-file-shell-command-rejection-never-runs-target ()
+  "Rejected separators and newlines cannot make an executable target a command."
+  (let* ((directory (make-temp-file "pi-file-action-" t))
+         (target (expand-file-name "executable-target" directory))
+         (sentinel (expand-file-name "TARGET-RAN" directory)))
+    (unwind-protect
+        (progn
+          (write-region (format "#!/bin/sh\nprintf ran > %s\n"
+                                (shell-quote-argument sentinel))
+                        nil target nil 'silent)
+          (set-file-modes target #o700)
+          (dolist (input '("true;" "true\n"))
+            (with-temp-buffer
+              (pi-coding-agent-chat-mode)
+              (pi-coding-agent--set-chat-session-identity directory)
+              (let ((inhibit-read-only t)) (insert target))
+              (goto-char (+ (point-min) 2))
+              (cl-letf (((symbol-function 'read-shell-command)
+                         (lambda (&rest _) input)))
+                ;; Leave native `shell-command' unstubbed: the red behavior
+                ;; really executed TARGET after the separator/newline.
+                (should-error (pi-coding-agent-shell-command-at-point)
+                              :type 'user-error)))
+            (should-not (file-exists-p sentinel))))
+      (delete-directory directory t))))
 
 (defun pi-coding-agent-test--run-shell-command-at-point
     (input &optional during-read prefix)
@@ -4068,6 +4173,568 @@ INPUT is returned by `read-shell-command', or signals `quit' when it is
       (should (equal prompt-environment command-environment))
       (should (equal "/chat/test-shell" prompt-shell))
       (should (equal prompt-shell command-shell)))))
+
+(defvar pi-coding-agent-test--connection-execution-marker nil
+  "Arbitrary connection-local value used by execution snapshot tests.")
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-snapshot-is-narrow-locally ()
+  "Local execution freezes launch values, not unrelated connection state."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+    (let ((inhibit-read-only t)
+          (connection-local-profile-alist
+           '((chat-profile (shell-file-name . "/snapshot/profile-shell"))))
+          seen)
+      (insert "src/app.el")
+      (goto-char (+ (point-min) 2))
+      (setq-local tramp-remote-process-environment '("REMOTE=SNAPSHOT"))
+      (setq-local pi-coding-agent-test--connection-execution-marker 'snapshot)
+      (setq-local connection-local-variables-alist
+                  '((pi-coding-agent-test--connection-execution-marker
+                     . snapshot)))
+      (cl-letf (((symbol-function 'read-shell-command)
+                 (lambda (&rest _)
+                   (setq connection-local-profile-alist
+                         '((later-profile
+                            (shell-file-name . "/later/profile-shell"))))
+                   (setq-local tramp-remote-process-environment
+                               '("REMOTE=LATER"))
+                   (setq-local pi-coding-agent-test--connection-execution-marker
+                               'later)
+                   (setq-local connection-local-variables-alist
+                               '((pi-coding-agent-test--connection-execution-marker
+                                  . later)))
+                   "file"))
+                ((symbol-function 'shell-command)
+                 (lambda (&rest _)
+                   (setq seen
+                         (list connection-local-profile-alist
+                               connection-local-variables-alist
+                               tramp-remote-process-environment
+                               pi-coding-agent-test--connection-execution-marker)))))
+        (pi-coding-agent-shell-command-at-point))
+      (should (equal
+               '(((later-profile
+                   (shell-file-name . "/later/profile-shell")))
+                 ((pi-coding-agent-test--connection-execution-marker . later))
+                 ("REMOTE=LATER") later)
+               seen))
+      (should (equal '("REMOTE=LATER")
+                     tramp-remote-process-environment))
+      (should (eq 'later
+                  pi-coding-agent-test--connection-execution-marker)))))
+
+(defun pi-coding-agent-test--write-snapshot-shell (directory)
+  "Write a validating shell wrapper in DIRECTORY and return its basename."
+  (let* ((name "pi-phase2-snapshot-shell")
+         (file (expand-file-name name directory)))
+    (write-region
+     (concat "#!/bin/sh\n"
+             "printf 'SWITCH=%s|' \"$1\"\n"
+             "test \"$1\" = --pi-switch || exit 92\n"
+             "shift\n"
+             "exec /bin/sh -c \"$1\"\n")
+     nil file nil 'silent)
+    (set-file-modes file #o700)
+    name))
+
+(defun pi-coding-agent-test--snapshot-shell-command (&optional async)
+  "Return a real shell command reporting snapshot state.
+When ASYNC is non-nil, include native terminal asynchronous syntax."
+  (concat
+   "printf 'MARK=%s|PWD=%s' \"$PI_CHAT_SHELL_MARKER\" \"$PWD\"; : *"
+   (and async " &")))
+
+(defun pi-coding-agent-test--wait-for-shell-output (buffer)
+  "Wait boundedly for BUFFER's shell process and return its contents."
+  (let ((deadline (+ (float-time) 8.0))
+        process)
+    (while (and (< (float-time) deadline)
+                (progn
+                  (setq process (get-buffer-process buffer))
+                  (or (and (null process)
+                           (with-current-buffer buffer (zerop (buffer-size))))
+                      (and process (process-live-p process)))))
+      (accept-process-output process 0.05))
+    (when (and process (process-live-p process))
+      (ert-fail "Timed out waiting for real async shell subprocess"))
+    (accept-process-output process 0.05)
+    (with-current-buffer buffer
+      (buffer-substring-no-properties (point-min) (point-max)))))
+
+(defun pi-coding-agent-test--delete-shell-buffer (buffer)
+  "Delete BUFFER and any process associated with it."
+  (when (buffer-live-p buffer)
+    (when-let* ((process (get-buffer-process buffer)))
+      (when (process-live-p process)
+        (delete-process process)))
+    (kill-buffer buffer)))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-real-sync-snapshots-execution ()
+  "A real synchronous subprocess uses and then releases the pre-prompt snapshot."
+  (let* ((directory (file-name-as-directory
+                     (make-temp-file "pi-shell-snapshot-" t)))
+         (later-directory (file-name-as-directory
+                           (make-temp-file "pi-shell-later-" t)))
+         (output-name shell-command-buffer-name)
+         (output (get-buffer output-name)))
+    (when output (pi-coding-agent-test--delete-shell-buffer output))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (pi-coding-agent--set-chat-session-identity directory)
+          (let ((inhibit-read-only t)
+                (shell-name
+                 (pi-coding-agent-test--write-snapshot-shell directory)))
+            (insert "./target.txt")
+            (goto-char (+ (point-min) 2))
+            (setq-local process-environment
+                        (cons "PI_CHAT_SHELL_MARKER=SYNC-SNAPSHOT"
+                              process-environment))
+            (setq-local exec-path (cons directory exec-path))
+            (setq-local shell-file-name shell-name)
+            (setq-local shell-command-switch "--pi-switch")
+            (cl-letf (((symbol-function 'read-shell-command)
+                       (lambda (&rest _)
+                         ;; Simulate arbitrary buffer/session local changes
+                         ;; while the native minibuffer would be active.
+                         (setq-local process-environment
+                                     '("PI_CHAT_SHELL_MARKER=SYNC-MUTATED"))
+                         (setq-local exec-path '("/missing-after-prompt"))
+                         (setq-local shell-file-name "/bin/false")
+                         (setq-local shell-command-switch "--wrong-switch")
+                         (pi-coding-agent--set-chat-session-identity
+                          later-directory)
+                         (pi-coding-agent-test--snapshot-shell-command))))
+              (pi-coding-agent-shell-command-at-point))
+            (setq output (get-buffer output-name))
+            (should (buffer-live-p output))
+            (should (equal
+                     (format "SWITCH=--pi-switch|MARK=SYNC-SNAPSHOT|PWD=%s"
+                             (directory-file-name directory))
+                     (with-current-buffer output
+                       (buffer-string))))
+            ;; Launch-time propagation must unwind to prompt-time mutations.
+            (should (equal '("PI_CHAT_SHELL_MARKER=SYNC-MUTATED")
+                           process-environment))
+            (should (equal '("/missing-after-prompt") exec-path))
+            (should (equal "/bin/false" shell-file-name))
+            (should (equal "--wrong-switch" shell-command-switch))
+            (should (equal later-directory default-directory))))
+      (pi-coding-agent-test--delete-shell-buffer output)
+      (delete-directory directory t)
+      (delete-directory later-directory t))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-real-async-ignores-output-locals ()
+  "Fresh and reused native async buffers cannot replace the chat snapshot."
+  (let* ((directory (file-name-as-directory
+                     (make-temp-file "pi-shell-async-" t)))
+         (shell-name (pi-coding-agent-test--write-snapshot-shell directory))
+         (output-name shell-command-buffer-name-async)
+         output)
+    (unwind-protect
+        (dolist (reused '(nil t))
+          (pi-coding-agent-test--delete-shell-buffer (get-buffer output-name))
+          (when reused
+            (with-current-buffer (get-buffer-create output-name)
+              (setq-local process-environment
+                          '("PI_CHAT_SHELL_MARKER=OUTPUT-OVERRIDE"))
+              (setq-local exec-path '("/output/missing"))
+              (setq-local shell-file-name "/bin/false")
+              (setq-local shell-command-switch "--output-wrong")))
+          (with-temp-buffer
+            (pi-coding-agent-chat-mode)
+            (pi-coding-agent--set-chat-session-identity directory)
+            (let ((inhibit-read-only t)) (insert "./target.txt"))
+            (goto-char (+ (point-min) 2))
+            (setq-local process-environment
+                        (cons (format "PI_CHAT_SHELL_MARKER=ASYNC-%s"
+                                      (if reused "REUSED" "FRESH"))
+                              process-environment))
+            (setq-local exec-path (cons directory exec-path))
+            (setq-local shell-file-name shell-name)
+            (setq-local shell-command-switch "--pi-switch")
+            ;; A fresh native output buffer has ordinary global values; a
+            ;; reused one has even stronger wrong buffer-local values.
+            (let ((async-shell-command-display-buffer nil))
+              (cl-letf (((symbol-function 'read-shell-command)
+                         (lambda (&rest _)
+                           (pi-coding-agent-test--snapshot-shell-command t))))
+                (pi-coding-agent-shell-command-at-point))))
+          (setq output (get-buffer output-name))
+          (should (buffer-live-p output))
+          (let ((process (get-buffer-process output)))
+            (should (processp process))
+            (should (string-prefix-p "Shell" (process-name process)))
+            (should (eq #'shell-command-sentinel
+                        (process-sentinel process)))
+            (should (functionp (process-filter process))))
+          ;; Native shell mode initialization may itself clear old output
+          ;; locals after startup; the real process result proves those locals
+          ;; could not override this launch.
+          (should (equal
+                   (format "SWITCH=--pi-switch|MARK=ASYNC-%s|PWD=%s"
+                           (if reused "REUSED" "FRESH")
+                           (directory-file-name directory))
+                   (pi-coding-agent-test--wait-for-shell-output output))))
+      (pi-coding-agent-test--delete-shell-buffer output)
+      (delete-directory directory t))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-native-async-revert-keeps-snapshot ()
+  "Reverting async output reruns with the original execution snapshot."
+  (let* ((directory (file-name-as-directory
+                     (make-temp-file "pi-shell-revert-" t)))
+         (shell-name (pi-coding-agent-test--write-snapshot-shell directory))
+         (output-name shell-command-buffer-name-async)
+         output)
+    (pi-coding-agent-test--delete-shell-buffer (get-buffer output-name))
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (pi-coding-agent-chat-mode)
+            (pi-coding-agent--set-chat-session-identity directory)
+            (let ((inhibit-read-only t)) (insert "./target.txt"))
+            (goto-char (+ (point-min) 2))
+            (setq-local process-environment
+                        (cons "PI_CHAT_SHELL_MARKER=ASYNC-REVERT"
+                              process-environment))
+            (setq-local exec-path (cons directory exec-path))
+            (setq-local shell-file-name shell-name)
+            (setq-local shell-command-switch "--pi-switch")
+            (let ((async-shell-command-display-buffer nil))
+              (cl-letf (((symbol-function 'read-shell-command)
+                         (lambda (&rest _)
+                           (pi-coding-agent-test--snapshot-shell-command t))))
+                (pi-coding-agent-shell-command-at-point))))
+          (setq output (get-buffer output-name))
+          (should (equal
+                   (format "SWITCH=--pi-switch|MARK=ASYNC-REVERT|PWD=%s"
+                           (directory-file-name directory))
+                   (pi-coding-agent-test--wait-for-shell-output output)))
+          ;; Neither later globals nor stale output locals may affect rerun.
+          (let ((process-environment '("PI_CHAT_SHELL_MARKER=GLOBAL-WRONG"))
+                (exec-path '("/missing-global"))
+                (shell-file-name "/bin/false")
+                (shell-command-switch "--wrong-global")
+                (async-shell-command-display-buffer nil))
+            (with-current-buffer output
+              (setq-local process-environment
+                          '("PI_CHAT_SHELL_MARKER=OUTPUT-WRONG"))
+              (setq-local exec-path '("/missing-output"))
+              (setq-local shell-file-name "/bin/false")
+              (setq-local shell-command-switch "--wrong-output")
+              (revert-buffer nil t)))
+          (should (equal
+                   (format "SWITCH=--pi-switch|MARK=ASYNC-REVERT|PWD=%s"
+                           (directory-file-name directory))
+                   (pi-coding-agent-test--wait-for-shell-output output))))
+      (pi-coding-agent-test--delete-shell-buffer output)
+      (delete-directory directory t))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-native-async-snapshots-terminal-environment ()
+  "Async TERM and width come from invocation state, not reused output locals."
+  (require 'comint)
+  (let* ((directory (file-name-as-directory
+                     (make-temp-file "pi-shell-terminal-env-" t)))
+         (shell-name (pi-coding-agent-test--write-snapshot-shell directory))
+         (output-name shell-command-buffer-name-async)
+         (output (get-buffer-create output-name)))
+    (unwind-protect
+        (progn
+          (with-current-buffer output
+            (setq-local comint-terminfo-terminal "OUTPUT-WRONG")
+            (setq-local async-shell-command-width 13))
+          (with-temp-buffer
+            (pi-coding-agent-chat-mode)
+            (pi-coding-agent--set-chat-session-identity directory)
+            (let ((inhibit-read-only t)) (insert "./target.txt"))
+            (goto-char (+ (point-min) 2))
+            (setq-local process-environment
+                        (cons "PI_CHAT_SHELL_MARKER=ASYNC-TERM"
+                              process-environment))
+            (setq-local exec-path (cons directory exec-path))
+            (setq-local shell-file-name shell-name)
+            (setq-local shell-command-switch "--pi-switch")
+            (setq-local comint-terminfo-terminal "SNAPSHOT-TERM")
+            (setq-local async-shell-command-width 77)
+            (let ((async-shell-command-display-buffer nil))
+              (cl-letf (((symbol-function 'read-shell-command)
+                         (lambda (&rest _)
+                           "printf 'TERM=%s|COLUMNS=%s' \"$TERM\" \"$COLUMNS\"; : * &")))
+                (pi-coding-agent-shell-command-at-point))))
+          (setq output (get-buffer output-name))
+          (should (equal "SWITCH=--pi-switch|TERM=SNAPSHOT-TERM|COLUMNS=77"
+                         (pi-coding-agent-test--wait-for-shell-output output))))
+      (pi-coding-agent-test--delete-shell-buffer output)
+      (delete-directory directory t))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-native-async-snapshots-process-controls ()
+  "Async process coding inheritance and adaptive buffering use the chat snapshot."
+  (let* ((directory (file-name-as-directory
+                     (make-temp-file "pi-shell-process-controls-" t)))
+         (output-name shell-command-buffer-name-async)
+         (output (get-buffer-create output-name))
+         (native-start (symbol-function 'start-process-shell-command))
+         observed-adaptive process)
+    (unwind-protect
+        (progn
+          (with-current-buffer output
+            (setq-local inherit-process-coding-system nil)
+            (setq-local process-adaptive-read-buffering nil))
+          (with-temp-buffer
+            (pi-coding-agent-chat-mode)
+            (pi-coding-agent--set-chat-session-identity directory)
+            (let ((inhibit-read-only t)) (insert "./target.txt"))
+            (goto-char (+ (point-min) 2))
+            (setq-local inherit-process-coding-system t)
+            (setq-local process-adaptive-read-buffering t)
+            (let ((async-shell-command-display-buffer nil))
+              (cl-letf (((symbol-function 'read-shell-command)
+                         (lambda (&rest _)
+                           (setq-local inherit-process-coding-system nil)
+                           (setq-local process-adaptive-read-buffering nil)
+                           "printf done; sleep 0.05; : * &"))
+                        ((symbol-function 'start-process-shell-command)
+                         (lambda (&rest args)
+                           (setq observed-adaptive
+                                 process-adaptive-read-buffering)
+                           (apply native-start args))))
+                (pi-coding-agent-shell-command-at-point))))
+          (setq output (get-buffer output-name)
+                process (get-buffer-process output))
+          (should (process-live-p process))
+          (should (eq t observed-adaptive))
+          (should (process-inherit-coding-system-flag process))
+          (pi-coding-agent-test--wait-for-shell-output output))
+      (pi-coding-agent-test--delete-shell-buffer output)
+      (delete-directory directory t))))
+
+(ert-deftest pi-coding-agent-test-snapshotted-local-async-uses-local-process-api ()
+  "The no-handler async branch uses native's local process API."
+  (let* ((directory (file-name-as-directory
+                     (make-temp-file "pi-shell-local-api-" t)))
+         (snapshot (pi-coding-agent--shell-execution-snapshot directory))
+         (buffer-name (generate-new-buffer-name " *pi-local-api*"))
+         process output)
+    (unwind-protect
+        (let ((shell-command-buffer-name-async buffer-name)
+              (async-shell-command-display-buffer nil))
+          (cl-letf (((symbol-function 'start-file-process-shell-command)
+                     (lambda (&rest _)
+                       (ert-fail "Local async must not dispatch through file handlers"))))
+            (pi-coding-agent--start-snapshotted-async-shell-command
+             snapshot "printf local-api"))
+          (setq output (get-buffer buffer-name)
+                process (get-buffer-process output))
+          (should (processp process))
+          (should (equal "local-api"
+                         (pi-coding-agent-test--wait-for-shell-output output))))
+      (pi-coding-agent-test--delete-shell-buffer output)
+      (delete-directory directory t))))
+
+(ert-deftest pi-coding-agent-test-snapshotted-async-native-display-actions ()
+  "Immediate and deferred display arguments match native Emacs 29/30."
+  (dolist (immediate '(t nil))
+    (let* ((directory (file-name-as-directory
+                       (make-temp-file "pi-shell-display-action-" t)))
+           (snapshot (pi-coding-agent--shell-execution-snapshot directory))
+           (buffer-name (generate-new-buffer-name " *pi-display-action*"))
+           calls output)
+      (unwind-protect
+          (let ((shell-command-buffer-name-async buffer-name)
+                (async-shell-command-display-buffer immediate))
+            (cl-letf (((symbol-function 'display-buffer)
+                       (lambda (buffer &optional action &rest _)
+                         (push (list buffer action) calls))))
+              (pi-coding-agent--start-snapshotted-async-shell-command
+               snapshot "printf display-action")
+              (setq output (get-buffer buffer-name))
+              (should (equal "display-action"
+                             (pi-coding-agent-test--wait-for-shell-output
+                              output))))
+            (should (= 1 (length calls)))
+            (should (eq output (caar calls)))
+            (should
+             (equal
+              (if (or immediate (>= emacs-major-version 30))
+                  '(nil (allow-no-window . t))
+                nil)
+              (cadar calls))))
+        (pi-coding-agent-test--delete-shell-buffer output)
+        (delete-directory directory t)))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-native-async-conflict-snapshot ()
+  "Native new-buffer conflict handling retains the launch snapshot."
+  (let* ((directory (file-name-as-directory
+                     (make-temp-file "pi-shell-conflict-" t)))
+         (shell-name (pi-coding-agent-test--write-snapshot-shell directory))
+         (base (get-buffer-create shell-command-buffer-name-async))
+         (occupier (start-process "pi-shell-occupier" base
+                                  "/bin/sh" "-c" "sleep 30"))
+         generated)
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (pi-coding-agent--set-chat-session-identity directory)
+          (let ((inhibit-read-only t)) (insert "./target.txt"))
+          (goto-char (+ (point-min) 2))
+          (setq-local process-environment
+                      (cons "PI_CHAT_SHELL_MARKER=ASYNC-CONFLICT"
+                            process-environment))
+          (setq-local exec-path (cons directory exec-path))
+          (setq-local shell-file-name shell-name)
+          (setq-local shell-command-switch "--pi-switch")
+          (let ((async-shell-command-buffer 'new-buffer)
+                (async-shell-command-display-buffer nil))
+            (cl-letf (((symbol-function 'read-shell-command)
+                       (lambda (&rest _)
+                         (pi-coding-agent-test--snapshot-shell-command t))))
+              (pi-coding-agent-shell-command-at-point)))
+          (setq generated
+                (seq-find
+                 (lambda (buffer)
+                   (and (not (eq buffer base))
+                        (string-prefix-p shell-command-buffer-name-async
+                                         (buffer-name buffer))
+                        (get-buffer-process buffer)))
+                 (buffer-list)))
+          (should (buffer-live-p generated))
+          (let ((process (get-buffer-process generated)))
+            (should (processp process))
+            (should (string-prefix-p "Shell" (process-name process)))
+            (should (eq #'shell-command-sentinel
+                        (process-sentinel process)))
+            (should (functionp (process-filter process))))
+          (should (equal
+                   (format "SWITCH=--pi-switch|MARK=ASYNC-CONFLICT|PWD=%s"
+                           (directory-file-name directory))
+                   (pi-coding-agent-test--wait-for-shell-output generated))))
+      (when (process-live-p occupier) (delete-process occupier))
+      (pi-coding-agent-test--delete-shell-buffer generated)
+      (pi-coding-agent-test--delete-shell-buffer base)
+      (delete-directory directory t))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-remote-async-terminal-snapshot ()
+  "Remote native dispatch sees pre-prompt async TERM and COLUMNS values."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((directory "/ssh:host:/srv/project/")
+          (native-find (symbol-function 'find-file-name-handler))
+          observed)
+      (pi-coding-agent--set-chat-session-identity directory)
+      (pi-coding-agent--display-tool-start "read" '(:path "reports/a.el"))
+      (goto-char (overlay-start pi-coding-agent--pending-tool-overlay))
+      (setq-local comint-terminfo-terminal "SNAPSHOT-TERM")
+      (setq-local async-shell-command-width 41)
+      (cl-letf (((symbol-function 'read-shell-command)
+                 (lambda (&rest _)
+                   (setq-local comint-terminfo-terminal "MUTATED-TERM")
+                   (setq-local async-shell-command-width 99)
+                   "printf x; : * &"))
+                ((symbol-function 'find-file-name-handler)
+                 (lambda (file operation)
+                   (if (eq operation 'shell-command)
+                       (lambda (_op &rest _args)
+                         (setq observed
+                               (list comint-terminfo-terminal
+                                     async-shell-command-width)))
+                     (funcall native-find file operation)))))
+        (pi-coding-agent-shell-command-at-point))
+      (should (equal '("SNAPSHOT-TERM" 41) observed))
+      (should (equal "MUTATED-TERM" comint-terminfo-terminal))
+      (should (= 99 async-shell-command-width)))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-copies-cwd-snapshot ()
+  "Destructive prompt-time string mutation cannot alter the snapshotted cwd."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((directory (copy-sequence "/tmp/snapshot/"))
+           (target (list :shell-path "/tmp/snapshot/file.el"
+                         :shell-directory directory :display "file.el"))
+           observed)
+      (cl-letf (((symbol-function 'pi-coding-agent--file-target-at-point)
+                 (lambda () target))
+                ((symbol-function 'read-shell-command)
+                 (lambda (&rest _)
+                   (aset directory 5 ?X)
+                   "file"))
+                ((symbol-function 'shell-command)
+                 (lambda (&rest _)
+                   (setq observed default-directory))))
+        (pi-coding-agent-shell-command-at-point))
+      (should (equal "/tmp/snapshot/" observed)))))
+
+(ert-deftest pi-coding-agent-test-shell-command-at-point-native-multihop-dispatch ()
+  "The snapshotted multi-hop directory reaches native file-handler dispatch."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((directory "/ssh:bastion|sudo:root@host:/srv/project/")
+          (native-find (symbol-function 'find-file-name-handler))
+          (connection-local-profile-alist
+           '((snapshot-profile
+              (tramp-remote-process-environment . ("REMOTE=SNAPSHOT"))
+              (pi-coding-agent-test--connection-execution-marker
+               . nested-snapshot))))
+          (connection-local-criteria-alist
+           '(((:application tramp :protocol "sudo") snapshot-profile)))
+          (connection-local-default-application 'tramp)
+          observed)
+      (pi-coding-agent--set-chat-session-identity directory)
+      (pi-coding-agent--display-tool-start "read" '(:path "reports/a.el"))
+      (goto-char (overlay-start pi-coding-agent--pending-tool-overlay))
+      (setq-local tramp-remote-process-environment '("REMOTE=SNAPSHOT"))
+      (cl-letf (((symbol-function 'read-shell-command)
+                 (lambda (&rest _)
+                   (setq connection-local-profile-alist
+                         '((later-profile
+                            (tramp-remote-process-environment
+                             . ("REMOTE=LATER")))))
+                   (setq connection-local-criteria-alist
+                         '(((:application tramp :protocol "ssh")
+                            later-profile)))
+                   (setq-local tramp-remote-process-environment
+                               '("REMOTE=LATER"))
+                   (setq connection-local-default-application 'later-app)
+                   "file"))
+                ((symbol-function 'find-file-name-handler)
+                 (lambda (file operation)
+                   (if (eq operation 'shell-command)
+                       (lambda (op &rest args)
+                         (let (nested-marker)
+                           (with-connection-local-variables
+                             (setq nested-marker
+                                   pi-coding-agent-test--connection-execution-marker))
+                           (setq observed
+                                 (list op args default-directory
+                                       connection-local-profile-alist
+                                       connection-local-criteria-alist
+                                       tramp-remote-process-environment
+                                       connection-local-default-application
+                                       nested-marker)))
+                         :native-handler-result)
+                     (funcall native-find file operation)))))
+        (should (eq :native-handler-result
+                    (pi-coding-agent-shell-command-at-point))))
+      (should (equal 'shell-command (car observed)))
+      (should (equal directory (nth 2 observed)))
+      (should (equal "file /srv/project/reports/a.el"
+                     (car (cadr observed))))
+      (should (equal
+               '(snapshot-profile
+                 (tramp-remote-process-environment . ("REMOTE=SNAPSHOT"))
+                 (pi-coding-agent-test--connection-execution-marker
+                  . nested-snapshot))
+               (assq 'snapshot-profile (nth 3 observed))))
+      (should-not (assq 'later-profile (nth 3 observed)))
+      ;; Loading TRAMP may add built-in criteria before the snapshot; our
+      ;; invocation criterion must still be the frozen one, never the mutation.
+      (should (member
+               '((:application tramp :protocol "sudo") snapshot-profile)
+               (nth 4 observed)))
+      (should (equal '("REMOTE=SNAPSHOT") (nth 5 observed)))
+      (should (eq 'tramp (nth 6 observed)))
+      (should (eq 'nested-snapshot (nth 7 observed))))))
 
 (ert-deftest pi-coding-agent-test-shell-command-at-point-builds-local-target-forms ()
   "Local text targets flow through resolution, quoting, and the Unit A builder."
@@ -6374,6 +7041,9 @@ INPUT is returned by `read-shell-command', or signals `quit' when it is
       (font-lock-ensure)
       (goto-char (point-min))
       (search-forward "src/no.el")
+      (should (plist-get
+               (pi-coding-agent--semantic-link-file-target-at-point)
+               :markdown-code-span))
       (should-not (pi-coding-agent--file-target-at-point)))))
 
 (ert-deftest pi-coding-agent-test-file-target-text-location-suffix-is-case-sensitive ()
