@@ -7357,9 +7357,367 @@ When ASYNC is non-nil, include native terminal asynchronous syntax."
       (should (equal overlays (overlays-in (point-min) (point-max))))
       (should-not (buffer-modified-p)))))
 
+(defun pi-coding-agent-test--call-tool-target-preserving-narrowing
+    (start end position function)
+  "Call FUNCTION at POSITION narrowed to START..END and verify chat state.
+Return FUNCTION's value, or re-signal its error after checking that physical
+text properties, overlays, point, and the exact restriction were preserved."
+  (let ((full-text (buffer-substring (point-min) (point-max)))
+        (overlays (mapcar (lambda (overlay)
+                            (list overlay (overlay-start overlay)
+                                  (overlay-end overlay)
+                                  (overlay-properties overlay)))
+                          (overlays-in (point-min) (point-max))))
+        (tick (buffer-chars-modified-tick))
+        value error-data)
+    (narrow-to-region start end)
+    (goto-char position)
+    (let ((restricted-min (point-min))
+          (restricted-max (point-max))
+          (restricted-point (point)))
+      (condition-case err
+          (setq value (funcall function))
+        (error (setq error-data err)))
+      (should (= restricted-min (point-min)))
+      (should (= restricted-max (point-max)))
+      (should (= restricted-point (point)))
+      (should (= tick (buffer-chars-modified-tick)))
+      (should
+       (equal-including-properties
+        full-text
+        (save-restriction
+          (widen)
+          (buffer-substring (point-min) (point-max)))))
+      (should
+       (equal overlays
+              (save-restriction
+                (widen)
+                (mapcar (lambda (overlay)
+                          (list overlay (overlay-start overlay)
+                                (overlay-end overlay)
+                                (overlay-properties overlay)))
+                        (overlays-in (point-min) (point-max)))))))
+    (if error-data
+        (signal (car error-data) (cdr error-data))
+      value)))
+
+(defun pi-coding-agent-test--tool-row-positions (body-regexp)
+  "Return interior header, opening-fence, and BODY-REGEXP positions."
+  (save-restriction
+    (widen)
+    (save-excursion
+      (goto-char (point-min))
+      (let ((header (progn (re-search-forward "^[^\n]+$")
+                           (min (1- (line-end-position))
+                                (1+ (line-beginning-position)))))
+            (fence (progn (re-search-forward "^```.*$")
+                          (min (1- (line-end-position))
+                               (1+ (line-beginning-position)))))
+            (body (progn (re-search-forward body-regexp)
+                         (match-beginning 0))))
+        (list header fence body)))))
+
+(ert-deftest pi-coding-agent-test-file-target-narrowed-hot-read-uses-physical-lines ()
+  "Hot collapsed and expanded reads map physical rows under narrowing."
+  (dolist (expanded '(nil t))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((pi-coding-agent-tool-preview-lines 3))
+        (pi-coding-agent--display-tool-start
+         "read" '(:path "/tmp/read.txt" :offset 100))
+        (pi-coding-agent--display-tool-end
+         "read" '(:path "/tmp/read.txt" :offset 100)
+         '((:type "text" :text "r100\n\nr102\nr103\nr104\nr105")) nil nil))
+      (when expanded
+        (goto-char (point-min))
+        (re-search-forward "\\.\\.\\. ([0-9]+ more lines)")
+        (pi-coding-agent--toggle-tool-output
+         (button-at (match-beginning 0))))
+      (pcase-let* ((`(,header ,fence ,body)
+                    (pi-coding-agent-test--tool-row-positions "r103"))
+                   (overlay (car (pi-coding-agent-test--all-tool-overlays)))
+                   (physical-bounds (cons (overlay-start overlay)
+                                          (overlay-end overlay))))
+        (dolist (restriction-start (list header fence body))
+          (let ((target
+                 (save-restriction
+                   (pi-coding-agent-test--call-tool-target-preserving-narrowing
+                    restriction-start (1- (point-max)) body
+                    #'pi-coding-agent--file-target-at-point))))
+            (should (eq :tool (plist-get target :source)))
+            (should (equal "/tmp/read.txt" (plist-get target :emacs-path)))
+            (should (= 103 (plist-get target :line)))
+            (should (equal physical-bounds (plist-get target :bounds)))))))))
+
+(ert-deftest pi-coding-agent-test-file-target-narrowed-cold-read-uses-physical-lines ()
+  "Cooled read ownership, extents, offsets, and line maps are physical."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-tool-preview-lines 3))
+      (pi-coding-agent--display-tool-start
+       "read" '(:path "/tmp/cold.txt" :offset 100))
+      (pi-coding-agent--display-tool-end
+       "read" '(:path "/tmp/cold.txt" :offset 100)
+       '((:type "text" :text "r100\n\nr102\nr103\nr104\nr105")) nil nil))
+    (pi-coding-agent--cool-completed-tool-blocks
+     (pi-coding-agent-test--all-tool-overlays))
+    (pcase-let* ((`(,header ,fence ,body)
+                  (pi-coding-agent-test--tool-row-positions "r103"))
+                 (physical-block (progn
+                                   (goto-char body)
+                                   (pi-coding-agent--cold-tool-block-at-point)))
+                 (physical-bounds (plist-get physical-block :bounds)))
+      (dolist (restriction-start (list header fence body))
+        (let ((target
+               (save-restriction
+                 (pi-coding-agent-test--call-tool-target-preserving-narrowing
+                  restriction-start (1- (point-max)) body
+                  #'pi-coding-agent--file-target-at-point))))
+          (should (eq :tool (plist-get target :source)))
+          (should (equal "/tmp/cold.txt" (plist-get target :emacs-path)))
+          (should (= 103 (plist-get target :line)))
+          (should (equal physical-bounds (plist-get target :bounds))))))))
+
+(ert-deftest pi-coding-agent-test-file-target-narrowed-hot-cold-edit-parity ()
+  "Hot and cold edit rows retain physical diff lines under narrowing."
+  (dolist (cooled '(nil t))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-tool-start "edit" '(:path "/tmp/edit.el"))
+      (pi-coding-agent--display-tool-end
+       "edit" '(:path "/tmp/edit.el") '((:type "text" :text "done"))
+       '(:diff "+ 7     added\n  9     context\n-12     removed") nil)
+      (when cooled
+        (pi-coding-agent--cool-completed-tool-blocks
+         (pi-coding-agent-test--all-tool-overlays)))
+      (pcase-let ((`(,header ,fence ,body)
+                   (pi-coding-agent-test--tool-row-positions
+                    "^  9     context$")))
+        (dolist (restriction-start (list header fence body))
+          (let ((target
+                 (save-restriction
+                   (pi-coding-agent-test--call-tool-target-preserving-narrowing
+                    restriction-start (1- (point-max)) body
+                    #'pi-coding-agent--file-target-at-point))))
+            (should (eq :tool (plist-get target :source)))
+            (should (equal "/tmp/edit.el" (plist-get target :emacs-path)))
+            (should (= 9 (plist-get target :line)))))))))
+
+(ert-deftest pi-coding-agent-test-file-target-narrowed-tool-authority-and-errors ()
+  "Narrowing cannot expose authoritative tool body text as fallback."
+  (dolist (cooled '(nil t))
+    (dolist (state '(:absent :invalid))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+        (pi-coding-agent--display-tool-start "read" '(:path "/tmp/tool.el"))
+        (pi-coding-agent--display-tool-end
+         "read" '(:path "/tmp/tool.el")
+         '((:type "text" :text "src/misleading.el")) nil nil)
+        (let* ((overlay (car (pi-coding-agent-test--all-tool-overlays)))
+               (block (pi-coding-agent--tool-block-from-overlay overlay))
+               (message "narrowed backend path error"))
+          (if (eq state :absent)
+              (pi-coding-agent--tool-block-sync-path-metadata block nil)
+            (overlay-put overlay 'pi-coding-agent-tool-path nil)
+            (overlay-put overlay 'pi-coding-agent-tool-path-error message))
+          (when cooled
+            (pi-coding-agent--cool-completed-tool-blocks (list overlay)))
+          (pcase-let* ((`(,_header ,fence ,body)
+                        (pi-coding-agent-test--tool-row-positions
+                         "src/misleading.el"))
+                       (call (lambda ()
+                               (save-restriction
+                                 (pi-coding-agent-test--call-tool-target-preserving-narrowing
+                                  fence (1- (point-max)) body
+                                  #'pi-coding-agent--file-target-at-point)))))
+            (if (eq state :absent)
+                (should-not (funcall call))
+              (let ((err (should-error (funcall call) :type 'user-error)))
+                (should (equal message (error-message-string err)))))))))))
+
+(ert-deftest pi-coding-agent-test-file-target-narrowed-non-content-is-authoritative ()
+  "Narrowed hot/cold headers, fences, and hints keep the tool-line error."
+  (dolist (cooled '(nil t))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((pi-coding-agent-tool-preview-lines 2))
+        (pi-coding-agent--display-tool-start "read" '(:path "/tmp/tool.el"))
+        (pi-coding-agent--display-tool-end
+         "read" '(:path "/tmp/tool.el")
+         '((:type "text" :text "line1\nline2\nline3\nline4")) nil nil))
+      (when cooled
+        (pi-coding-agent--cool-completed-tool-blocks
+         (pi-coding-agent-test--all-tool-overlays)))
+      (dolist (regexp '("^read /tmp/tool\\.el$" "^```$"
+                        "^\\.\\.\\. (2 more lines)$"))
+        (let ((position
+               (save-excursion
+                 (goto-char (point-min))
+                 (re-search-forward regexp)
+                 (match-beginning 0))))
+          (cl-letf (((symbol-function 'find-file)
+                     (lambda (&rest _) (ert-fail "Non-content row opened")))
+                    ((symbol-function 'find-file-other-window)
+                     (lambda (&rest _) (ert-fail "Non-content row opened"))))
+            (let ((err
+                   (should-error
+                    (save-restriction
+                      (pi-coding-agent-test--call-tool-target-preserving-narrowing
+                       position (1- (point-max)) position
+                       #'pi-coding-agent-visit-file))
+                    :type 'user-error)))
+              (should (equal "No file line at point"
+                             (error-message-string err))))))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-tool-location-validation-is-authoritative ()
+  "Invalid authoritative tool lines reject before opening or body fallback."
+  (dolist (line '(nil 0 -1 1.5 "1" (:malformed)))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+      (pi-coding-agent--display-tool-start "read" '(:path "/tmp/tool.el"))
+      (pi-coding-agent--display-tool-end
+       "read" '(:path "/tmp/tool.el")
+       '((:type "text" :text "src/body-fallback.el")) nil nil)
+      (goto-char (point-min))
+      (search-forward "src/body-fallback.el")
+      (let ((text (buffer-substring (point-min) (point-max)))
+            (tick (buffer-chars-modified-tick))
+            (origin (point))
+            (status pi-coding-agent--status)
+            (session (pi-coding-agent--chat-session-directory)))
+        (cl-letf (((symbol-function 'pi-coding-agent--tool-line-at-point)
+                   (lambda (_) line))
+                  ((symbol-function 'find-file)
+                   (lambda (&rest _) (ert-fail "Invalid tool line opened")))
+                  ((symbol-function 'find-file-other-window)
+                   (lambda (&rest _) (ert-fail "Invalid tool line opened"))))
+          (let ((err (should-error (pi-coding-agent-visit-file)
+                                   :type 'user-error)))
+            (should (equal "No file line at point"
+                           (error-message-string err)))))
+        (should (equal-including-properties
+                 text (buffer-substring (point-min) (point-max))))
+        (should (= tick (buffer-chars-modified-tick)))
+        (should (= origin (point)))
+        (should (eq status pi-coding-agent--status))
+        (should (equal session (pi-coding-agent--chat-session-directory)))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-collapsed-map-invalid-lines-fail-closed ()
+  "Malformed collapsed map values cannot fall back to visible body rows."
+  (dolist (mapped-line '(0 -1 1.5 "1" (:malformed)))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((pi-coding-agent-tool-preview-lines 2))
+        (pi-coding-agent--display-tool-start "read" '(:path "/tmp/tool.el"))
+        (pi-coding-agent--display-tool-end
+         "read" '(:path "/tmp/tool.el")
+         '((:type "text" :text "visible-one\nvisible-two\nvisible-three"))
+         nil nil))
+      (let ((overlay (car (pi-coding-agent-test--all-tool-overlays))))
+        (overlay-put overlay 'pi-coding-agent-line-map (vector mapped-line)))
+      (goto-char (point-min))
+      (search-forward "visible-one")
+      (cl-letf (((symbol-function 'find-file)
+                 (lambda (&rest _) (ert-fail "Invalid map line opened")))
+                ((symbol-function 'find-file-other-window)
+                 (lambda (&rest _) (ert-fail "Invalid map line opened"))))
+        (let ((err (should-error (pi-coding-agent-visit-file)
+                                 :type 'user-error)))
+          (should (equal "No file line at point"
+                         (error-message-string err))))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-nontool-location-validation ()
+  "Malformed non-tool locations report controlled errors before opening."
+  (dolist (case '(((:source :text :emacs-path "/tmp/a" :line 0)
+                   "File line must be a positive integer")
+                  ((:source :link :emacs-path "/tmp/a" :line -1)
+                   "File line must be a positive integer")
+                  ((:source :text :emacs-path "/tmp/a" :line 1.5)
+                   "File line must be a positive integer")
+                  ((:source :text :emacs-path "/tmp/a" :line "1")
+                   "File line must be a positive integer")
+                  ((:source :text :emacs-path "/tmp/a" :column 1)
+                   "File column requires a valid line")
+                  ((:source :text :emacs-path "/tmp/a" :line 1 :column 0)
+                   "File column must be a positive integer")
+                  ((:source :link :emacs-path "/tmp/a" :line 1 :column -1)
+                   "File column must be a positive integer")
+                  ((:source :text :emacs-path "/tmp/a" :line 1 :column 2.5)
+                   "File column must be a positive integer")
+                  ((:source :text :emacs-path "/tmp/a" :line 1 :column "2")
+                   "File column must be a positive integer")))
+    (pcase-let ((`(,target ,message) case))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (let ((inhibit-read-only t))
+          (insert "unchanged chat"))
+        (goto-char 4)
+        (let* ((text (buffer-substring (point-min) (point-max)))
+               (tick (buffer-chars-modified-tick))
+               (origin (point))
+               (status pi-coding-agent--status)
+               io-calls monitoring error-data
+               (io-guard (lambda (&rest _)
+                           (when monitoring
+                             (push this-command io-calls))))
+               (io-functions '(file-directory-p file-remote-p
+                               file-readable-p file-attributes)))
+          (dolist (function io-functions)
+            (advice-add function :before io-guard))
+          (unwind-protect
+              (cl-letf (((symbol-function 'pi-coding-agent--file-target-at-point)
+                         (lambda () target))
+                        ((symbol-function 'find-file)
+                         (lambda (&rest _)
+                           (ert-fail "Invalid location opened")))
+                        ((symbol-function 'find-file-other-window)
+                         (lambda (&rest _)
+                           (ert-fail "Invalid location opened"))))
+                (setq monitoring t)
+                (unwind-protect
+                    (condition-case err
+                        (pi-coding-agent-visit-file)
+                      (user-error (setq error-data err)))
+                  (setq monitoring nil)))
+            (dolist (function io-functions)
+              (advice-remove function io-guard)))
+          (should error-data)
+          (should (equal message (error-message-string error-data)))
+          (should-not io-calls)
+          (should (equal text (buffer-string)))
+          (should (= tick (buffer-chars-modified-tick)))
+          (should (= origin (point)))
+          (should (eq status pi-coding-agent--status)))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-tool-line-one-remains-valid ()
+  "The minimum positive authoritative tool line still opens normally."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (cl-letf (((symbol-function 'pi-coding-agent--file-target-at-point)
+               (lambda () '(:source :tool :emacs-path "/tmp/tool.el" :line 1)))
+              ((symbol-function 'find-file-other-window)
+               (lambda (path)
+                 (should (equal "/tmp/tool.el" path))
+                 (set-buffer (get-buffer-create " *pi-location-line-one*"))
+                 (setq buffer-file-name path)
+                 (erase-buffer)
+                 (insert "one\ntwo\n")
+                 (goto-char (point-max)))))
+      (unwind-protect
+          (progn
+            (pi-coding-agent-visit-file)
+            (should (= 1 (line-number-at-pos))))
+        (when-let* ((buffer (get-buffer " *pi-location-line-one*")))
+          (with-current-buffer buffer
+            (set-buffer-modified-p nil))
+          (kill-buffer buffer))))))
+
 (defun pi-coding-agent-test--open-target-buffer (line-count)
   "Create and return a fake visited buffer with LINE-COUNT lines."
   (set-buffer (get-buffer-create "*pi-coding-agent-test-target*"))
+  (setq buffer-file-name "/tmp/pi-coding-agent-test-target")
   (erase-buffer)
   (dotimes (_ line-count)
     (insert "line\n"))
@@ -7407,6 +7765,7 @@ state."
               ((open (path)
                  (setq opened-path path)
                  (set-buffer (get-buffer-create target-name))
+                 (setq buffer-file-name path)
                  (erase-buffer)
                  (insert contents)
                  (goto-char (min (or initial-point (point-min)) (point-max)))
@@ -8046,6 +8405,156 @@ fixture; a test may dynamically override it inside FUNCTION."
        (should (eq input (window-buffer input-window)))
        (should (eq 'side (window-dedicated-p input-window)))))))
 
+(ert-deftest pi-coding-agent-test-visit-file-native-directory-location-is-inapplicable ()
+  "Directory coordinates do not change the point and marks native Dired chose."
+  (require 'dired)
+  (dolist (other-window '(nil t))
+    (let* ((directory (make-temp-file "pi-coding-agent-directory-" t))
+           (first (expand-file-name "first.el" directory))
+           (second (expand-file-name "second.el" directory))
+           (third (expand-file-name "third.el" directory))
+           (chat (generate-new-buffer " *pi-directory-chat*"))
+           (dired-buffer nil)
+           (native-find (symbol-function 'find-file))
+           (native-find-other (symbol-function 'find-file-other-window))
+           (native-depth 0)
+           (guard (lambda (&rest _)
+                    (when (zerop native-depth)
+                      (ert-fail "Pi performed directory/remote preflight"))))
+           (located nil)
+           opener-calls point mark saved-mark-active text tick)
+      (unwind-protect
+          (progn
+            (dolist (file (list first second third))
+              (write-region "fixture\n" nil file nil 'silent))
+            (setq dired-buffer (dired-noselect directory))
+            (with-current-buffer dired-buffer
+              (dired-goto-file first)
+              (dired-mark 1)
+              (dired-goto-file third)
+              (let ((mark-position (point)))
+                (dired-goto-file second)
+                (set-mark mark-position)
+                (setq mark-active t)))
+            (with-current-buffer chat
+              (pi-coding-agent-chat-mode)
+              (let ((inhibit-read-only t))
+                (insert "directory target")))
+            (save-window-excursion
+              (delete-other-windows)
+              (switch-to-buffer chat)
+              (advice-add 'file-directory-p :before guard)
+              (advice-add 'file-remote-p :before guard)
+              (unwind-protect
+                  (cl-letf (((symbol-function
+                              'pi-coding-agent--file-target-at-point)
+                             (lambda ()
+                               (append
+                                (list :source :text :emacs-path directory)
+                                (and located '(:line 2 :column 3)))))
+                            ((symbol-function 'find-file)
+                             (lambda (&rest args)
+                               (push :same opener-calls)
+                               (cl-incf native-depth)
+                               (unwind-protect
+                                   (apply native-find args)
+                                 (cl-decf native-depth))))
+                            ((symbol-function 'find-file-other-window)
+                             (lambda (&rest args)
+                               (push :other opener-calls)
+                               (cl-incf native-depth)
+                               (unwind-protect
+                                   (apply native-find-other args)
+                                 (cl-decf native-depth)))))
+                    ;; Establish exactly the state selected by a native
+                    ;; no-location directory visit.
+                    (let ((pi-coding-agent-visit-file-other-window
+                           other-window))
+                      (pi-coding-agent-visit-file))
+                    (should (eq dired-buffer (current-buffer)))
+                    (should (derived-mode-p 'dired-mode))
+                    (should-not (buffer-file-name))
+                    (setq point (point)
+                          mark (mark t)
+                          saved-mark-active mark-active
+                          text (buffer-substring (point-min) (point-max))
+                          tick (buffer-chars-modified-tick)
+                          located t)
+                    (switch-to-buffer chat)
+                    ;; The same strict directory target with coordinates must
+                    ;; remain indistinguishable from native directory visiting.
+                    (let ((pi-coding-agent-visit-file-other-window
+                           other-window))
+                      (pi-coding-agent-visit-file))
+                    (should (eq dired-buffer (current-buffer))))
+                (advice-remove 'file-remote-p guard)
+                (advice-remove 'file-directory-p guard)))
+            (should (equal (make-list 2 (if other-window :other :same))
+                           opener-calls))
+            (with-current-buffer dired-buffer
+              (should (= point (point)))
+              (should (= mark (mark t)))
+              (should (eq saved-mark-active mark-active))
+              (should (equal-including-properties
+                       text (buffer-substring (point-min) (point-max))))
+              (should (= tick (buffer-chars-modified-tick)))))
+        (ignore-errors (advice-remove 'file-remote-p guard))
+        (ignore-errors (advice-remove 'file-directory-p guard))
+        (when (buffer-live-p chat)
+          (kill-buffer chat))
+        (when (buffer-live-p dired-buffer)
+          (kill-buffer dired-buffer))
+        (ignore-errors (delete-directory directory t))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-native-narrowed-reuses-displayed-window ()
+  "A physical text location widens and reuses its displayed target window."
+  (pi-coding-agent-test--call-with-native-visit-layout
+   "one\ntwo\nthree\nfour\nfive\nsix\n"
+   (lambda (layout)
+     (let* ((chat (plist-get layout :chat))
+            (input (plist-get layout :input))
+            (chat-window (plist-get layout :chat-window))
+            (input-window (plist-get layout :input-window))
+            (path (plist-get layout :path))
+            (target (find-file-noselect path))
+            (target-window (split-window chat-window nil 'right))
+            expected window-count)
+       (with-current-buffer target
+         (setq expected
+               (save-excursion
+                 (goto-char (point-min))
+                 (forward-line 1)
+                 (move-to-column 2)
+                 (point)))
+         (goto-char (point-min))
+         (forward-line 2)
+         (let ((start (point)))
+           (forward-line 3)
+           (narrow-to-region start (point)))
+         (goto-char (point-min))
+         (forward-line 1))
+       (set-window-buffer target-window target)
+       (set-window-point target-window (with-current-buffer target (point)))
+       (with-current-buffer chat
+         (let ((inhibit-read-only t))
+           (erase-buffer)
+           (insert (format "%s:2:3" path)))
+         (goto-char (+ (point-min) 2)))
+       (select-window chat-window)
+       (set-window-point chat-window (with-current-buffer chat (point)))
+       (setq window-count (length (window-list)))
+       (let ((pi-coding-agent-visit-file-other-window t)
+             (widen-automatically t))
+         (pi-coding-agent-visit-file))
+       (should (= window-count (length (window-list))))
+       (should (eq target-window (selected-window)))
+       (should (eq target (current-buffer)))
+       (should-not (buffer-narrowed-p))
+       (should (= expected (point)))
+       (should (eq chat (window-buffer chat-window)))
+       (should (eq input (window-buffer input-window)))
+       (should (eq 'side (window-dedicated-p input-window)))))))
+
 (ert-deftest pi-coding-agent-test-visit-file-native-respects-display-policy ()
   "A user `display-buffer-alist' rule can redirect same-window intent."
   (pi-coding-agent-test--call-with-native-visit-layout
@@ -8083,70 +8592,150 @@ fixture; a test may dynamically override it inside FUNCTION."
        (should (eq input (window-buffer input-window)))
        (should (eq 'side (window-dedicated-p input-window)))))))
 
-(ert-deftest pi-coding-agent-test-visit-file-native-narrowed-point-contract ()
-  "Native existing-buffer point and explicit accessible locations do not widen."
-  (dolist (explicit '(nil t))
+(ert-deftest pi-coding-agent-test-visit-file-native-narrowed-physical-locations ()
+  "Explicit tool, text, and link locations use physical file coordinates."
+  (dolist (case '((:text 4 3 t) (:link 2 99 nil) (:tool 999 4 nil)))
+    (pcase-let ((`(,source ,line ,column ,stays-narrowed) case))
+      (pi-coding-agent-test--call-with-native-visit-layout
+       "one\ntwo\nthree\nfour\nfive\nsix\nseven\n"
+       (lambda (layout)
+         (let* ((chat (plist-get layout :chat))
+                (chat-window (plist-get layout :chat-window))
+                (path (plist-get layout :path))
+                (buffer (find-file-noselect path))
+                start end expected full-text tick)
+           (with-current-buffer buffer
+             (setq expected
+                   (save-excursion
+                     (goto-char (point-min))
+                     (forward-line (1- line))
+                     (move-to-column (1- column))
+                     (point)))
+             (goto-char (point-min))
+             (forward-line 2)
+             (setq start (point))
+             (forward-line 3)
+             (setq end (point))
+             (narrow-to-region start end)
+             (goto-char (point-min))
+             (forward-line 1)
+             (setq full-text
+                   (save-restriction
+                     (widen)
+                     (buffer-substring (point-min) (point-max)))
+                   tick (buffer-chars-modified-tick)))
+           (select-window chat-window)
+           (set-window-point chat-window (with-current-buffer chat (point)))
+           (cl-letf (((symbol-function 'pi-coding-agent--file-target-at-point)
+                      (lambda ()
+                        (list :source source :emacs-path path
+                              :line line :column column))))
+             (let ((pi-coding-agent-visit-file-other-window nil)
+                   (widen-automatically t))
+               (pi-coding-agent-visit-file)))
+           (should (eq buffer (current-buffer)))
+           (should (= expected (point)))
+           (if stays-narrowed
+               (progn
+                 (should (buffer-narrowed-p))
+                 (should (= start (point-min)))
+                 (should (= end (point-max))))
+             (should-not (buffer-narrowed-p)))
+           (should-not (use-region-p))
+           (should
+            (equal-including-properties
+             full-text
+             (save-restriction
+               (widen)
+               (buffer-substring (point-min) (point-max)))))
+           (should (= tick (buffer-chars-modified-tick)))
+           (should-not (buffer-modified-p))))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-native-narrowed-no-location-is-native ()
+  "No-location text/link visits preserve point, mark, and restriction exactly."
+  (dolist (source '(:text :link))
     (pi-coding-agent-test--call-with-native-visit-layout
      "one\ntwo\nthree\nfour\nfive\nsix\n"
      (lambda (layout)
        (let* ((chat (plist-get layout :chat))
               (chat-window (plist-get layout :chat-window))
               (path (plist-get layout :path))
-              (target (find-file-noselect path))
-              accessible-start accessible-end expected accessible-text
-              full-text full-tick)
-         (with-current-buffer target
+              (buffer (find-file-noselect path))
+              (transient-mark-mode t)
+              start end native-point native-mark)
+         (with-current-buffer buffer
+           (goto-char (point-min))
+           (forward-line 1)
+           (setq start (point))
+           (forward-line 4)
+           (setq end (point))
+           (narrow-to-region start end)
            (goto-char (point-min))
            (forward-line 2)
-           (setq accessible-start (point))
-           (forward-line 3)
-           (setq accessible-end (point))
-           (narrow-to-region accessible-start accessible-end)
-           (if explicit
-               (progn
-                 (goto-char (point-min))
-                 (forward-line 1)
-                 (move-to-column 2)
-                 (setq expected (point))
-                 (goto-char (point-max)))
-             (goto-char (point-min))
-             (search-forward "five")
-             (setq expected (point)))
-           (setq accessible-text (buffer-string))
-           (set-buffer-modified-p nil)
-           (setq full-text
-                 (save-restriction
-                   (widen)
-                   (buffer-substring (point-min) (point-max)))
-                 full-tick (buffer-chars-modified-tick)))
-         (when explicit
-           (with-current-buffer chat
-             (let ((inhibit-read-only t))
-               (erase-buffer)
-               (insert (format "%s:2:3" path)))
-             (goto-char (+ (point-min) 2)))
-           (set-window-point chat-window
-                             (with-current-buffer chat (point))))
+           (move-to-column 2)
+           (setq native-point (point))
+           (set-mark (point-min))
+           (setq native-mark (mark))
+           (activate-mark))
          (select-window chat-window)
-         (with-current-buffer chat
-           (goto-char (+ (point-min) 2)))
          (set-window-point chat-window (with-current-buffer chat (point)))
-         (let ((pi-coding-agent-visit-file-other-window nil))
-           (pi-coding-agent-visit-file))
-         (should (eq target (current-buffer)))
+         (cl-letf (((symbol-function 'pi-coding-agent--file-target-at-point)
+                    (lambda () (list :source source :emacs-path path))))
+           (let ((pi-coding-agent-visit-file-other-window nil))
+             (pi-coding-agent-visit-file)))
+         (should (eq buffer (current-buffer)))
+         (should (= native-point (point)))
+         (should (= native-mark (mark)))
+         (should (use-region-p))
          (should (buffer-narrowed-p))
-         (should (= accessible-start (point-min)))
-         (should (= accessible-end (point-max)))
-         (should (= expected (point)))
-         (should (equal accessible-text (buffer-string)))
-         (should
-          (equal-including-properties
-           full-text
-           (save-restriction
-             (widen)
-             (buffer-substring (point-min) (point-max)))))
-         (should (= full-tick (buffer-chars-modified-tick)))
-         (should-not (buffer-modified-p)))))))
+         (should (= start (point-min)))
+         (should (= end (point-max))))))))
+
+(ert-deftest pi-coding-agent-test-visit-file-native-narrowed-respects-no-widen ()
+  "An inaccessible physical location errors when automatic widening is off."
+  (dolist (source '(:tool :text :link))
+    (pi-coding-agent-test--call-with-native-visit-layout
+     "one\ntwo\nthree\nfour\nfive\nsix\n"
+     (lambda (layout)
+       (let* ((chat (plist-get layout :chat))
+              (chat-window (plist-get layout :chat-window))
+              (path (plist-get layout :path))
+              (buffer (find-file-noselect path))
+              (transient-mark-mode t)
+              start end native-point native-mark)
+         (with-current-buffer buffer
+           (goto-char (point-min))
+           (forward-line 2)
+           (setq start (point))
+           (forward-line 3)
+           (setq end (point))
+           (narrow-to-region start end)
+           (goto-char (point-min))
+           (forward-line 1)
+           (setq native-point (point))
+           (set-mark (point-max))
+           (setq native-mark (mark))
+           (activate-mark))
+         (select-window chat-window)
+         (set-window-point chat-window (with-current-buffer chat (point)))
+         (cl-letf (((symbol-function 'pi-coding-agent--file-target-at-point)
+                    (lambda ()
+                      (list :source source :emacs-path path
+                            :line 1 :column 2))))
+           (let ((pi-coding-agent-visit-file-other-window nil)
+                 (widen-automatically nil))
+             (let ((err (should-error (pi-coding-agent-visit-file)
+                                      :type 'user-error)))
+               (should
+                (equal "Position is outside accessible part of buffer"
+                       (error-message-string err))))))
+         (should (eq buffer (current-buffer)))
+         (should (= native-point (point)))
+         (should (= native-mark (mark)))
+         (should (use-region-p))
+         (should (buffer-narrowed-p))
+         (should (= start (point-min)))
+         (should (= end (point-max))))))))
 
 (ert-deftest pi-coding-agent-test-visit-file-native-existing-region-contract ()
   "No location preserves native region state; an explicit location clears it."
@@ -8413,6 +9002,287 @@ fixture; a test may dynamically override it inside FUNCTION."
                        pi-coding-agent--followup-queue
                        (pi-coding-agent--chat-session-directory)))))))))
 
+(ert-deftest pi-coding-agent-test-standard-link-button-ret-visits-semantic-target ()
+  "RET on a standard link button visits its semantic local destination once."
+  (dolist (case '(("RET" t :other)
+                  ("C-u RET" t :same)
+                  ("RET" nil :same)
+                  ("C-u RET" nil :other)))
+    (pcase-let ((`(,keys ,option ,expected-kind) case))
+      (let ((chat (generate-new-buffer " *pi-coding-agent-link-button*"))
+            (overriding-terminal-local-map nil)
+            (overriding-local-map nil)
+            (pre-command-hook nil)
+            (post-command-hook nil)
+            (button-actions 0)
+            opener-calls)
+        (unwind-protect
+            (save-window-excursion
+              (with-current-buffer chat
+                (pi-coding-agent-chat-mode)
+                (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+                (let ((inhibit-read-only t))
+                  (insert "[Displayed label](docs/actual-target.el)"))
+                (font-lock-ensure)
+                (goto-char (point-min))
+                (search-forward "Displayed label")
+                (let ((start (match-beginning 0))
+                      (end (match-end 0))
+                      (inhibit-read-only t))
+                  (make-text-button
+                   start end
+                   'action (lambda (_) (cl-incf button-actions)))
+                  (goto-char start)))
+              (switch-to-buffer chat)
+              (should (button-at (point)))
+              (should (eq #'pi-coding-agent--dispatch-button
+                          (key-binding (kbd "RET"))))
+              (cl-letf (((symbol-function 'find-file)
+                         (lambda (path)
+                           (push (list :same path) opener-calls)))
+                        ((symbol-function 'find-file-other-window)
+                         (lambda (path)
+                           (push (list :other path) opener-calls))))
+                (let ((pi-coding-agent-visit-file-other-window option))
+                  (execute-kbd-macro (kbd keys))))
+              (should (= 0 button-actions))
+              (should
+               (equal (list (list expected-kind
+                                  "/tmp/project/docs/actual-target.el"))
+                      opener-calls)))
+          (when (buffer-live-p chat)
+            (kill-buffer chat)))))))
+
+(ert-deftest pi-coding-agent-test-standard-button-ret-keeps-tool-authority ()
+  "RET on a foreign button inside a tool block keeps tool ownership."
+  (dolist (cooled '(nil t))
+    (dolist (state '(:valid :absent :invalid))
+      (let ((chat (generate-new-buffer " *pi-tool-foreign-button*"))
+            (overriding-terminal-local-map nil)
+            (overriding-local-map nil)
+            (pre-command-hook nil)
+            (post-command-hook nil)
+            (button-actions 0)
+            (message "authoritative tool path error"))
+        (unwind-protect
+            (save-window-excursion
+              (with-current-buffer chat
+                (pi-coding-agent-chat-mode)
+                (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+                (let ((args '(:path "[Label](docs/wrong.el)")))
+                  (pi-coding-agent--display-tool-start "read" args)
+                  (pi-coding-agent--display-tool-end
+                   "read" args '((:type "text" :text "content")) nil nil))
+                (let* ((overlay
+                        (car (pi-coding-agent-test--all-tool-overlays)))
+                       (block (pi-coding-agent--tool-block-from-overlay overlay)))
+                  (pcase state
+                    (:absent
+                     (pi-coding-agent--tool-block-sync-path-metadata block nil))
+                    (:invalid
+                     (overlay-put overlay 'pi-coding-agent-tool-path nil)
+                     (overlay-put overlay 'pi-coding-agent-tool-path-error
+                                  message)))
+                  (when cooled
+                    (pi-coding-agent--cool-completed-tool-blocks
+                     (list overlay))))
+                (goto-char (point-min))
+                (search-forward "Label")
+                (let ((start (match-beginning 0))
+                      (end (match-end 0))
+                      (inhibit-read-only t))
+                  (make-text-button
+                   start end
+                   'action (lambda (_) (cl-incf button-actions)))
+                  (goto-char start)))
+              (switch-to-buffer chat)
+              (cl-letf (((symbol-function 'find-file)
+                         (lambda (&rest _)
+                           (ert-fail "Tool button opened Markdown destination")))
+                        ((symbol-function 'find-file-other-window)
+                         (lambda (&rest _)
+                           (ert-fail "Tool button opened Markdown destination"))))
+                (let ((err (should-error (execute-kbd-macro (kbd "RET"))
+                                         :type 'user-error)))
+                  (should
+                   (equal (pcase state
+                            (:valid "No file line at point")
+                            (:absent "No file at point")
+                            (:invalid message))
+                          (error-message-string err)))))
+              (should (= 0 button-actions)))
+          (when (buffer-live-p chat)
+            (kill-buffer chat)))))))
+
+(ert-deftest pi-coding-agent-test-button-remap-leaves-non-ret-keys-native ()
+  "A chat binding to `push-button' outside RET retains native behavior."
+  (let ((chat (generate-new-buffer " *pi-non-ret-button*"))
+        (overriding-terminal-local-map nil)
+        (overriding-local-map nil)
+        (pre-command-hook nil)
+        (post-command-hook nil)
+        (actions 0))
+    (unwind-protect
+        (save-window-excursion
+          (switch-to-buffer chat)
+          (pi-coding-agent-chat-mode)
+          (let ((inhibit-read-only t))
+            (insert "Ordinary button")
+            (make-text-button
+             (point-min) (point-max)
+             'action (lambda (_) (cl-incf actions))))
+          (dolist (keys '("SPC" "C-c RET"))
+            (local-set-key (kbd keys) #'push-button)
+            (goto-char (point-min))
+            (should (eq #'pi-coding-agent--dispatch-button
+                        (key-binding (kbd keys))))
+            (execute-kbd-macro (kbd keys)))
+          (should (= 2 actions)))
+      (when (buffer-live-p chat)
+        (kill-buffer chat)))))
+
+(ert-deftest pi-coding-agent-test-local-md-ts-04-button-compatibility ()
+  "Real md-ts link buttons route local RET and reject URI RET.
+Skip when the loaded md-ts-mode does not provide link buttons, as in the
+supported installed 0.3 dependency lane."
+  (let ((overriding-terminal-local-map nil)
+        (overriding-local-map nil)
+        (pre-command-hook nil)
+        (post-command-hook nil))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+      (let ((inhibit-read-only t))
+        (insert "[Displayed label](docs/actual-target.el)"))
+      (font-lock-ensure)
+      (goto-char (point-min))
+      (search-forward "Displayed label")
+      (goto-char (match-beginning 0))
+      (skip-unless (button-at (point)))
+      (should (equal "Displayed label" (button-label (button-at (point)))))
+      (let ((buffer (current-buffer))
+            (label-start (point))
+            opener-calls)
+        (save-window-excursion
+          (switch-to-buffer buffer)
+          (cl-letf (((symbol-function 'find-file)
+                     (lambda (path) (push (list :same path) opener-calls)))
+                    ((symbol-function 'find-file-other-window)
+                     (lambda (path) (push (list :other path) opener-calls))))
+            (let ((pi-coding-agent-visit-file-other-window t))
+              (execute-kbd-macro (kbd "RET"))
+              (goto-char label-start)
+              (execute-kbd-macro (kbd "C-u RET")))))
+        (should
+         (equal '((:same "/tmp/project/docs/actual-target.el")
+                  (:other "/tmp/project/docs/actual-target.el"))
+                opener-calls))))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t))
+        (insert "[Remote](https://example.com/x)"))
+      (font-lock-ensure)
+      (goto-char (point-min))
+      (search-forward "Remote")
+      (goto-char (match-beginning 0))
+      (should (button-at (point)))
+      (let ((buffer (current-buffer)))
+        (save-window-excursion
+          (switch-to-buffer buffer)
+          (cl-letf (((symbol-function 'find-file)
+                     (lambda (&rest _) (ert-fail "URI RET opened a file")))
+                    ((symbol-function 'find-file-other-window)
+                     (lambda (&rest _) (ert-fail "URI RET opened a file")))
+                    ((symbol-function 'browse-url)
+                     (lambda (&rest _) (ert-fail "URI RET browsed"))))
+            (let ((err (should-error (execute-kbd-macro (kbd "RET"))
+                                     :type 'user-error)))
+              (should (equal "No file at point"
+                             (error-message-string err))))))))))
+
+(ert-deftest pi-coding-agent-test-standard-nonlocal-link-buttons-fail-closed ()
+  "RET never activates standard buttons on non-local or invalid link text."
+  (dolist (case '(("[src/fallback.el](https://example.com/x)"
+                   "src/fallback.el")
+                  ("[src/fallback.el](mailto:user@example.com)"
+                   "src/fallback.el")
+                  ("[src/fallback.el][reference]\n\n[reference]: docs/actual.el"
+                   "src/fallback.el")
+                  ("[src/fallback.el](docs/incomplete.el"
+                   "src/fallback.el")
+                  ("Not a file" "Not a file")))
+    (let ((chat (generate-new-buffer " *pi-coding-agent-invalid-button*"))
+          (overriding-terminal-local-map nil)
+          (overriding-local-map nil)
+          (pre-command-hook nil)
+          (post-command-hook nil)
+          (button-actions 0))
+      (unwind-protect
+          (save-window-excursion
+            (with-current-buffer chat
+              (pi-coding-agent-chat-mode)
+              (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+              (let ((inhibit-read-only t))
+                (insert (car case)))
+              (font-lock-ensure)
+              (goto-char (point-min))
+              (search-forward (cadr case))
+              (let ((start (match-beginning 0))
+                    (end (match-end 0))
+                    (inhibit-read-only t))
+                (make-text-button
+                 start end
+                 'action (lambda (_) (cl-incf button-actions)))
+                (goto-char start)))
+            (switch-to-buffer chat)
+            (cl-letf (((symbol-function 'find-file)
+                       (lambda (&rest _) (ert-fail "Invalid button opened file")))
+                      ((symbol-function 'find-file-other-window)
+                       (lambda (&rest _) (ert-fail "Invalid button opened file")))
+                      ((symbol-function 'browse-url)
+                       (lambda (&rest _) (ert-fail "Invalid button browsed URI")))
+                      ((symbol-function 'url-mailto)
+                       (lambda (&rest _) (ert-fail "Invalid button opened mail"))))
+              (let ((err (should-error (execute-kbd-macro (kbd "RET"))
+                                       :type 'user-error)))
+                (should (equal "No file at point"
+                               (error-message-string err)))))
+            (should (= 0 button-actions)))
+        (when (buffer-live-p chat)
+          (kill-buffer chat))))))
+
+(ert-deftest pi-coding-agent-test-button-dispatch-leaves-direct-and-mouse-actions-native ()
+  "Direct and mouse button activation bypass chat keyboard dispatch."
+  (let ((chat (generate-new-buffer " *pi-coding-agent-native-button*"))
+        (keyboard-actions 0)
+        (mouse-actions 0))
+    (unwind-protect
+        (save-window-excursion
+          (switch-to-buffer chat)
+          (pi-coding-agent-chat-mode)
+          (let ((inhibit-read-only t))
+            (insert "Ordinary button"))
+          (let ((inhibit-read-only t))
+            (make-text-button
+             (point-min) (point-max)
+             'action (lambda (_) (cl-incf keyboard-actions))
+             'mouse-action (lambda (_) (cl-incf mouse-actions))))
+          (goto-char (point-min))
+          (should (command-remapping #'push-button))
+          (should (push-button))
+          (should (= 1 keyboard-actions))
+          (should (= 0 mouse-actions))
+          (let ((event (list 'mouse-2
+                             (list (selected-window) (point)
+                                   '(0 . 0) 0))))
+            (should (pi-coding-agent--dispatch-button event)))
+          (should (= 1 keyboard-actions))
+          (should (= 1 mouse-actions)))
+      (when (buffer-live-p chat)
+        (kill-buffer chat)))
+    (with-temp-buffer
+      (should-not (command-remapping #'push-button)))))
+
 (ert-deftest pi-coding-agent-test-tool-toggle-ret-precedes-file-visitor ()
   "Actual RET activates a tool button; <return> and direct visiting still error."
   (let ((chat (generate-new-buffer " *pi-coding-agent-button-dispatch*"))
@@ -8445,7 +9315,8 @@ fixture; a test may dynamically override it inside FUNCTION."
           (should (eq #'pi-coding-agent-visit-file
                       (lookup-key pi-coding-agent-chat-mode-map
                                   (kbd "<return>"))))
-          (should (eq #'push-button (key-binding (kbd "RET"))))
+          (should (eq #'pi-coding-agent--dispatch-button
+                      (key-binding (kbd "RET"))))
           (should (eq #'pi-coding-agent-visit-file
                       (key-binding (kbd "<return>"))))
           (let ((toggle-count 0)
@@ -8512,8 +9383,11 @@ fixture; a test may dynamically override it inside FUNCTION."
     (goto-char (point-min))
     (search-forward "Report")
     (goto-char (match-beginning 0))
+    ;; A local newer implementation can be loaded while package metadata still
+    ;; names the installed 0.3 release; the separate compatibility test owns
+    ;; the buttonized behavior in that lane.
+    (skip-unless (not (button-at (point))))
     (should (package-installed-p 'md-ts-mode '(0 3 0)))
-    (should-not (button-at (point)))
     (should (eq #'pi-coding-agent-visit-file (key-binding (kbd "RET"))))
     (should (eq #'pi-coding-agent-visit-file
                 (key-binding (kbd "<return>"))))

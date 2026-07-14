@@ -56,6 +56,7 @@
 (declare-function pi-coding-agent-toggle-tool-section "pi-coding-agent-render")
 (declare-function pi-coding-agent-shell-command-at-point "pi-coding-agent-render")
 (declare-function pi-coding-agent-visit-file "pi-coding-agent-render")
+(declare-function pi-coding-agent--dispatch-button "pi-coding-agent-render")
 (declare-function pi-coding-agent--cleanup-on-kill "pi-coding-agent-render")
 (declare-function pi-coding-agent--restore-tool-properties "pi-coding-agent-render")
 (declare-function pi-coding-agent--maybe-refresh-hot-tail-tables "pi-coding-agent-table")
@@ -187,10 +188,11 @@ Prevents huge single-line outputs from blowing up the chat buffer."
   :group 'pi-coding-agent)
 
 (defcustom pi-coding-agent-visit-file-other-window t
-  "Whether RET visits chat file targets in another window.
+  "Whether RET requests the native opener for another window.
 When non-nil, RET on a strict tool row, plain path reference, or local Markdown
-link label opens its file in another window.  When nil, RET opens it in the
-same window.  A prefix argument inverts the behavior."
+link label calls `find-file-other-window'; when nil, it calls `find-file'.  A
+prefix argument inverts that request.  Emacs display policy may redirect the
+final window placement."
   :type 'boolean
   :group 'pi-coding-agent)
 
@@ -523,6 +525,7 @@ Return nil when PATH is not a string."
     (define-key map (kbd "!") #'pi-coding-agent-shell-command-at-point)
     (define-key map (kbd "RET") #'pi-coding-agent-visit-file)
     (define-key map (kbd "<return>") #'pi-coding-agent-visit-file)
+    (define-key map [remap push-button] #'pi-coding-agent--dispatch-button)
     map)
   "Keymap for `pi-coding-agent-chat-mode'.")
 

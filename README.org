@@ -179,14 +179,18 @@ while the underlying buffer text remains ordinary Markdown.
 Press =RET= on one strict file target at point: a file-content row in tool
 output, a plain path reference, or the label of a local Markdown link.
 Tool headers, fences, preview hints, and other non-content rows do not open
-files.  Plain locations such as =src/app.el:12:3= visit their one-based line
-and optional one-based column; a range such as =src/app.el#L12-L20= visits
-its first line only.  A target without a location keeps the point chosen by
-normal Emacs file visiting.
+files.  Plain locations such as =src/app.el:12:3= visit their one-based
+physical file line and optional one-based column; a range such as
+=src/app.el#L12-L20= visits its first line only.  If an explicit location is
+outside an existing narrowing, the default =widen-automatically= policy widens
+the file.  Coordinates apply only to file-visiting buffers; directory targets
+retain native Dired point and marks.  A target without a location keeps the
+point, mark, and narrowing chosen by normal Emacs file visiting.
 
-By default the file opens in another window so the chat stays visible.  Use
-=C-u RET= to invert =pi-coding-agent-visit-file-other-window= for that visit;
-with the default setting this opens it in the same window instead.
+By default Pi requests the native other-window opener.  Use =C-u RET= to invert
+=pi-coding-agent-visit-file-other-window= for that visit; with the default
+setting this requests the same-window opener instead.  Emacs display policy may
+redirect the final placement.
 
 Press =!= on one strict file target at point for a Dired-inspired shell
 command.  One command word followed only by whitespace-delimited options
@@ -437,8 +441,9 @@ Here's some common non-default preferences:
 ;; Copy source Markdown from the chat buffer instead of only visible text:
 (setopt pi-coding-agent-copy-raw-markdown t)
 
-;; Open chat file targets in the current window instead of another window;
-;; use C-u RET to invert this choice for one visit:
+;; Request the native same-window opener for chat file targets;
+;; use C-u RET to invert this request for one visit.  Emacs display policy
+;; may redirect final placement:
 (setopt pi-coding-agent-visit-file-other-window nil)
 #+end_src
 

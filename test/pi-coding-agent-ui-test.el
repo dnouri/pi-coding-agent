@@ -696,6 +696,9 @@ Closes the category from issue #234: any instance without a usable
       (should (equal "/tmp/project/" command-directory)))
     (should (eq (lookup-key pi-coding-agent-chat-mode-map (kbd "RET"))
                 #'pi-coding-agent-visit-file))
+    (should (eq (lookup-key pi-coding-agent-chat-mode-map
+                            [remap push-button])
+                #'pi-coding-agent--dispatch-button))
     (dolist (key '("&" "E" "o"))
       (should-not (lookup-key pi-coding-agent-chat-mode-map (kbd key))))))
 

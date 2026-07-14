@@ -2462,6 +2462,7 @@ HIDDEN-COUNT is stored for the button label."
      (propertize button-label 'face 'pi-coding-agent-collapsed-indicator)
      'action #'pi-coding-agent--toggle-tool-output
      'follow-link t
+     'pi-coding-agent-tool-toggle t
      'pi-coding-agent-full-content full-content
      'pi-coding-agent-preview-content preview-content
      'pi-coding-agent-lang lang
@@ -2680,6 +2681,10 @@ use for resize scope, so there is one unified hot-tail concept."
 
 ;;;; File Navigation
 
+(defun pi-coding-agent--positive-location-p (value)
+  "Return non-nil when VALUE is a positive one-based integer."
+  (and (integerp value) (> value 0)))
+
 (defun pi-coding-agent--diff-line-at-point ()
   "Extract line number from diff line at point.
 Returns the line number if point is on an added, removed, or context
@@ -2688,7 +2693,7 @@ Diff format: [+- ] LINENUM content.
 For example: '+ 7     code', '-12     code', or '  9     context'."
   (save-excursion
     (beginning-of-line)
-    (when (looking-at "^[ +-] *\\([0-9]+\\)\\(?:[ \t]+\\|$\\)")
+    (when (looking-at "^[ +-] *\\([1-9][0-9]*\\)\\(?:[ \t]+\\|$\\)")
       (string-to-number (match-string 1)))))
 
 (defun pi-coding-agent--fence-line-info-at-point ()
@@ -2779,33 +2784,38 @@ Invalid read offsets and positions without a meaningful file row return nil."
         ;; Edit navigation uses the explicit line number in diff rows.
         (pi-coding-agent--diff-line-at-point)
       (when offset
-        (or
-         ;; Collapsed preview strips blank lines, so use line-map there.
-         (when (and use-line-map line-map header-end)
-           (save-excursion
-             (let* ((current-line (line-number-at-pos))
-                    (header-line (line-number-at-pos header-end))
-                    (lines-from-header (- current-line header-line))
-                    (map-index (1- lines-from-header)))
-               (when (and (>= map-index 0) (< map-index (length line-map)))
-                 (+ (aref line-map map-index) (1- offset))))))
-         ;; Expanded/full output preserves blank lines: derive from code block.
-         (when-let* ((header-end header-end)
-                     (block-line
-                      (pi-coding-agent--code-block-line-at-point header-end)))
-           (+ block-line (1- offset))))))))
+        (if (and use-line-map line-map header-end)
+            ;; Collapsed preview strips blank lines, so its authoritative map
+            ;; must not fall through to expanded code-block coordinates.
+            (save-excursion
+              (let* ((current-line (line-number-at-pos))
+                     (header-line (line-number-at-pos header-end))
+                     (lines-from-header (- current-line header-line))
+                     (map-index (1- lines-from-header)))
+                (when (and (>= map-index 0) (< map-index (length line-map)))
+                  (let ((mapped-line (aref line-map map-index)))
+                    (when (pi-coding-agent--positive-location-p mapped-line)
+                      (+ mapped-line (1- offset)))))))
+          ;; Expanded/full output preserves blank lines: derive from code block.
+          (when-let* ((header-end header-end)
+                      (block-line
+                       (pi-coding-agent--code-block-line-at-point header-end)))
+            (+ block-line (1- offset))))))))
 
 (defun pi-coding-agent--tool-line-at-point (overlay)
-  "Calculate the file line number at point for hot tool OVERLAY."
-  (let ((line-map (overlay-get overlay 'pi-coding-agent-line-map))
-        (header-end (overlay-get overlay 'pi-coding-agent-header-end)))
-    (pi-coding-agent--tool-line-from-metadata
-     (overlay-get overlay 'pi-coding-agent-tool-name)
-     (overlay-get overlay 'pi-coding-agent-tool-offset)
-     line-map
-     header-end
-     (and line-map header-end
-          (pi-coding-agent--tool-overlay-collapsed-p overlay)))))
+  "Calculate the physical file line at point for hot tool OVERLAY.
+Any chat restriction is restored exactly after the authoritative lookup."
+  (save-restriction
+    (widen)
+    (let ((line-map (overlay-get overlay 'pi-coding-agent-line-map))
+          (header-end (overlay-get overlay 'pi-coding-agent-header-end)))
+      (pi-coding-agent--tool-line-from-metadata
+       (overlay-get overlay 'pi-coding-agent-tool-name)
+       (overlay-get overlay 'pi-coding-agent-tool-offset)
+       line-map
+       header-end
+       (and line-map header-end
+            (pi-coding-agent--tool-overlay-collapsed-p overlay))))))
 
 (cl-defun pi-coding-agent--make-file-target
     (source raw emacs-path &key line column range bounds fragment label)
@@ -4562,10 +4572,13 @@ source positions."
          :bounds bounds)))))
 
 (defun pi-coding-agent--tool-overlay-at-point ()
-  "Return the tool block overlay at point, or nil."
-  (seq-find (lambda (overlay)
-              (overlay-get overlay 'pi-coding-agent-tool-block))
-            (overlays-at (point))))
+  "Return the authoritative hot tool overlay at physical point, or nil.
+Any chat restriction is restored exactly after lookup."
+  (save-restriction
+    (widen)
+    (seq-find (lambda (overlay)
+                (overlay-get overlay 'pi-coding-agent-tool-block))
+              (overlays-at (point)))))
 
 (defun pi-coding-agent--tool-file-target-from-metadata
     (stored-path raw-path path-error bounds line-function)
@@ -4597,32 +4610,37 @@ returns nil."
    (lambda () (pi-coding-agent--tool-line-at-point overlay))))
 
 (defun pi-coding-agent--cold-tool-block-at-point ()
-  "Return lightweight cold-tool metadata and bounds at point, or nil."
-  (when-let* ((metadata
-               (get-text-property (point)
-                                  'pi-coding-agent-cold-tool-block)))
-    (let ((start (or (previous-single-property-change
-                      (1+ (point)) 'pi-coding-agent-cold-tool-block
-                      nil (point-min))
-                     (point-min)))
-          (end (or (next-single-property-change
-                    (point) 'pi-coding-agent-cold-tool-block
-                    nil (point-max))
-                   (point-max))))
-      (list :metadata metadata :bounds (cons start end)))))
+  "Return authoritative cold-tool metadata and physical bounds at point.
+Return nil outside a cold tool.  Any chat restriction is restored exactly."
+  (save-restriction
+    (widen)
+    (when-let* ((metadata
+                 (get-text-property (point)
+                                    'pi-coding-agent-cold-tool-block)))
+      (let ((start (or (previous-single-property-change
+                        (1+ (point)) 'pi-coding-agent-cold-tool-block
+                        nil (point-min))
+                       (point-min)))
+            (end (or (next-single-property-change
+                      (point) 'pi-coding-agent-cold-tool-block
+                      nil (point-max))
+                     (point-max))))
+        (list :metadata metadata :bounds (cons start end))))))
 
 (defun pi-coding-agent--cold-tool-line-at-point (cold-block)
-  "Calculate the meaningful file line at point for COLD-BLOCK."
-  (let* ((metadata (plist-get cold-block :metadata))
-         (bounds (plist-get cold-block :bounds))
-         (header-length (plist-get metadata :header-length))
-         (header-end (and (integerp header-length)
-                          (+ (car bounds) header-length)))
-         (line-map (plist-get metadata :line-map)))
-    (pi-coding-agent--tool-line-from-metadata
-     (plist-get metadata :tool-name)
-     (plist-get metadata :offset)
-     line-map header-end line-map)))
+  "Calculate the physical meaningful file line at point for COLD-BLOCK."
+  (save-restriction
+    (widen)
+    (let* ((metadata (plist-get cold-block :metadata))
+           (bounds (plist-get cold-block :bounds))
+           (header-length (plist-get metadata :header-length))
+           (header-end (and (integerp header-length)
+                            (+ (car bounds) header-length)))
+           (line-map (plist-get metadata :line-map)))
+      (pi-coding-agent--tool-line-from-metadata
+       (plist-get metadata :tool-name)
+       (plist-get metadata :offset)
+       line-map header-end line-map))))
 
 (defun pi-coding-agent--cold-tool-file-target (cold-block)
   "Return the authoritative file target for COLD-BLOCK, or nil."
@@ -4909,49 +4927,115 @@ or TRAMP execution environment."
         execution-snapshot shell-command-text)))))
 
 (defun pi-coding-agent--goto-file-target-location (line column)
-  "Move to optional one-based LINE and COLUMN in the current buffer.
-A nil LINE preserves the point established by native file visiting.  Explicit
-locations clamp at the accessible buffer or line end and deactivate any stale
-region.  COLUMN uses display columns and never inserts text.  Range starts are
-already represented by LINE; range ends and link fragments deliberately do not
+  "Move to optional one-based physical LINE and COLUMN in the current file.
+A nil LINE preserves the point, mark, and restriction established by native
+file visiting.  Explicit locations are computed against the full file, clamp
+at physical EOF or EOL, and deactivate any stale region after a successful
+move.  COLUMN uses display columns and never inserts text.  If the resulting
+position is inaccessible, obey `widen-automatically': widen when non-nil, or
+signal `user-error' without changing point or the restriction when nil.  Range
+starts are already represented by LINE; range ends and link fragments do not
 affect navigation."
   (when line
-    (goto-char (point-min))
-    (forward-line (1- line))
-    (when column
-      ;; Emacs 29's `move-to-column' requires a fixnum, while strict target
-      ;; parsing can produce a larger integer.  Either value is past any real
-      ;; line end, so clamping the goal preserves the non-inserting result.
-      (move-to-column (min (1- column) most-positive-fixnum)))
-    (deactivate-mark)))
+    (let ((position
+           (save-excursion
+             (save-restriction
+               (widen)
+               (goto-char (point-min))
+               (forward-line (1- line))
+               (when column
+                 ;; Emacs 29's `move-to-column' requires a fixnum, while strict
+                 ;; target parsing can produce a larger integer.  Either value
+                 ;; is past any real line end, so this preserves EOL clamping.
+                 (move-to-column (min (1- column) most-positive-fixnum)))
+               (point)))))
+      (cond
+       ((and (<= (point-min) position) (<= position (point-max))))
+       (widen-automatically (widen))
+       (t (user-error "Position is outside accessible part of buffer")))
+      (goto-char position)
+      (deactivate-mark))))
+
+(defun pi-coding-agent--validate-file-target-location (source line column)
+  "Validate SOURCE's optional one-based LINE and COLUMN before opening.
+Tool rows retain their established controlled error for any absent or malformed
+mapped LINE.  Other sources may omit a location, but explicit coordinates must
+be positive integers and COLUMN requires LINE."
+  (cond
+   ((eq source :tool)
+    (unless (pi-coding-agent--positive-location-p line)
+      (user-error "No file line at point")))
+   ((and line (not (pi-coding-agent--positive-location-p line)))
+    (user-error "File line must be a positive integer")))
+  (cond
+   ((and column (not (pi-coding-agent--positive-location-p line)))
+    (user-error "File column requires a valid line"))
+   ((and column (not (pi-coding-agent--positive-location-p column)))
+    (user-error "File column must be a positive integer"))))
 
 (defun pi-coding-agent--visit-file-target (target toggle)
   "Visit TARGET, honoring TOGGLE's window inversion.
-Tool targets require a meaningful mapped line.  An optional location overrides
-native point after opening; a target without one preserves native behavior."
+Validate locations before requesting a native opener.  After opening, apply a
+location only when the resulting buffer actually visits a file; native Dired
+buffers and other non-file buffers retain the point and mark chosen by Emacs.
+A target without a location preserves native behavior."
   (let ((source (plist-get target :source))
         (path (plist-get target :emacs-path))
         (line (plist-get target :line))
         (column (plist-get target :column)))
-    (when (and (eq source :tool) (not line))
-      (user-error "No file line at point"))
+    (pi-coding-agent--validate-file-target-location source line column)
     (let ((use-other-window
            (if toggle
                (not pi-coding-agent-visit-file-other-window)
              pi-coding-agent-visit-file-other-window)))
       (funcall (if use-other-window #'find-file-other-window #'find-file)
                path))
-    (pi-coding-agent--goto-file-target-location line column)))
+    ;; Decide applicability from public post-open buffer semantics.  In
+    ;; particular, do not preflight local or remote paths to detect directories.
+    (when (and line
+               (buffer-file-name (current-buffer))
+               (not (derived-mode-p 'dired-mode)))
+      (pi-coding-agent--goto-file-target-location line column))))
+
+(defun pi-coding-agent--dispatch-button
+    (&optional position use-mouse-action strict-return)
+  "Dispatch a remapped chat button at POSITION.
+On keyboard RET, a Pi tool toggle retains its standard button action.  Every
+other button resolves once through the strict file-target visitor: authoritative
+tool ownership is preserved, while only a semantically owned local Markdown
+link is accepted outside tools.  Invalid, non-local, reference, malformed, and
+non-Markdown buttons fail closed.  Other keyboard keys, mouse events, and direct
+calls to `push-button' retain standard behavior.  USE-MOUSE-ACTION has the same
+meaning as for `push-button'.  STRICT-RETURN is non-nil only for interactive
+RET."
+  (interactive
+   (list (if (integerp last-command-event) (point) last-command-event)
+         nil
+         (equal (this-single-command-keys) [?\r])))
+  (if (not strict-return)
+      (push-button position use-mouse-action)
+    (if-let* ((button (button-at (or position (point)))))
+        (if (button-get button 'pi-coding-agent-tool-toggle)
+            (push-button position use-mouse-action)
+          (let ((target (or (pi-coding-agent--file-target-at-point)
+                            (user-error "No file at point"))))
+            (if (memq (plist-get target :source) '(:tool :link))
+                (pi-coding-agent--visit-file-target
+                 target current-prefix-arg)
+              (user-error "No file at point"))))
+      (push-button position use-mouse-action))))
 
 (defun pi-coding-agent-visit-file (&optional toggle)
   "Visit one strict file target at point.
 Targets may be file-content rows in tool output, plain path references, or
 labels of local Markdown links.  Tool headers and other non-content rows are
-not visitable.  Plain path locations use a one-based line and optional
-one-based column; a line range visits its first line only.  Targets without a
-location preserve native file-visiting point behavior.  By default, use
-`pi-coding-agent-visit-file-other-window' to choose the window.  With prefix
-argument TOGGLE, invert that choice."
+not visitable.  Plain path locations use a one-based physical file line and
+optional one-based column; a line range visits its first line only.  Explicit
+locations obey `widen-automatically' in file-visiting buffers and are ignored in
+native Dired buffers.  Targets without a location preserve native point,
+mark, and narrowing.  By default, `pi-coding-agent-visit-file-other-window'
+selects which native opener Pi requests; Emacs display policy controls final
+placement.  With prefix argument TOGGLE, invert the opener request."
   (interactive "P")
   (let ((target (or (pi-coding-agent--file-target-at-point)
                     (user-error "No file at point"))))
