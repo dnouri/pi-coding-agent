@@ -187,10 +187,10 @@ Prevents huge single-line outputs from blowing up the chat buffer."
   :group 'pi-coding-agent)
 
 (defcustom pi-coding-agent-visit-file-other-window t
-  "Whether to open files in other window when visiting from tool blocks.
-When non-nil, RET on a line in tool output opens in other window.
-When nil, RET opens in the same window.
-Prefix arg toggles the behavior."
+  "Whether RET visits chat file targets in another window.
+When non-nil, RET on a strict tool row, plain path reference, or local Markdown
+link label opens its file in another window.  When nil, RET opens it in the
+same window.  A prefix argument inverts the behavior."
   :type 'boolean
   :group 'pi-coding-agent)
 

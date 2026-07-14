@@ -176,11 +176,17 @@ Markdown pipe tables get a display-only treatment: wide tables are
 wrapped and drawn to neatly fit window width, with cleaner separators,
 while the underlying buffer text remains ordinary Markdown.
 
-Output from file tools such as =read=, =write=, and =edit=, and custom
-tools that include =:path= allow that =RET= on a file-content line
-opens the backing file at the matching line.  By default the file
-opens in the other window so the chat stays visible; use =C-u RET= to
-open it in the same window instead.
+Press =RET= on one strict file target at point: a file-content row in tool
+output, a plain path reference, or the label of a local Markdown link.
+Tool headers, fences, preview hints, and other non-content rows do not open
+files.  Plain locations such as =src/app.el:12:3= visit their one-based line
+and optional one-based column; a range such as =src/app.el#L12-L20= visits
+its first line only.  A target without a location keeps the point chosen by
+normal Emacs file visiting.
+
+By default the file opens in another window so the chat stays visible.  Use
+=C-u RET= to invert =pi-coding-agent-visit-file-other-window= for that visit;
+with the default setting this opens it in the same window instead.
 
 Press =!= on one strict file target at point for a Dired-inspired shell
 command.  One command word followed only by whitespace-delimited options
@@ -228,7 +234,7 @@ and error thresholds.
 | =M+<prior/next>= | input   | 🛗 Scroll linked chat window                  |
 | =TAB=            | chat    | 🪗 Toggle thinking block, tool block, or turn |
 | =!=              | chat    | 🐚 Run a Dired-inspired command on a file    |
-| =RET=            | chat    | 🎯 Visit file at point from tool output       |
+| =RET=            | chat    | 🎯 Visit strict file target at point          |
 | =n= / =p=        | chat    | 🐾 Navigate user messages                     |
 | =f=              | chat    | 🌿 Fork from the turn at point                |
 | =q=              | chat    | 👋 Quit session                               |
@@ -431,7 +437,8 @@ Here's some common non-default preferences:
 ;; Copy source Markdown from the chat buffer instead of only visible text:
 (setopt pi-coding-agent-copy-raw-markdown t)
 
-;; Open files from tool output in the current window instead of another window:
+;; Open chat file targets in the current window instead of another window;
+;; use C-u RET to invert this choice for one visit:
 (setopt pi-coding-agent-visit-file-other-window nil)
 #+end_src
 

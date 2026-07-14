@@ -35,7 +35,8 @@
 ;; - Streaming fontification (incremental syntax highlighting)
 ;; - Diff overlay highlighting
 ;; - Compaction display
-;; - File navigation from tool blocks
+;; - File navigation from strict tool rows, plain paths, and local
+;;   Markdown labels
 ;; - Session history display and rendering
 
 ;;; Code:
@@ -2298,7 +2299,8 @@ Preserves window scroll position during the toggle."
         ;; Save window positions relative to content-start
         ;; Windows before the tool block: save absolute position
         ;; Windows inside tool block: will use header position after toggle
-        (let* ((content-start header-end)
+        ;; Emacs 29's `font-lock-ensure' requires integer bounds below.
+        (let* ((content-start (marker-position header-end))
                (block-start (car bounds))
                (saved-windows
                 (mapcar (lambda (w)
@@ -4906,42 +4908,54 @@ or TRAMP execution environment."
        (pi-coding-agent--call-native-shell-command
         execution-snapshot shell-command-text)))))
 
+(defun pi-coding-agent--goto-file-target-location (line column)
+  "Move to optional one-based LINE and COLUMN in the current buffer.
+A nil LINE preserves the point established by native file visiting.  Explicit
+locations clamp at the accessible buffer or line end and deactivate any stale
+region.  COLUMN uses display columns and never inserts text.  Range starts are
+already represented by LINE; range ends and link fragments deliberately do not
+affect navigation."
+  (when line
+    (goto-char (point-min))
+    (forward-line (1- line))
+    (when column
+      ;; Emacs 29's `move-to-column' requires a fixnum, while strict target
+      ;; parsing can produce a larger integer.  Either value is past any real
+      ;; line end, so clamping the goal preserves the non-inserting result.
+      (move-to-column (min (1- column) most-positive-fixnum)))
+    (deactivate-mark)))
+
+(defun pi-coding-agent--visit-file-target (target toggle)
+  "Visit TARGET, honoring TOGGLE's window inversion.
+Tool targets require a meaningful mapped line.  An optional location overrides
+native point after opening; a target without one preserves native behavior."
+  (let ((source (plist-get target :source))
+        (path (plist-get target :emacs-path))
+        (line (plist-get target :line))
+        (column (plist-get target :column)))
+    (when (and (eq source :tool) (not line))
+      (user-error "No file line at point"))
+    (let ((use-other-window
+           (if toggle
+               (not pi-coding-agent-visit-file-other-window)
+             pi-coding-agent-visit-file-other-window)))
+      (funcall (if use-other-window #'find-file-other-window #'find-file)
+               path))
+    (pi-coding-agent--goto-file-target-location line column)))
+
 (defun pi-coding-agent-visit-file (&optional toggle)
-  "Visit the file associated with the tool block at point.
-If on a diff line, go to the corresponding line number.
-For read/write, go to the line within the displayed content.
-By default, uses `pi-coding-agent-visit-file-other-window' to decide
-whether to open in another window.  With prefix arg TOGGLE, invert
-that behavior."
+  "Visit one strict file target at point.
+Targets may be file-content rows in tool output, plain path references, or
+labels of local Markdown links.  Tool headers and other non-content rows are
+not visitable.  Plain path locations use a one-based line and optional
+one-based column; a line range visits its first line only.  Targets without a
+location preserve native file-visiting point behavior.  By default, use
+`pi-coding-agent-visit-file-other-window' to choose the window.  With prefix
+argument TOGGLE, invert that choice."
   (interactive "P")
-  (if-let* ((ov (seq-find (lambda (o) (overlay-get o 'pi-coding-agent-tool-block))
-                          (overlays-at (point)))))
-      (let* ((stored-path (overlay-get ov 'pi-coding-agent-tool-path))
-             (path-error (overlay-get ov 'pi-coding-agent-tool-path-error))
-             (path (cond
-                    ((not stored-path) nil)
-                    ((not (stringp stored-path))
-                     (setq path-error "Tool path metadata is not a string")
-                     nil)
-                    (t
-                     (condition-case err
-                         (pi-coding-agent--tool-emacs-path stored-path)
-                       (error
-                        (setq path-error (error-message-string err))
-                        nil))))))
-        (if path
-            (if-let* ((line (pi-coding-agent--tool-line-at-point ov)))
-                (let ((use-other-window
-                       (if toggle
-                           (not pi-coding-agent-visit-file-other-window)
-                         pi-coding-agent-visit-file-other-window)))
-                  (funcall (if use-other-window #'find-file-other-window #'find-file)
-                           path)
-                  (goto-char (point-min))
-                  (forward-line (1- line)))
-              (user-error "No file line at point"))
-          (user-error "%s" (or path-error "No file at point"))))
-    (user-error "No file at point")))
+  (let ((target (or (pi-coding-agent--file-target-at-point)
+                    (user-error "No file at point"))))
+    (pi-coding-agent--visit-file-target target toggle)))
 
 ;;;; Diff Overlay Highlighting
 
