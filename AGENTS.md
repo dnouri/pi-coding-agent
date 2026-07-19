@@ -6,7 +6,8 @@ Communicates with the pi CLI via JSON-over-stdio (RPC).
 
 ## Module Architecture
 
-Eight source modules with a strict dependency chain (no cycles):
+Eight source modules with a strict dependency chain (no cycles), plus
+an optional Evil integration module:
 
 ```
 pi-coding-agent.el              ← entry point, autoloads
@@ -46,6 +47,7 @@ module, direct `setq` is fine.
 | `pi-coding-agent-input.el` | Input history, isearch, send/abort, file/path/slash completion, queuing |
 | `pi-coding-agent-menu.el` | Transient menu, session management, model selection, commands |
 | `pi-coding-agent-grammars.el` | Tree-sitter grammar recipes, install prompts, `M-x pi-coding-agent-install-grammars` |
+| `pi-coding-agent-evil.el` | Optional Evil keybindings; auto-loaded via `with-eval-after-load` when Evil is present. Leaf module: requires `ui`, `input`, and `menu` directly (never the top-level feature, to avoid a recursive require during auto-load) |
 
 ## Test Files
 
