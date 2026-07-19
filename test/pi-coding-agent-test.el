@@ -116,7 +116,7 @@ still mock the RPC boundary, so the process is never used for I/O."
                        (push (list 'setup-session dir session) calls)
                        chat-buf))
                     ((symbol-function 'pi-coding-agent--display-buffers)
-                     (lambda (chat input)
+                     (lambda (chat input &optional _chat-only)
                        (push (list 'display chat input) calls)))
                     ((symbol-function 'pi-coding-agent--session-transition-ready-p)
                      (lambda (chat action)
@@ -184,7 +184,7 @@ still mock the RPC boundary, so the process is never used for I/O."
                      (push (list 'setup-session dir session) calls)
                      chat-buf))
                   ((symbol-function 'pi-coding-agent--display-buffers)
-                   (lambda (chat input)
+                   (lambda (chat input &optional _chat-only)
                      (push (list 'display chat input) calls)))
                   ((symbol-function 'pi-coding-agent--session-transition-ready-p)
                    (lambda (chat action)
@@ -226,7 +226,7 @@ still mock the RPC boundary, so the process is never used for I/O."
                     ((symbol-function 'pi-coding-agent--setup-session)
                      (lambda (_dir &optional _session) chat-buf))
                     ((symbol-function 'pi-coding-agent--display-buffers)
-                     (lambda (_chat _input) (setq displayed t)))
+                     (lambda (_chat _input &optional _chat-only) (setq displayed t)))
                     ((symbol-function 'pi-coding-agent--session-transition-ready-p)
                      (lambda (_chat _action) nil))
                     ((symbol-function 'pi-coding-agent--resume-selected-session)
@@ -1127,7 +1127,7 @@ must decide whether this is a no-op."
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
               ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
               ((symbol-function 'pi-coding-agent--display-buffers)
-               (lambda (chat _input) (setq displayed chat))))
+               (lambda (chat _input &rest _) (setq displayed chat))))
       (unwind-protect
           (progn
             ;; Create named session first.
@@ -1303,7 +1303,7 @@ must decide whether this is a no-op."
                      (lambda (&rest _)
                        (ert-fail "toggle checked process dependencies")))
                     ((symbol-function 'pi-coding-agent--display-buffers)
-                     (lambda (_chat _input)
+                     (lambda (_chat _input &rest _)
                        (setq displayed t))))
             (with-temp-buffer
               (setq default-directory root)
@@ -1323,7 +1323,7 @@ must decide whether this is a no-op."
               ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
               ((symbol-function 'pi-coding-agent--check-dependencies) #'ignore)
               ((symbol-function 'pi-coding-agent--display-buffers)
-               (lambda (chat _input)
+               (lambda (chat _input &rest _)
                  (setq displayed-name (buffer-name chat)))))
       (unwind-protect
           (progn
@@ -1478,7 +1478,7 @@ must decide whether this is a no-op."
                   ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
                   ((symbol-function 'pi-coding-agent--check-dependencies) #'ignore)
                   ((symbol-function 'pi-coding-agent--display-buffers)
-                   (lambda (chat-buf input-buf)
+                   (lambda (chat-buf input-buf &rest _)
                      (setq displayed-chat chat-buf
                            displayed-input input-buf))))
           (setq chat (pi-coding-agent--setup-session root nil)

@@ -644,6 +644,144 @@ Closes the category from issue #234: any instance without a usable
         (pi-coding-agent-test--kill-session-buffers root)
         (delete-other-windows)))))
 
+(ert-deftest pi-coding-agent-test-display-buffers-chat-only-when-show-input-nil ()
+  "SHOW-INPUT nil displays only the chat window."
+  (let ((root "/tmp/pi-coding-agent-test-display-chat-only/"))
+    (make-directory root t)
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil)))
+      (unwind-protect
+          (let* ((chat (pi-coding-agent--setup-session root nil))
+                 (input (buffer-local-value 'pi-coding-agent--input-buffer chat)))
+            (delete-other-windows)
+            (pi-coding-agent--display-buffers chat input t)
+            (should (get-buffer-window chat))
+            (should-not (get-buffer-window input)))
+        (pi-coding-agent-test--kill-session-buffers root)
+        (delete-other-windows)))))
+
+(ert-deftest pi-coding-agent-test-open-input-splits-below-chat ()
+  "`pi-coding-agent-open-input' opens a soft-dedicated input window below chat."
+  (let ((root "/tmp/pi-coding-agent-test-open-input-split/"))
+    (make-directory root t)
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil)))
+      (unwind-protect
+          (let* ((chat (pi-coding-agent--setup-session root nil))
+                 (input (buffer-local-value 'pi-coding-agent--input-buffer chat)))
+            (delete-other-windows)
+            (pi-coding-agent--display-buffers chat input t)
+            (select-window (get-buffer-window chat))
+            (pi-coding-agent-open-input)
+            (let ((input-win (get-buffer-window input)))
+              (should input-win)
+              (should (eq (selected-window) input-win))
+              (should (eq 'side (window-dedicated-p input-win)))
+              (should (eq (window-in-direction 'above input-win)
+                          (get-buffer-window chat)))))
+        (pi-coding-agent-test--kill-session-buffers root)
+        (delete-other-windows)))))
+
+(ert-deftest pi-coding-agent-test-open-input-focuses-visible-input ()
+  "`pi-coding-agent-open-input' selects an already-visible input window."
+  (let ((root "/tmp/pi-coding-agent-test-open-input-focus/"))
+    (make-directory root t)
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil)))
+      (unwind-protect
+          (let* ((chat (pi-coding-agent--setup-session root nil))
+                 (input (buffer-local-value 'pi-coding-agent--input-buffer chat)))
+            (delete-other-windows)
+            (pi-coding-agent--display-buffers chat input)
+            (select-window (get-buffer-window chat))
+            (pi-coding-agent-open-input)
+            (should (eq (selected-window) (get-buffer-window input)))
+            (should (= 2 (length (window-list nil 'no-mini)))))
+        (pi-coding-agent-test--kill-session-buffers root)
+        (delete-other-windows)))))
+
+(ert-deftest pi-coding-agent-test-send-hides-input-window-on-demand ()
+  "Sending hides the input window when display is `on-demand'."
+  (let ((root "/tmp/pi-coding-agent-test-send-hide/")
+        (pi-coding-agent-input-window-display 'on-demand))
+    (make-directory root t)
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
+              ((symbol-function 'pi-coding-agent--prepare-and-send) #'ignore))
+      (unwind-protect
+          (let* ((chat (pi-coding-agent--setup-session root nil))
+                 (input (buffer-local-value 'pi-coding-agent--input-buffer chat)))
+            (delete-other-windows)
+            (pi-coding-agent--display-buffers chat input)
+            (with-current-buffer input
+              (insert "Hello, pi!")
+              (pi-coding-agent-send))
+            (should-not (get-buffer-window input))
+            (should (eq (selected-window) (get-buffer-window chat))))
+        (pi-coding-agent-test--kill-session-buffers root)
+        (delete-other-windows)))))
+
+(ert-deftest pi-coding-agent-test-send-keeps-input-window-when-always ()
+  "Sending keeps the input window when display is `always'."
+  (let ((root "/tmp/pi-coding-agent-test-send-keep/")
+        (pi-coding-agent-input-window-display 'always))
+    (make-directory root t)
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
+              ((symbol-function 'pi-coding-agent--prepare-and-send) #'ignore))
+      (unwind-protect
+          (let* ((chat (pi-coding-agent--setup-session root nil))
+                 (input (buffer-local-value 'pi-coding-agent--input-buffer chat)))
+            (delete-other-windows)
+            (pi-coding-agent--display-buffers chat input)
+            (with-current-buffer input
+              (insert "Hello, pi!")
+              (pi-coding-agent-send))
+            (should (get-buffer-window input)))
+        (pi-coding-agent-test--kill-session-buffers root)
+        (delete-other-windows)))))
+
+(ert-deftest pi-coding-agent-test-show-session-buffers-hidden-launches-chat-only ()
+  "A fresh session launches chat-only when display is `hidden'.
+`pi-coding-agent--show-session-buffers' honors
+`pi-coding-agent-input-window-display', so a `hidden' session starts
+without an input window."
+  (let ((root "/tmp/pi-coding-agent-test-show-hidden/")
+        (pi-coding-agent-input-window-display 'hidden))
+    (make-directory root t)
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil)))
+      (unwind-protect
+          (let* ((chat (pi-coding-agent--setup-session root nil))
+                 (input (buffer-local-value 'pi-coding-agent--input-buffer chat)))
+            (delete-other-windows)
+            (pi-coding-agent--show-session-buffers chat input)
+            (should (get-buffer-window chat))
+            (should-not (get-buffer-window input)))
+        (pi-coding-agent-test--kill-session-buffers root)
+        (delete-other-windows)))))
+
+(ert-deftest pi-coding-agent-test-send-hides-input-window-when-hidden ()
+  "Sending hides the input window when display is `hidden'."
+  (let ((root "/tmp/pi-coding-agent-test-send-hide-hidden/")
+        (pi-coding-agent-input-window-display 'hidden))
+    (make-directory root t)
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+              ((symbol-function 'pi-coding-agent--start-process) (lambda (_) nil))
+              ((symbol-function 'pi-coding-agent--prepare-and-send) #'ignore))
+      (unwind-protect
+          (let* ((chat (pi-coding-agent--setup-session root nil))
+                 (input (buffer-local-value 'pi-coding-agent--input-buffer chat)))
+            (delete-other-windows)
+            (pi-coding-agent--display-buffers chat input)
+            (with-current-buffer input
+              (insert "Hello, pi!")
+              (pi-coding-agent-send))
+            (should-not (get-buffer-window input))
+            (should (eq (selected-window) (get-buffer-window chat))))
+        (pi-coding-agent-test--kill-session-buffers root)
+        (delete-other-windows)))))
+
 (ert-deftest pi-coding-agent-test-hide-session-windows-uses-current-frame-window-list ()
   "`pi-coding-agent--hide-session-windows' should query current frame windows only."
   (let ((root "/tmp/pi-coding-agent-test-hide-frame-local/")
