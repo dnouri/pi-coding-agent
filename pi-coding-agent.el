@@ -66,6 +66,13 @@
 ;;     TAB            Toggle completed thinking/tool section or fold turn
 ;;     RET            Visit file at point (from tool blocks)
 ;;     C-c C-k        Abort current operation
+;;     C-c C-n        New session
+;;     C-c C-r        Resume session
+;;     C-c C-e        Export HTML
+;;     C-c C-c        Compact context
+;;     C-c C-m        Select model
+;;     C-c C-t        Cycle thinking level
+;;     C-c C-y        Copy last message
 ;;     C-c C-p        Open menu
 ;;
 ;; Editor Features:
