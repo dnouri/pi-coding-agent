@@ -97,9 +97,25 @@
 
 ;;;; Main Entry Point
 
+(defcustom pi-coding-agent-evil-integration t
+  "When non-nil, load Evil keybindings automatically when Evil is in use.
+Loads `pi-coding-agent-evil' when a session is set up while Evil is
+present.  Set to nil before loading this package to opt out."
+  :type 'boolean
+  :group 'pi-coding-agent)
+
+(defun pi-coding-agent--maybe-load-evil-integration ()
+  "Load the optional Evil integration when Evil is in use.
+Skips when `pi-coding-agent-evil-integration' is nil or Evil has not
+been loaded.  Called before session buffers are created so initial
+Evil states apply to them."
+  (when (and pi-coding-agent-evil-integration (featurep 'evil))
+    (require 'pi-coding-agent-evil nil t)))
+
 (defun pi-coding-agent--setup-session (dir &optional session)
   "Set up a new or existing session for DIR with optional SESSION name.
 Returns the chat buffer."
+  (pi-coding-agent--maybe-load-evil-integration)
   (let* ((chat-buf (pi-coding-agent--get-or-create-buffer :chat dir session))
          (input-buf (pi-coding-agent--get-or-create-buffer :input dir session))
          (new-session nil))
@@ -274,18 +290,6 @@ If no session exists, signal an error."
      ;; Session hidden: show it
      (t
       (pi-coding-agent--display-buffers chat-buf input-buf)))))
-
-(defcustom pi-coding-agent-evil-integration t
-  "When non-nil, load Evil keybindings automatically when Evil is in use.
-Loads `pi-coding-agent-evil' once Evil is loaded.  Set to nil before
-loading this package to opt out."
-  :type 'boolean
-  :group 'pi-coding-agent)
-
-;; Load optional Evil integration when Evil is present.
-(with-eval-after-load 'evil
-  (when pi-coding-agent-evil-integration
-    (require 'pi-coding-agent-evil nil t)))
 
 (provide 'pi-coding-agent)
 ;;; pi-coding-agent.el ends here

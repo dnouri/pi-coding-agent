@@ -47,7 +47,7 @@ module, direct `setq` is fine.
 | `pi-coding-agent-input.el` | Input history, isearch, send/abort, file/path/slash completion, queuing |
 | `pi-coding-agent-menu.el` | Transient menu, session management, model selection, commands |
 | `pi-coding-agent-grammars.el` | Tree-sitter grammar recipes, install prompts, `M-x pi-coding-agent-install-grammars` |
-| `pi-coding-agent-evil.el` | Optional Evil keybindings; auto-loaded via `with-eval-after-load` when Evil is present. Leaf module: requires `ui`, `input`, and `menu` directly (never the top-level feature, to avoid a recursive require during auto-load) |
+| `pi-coding-agent-evil.el` | Optional Evil keybindings; auto-loaded by `pi-coding-agent--maybe-load-evil-integration` when a session is set up while Evil is present. Leaf module: requires `ui`, `input`, and `menu` directly (never the top-level feature, to avoid a recursive require during auto-load). Must byte-compile and load without Evil installed |
 
 ## Test Files
 

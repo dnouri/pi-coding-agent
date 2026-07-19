@@ -87,11 +87,32 @@
          (should (eq evil-state state)))))))
 
 (ert-deftest pi-coding-agent-evil-test-snipe-disabled-in-chat ()
-  "Setup registers pi chat mode with `evil-snipe-disabled-modes'."
+  "Setup hooks snipe disablement, which turns snipe off in chat buffers."
+  (pi-coding-agent-evil-test--with-evil
+   (pi-coding-agent-evil-setup)
+   (should (memq #'pi-coding-agent-evil--maybe-disable-snipe
+                 (default-value 'evil-snipe-local-mode-hook)))
+   (should (memq #'pi-coding-agent-evil--maybe-disable-snipe
+                 (default-value 'evil-snipe-override-local-mode-hook)))))
+
+(ert-deftest pi-coding-agent-evil-test-snipe-hook-disables-in-chat ()
+  "The snipe hook turns snipe off in chat buffers only."
   (pi-coding-agent-evil-test--with-evil
    (skip-unless (require 'evil-snipe nil t))
-   (pi-coding-agent-evil-setup)
-   (should (memq 'pi-coding-agent-chat-mode evil-snipe-disabled-modes))))
+   (with-temp-buffer
+     (evil-snipe-local-mode 1)
+     (evil-snipe-override-local-mode 1)
+     (setq major-mode 'pi-coding-agent-chat-mode)
+     (pi-coding-agent-evil--maybe-disable-snipe)
+     (should-not evil-snipe-local-mode)
+     (should-not evil-snipe-override-local-mode))
+   (with-temp-buffer
+     (evil-snipe-local-mode 1)
+     (evil-snipe-override-local-mode 1)
+     (setq major-mode 'text-mode)
+     (pi-coding-agent-evil--maybe-disable-snipe)
+     (should evil-snipe-local-mode)
+     (should evil-snipe-override-local-mode))))
 
 (ert-deftest pi-coding-agent-evil-test-copy-raw-markdown-opt-out ()
   "Setup does not add the chat mode hook when opted out."

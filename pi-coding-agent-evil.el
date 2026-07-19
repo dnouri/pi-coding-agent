@@ -30,9 +30,10 @@
 ;; state so navigation keys work unmodified, the input buffer starts
 ;; in insert state, and `?' opens the transient menu.
 ;;
-;; This file loads automatically when Evil is in use; set
-;; `pi-coding-agent-evil-integration' to nil before loading
-;; pi-coding-agent to opt out.  It can also be loaded explicitly:
+;; This file loads automatically when a session is set up while Evil
+;; is in use; set `pi-coding-agent-evil-integration' to nil before
+;; loading pi-coding-agent to opt out.  It can also be loaded
+;; explicitly:
 ;;
 ;;   (require 'pi-coding-agent-evil)
 ;;
@@ -63,16 +64,33 @@
 ;;; Code:
 
 ;; Require the submodules directly rather than `pi-coding-agent': this
-;; file is also loaded from a `with-eval-after-load' form at the end
-;; of pi-coding-agent.el, and requiring the top-level feature from
-;; here would be a recursive require during that load.
+;; file may be loaded while pi-coding-agent.el itself is still
+;; loading, and requiring the top-level feature from here would be a
+;; recursive require.
 (require 'pi-coding-agent-ui)
 (require 'pi-coding-agent-input)
 (require 'pi-coding-agent-menu)
-(require 'evil)
 
-;; Optional dependency, registered with when it loads.
-(defvar evil-snipe-disabled-modes)
+;; Evil is an optional dependency: this file must byte-compile and
+;; load in environments where Evil is not installed (e.g. MELPA
+;; builds), and only activates when Evil is present.  Call the
+;; function `evil-define-key*' rather than the `evil-define-key'
+;; macro so byte-compiled output is correct regardless of whether
+;; Evil was present at compile time.
+(require 'evil nil t)
+
+(declare-function evil-change-state "evil")
+(declare-function evil-define-key* "evil")
+(declare-function evil-set-initial-state "evil")
+(declare-function evil-snipe-local-mode "evil-snipe")
+(declare-function evil-snipe-override-local-mode "evil-snipe")
+
+;; Note on the evil-snipe references below: hook variables are only
+;; ever quoted, and mode variables are tested with
+;; `bound-and-true-p', so nothing needs declaring here.  Adding to
+;; the hooks before evil-snipe loads is safe: the hooks exist as soon
+;; as `add-hook' creates them, and `defvar' in evil-snipe does not
+;; reset an already-bound variable.
 
 (defcustom pi-coding-agent-evil-chat-state 'motion
   "Initial Evil state for pi chat buffers.
@@ -93,12 +111,12 @@ buffer with `pi-coding-agent-evil-insert-input' or
 (defcustom pi-coding-agent-evil-disable-snipe t
   "When non-nil, disable `evil-snipe' in pi chat buffers.
 evil-snipe's minor-mode keymaps take precedence over the chat mode's
-own `f' binding (fork at point), so `pi-coding-agent-evil-setup' adds
-`pi-coding-agent-chat-mode' to `evil-snipe-disabled-modes' once
-evil-snipe loads; the same treatment `magit-mode' receives by
-default.  Only affects chat buffers created afterwards.  Without
-evil-snipe, fork stays on `f' while F, t, and T remain Evil's native
-char-finding motions."
+own `f' binding (fork at point), so `pi-coding-agent-evil-setup'
+turns the snipe minor modes off in chat buffers via
+`evil-snipe-local-mode-hook' and
+`evil-snipe-override-local-mode-hook'.  Without evil-snipe, fork
+stays on `f' while F, t, and T remain Evil's native char-finding
+motions."
   :type 'boolean
   :group 'pi-coding-agent)
 
@@ -118,6 +136,19 @@ Added to `pi-coding-agent-chat-mode-hook' by
 `pi-coding-agent-evil-setup' when
 `pi-coding-agent-evil-copy-raw-markdown' is non-nil."
   (setq-local pi-coding-agent-copy-raw-markdown t))
+
+(defun pi-coding-agent-evil--maybe-disable-snipe ()
+  "Disable the `evil-snipe' minor modes in pi chat buffers.
+Added to `evil-snipe-local-mode-hook' and
+`evil-snipe-override-local-mode-hook' by
+`pi-coding-agent-evil-setup' when `pi-coding-agent-evil-disable-snipe'
+is non-nil.  Mode hooks run on disable as well as enable, so guard
+on the modes being active to avoid recursing."
+  (when (derived-mode-p 'pi-coding-agent-chat-mode)
+    (when (bound-and-true-p evil-snipe-local-mode)
+      (evil-snipe-local-mode -1))
+    (when (bound-and-true-p evil-snipe-override-local-mode)
+      (evil-snipe-override-local-mode -1))))
 
 (defun pi-coding-agent-evil-insert-input ()
   "Focus the session input window and enter the configured input state.
@@ -169,16 +200,17 @@ When APPEND is non-nil, move point to the end of the input buffer."
   "Set up Evil integration for pi-coding-agent.
 Set initial buffer states, install keybindings, and apply the user
 options `pi-coding-agent-evil-chat-state',
-`pi-coding-agent-evil-input-state', and
-`pi-coding-agent-evil-copy-raw-markdown'.  Safe to call more than
-once."
+`pi-coding-agent-evil-input-state',
+`pi-coding-agent-evil-copy-raw-markdown', and
+`pi-coding-agent-evil-disable-snipe'.  Safe to call more than once."
   (interactive)
-  (require 'evil)
+  (unless (featurep 'evil)
+    (user-error "pi-coding-agent-evil: Evil is not loaded"))
   (evil-set-initial-state 'pi-coding-agent-chat-mode
                           pi-coding-agent-evil-chat-state)
   (evil-set-initial-state 'pi-coding-agent-input-mode
                           pi-coding-agent-evil-input-state)
-  (evil-define-key 'motion pi-coding-agent-chat-mode-map
+  (evil-define-key* 'motion pi-coding-agent-chat-mode-map
     "n" #'pi-coding-agent-next-message
     "p" #'pi-coding-agent-previous-message
     "f" #'pi-coding-agent-fork-at-point
@@ -189,7 +221,7 @@ once."
     (kbd "RET") #'pi-coding-agent-visit-file
     (kbd "TAB") #'pi-coding-agent-toggle-tool-section
     [tab] #'pi-coding-agent-toggle-tool-section)
-  (evil-define-key 'normal pi-coding-agent-input-mode-map
+  (evil-define-key* 'normal pi-coding-agent-input-mode-map
     (kbd "RET") #'pi-coding-agent-send
     "q" #'pi-coding-agent-evil-close-input
     "?" #'pi-coding-agent-menu)
@@ -197,11 +229,14 @@ once."
     (add-hook 'pi-coding-agent-chat-mode-hook
               #'pi-coding-agent-evil--copy-raw-markdown-in-chat))
   (when pi-coding-agent-evil-disable-snipe
-    (with-eval-after-load 'evil-snipe
-      (add-to-list 'evil-snipe-disabled-modes 'pi-coding-agent-chat-mode))))
+    (add-hook 'evil-snipe-local-mode-hook
+              #'pi-coding-agent-evil--maybe-disable-snipe)
+    (add-hook 'evil-snipe-override-local-mode-hook
+              #'pi-coding-agent-evil--maybe-disable-snipe)))
 
-;; Activate on load.
-(pi-coding-agent-evil-setup)
+;; Activate on load when Evil is present.
+(when (featurep 'evil)
+  (pi-coding-agent-evil-setup))
 
 (provide 'pi-coding-agent-evil)
 ;;; pi-coding-agent-evil.el ends here

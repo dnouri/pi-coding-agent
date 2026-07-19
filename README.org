@@ -460,8 +460,8 @@ Optional Evil keybindings ship in =pi-coding-agent-evil.el=, modeled on
 how Evil and Magit cooperate: the read-only chat buffer starts in
 motion state so navigation keys just work, the input buffer starts in
 insert state, and =?= opens the transient menu.  It loads
-automatically when Evil is in use; to opt out, set this before loading
-the package:
+automatically when a session is set up while Evil is in use; to opt
+out, set this before loading the package:
 
 #+begin_src emacs-lisp
 (setq pi-coding-agent-evil-integration nil)
@@ -510,12 +510,14 @@ defaults, and =M-x pi-coding-agent-evil-setup= re-applies them after
 changing options.
 
 With =evil-snipe= (enabled by default in Doom): its minor-mode keymaps
-shadow the chat buffer's =f= binding, so setup adds
-=pi-coding-agent-chat-mode= to =evil-snipe-disabled-modes= for new
-chat buffers — the same treatment =magit-mode= gets by default.  Fork
-stays on =f=, and char-finding remains available on =F=, =t=, and
-=T=.  Set =pi-coding-agent-evil-disable-snipe= to nil to keep snipe
-active in chat buffers.
+shadow the chat buffer's =f= binding, so setup turns the snipe minor
+modes off in chat buffers via evil-snipe's mode hooks — the same
+outcome =magit-mode= gets from its entry in
+=evil-snipe-disabled-modes=, and effective regardless of load order.
+Fork stays on =f=, char-finding remains available on =F=, =t=, and
+=T=, and snipe stays active in the input buffer.  Set
+=pi-coding-agent-evil-disable-snipe= to nil to keep snipe active in
+chat buffers.
 
 ** Display of thinking 💭
 
