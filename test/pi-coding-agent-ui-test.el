@@ -614,6 +614,11 @@ Closes the category from issue #234: any instance without a usable
         (pi-coding-agent-test--kill-session-buffers root)
         (delete-other-windows)))))
 
+(ert-deftest pi-coding-agent-test-chat-mode-map-binds-abort ()
+  "Chat mode map binds C-c C-k to `pi-coding-agent-abort'."
+  (should (eq (lookup-key pi-coding-agent-chat-mode-map (kbd "C-c C-k"))
+              #'pi-coding-agent-abort)))
+
 (ert-deftest pi-coding-agent-test-display-buffers-soft-dedicates-input-window ()
   "Input window should be soft-dedicated so `display-buffer' skips it."
   (let ((root "/tmp/pi-coding-agent-test-dedicated/"))

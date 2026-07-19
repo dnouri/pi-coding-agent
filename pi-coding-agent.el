@@ -65,6 +65,7 @@
 ;;     n / p          Navigate messages
 ;;     TAB            Toggle completed thinking/tool section or fold turn
 ;;     RET            Visit file at point (from tool blocks)
+;;     C-c C-k        Abort current operation
 ;;     C-c C-p        Open menu
 ;;
 ;; Editor Features:

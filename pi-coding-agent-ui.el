@@ -502,6 +502,7 @@ Return nil when PATH is not a string."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "q") #'pi-coding-agent-quit)
     (define-key map (kbd "C-c C-p") #'pi-coding-agent-menu)
+    (define-key map (kbd "C-c C-k") #'pi-coding-agent-abort)
     (define-key map (kbd "n") #'pi-coding-agent-next-message)
     (define-key map (kbd "p") #'pi-coding-agent-previous-message)
     (define-key map (kbd "f") #'pi-coding-agent-fork-at-point)
