@@ -34,7 +34,10 @@ scroll through the chat without losing focus, navigate and copy from
 previous output with ease, and use the key bindings and editing habits
 you already have.
 
-#+html: <a href="https://danielnouri.org/media/pi-coding-agent-demo.mp4"><img src="https://danielnouri.org/media/pi-coding-agent-preview.gif" alt="pi-coding-agent demo - click to play" width="600" height="600"></a>
+#+html: <a href="https://danielnouri.org/media/pi-coding-agent-demo.mp4"><img src="https://danielnouri.org/media/pi-coding-agent-preview.gif" alt="Narrated pi-coding-agent demo video (6:38) - click to play" width="600" height="600"></a>
+#+html: <p><small>Video music: "Electrodoodle" by Kevin MacLeod
+#+html: (<a href="https://incompetech.com">incompetech.com</a>),
+#+html: licensed under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.</small></p>
 
 #+html: <a id="quick-start"></a>
 * Quick start 🚀
