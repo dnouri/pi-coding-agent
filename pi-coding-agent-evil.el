@@ -71,6 +71,9 @@
 (require 'pi-coding-agent-menu)
 (require 'evil)
 
+;; Optional dependency, registered with when it loads.
+(defvar evil-snipe-disabled-modes)
+
 (defcustom pi-coding-agent-evil-chat-state 'motion
   "Initial Evil state for pi chat buffers.
 The chat buffer is read-only; motion state provides navigation keys
@@ -81,6 +84,18 @@ while unbound keys fall through to the mode's own keymap."
 (defcustom pi-coding-agent-evil-input-state 'insert
   "Initial Evil state for pi input buffers."
   :type 'symbol
+  :group 'pi-coding-agent)
+
+(defcustom pi-coding-agent-evil-disable-snipe t
+  "When non-nil, disable `evil-snipe' in pi chat buffers.
+evil-snipe's minor-mode keymaps take precedence over the chat mode's
+own `f' binding (fork at point), so `pi-coding-agent-evil-setup' adds
+`pi-coding-agent-chat-mode' to `evil-snipe-disabled-modes' once
+evil-snipe loads; the same treatment `magit-mode' receives by
+default.  Only affects chat buffers created afterwards.  Without
+evil-snipe, fork stays on `f' while F, t, and T remain Evil's native
+char-finding motions."
+  :type 'boolean
   :group 'pi-coding-agent)
 
 (defcustom pi-coding-agent-evil-copy-raw-markdown t
@@ -159,7 +174,10 @@ once."
     "q" #'pi-coding-agent-evil-close-input
     "?" #'pi-coding-agent-menu)
   (when pi-coding-agent-evil-copy-raw-markdown
-    (setq pi-coding-agent-copy-raw-markdown t)))
+    (setq pi-coding-agent-copy-raw-markdown t))
+  (when pi-coding-agent-evil-disable-snipe
+    (with-eval-after-load 'evil-snipe
+      (add-to-list 'evil-snipe-disabled-modes 'pi-coding-agent-chat-mode))))
 
 ;; Activate on load.
 (pi-coding-agent-evil-setup)

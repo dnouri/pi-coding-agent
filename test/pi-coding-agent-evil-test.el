@@ -71,6 +71,13 @@
      (pi-coding-agent-evil-setup)
      (should pi-coding-agent-copy-raw-markdown))))
 
+(ert-deftest pi-coding-agent-evil-test-snipe-disabled-in-chat ()
+  "Setup registers pi chat mode with `evil-snipe-disabled-modes'."
+  (pi-coding-agent-evil-test--with-evil
+   (skip-unless (require 'evil-snipe nil t))
+   (pi-coding-agent-evil-setup)
+   (should (memq 'pi-coding-agent-chat-mode evil-snipe-disabled-modes))))
+
 (ert-deftest pi-coding-agent-evil-test-copy-raw-markdown-opt-out ()
   "Setup leaves `pi-coding-agent-copy-raw-markdown' alone when opted out."
   (pi-coding-agent-evil-test--with-evil

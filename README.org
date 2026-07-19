@@ -497,6 +497,14 @@ User bindings made after =pi-coding-agent-evil-setup= runs (e.g. with
 defaults, and =M-x pi-coding-agent-evil-setup= re-applies them after
 changing options.
 
+With =evil-snipe= (enabled by default in Doom): its minor-mode keymaps
+shadow the chat buffer's =f= binding, so setup adds
+=pi-coding-agent-chat-mode= to =evil-snipe-disabled-modes= for new
+chat buffers — the same treatment =magit-mode= gets by default.  Fork
+stays on =f=, and char-finding remains available on =F=, =t=, and
+=T=.  Set =pi-coding-agent-evil-disable-snipe= to nil to keep snipe
+active in chat buffers.
+
 ** Display of thinking 💭
 
 New chat buffers inherit =pi-coding-agent-thinking-display=.  The
