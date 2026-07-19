@@ -100,12 +100,20 @@ char-finding motions."
 
 (defcustom pi-coding-agent-evil-copy-raw-markdown t
   "When non-nil, yanking from the chat buffer copies raw Markdown.
-`pi-coding-agent-evil-setup' sets `pi-coding-agent-copy-raw-markdown'
-to t when this option is non-nil, so that `evil-yank' preserves code
-fences and markup.  Set to nil before loading this file to keep the
-upstream default of copying only visible text."
+`pi-coding-agent-evil-setup' arranges for
+`pi-coding-agent-copy-raw-markdown' to be set buffer-locally in chat
+buffers, so that `evil-yank' preserves code fences and markup.  Set
+to nil before loading this file to keep the upstream default of
+copying only visible text."
   :type 'boolean
   :group 'pi-coding-agent)
+
+(defun pi-coding-agent-evil--copy-raw-markdown-in-chat ()
+  "Set `pi-coding-agent-copy-raw-markdown' buffer-locally.
+Added to `pi-coding-agent-chat-mode-hook' by
+`pi-coding-agent-evil-setup' when
+`pi-coding-agent-evil-copy-raw-markdown' is non-nil."
+  (setq-local pi-coding-agent-copy-raw-markdown t))
 
 (defun pi-coding-agent-evil-insert-input ()
   "Focus the session input window and enter insert state.
@@ -174,7 +182,8 @@ once."
     "q" #'pi-coding-agent-evil-close-input
     "?" #'pi-coding-agent-menu)
   (when pi-coding-agent-evil-copy-raw-markdown
-    (setq pi-coding-agent-copy-raw-markdown t))
+    (add-hook 'pi-coding-agent-chat-mode-hook
+              #'pi-coding-agent-evil--copy-raw-markdown-in-chat))
   (when pi-coding-agent-evil-disable-snipe
     (with-eval-after-load 'evil-snipe
       (add-to-list 'evil-snipe-disabled-modes 'pi-coding-agent-chat-mode))))

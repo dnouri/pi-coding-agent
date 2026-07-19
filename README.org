@@ -479,9 +479,10 @@ Input buffer (normal state):
 | q   | close input window |
 | ?   | transient menu     |
 
-Setup also enables =pi-coding-agent-copy-raw-markdown= so that yanking
-from the chat buffer preserves code fences and markup.  Each part can
-be tuned independently before loading:
+Setup also sets =pi-coding-agent-copy-raw-markdown= buffer-locally in
+chat buffers, so that yanking preserves code fences and markup without
+changing the global default.  Each part can be tuned independently
+before loading:
 
 #+begin_src emacs-lisp
 ;; Different initial states:

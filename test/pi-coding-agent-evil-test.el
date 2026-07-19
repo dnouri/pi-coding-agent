@@ -65,11 +65,16 @@
      (should (eq (lookup-key map "?") #'pi-coding-agent-menu)))))
 
 (ert-deftest pi-coding-agent-evil-test-copy-raw-markdown-default ()
-  "Setup enables copying raw markdown by default."
+  "Setup copies raw markdown buffer-locally in chat buffers by default."
   (pi-coding-agent-evil-test--with-evil
-   (let ((pi-coding-agent-copy-raw-markdown nil))
+   (let ((pi-coding-agent-chat-mode-hook nil))
      (pi-coding-agent-evil-setup)
-     (should pi-coding-agent-copy-raw-markdown))))
+     (should (memq #'pi-coding-agent-evil--copy-raw-markdown-in-chat
+                   pi-coding-agent-chat-mode-hook)))
+   (with-temp-buffer
+     (pi-coding-agent-evil--copy-raw-markdown-in-chat)
+     (should (and (local-variable-p 'pi-coding-agent-copy-raw-markdown)
+                  pi-coding-agent-copy-raw-markdown)))))
 
 (ert-deftest pi-coding-agent-evil-test-snipe-disabled-in-chat ()
   "Setup registers pi chat mode with `evil-snipe-disabled-modes'."
@@ -79,12 +84,13 @@
    (should (memq 'pi-coding-agent-chat-mode evil-snipe-disabled-modes))))
 
 (ert-deftest pi-coding-agent-evil-test-copy-raw-markdown-opt-out ()
-  "Setup leaves `pi-coding-agent-copy-raw-markdown' alone when opted out."
+  "Setup does not add the chat mode hook when opted out."
   (pi-coding-agent-evil-test--with-evil
    (let ((pi-coding-agent-evil-copy-raw-markdown nil)
-         (pi-coding-agent-copy-raw-markdown nil))
+         (pi-coding-agent-chat-mode-hook nil))
      (pi-coding-agent-evil-setup)
-     (should-not pi-coding-agent-copy-raw-markdown))))
+     (should-not (memq #'pi-coding-agent-evil--copy-raw-markdown-in-chat
+                       pi-coding-agent-chat-mode-hook)))))
 
 (provide 'pi-coding-agent-evil-test)
 ;;; pi-coding-agent-evil-test.el ends here
