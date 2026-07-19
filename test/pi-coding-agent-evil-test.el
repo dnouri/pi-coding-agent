@@ -76,6 +76,16 @@
      (should (and (local-variable-p 'pi-coding-agent-copy-raw-markdown)
                   pi-coding-agent-copy-raw-markdown)))))
 
+(ert-deftest pi-coding-agent-evil-test-enter-input-state-respects-option ()
+  "Focusing the input window enters `pi-coding-agent-evil-input-state'."
+  (pi-coding-agent-evil-test--with-evil
+   (dolist (state '(insert normal emacs))
+     (let ((pi-coding-agent-evil-input-state state))
+       (with-temp-buffer
+         (evil-local-mode 1)
+         (pi-coding-agent-evil--enter-input-state)
+         (should (eq evil-state state)))))))
+
 (ert-deftest pi-coding-agent-evil-test-snipe-disabled-in-chat ()
   "Setup registers pi chat mode with `evil-snipe-disabled-modes'."
   (pi-coding-agent-evil-test--with-evil

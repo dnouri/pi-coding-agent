@@ -82,7 +82,11 @@ while unbound keys fall through to the mode's own keymap."
   :group 'pi-coding-agent)
 
 (defcustom pi-coding-agent-evil-input-state 'insert
-  "Initial Evil state for pi input buffers."
+  "Evil state for pi input buffers.
+Used both as the initial state when an input buffer is created and as
+the state entered when focusing the input window from the chat
+buffer with `pi-coding-agent-evil-insert-input' or
+`pi-coding-agent-evil-append-input'."
   :type 'symbol
   :group 'pi-coding-agent)
 
@@ -116,18 +120,26 @@ Added to `pi-coding-agent-chat-mode-hook' by
   (setq-local pi-coding-agent-copy-raw-markdown t))
 
 (defun pi-coding-agent-evil-insert-input ()
-  "Focus the session input window and enter insert state.
-Restore the session window layout when no input window is visible."
+  "Focus the session input window and enter the configured input state.
+Enter the state named by `pi-coding-agent-evil-input-state' (insert
+by default).  Restore the session window layout when no input window
+is visible."
   (interactive)
   (pi-coding-agent-evil--focus-input nil))
 
 (defun pi-coding-agent-evil-append-input ()
-  "Focus the session input window at end of buffer and enter insert state."
+  "Focus the session input window at end of buffer.
+Enter the state named by `pi-coding-agent-evil-input-state' (insert
+by default)."
   (interactive)
   (pi-coding-agent-evil--focus-input t))
 
+(defun pi-coding-agent-evil--enter-input-state ()
+  "Enter the state named by `pi-coding-agent-evil-input-state'."
+  (evil-change-state pi-coding-agent-evil-input-state))
+
 (defun pi-coding-agent-evil--focus-input (append)
-  "Focus the session input window and enter insert state.
+  "Focus the session input window and enter the configured input state.
 When APPEND is non-nil, move point to the end of the input buffer."
   (let ((chat-buf (pi-coding-agent--get-chat-buffer))
         (input-buf (pi-coding-agent--get-input-buffer)))
@@ -139,7 +151,7 @@ When APPEND is non-nil, move point to the end of the input buffer."
     (when (derived-mode-p 'pi-coding-agent-input-mode)
       (when append
         (goto-char (point-max)))
-      (evil-insert-state))))
+      (pi-coding-agent-evil--enter-input-state))))
 
 (defun pi-coding-agent-evil-close-input ()
   "Close the session input window and select the chat window."

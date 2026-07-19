@@ -495,7 +495,10 @@ before loading:
 #+begin_src emacs-lisp
 ;; Different initial states:
 (setq pi-coding-agent-evil-chat-state 'normal)
-(setq pi-coding-agent-evil-input-state 'emacs)
+
+;; Open and focus the input window in normal state instead of insert
+;; (press i to start composing, RET sends, q closes the window):
+(setq pi-coding-agent-evil-input-state 'normal)
 
 ;; Keep copying only visible text instead of raw Markdown:
 (setq pi-coding-agent-evil-copy-raw-markdown nil)
