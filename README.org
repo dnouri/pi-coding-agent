@@ -451,11 +451,12 @@ M-x customize-group RET pi-coding-agent RET
 Optional Evil keybindings ship in =pi-coding-agent-evil.el=, modeled on
 how Evil and Magit cooperate: the read-only chat buffer starts in
 motion state so navigation keys just work, the input buffer starts in
-insert state, and =?= opens the transient menu.  Load it after the
-package:
+insert state, and =?= opens the transient menu.  It loads
+automatically when Evil is in use; to opt out, set this before loading
+the package:
 
 #+begin_src emacs-lisp
-(require 'pi-coding-agent-evil)
+(setq pi-coding-agent-evil-integration nil)
 #+end_src
 
 Chat buffer (motion state):

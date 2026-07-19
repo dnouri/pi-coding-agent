@@ -267,5 +267,17 @@ If no session exists, signal an error."
      (t
       (pi-coding-agent--display-buffers chat-buf input-buf)))))
 
+(defcustom pi-coding-agent-evil-integration t
+  "When non-nil, load Evil keybindings automatically when Evil is in use.
+Loads `pi-coding-agent-evil' once Evil is loaded.  Set to nil before
+loading this package to opt out."
+  :type 'boolean
+  :group 'pi-coding-agent)
+
+;; Load optional Evil integration when Evil is present.
+(with-eval-after-load 'evil
+  (when pi-coding-agent-evil-integration
+    (require 'pi-coding-agent-evil nil t)))
+
 (provide 'pi-coding-agent)
 ;;; pi-coding-agent.el ends here

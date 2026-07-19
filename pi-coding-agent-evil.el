@@ -30,7 +30,9 @@
 ;; state so navigation keys work unmodified, the input buffer starts
 ;; in insert state, and `?' opens the transient menu.
 ;;
-;; To enable, load this file after pi-coding-agent:
+;; This file loads automatically when Evil is in use; set
+;; `pi-coding-agent-evil-integration' to nil before loading
+;; pi-coding-agent to opt out.  It can also be loaded explicitly:
 ;;
 ;;   (require 'pi-coding-agent-evil)
 ;;
@@ -60,7 +62,13 @@
 
 ;;; Code:
 
-(require 'pi-coding-agent)
+;; Require the submodules directly rather than `pi-coding-agent': this
+;; file is also loaded from a `with-eval-after-load' form at the end
+;; of pi-coding-agent.el, and requiring the top-level feature from
+;; here would be a recursive require during that load.
+(require 'pi-coding-agent-ui)
+(require 'pi-coding-agent-input)
+(require 'pi-coding-agent-menu)
 (require 'evil)
 
 (defcustom pi-coding-agent-evil-chat-state 'motion
