@@ -446,6 +446,56 @@ You can also inspect the whole customization group with:
 M-x customize-group RET pi-coding-agent RET
 #+end_src
 
+** Evil integration 😈
+
+Optional Evil keybindings ship in =pi-coding-agent-evil.el=, modeled on
+how Evil and Magit cooperate: the read-only chat buffer starts in
+motion state so navigation keys just work, the input buffer starts in
+insert state, and =?= opens the transient menu.  Load it after the
+package:
+
+#+begin_src emacs-lisp
+(require 'pi-coding-agent-evil)
+#+end_src
+
+Chat buffer (motion state):
+
+| Key   | Action                                  |
+|-------+-----------------------------------------|
+| n / p | next / previous message                 |
+| f     | fork session at point                   |
+| TAB   | toggle tool/thinking section            |
+| RET   | visit file at point                     |
+| i / a | focus input (=a= goes to end of input)  |
+| ?     | transient menu                          |
+| q     | quit session                            |
+
+Input buffer (normal state):
+
+| Key | Action             |
+|-----+--------------------|
+| RET | send               |
+| q   | close input window |
+| ?   | transient menu     |
+
+Setup also enables =pi-coding-agent-copy-raw-markdown= so that yanking
+from the chat buffer preserves code fences and markup.  Each part can
+be tuned independently before loading:
+
+#+begin_src emacs-lisp
+;; Different initial states:
+(setq pi-coding-agent-evil-chat-state 'normal)
+(setq pi-coding-agent-evil-input-state 'emacs)
+
+;; Keep copying only visible text instead of raw Markdown:
+(setq pi-coding-agent-evil-copy-raw-markdown nil)
+#+end_src
+
+User bindings made after =pi-coding-agent-evil-setup= runs (e.g. with
+=evil-define-key= or Doom's =map!=) take precedence over these
+defaults, and =M-x pi-coding-agent-evil-setup= re-applies them after
+changing options.
+
 ** Display of thinking 💭
 
 New chat buffers inherit =pi-coding-agent-thinking-display=.  The
