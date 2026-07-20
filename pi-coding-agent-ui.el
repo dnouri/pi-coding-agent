@@ -71,10 +71,14 @@
 
 ;; pi-coding-agent-menu.el (menu and session commands)
 (declare-function pi-coding-agent-menu "pi-coding-agent-menu")
+(declare-function pi-coding-agent-new-session "pi-coding-agent-menu")
 (declare-function pi-coding-agent-resume-session "pi-coding-agent-menu")
+(declare-function pi-coding-agent-export-html "pi-coding-agent-menu")
+(declare-function pi-coding-agent-compact "pi-coding-agent-menu")
 (declare-function pi-coding-agent-select-model "pi-coding-agent-menu")
 (declare-function pi-coding-agent-cycle-thinking "pi-coding-agent-menu")
 (declare-function pi-coding-agent-fork-at-point "pi-coding-agent-menu")
+(declare-function pi-coding-agent-copy-last-message "pi-coding-agent-menu")
 
 ;;;; Customization Group
 
@@ -502,6 +506,14 @@ Return nil when PATH is not a string."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "q") #'pi-coding-agent-quit)
     (define-key map (kbd "C-c C-p") #'pi-coding-agent-menu)
+    (define-key map (kbd "C-c C-k") #'pi-coding-agent-abort)
+    (define-key map (kbd "C-c C-n") #'pi-coding-agent-new-session)
+    (define-key map (kbd "C-c C-r") #'pi-coding-agent-resume-session)
+    (define-key map (kbd "C-c C-e") #'pi-coding-agent-export-html)
+    (define-key map (kbd "C-c C-c") #'pi-coding-agent-compact)
+    (define-key map (kbd "C-c C-m") #'pi-coding-agent-select-model)
+    (define-key map (kbd "C-c C-t") #'pi-coding-agent-cycle-thinking)
+    (define-key map (kbd "C-c C-y") #'pi-coding-agent-copy-last-message)
     (define-key map (kbd "n") #'pi-coding-agent-next-message)
     (define-key map (kbd "p") #'pi-coding-agent-previous-message)
     (define-key map (kbd "f") #'pi-coding-agent-fork-at-point)

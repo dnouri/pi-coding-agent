@@ -220,6 +220,14 @@ and error thresholds.
 | =n= / =p=        | chat    | 🐾 Navigate user messages                     |
 | =f=              | chat    | 🌿 Fork from the turn at point                |
 | =q=              | chat    | 👋 Quit session                               |
+| =C-c C-k=        | chat    | 🪓 Abort current operation                    |
+| =C-c C-n=        | chat    | 🌱 New session                                |
+| =C-c C-r=        | chat    | 📼 Resume a previous session                  |
+| =C-c C-e=        | chat    | 🖨️ Export session to HTML                     |
+| =C-c C-c=        | chat    | 🗜️ Compact conversation context               |
+| =C-c C-m=        | chat    | 🧠 Select model                               |
+| =C-c C-t=        | chat    | 🌀 Cycle thinking level                       |
+| =C-c C-y=        | chat    | 📋 Copy last message                          |
 
 #+html: <a id="troubleshooting"></a>
 * Troubleshooting and first-run notes 🩺
@@ -445,6 +453,71 @@ You can also inspect the whole customization group with:
 #+begin_src
 M-x customize-group RET pi-coding-agent RET
 #+end_src
+
+** Evil integration 😈
+
+Optional Evil keybindings ship in =pi-coding-agent-evil.el=, modeled on
+how Evil and Magit cooperate: the read-only chat buffer starts in
+motion state so navigation keys just work, the input buffer starts in
+insert state, and =?= opens the transient menu.  It loads
+automatically when a session is set up while Evil is in use; to opt
+out, set this before loading the package:
+
+#+begin_src emacs-lisp
+(setq pi-coding-agent-evil-integration nil)
+#+end_src
+
+Chat buffer (motion state):
+
+| Key   | Action                                  |
+|-------+-----------------------------------------|
+| n / p | next / previous message                 |
+| f     | fork session at point                   |
+| TAB   | toggle tool/thinking section            |
+| RET   | visit file at point                     |
+| i / a | focus input (=a= goes to end of input)  |
+| ?     | transient menu                          |
+| q     | quit session                            |
+
+Input buffer (normal state):
+
+| Key | Action             |
+|-----+--------------------|
+| RET | send               |
+| q   | close input window |
+| ?   | transient menu     |
+
+Setup also sets =pi-coding-agent-copy-raw-markdown= buffer-locally in
+chat buffers, so that yanking preserves code fences and markup without
+changing the global default.  Each part can be tuned independently
+before loading:
+
+#+begin_src emacs-lisp
+;; Different initial states:
+(setq pi-coding-agent-evil-chat-state 'normal)
+
+;; Open and focus the input window in normal state instead of insert
+;; (press i to start composing, RET sends, q closes the window):
+(setq pi-coding-agent-evil-input-state 'normal)
+
+;; Keep copying only visible text instead of raw Markdown:
+(setq pi-coding-agent-evil-copy-raw-markdown nil)
+#+end_src
+
+User bindings made after =pi-coding-agent-evil-setup= runs (e.g. with
+=evil-define-key= or Doom's =map!=) take precedence over these
+defaults, and =M-x pi-coding-agent-evil-setup= re-applies them after
+changing options.
+
+With =evil-snipe= (enabled by default in Doom): its minor-mode keymaps
+shadow the chat buffer's =f= binding, so setup turns the snipe minor
+modes off in chat buffers via evil-snipe's mode hooks — the same
+outcome =magit-mode= gets from its entry in
+=evil-snipe-disabled-modes=, and effective regardless of load order.
+Fork stays on =f=, char-finding remains available on =F=, =t=, and
+=T=, and snipe stays active in the input buffer.  Set
+=pi-coding-agent-evil-disable-snipe= to nil to keep snipe active in
+chat buffers.
 
 ** Display of thinking 💭
 

@@ -65,6 +65,14 @@
 ;;     n / p          Navigate messages
 ;;     TAB            Toggle completed thinking/tool section or fold turn
 ;;     RET            Visit file at point (from tool blocks)
+;;     C-c C-k        Abort current operation
+;;     C-c C-n        New session
+;;     C-c C-r        Resume session
+;;     C-c C-e        Export HTML
+;;     C-c C-c        Compact context
+;;     C-c C-m        Select model
+;;     C-c C-t        Cycle thinking level
+;;     C-c C-y        Copy last message
 ;;     C-c C-p        Open menu
 ;;
 ;; Editor Features:
@@ -89,9 +97,25 @@
 
 ;;;; Main Entry Point
 
+(defcustom pi-coding-agent-evil-integration t
+  "When non-nil, load Evil keybindings automatically when Evil is in use.
+Loads `pi-coding-agent-evil' when a session is set up while Evil is
+present.  Set to nil before loading this package to opt out."
+  :type 'boolean
+  :group 'pi-coding-agent)
+
+(defun pi-coding-agent--maybe-load-evil-integration ()
+  "Load the optional Evil integration when Evil is in use.
+Skips when `pi-coding-agent-evil-integration' is nil or Evil has not
+been loaded.  Called before session buffers are created so initial
+Evil states apply to them."
+  (when (and pi-coding-agent-evil-integration (featurep 'evil))
+    (require 'pi-coding-agent-evil nil t)))
+
 (defun pi-coding-agent--setup-session (dir &optional session)
   "Set up a new or existing session for DIR with optional SESSION name.
 Returns the chat buffer."
+  (pi-coding-agent--maybe-load-evil-integration)
   (let* ((chat-buf (pi-coding-agent--get-or-create-buffer :chat dir session))
          (input-buf (pi-coding-agent--get-or-create-buffer :input dir session))
          (new-session nil))
