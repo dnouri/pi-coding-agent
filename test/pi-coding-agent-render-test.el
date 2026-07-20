@@ -9126,6 +9126,9 @@ fixture; a test may dynamically override it inside FUNCTION."
         (save-window-excursion
           (switch-to-buffer chat)
           (pi-coding-agent-chat-mode)
+          ;; `local-set-key' would mutate the shared mode map; give this
+          ;; buffer its own copy so the rebindings stay local.
+          (use-local-map (copy-keymap pi-coding-agent-chat-mode-map))
           (let ((inhibit-read-only t))
             (insert "Ordinary button")
             (make-text-button
