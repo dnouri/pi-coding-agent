@@ -35,7 +35,8 @@
 ;; - Streaming fontification (incremental syntax highlighting)
 ;; - Diff overlay highlighting
 ;; - Compaction display
-;; - File navigation from tool blocks
+;; - File navigation from strict tool rows, plain paths, and local
+;;   Markdown labels
 ;; - Session history display and rendering
 
 ;;; Code:
@@ -47,6 +48,25 @@
 
 ;; Forward references for functions in other modules
 (declare-function pi-coding-agent-compact "pi-coding-agent-menu" (&optional custom-instructions))
+;; Declare the Emacs 29 minimum API.  Adding Emacs 30's optional TAG here makes
+;; its byte compiler pad three-argument calls, producing incompatible bytecode.
+(declare-function treesit-parser-create "treesit.c"
+                  (language &optional buffer no-reuse))
+(declare-function treesit-parser-delete "treesit.c" (parser))
+(declare-function treesit-parser-list "treesit.c"
+                  (&optional buffer language tag))
+(declare-function treesit-parser-language "treesit.c" (parser))
+(declare-function treesit-parser-included-ranges "treesit.c" (parser))
+(declare-function treesit-parser-root-node "treesit.c" (parser))
+(declare-function treesit-parser-set-included-ranges "treesit.c"
+                  (parser ranges))
+(declare-function treesit-node-descendant-for-range "treesit.c"
+                  (node beg end &optional named))
+(declare-function treesit-query-capture "treesit.c"
+                  (node query &optional beg end node-only))
+(declare-function comint-output-filter "comint" (process string))
+(declare-function comint-term-environment "comint" ())
+(declare-function shell-mode "shell" ())
 
 (defconst pi-coding-agent--history-replay-gc-threshold (* 64 1024 1024)
   "Minimum `gc-cons-threshold' used while replaying full session history.")
@@ -1369,14 +1389,17 @@ Returns a plist with:
               :line-map line-map-vec)))))
 
 (defun pi-coding-agent--clear-render-artifacts ()
-  "Delete pi-owned render overlays in the current chat buffer.
-This removes completed/pending tool overlays and diff overlays before
-buffer reset or history rebuild, then clears keyed live-tool state,
-cached execution args, and the compatibility pending overlay slot so
-buffer state and overlay state stay consistent.  Tree-sitter overlays
-are left alone."
+  "Delete pi-owned render artifacts in the current chat buffer.
+This removes completed/pending tool overlays, diff overlays, and lightweight
+cold-tool metadata before buffer reset or history rebuild, then clears keyed
+live-tool state, cached execution args, and the compatibility pending overlay
+slot so buffer and render state stay consistent.  Tree-sitter overlays are
+left alone."
   (remove-overlays (point-min) (point-max) 'pi-coding-agent-tool-block t)
   (remove-overlays (point-min) (point-max) 'pi-coding-agent-diff-overlay t)
+  (let ((inhibit-read-only t))
+    (remove-text-properties
+     (point-min) (point-max) '(pi-coding-agent-cold-tool-block nil)))
   (setq pi-coding-agent--pending-tool-overlay nil
         pi-coding-agent--tool-block-order-counter 0
         pi-coding-agent--thinking-block-order-counter 0)
@@ -2276,7 +2299,8 @@ Preserves window scroll position during the toggle."
         ;; Save window positions relative to content-start
         ;; Windows before the tool block: save absolute position
         ;; Windows inside tool block: will use header position after toggle
-        (let* ((content-start header-end)
+        ;; Emacs 29's `font-lock-ensure' requires integer bounds below.
+        (let* ((content-start (marker-position header-end))
                (block-start (car bounds))
                (saved-windows
                 (mapcar (lambda (w)
@@ -2438,6 +2462,7 @@ HIDDEN-COUNT is stored for the button label."
      (propertize button-label 'face 'pi-coding-agent-collapsed-indicator)
      'action #'pi-coding-agent--toggle-tool-output
      'follow-link t
+     'pi-coding-agent-tool-toggle t
      'pi-coding-agent-full-content full-content
      'pi-coding-agent-preview-content preview-content
      'pi-coding-agent-lang lang
@@ -2492,8 +2517,19 @@ command falls back to `outline-cycle' for turn folding."
 ;;
 ;; Completed tool blocks outside the hot tail (older than the most
 ;; recent `pi-coding-agent-hot-tail-turn-count' headed turns) are
-;; cooled into plain text.  The cold form keeps the header and visible
-;; preview but drops overlays, buttons, and syntax-tagged rendering.
+;; cooled into plain text.  The cold form keeps the header, visible
+;; preview, and lightweight authoritative target metadata, but drops
+;; overlays, buttons, full-content payloads, and syntax-tagged rendering.
+
+(defun pi-coding-agent--ensure-cold-tool-property-nonsticky ()
+  "Keep cold tool authority from spreading across insertion boundaries."
+  (unless (eq t (alist-get 'pi-coding-agent-cold-tool-block
+                           text-property-default-nonsticky))
+    (setq-local text-property-default-nonsticky
+                (cons '(pi-coding-agent-cold-tool-block . t)
+                      (assq-delete-all
+                       'pi-coding-agent-cold-tool-block
+                       (copy-sequence text-property-default-nonsticky))))))
 
 (defun pi-coding-agent--tool-overlay-live-p (overlay)
   "Return non-nil when OVERLAY's tool block is still in the live registry."
@@ -2539,20 +2575,43 @@ therefore cool into their visible preview only."
                   (substring wrapped-body 0 -1)
                 wrapped-body))))))))
 
+(defun pi-coding-agent--cold-tool-target-metadata
+    (overlay header-end collapsed)
+  "Return lightweight target metadata for cold tool OVERLAY.
+HEADER-END is the current absolute end of its header.  COLLAPSED is non-nil
+when the visible body is a mapped preview.  The result deliberately excludes
+buttons, full content, markers, and absolute buffer positions."
+  (let ((record (pi-coding-agent--tool-block-from-overlay overlay)))
+    (list :order (and record (pi-coding-agent--tool-block-order record))
+          :tool-name (overlay-get overlay 'pi-coding-agent-tool-name)
+          :path (overlay-get overlay 'pi-coding-agent-tool-path)
+          :raw-path (overlay-get overlay 'pi-coding-agent-tool-raw-path)
+          :path-error (overlay-get overlay 'pi-coding-agent-tool-path-error)
+          :offset (overlay-get overlay 'pi-coding-agent-tool-offset)
+          ;; Only collapsed previews need the small visible-line map.
+          :line-map (and collapsed
+                         (overlay-get overlay 'pi-coding-agent-line-map))
+          :header-length (- header-end (overlay-start overlay)))))
+
 (defun pi-coding-agent--tool-overlay-cold-metadata (overlay)
   "Return cold-history metadata for completed tool OVERLAY.
-The result is a plist with `:visible-body' and, for currently collapsed
-blocks only, `:hidden-count'.  Expanded blocks return no hidden-count
-because cold history must stay preview-only."
+The result carries its visible body, lightweight target metadata and, for a
+currently collapsed block, its hidden count.  Expanded blocks return no hidden
+count because cold history must stay preview-only."
   (when-let* ((visible-body (pi-coding-agent--tool-overlay-visible-body overlay))
               (header-end (marker-position
                            (overlay-get overlay 'pi-coding-agent-header-end))))
     (let* ((button (pi-coding-agent--find-toggle-button-in-region
                     header-end (overlay-end overlay)))
-           (hidden-count (and button
-                              (not (button-get button 'pi-coding-agent-expanded))
+           (collapsed (and button
+                           (not (button-get button
+                                            'pi-coding-agent-expanded))))
+           (hidden-count (and collapsed
                               (button-get button 'hidden-count))))
       (list :visible-body visible-body
+            :target-metadata
+            (pi-coding-agent--cold-tool-target-metadata
+             overlay header-end collapsed)
             :hidden-count (and (integerp hidden-count)
                                (> hidden-count 0)
                                hidden-count)))))
@@ -2568,6 +2627,7 @@ diff annotations."
                              (overlay-get overlay 'pi-coding-agent-header-end))))
       (let* ((inhibit-read-only t)
              (hidden-count (plist-get metadata :hidden-count))
+             (target-metadata (plist-get metadata :target-metadata))
              (cold-body (concat
                          (pi-coding-agent--wrap-in-src-block visible-body nil)
                          "\n"
@@ -2577,11 +2637,17 @@ diff annotations."
              (ov-start (overlay-start overlay))
              (ov-end (overlay-end overlay)))
         (remove-overlays ov-start ov-end 'pi-coding-agent-diff-overlay t)
+        (remove-text-properties
+         ov-start ov-end '(pi-coding-agent-cold-tool-block nil))
         (delete-overlay overlay)
         (save-excursion
           (goto-char header-end)
           (delete-region header-end ov-end)
-          (insert cold-body))
+          (insert cold-body)
+          (pi-coding-agent--ensure-cold-tool-property-nonsticky)
+          (add-text-properties
+           ov-start (point)
+           `(pi-coding-agent-cold-tool-block ,target-metadata)))
         t))))
 
 (defun pi-coding-agent--cool-completed-tool-blocks (overlays)
@@ -2615,6 +2681,10 @@ use for resize scope, so there is one unified hot-tail concept."
 
 ;;;; File Navigation
 
+(defun pi-coding-agent--positive-location-p (value)
+  "Return non-nil when VALUE is a positive one-based integer."
+  (and (integerp value) (> value 0)))
+
 (defun pi-coding-agent--diff-line-at-point ()
   "Extract line number from diff line at point.
 Returns the line number if point is on an added, removed, or context
@@ -2623,7 +2693,7 @@ Diff format: [+- ] LINENUM content.
 For example: '+ 7     code', '-12     code', or '  9     context'."
   (save-excursion
     (beginning-of-line)
-    (when (looking-at "^[ +-] *\\([0-9]+\\)\\(?:[ \t]+\\|$\\)")
+    (when (looking-at "^[ +-] *\\([1-9][0-9]*\\)\\(?:[ \t]+\\|$\\)")
       (string-to-number (match-string 1)))))
 
 (defun pi-coding-agent--fence-line-info-at-point ()
@@ -2699,73 +2769,2277 @@ non-collapsible blocks return nil."
                    (overlay-end overlay))))
     (not (button-get btn 'pi-coding-agent-expanded))))
 
-(defun pi-coding-agent--tool-line-at-point (overlay)
-  "Calculate file line number at point for tool OVERLAY.
-For edit diffs: parse line number from added, removed, or context rows.
-For read/write: use line-map only in collapsed preview mode; otherwise
-count directly from the rendered code block."
-  (let* ((tool-name (overlay-get overlay 'pi-coding-agent-tool-name))
-         (offset (if (equal tool-name "read")
-                     (or (overlay-get overlay 'pi-coding-agent-tool-offset) 1)
-                   1))
-         (line-map (overlay-get overlay 'pi-coding-agent-line-map))
-         (header-end (overlay-get overlay 'pi-coding-agent-header-end))
-         (use-line-map (and line-map
-                            header-end
-                            (pi-coding-agent--tool-overlay-collapsed-p overlay))))
+(defun pi-coding-agent--tool-line-from-metadata
+    (tool-name stored-offset line-map header-end use-line-map)
+  "Calculate the file line at point from tool rendering metadata.
+TOOL-NAME and STORED-OFFSET identify tool semantics.  LINE-MAP maps visible
+preview rows when USE-LINE-MAP is non-nil.  HEADER-END bounds fence parsing.
+Invalid read offsets and positions without a meaningful file row return nil."
+  (let ((offset (cond
+                 ((not (equal tool-name "read")) 1)
+                 ((null stored-offset) 1)
+                 ((and (integerp stored-offset) (> stored-offset 0))
+                  stored-offset))))
     (if (equal tool-name "edit")
         ;; Edit navigation uses the explicit line number in diff rows.
         (pi-coding-agent--diff-line-at-point)
-      (or
-       ;; Collapsed preview strips blank lines, so use line-map there.
-       (when use-line-map
-         (save-excursion
-           (let* ((current-line (line-number-at-pos))
-                  (header-line (line-number-at-pos header-end))
-                  (lines-from-header (- current-line header-line))
-                  (map-index (1- lines-from-header)))
-             (when (and (>= map-index 0) (< map-index (length line-map)))
-               (+ (aref line-map map-index) (1- offset))))))
-       ;; Expanded/full output preserves blank lines: derive from code block.
-       (when-let* ((block-line (pi-coding-agent--code-block-line-at-point header-end)))
-         (+ block-line (1- offset)))))))
+      (when offset
+        (if (and use-line-map line-map header-end)
+            ;; Collapsed preview strips blank lines, so its authoritative map
+            ;; must not fall through to expanded code-block coordinates.
+            (save-excursion
+              (let* ((current-line (line-number-at-pos))
+                     (header-line (line-number-at-pos header-end))
+                     (lines-from-header (- current-line header-line))
+                     (map-index (1- lines-from-header)))
+                (when (and (>= map-index 0) (< map-index (length line-map)))
+                  (let ((mapped-line (aref line-map map-index)))
+                    (when (pi-coding-agent--positive-location-p mapped-line)
+                      (+ mapped-line (1- offset)))))))
+          ;; Expanded/full output preserves blank lines: derive from code block.
+          (when-let* ((header-end header-end)
+                      (block-line
+                       (pi-coding-agent--code-block-line-at-point header-end)))
+            (+ block-line (1- offset))))))))
+
+(defun pi-coding-agent--tool-line-at-point (overlay)
+  "Calculate the physical file line at point for hot tool OVERLAY.
+Any chat restriction is restored exactly after the authoritative lookup."
+  (save-restriction
+    (widen)
+    (let ((line-map (overlay-get overlay 'pi-coding-agent-line-map))
+          (header-end (overlay-get overlay 'pi-coding-agent-header-end)))
+      (pi-coding-agent--tool-line-from-metadata
+       (overlay-get overlay 'pi-coding-agent-tool-name)
+       (overlay-get overlay 'pi-coding-agent-tool-offset)
+       line-map
+       header-end
+       (and line-map header-end
+            (pi-coding-agent--tool-overlay-collapsed-p overlay))))))
+
+(cl-defun pi-coding-agent--make-file-target
+    (source raw emacs-path &key line column range bounds fragment label)
+  "Return a resolved file target for SOURCE and RAW candidate.
+EMACS-PATH is the normalized local or TRAMP path for Emacs operations.
+The returned plist has this contract:
+
+  `:source'     is `:tool', `:link', or `:text';
+  `:raw'        is the original metadata, link destination, or text candidate;
+  `:display'    is that candidate escaped for prompts and messages;
+  `:emacs-path' is the normalized path for Emacs file operations;
+  `:shell-path' is the unquoted path in the local or TRAMP shell namespace;
+  `:shell-path-error' explains why no safe shell path can be represented;
+  `:shell-directory' is the canonical directory selecting that shell host;
+  `:line', `:column', and `:range' are optional source locations;
+  `:bounds'     is an optional cons of buffer positions;
+  `:fragment'   is an optional local-link fragment, outside filesystem paths;
+  `:label'      is an optional control-safe Markdown link label.
+
+Keyword arguments LINE, COLUMN, RANGE, BOUNDS, FRAGMENT, and LABEL supply those
+fields.  Representable shell paths are absolute or remote-home-rooted, so
+leading-dash relative names cannot become options.  A shell-only conversion
+error is stored
+rather than signaled, leaving `:emacs-path' usable by Emacs-only consumers.
+Shell consumers must use `pi-coding-agent--file-target-shell-path' or the
+exactly-once quoted `pi-coding-agent--file-target-shell-argument'; `:shell-path'
+is not command text.  Constructing a target does not check file existence."
+  (let ((anchor (pi-coding-agent--chat-session-directory))
+        shell-path shell-path-error)
+    (condition-case err
+        (setq shell-path
+              (pi-coding-agent--shell-command-path emacs-path anchor))
+      (user-error
+       (setq shell-path-error (error-message-string err))))
+    (list :source source
+          :raw raw
+          :display (pi-coding-agent--escape-control-chars-for-display raw)
+          :emacs-path emacs-path
+          :shell-path shell-path
+          :shell-path-error shell-path-error
+          :shell-directory anchor
+          :line line
+          :column column
+          :range range
+          :bounds bounds
+          :fragment fragment
+          :label label)))
+
+(defun pi-coding-agent--file-target-shell-path (target)
+  "Return TARGET's unquoted shell-local path, or signal `user-error'.
+Shell conversion failures are delayed until this shell-action boundary so
+Emacs-only target consumers can always use a valid `:emacs-path'."
+  (or (plist-get target :shell-path)
+      (user-error "%s" (or (plist-get target :shell-path-error)
+                            "File target has no shell path"))))
+
+(defun pi-coding-agent--file-target-shell-argument (target)
+  "Return TARGET safely quoted exactly once as one shell operand.
+The result is suitable for a `shell-command' run with TARGET's
+`:shell-directory' as `default-directory'."
+  (pi-coding-agent--shell-quote-path
+   (pi-coding-agent--file-target-shell-path target)
+   (plist-get target :shell-directory)))
+
+(defun pi-coding-agent--isolated-shell-star-p (command index)
+  "Return non-nil when COMMAND has an isolated `*' at INDEX.
+This is Dired's shell-agnostic textual rule: both neighbors must independently
+be a string edge, an ASCII space, or a tab.  Quotes and backslashes have no
+special meaning; explicit marker placement is the user's responsibility."
+  (and (eq (aref command index) ?*)
+       (or (zerop index)
+           (memq (aref command (1- index)) '(?\s ?\t)))
+       (or (= (1+ index) (length command))
+           (memq (aref command (1+ index)) '(?\s ?\t)))))
+
+(defun pi-coding-agent--simple-shell-command-p (body)
+  "Return non-nil when BODY is safe for automatic file-argument appending.
+This is an explicit fail-closed ASCII whitelist, not a shell parser:
+
+  BODY := H* COMMAND (H+ OPTION)* H*
+  H := ASCII space or tab
+  COMMAND := one or more of A-Z a-z 0-9 _ + . / -,
+             containing at least one of A-Z a-z 0-9 _ and not being a
+             path metatoken such as `.`, `..`, or `/`
+  OPTION := `-` followed by one or more of A-Z a-z 0-9 _ + . / : = , -
+
+Thus ordinary commands such as `file`, `cat`, `wc -l`, and path-like command
+words are accepted.  Arguments other than options, controls, non-ASCII space,
+quotes, escapes, comments, redirections, substitutions, and globs are rejected."
+  (when (and
+         (stringp body)
+         (string-match
+          (concat "\\`[ \t]*\\([A-Za-z0-9_+./-]+\\)"
+                  "\\(?:[ \t]+-[A-Za-z0-9_+./:=,-]+\\)*"
+                  "[ \t]*\\'")
+          body))
+    (let ((command (match-string 1 body)))
+      (and (string-match-p "[A-Za-z0-9_]" command)
+           (not (member command '("." ".." "/" "./" "../" "-" "--")))))))
+
+(defun pi-coding-agent--terminal-shell-async-start (command)
+  "Return start of COMMAND's narrow native async suffix, or nil.
+The suffix is one ampersand preceded by one or more ASCII spaces or tabs and
+followed only by ASCII spaces or tabs.  Scan backward once so malformed long
+near-suffixes cannot cause regular-expression backtracking."
+  (let ((index (length command)))
+    (while (and (> index 0)
+                (memq (aref command (1- index)) '(?\s ?\t)))
+      (setq index (1- index)))
+    (when (and (> index 0)
+               (eq (aref command (1- index)) ?&))
+      (let ((ampersand (1- index)))
+        (setq index ampersand)
+        (while (and (> index 0)
+                    (memq (aref command (1- index)) '(?\s ?\t)))
+          (setq index (1- index)))
+        (and (< index ampersand) index)))))
+
+(defun pi-coding-agent--shell-command-with-file (command argument)
+  "Return validated COMMAND with already-quoted file ARGUMENT supplied.
+ARGUMENT is safe shell text and is never quoted again.  Every `*' with
+string-edge, ASCII-space, or tab boundaries on both sides is replaced linearly;
+quotes and escapes do not alter this Dired-style textual marker grammar.  A
+marker permits explicit compound, control, and multiline shell syntax.
+
+Without a marker, append ARGUMENT only when the body satisfies
+`pi-coding-agent--simple-shell-command-p'.  Recognize asynchronous execution
+only as one terminal ` &' suffix whose ampersand is preceded by ASCII space or
+tab; strip that suffix before substitution and validation, then reattach it.
+Reject blank bodies and any other raw terminal ampersand before `shell-command'
+can classify it asynchronously."
+  (let ((async-start (pi-coding-agent--terminal-shell-async-start command))
+        async-suffix)
+    (when async-start
+      (setq async-suffix (substring command async-start)
+            command (substring command 0 async-start)))
+    (when (or (string-match-p "\\`[ \t]*\\'" command)
+              (and (not async-suffix)
+                   (string-match-p "\\`[ \t]*&[ \t]*\\'" command)))
+      (user-error "Shell command cannot be empty"))
+    (let ((index 0)
+          (last 0)
+          (marker-p nil)
+          parts)
+      (while (< index (length command))
+        (when (and (eq (aref command index) ?*)
+                   (pi-coding-agent--isolated-shell-star-p command index))
+          (setq marker-p t)
+          (push (substring command last index) parts)
+          (push argument parts)
+          (setq last (1+ index)))
+        (setq index (1+ index)))
+      (let ((body
+             (if marker-p
+                 (progn
+                   (push (substring command last) parts)
+                   (apply #'concat (nreverse parts)))
+               (unless (pi-coding-agent--simple-shell-command-p command)
+                 (user-error
+                  (concat "Compound shell commands require an isolated * "
+                          "file placeholder")))
+               (concat command " " argument))))
+        (when (string-match-p "&[ \t]*\\'" body)
+          (user-error
+           "Ambiguous terminal ampersand; use a terminal ` &' suffix"))
+        (concat body async-suffix)))))
+
+(defun pi-coding-agent--strict-text-file-path-p (path quoted)
+  "Return non-nil when PATH has the strict plain-text file grammar.
+PATH must be absolute, home-relative, explicitly relative with `./', or have
+at least two slash-separated relative components.  When QUOTED is non-nil,
+ASCII spaces are also allowed in a final component with a conventional file
+extension.  This keeps the accepted quoted form narrow enough to reject common
+prose and command tails.  Empty, dot, and dot-dot components are rejected."
+  (when (and (stringp path) (not (string-empty-p path)))
+    (let ((body (cond
+                 ((string-prefix-p "./" path) (substring path 2))
+                 ((string-prefix-p "~/" path) (substring path 2))
+                 ((string-prefix-p "/" path) (substring path 1))
+                 ((string-match-p "/" path) path))))
+      (let ((components (and body (split-string body "/" nil))))
+        (and body
+             (not (string-empty-p body))
+             (not (string-suffix-p "/" body))
+             (or (not quoted)
+                 (cl-every (lambda (component)
+                             (not (string-match-p " " component)))
+                           (butlast components)))
+             (or (not quoted)
+                 (not (string-match-p " " path))
+                 (string-match-p
+                  "\\.[[:alnum:]][-[:alnum:]_.+]*\\'"
+                  (car (last components))))
+             (cl-every
+              (lambda (component)
+                (and (not (member component '("" "." "..")))
+                     (or (not quoted)
+                         (equal component (string-trim component)))
+                     (string-match-p
+                      (if quoted
+                          "\\`[-[:alnum:]_.+ ]+\\'"
+                        "\\`[-[:alnum:]_.+]+\\'")
+                      component)))
+              components))))))
+
+(defconst pi-coding-agent--max-text-file-candidate-length 4096
+  "Maximum number of characters in a plain-text file candidate.
+This matches the common conservative PATH_MAX scale while bounding regexp
+input, allocation, and at-point scans even for generated chat lines.  It is a
+character bound because Emacs buffer and string positions count characters.")
+
+(defconst pi-coding-agent--text-file-input-radius
+  (+ 2 (* 2 pi-coding-agent--max-text-file-candidate-length))
+  "Maximum source-text radius inspected around a file-target point.
+One candidate length covers candidate text; the second retains bounded wrapper,
+escape-parity, hidden-markup, and quote-authority context.")
+
+(defun pi-coding-agent--parse-text-file-candidate (raw quoted start end)
+  "Parse strict plain-text file candidate RAW between START and END.
+QUOTED permits spaces in the path.  START and END are caller-owned offsets
+returned unchanged as `:bounds'.  Return nil unless all of RAW matches the
+path grammar, optionally followed by `:LINE', `:LINE:COLUMN', or
+`#LSTART-LEND'.  A `:LINE' or `:LINE:COLUMN' may itself be followed by one
+terminal diagnostic-separator colon.  That separator is excluded from `:raw'
+and `:bounds'; arbitrary path colons and no-space diagnostic prose remain
+invalid.  Candidates longer than
+`pi-coding-agent--max-text-file-candidate-length' are rejected before any
+regexp runs.  This pure helper performs no buffer access or file I/O."
+  (when (and (stringp raw)
+             (<= (length raw)
+                 pi-coding-agent--max-text-file-candidate-length))
+    (let ((case-fold-search nil)
+          (path raw)
+          (candidate-raw raw)
+          (candidate-end end)
+          line column range diagnostic-separator)
+      (cond
+       ((string-match
+         "\\`\\(.*\\):\\([1-9][0-9]*\\):\\([1-9][0-9]*\\)\\(:\\)?\\'"
+         raw)
+        (setq path (match-string 1 raw)
+              line (string-to-number (match-string 2 raw))
+              column (string-to-number (match-string 3 raw))
+              diagnostic-separator (match-beginning 4)))
+       ((string-match
+         "\\`\\(.*\\):\\([1-9][0-9]*\\)\\(:\\)?\\'" raw)
+        (setq path (match-string 1 raw)
+              line (string-to-number (match-string 2 raw))
+              diagnostic-separator (match-beginning 3)))
+       ((string-match
+         "\\`\\(.*\\)#L\\([1-9][0-9]*\\)-L\\([1-9][0-9]*\\)\\'" raw)
+        (let ((first (string-to-number (match-string 2 raw)))
+              (last (string-to-number (match-string 3 raw))))
+          (when (<= first last)
+            (setq path (match-string 1 raw)
+                  line first
+                  range (cons first last))))))
+      (when diagnostic-separator
+        (setq candidate-raw (substring raw 0 -1)
+              candidate-end (1- end)))
+      (when (and (or (not (string-match-p "#L" raw)) range)
+                 (pi-coding-agent--strict-text-file-path-p path quoted))
+        (list :raw candidate-raw
+              :path path
+              :line line
+              :column column
+              :range range
+              :diagnostic-separator (and diagnostic-separator t)
+              :bounds (cons start candidate-end))))))
+
+(defun pi-coding-agent--text-file-diagnostic-context-p
+    (candidate text lexical-end following-index)
+  "Return non-nil when CANDIDATE has valid diagnostic context in TEXT.
+Ordinary candidates always pass.  A diagnostic separator must be the actual
+last character of the lexical candidate ending at LEXICAL-END, followed at
+FOLLOWING-INDEX by exactly one ASCII space and non-whitespace diagnostic text.
+Callers place FOLLOWING-INDEX after any authoritative quote wrapper."
+  (or (not (plist-get candidate :diagnostic-separator))
+      (let ((separator (cdr (plist-get candidate :bounds))))
+        (and (= (1+ separator) lexical-end)
+             (< (1+ following-index) (length text))
+             (eq (aref text separator) ?:)
+             (eq (aref text following-index) ?\s)
+             (not (pi-coding-agent--text-file-whitespace-p
+                   (aref text (1+ following-index))))))))
+
+(defun pi-coding-agent--single-quote-boundary-p (text index opening)
+  "Return non-nil when the quote at INDEX in TEXT is a wrapper boundary.
+When OPENING is non-nil, accept line start, whitespace, or an opening Markdown
+wrapper before the quote.  Otherwise accept line end, whitespace, trailing
+punctuation, or a closing Markdown wrapper after it."
+  (let ((neighbor-index (if opening (1- index) (1+ index))))
+    (or (< neighbor-index 0)
+        (>= neighbor-index (length text))
+        (memq (aref text neighbor-index)
+              (string-to-list
+               (if opening " \t([{<" " \t.,;!?)]}>"))))))
+
+(defun pi-coding-agent--escaped-text-quote-p (text index)
+  "Return non-nil when the quote at INDEX in TEXT is backslash-escaped.
+An overlong backslash run is conservatively treated as escaped."
+  (let ((cursor (1- index))
+        (remaining pi-coding-agent--max-text-file-candidate-length)
+        (slashes 0))
+    (while (and (>= cursor 0) (> remaining 0)
+                (eq (aref text cursor) ?\\))
+      (setq slashes (1+ slashes)
+            cursor (1- cursor)
+            remaining (1- remaining)))
+    (or (and (= remaining 0) (>= cursor 0)
+             (eq (aref text cursor) ?\\))
+        (cl-oddp slashes))))
+
+(defun pi-coding-agent--text-wrapper-quote-p (text index quote opening)
+  "Return non-nil when TEXT at INDEX is a usable QUOTE wrapper.
+OPENING selects the boundary direction.  Backslash-escaped quotes are literal.
+Single quotes use prose boundaries; backticks use the same conservative
+orientation, except an unescaped backtick after an even backslash run may open."
+  (and (eq (aref text index) quote)
+       (not (pi-coding-agent--escaped-text-quote-p text index))
+       (or (pi-coding-agent--single-quote-boundary-p text index opening)
+           (and opening (eq quote ?`) (> index 0)
+                (eq (aref text (1- index)) ?\\)))))
+
+(defun pi-coding-agent--text-wrapper-bounds-at-index (text index quote)
+  "Return non-crossing QUOTE wrapper bounds around INDEX in TEXT.
+The returned cons excludes delimiters.  Backtick delimiter runs pair only with
+runs of the same length, so ordinary Markdown double-backtick spans work while
+embedded shorter runs remain content.  Single quotes remain one-character
+prose wrappers.  Pairing scans only bounded TEXT from left to right.  A new
+unambiguous opener supersedes an unmatched opener; a matching closer, including
+a whitespace-ambiguous delimiter, closes the active opener.  Thus completed
+spans on either side of INDEX cannot cross-pair, while an unrelated unmatched
+earlier opener cannot poison a later local pair.  Overlong contents still
+return bounds so the wrapper remains authoritative-invalid rather than exposing
+an inner path token."
+  (let ((cursor 0)
+        (limit (length text))
+        opening found)
+    (while (and (not found) (< cursor limit))
+      (if (or (not (eq (aref text cursor) quote))
+              (pi-coding-agent--escaped-text-quote-p text cursor))
+          (setq cursor (1+ cursor))
+        (let* ((run-start cursor)
+               (run-end
+                (if (eq quote ?`)
+                    (progn
+                      (while (and (< cursor limit)
+                                  (eq (aref text cursor) quote))
+                        (setq cursor (1+ cursor)))
+                      cursor)
+                  (1+ cursor)))
+               (run-length (- run-end run-start))
+               (opens (pi-coding-agent--text-wrapper-quote-p
+                       text run-start quote t))
+               (closes (pi-coding-agent--text-wrapper-quote-p
+                        text (1- run-end) quote nil)))
+          (cond
+           ((null opening)
+            (when opens
+              (setq opening (list run-start run-end run-length))))
+           ((and closes (= run-length (nth 2 opening)))
+            (when (<= (nth 1 opening) index run-start)
+              (setq found (cons (nth 1 opening) run-start)))
+            (setq opening nil))
+           (opens
+            (setq opening (list run-start run-end run-length))))
+          (setq cursor run-end))))
+    found))
+
+(defun pi-coding-agent--text-wrapper-extent (text bounds quote)
+  "Return BOUNDS expanded to include surrounding QUOTE delimiters in TEXT."
+  (let ((start (1- (car bounds)))
+        (end (cdr bounds)))
+    (when (eq quote ?`)
+      (while (and (> start 0) (eq (aref text (1- start)) quote))
+        (setq start (1- start)))
+      (while (and (< end (length text)) (eq (aref text end) quote))
+        (setq end (1+ end))))
+    (cons start (if (eq quote ?`) end (1+ end)))))
+
+(defun pi-coding-agent--quoted-text-file-candidate-at-index (text index)
+  "Return a quoted file candidate surrounding INDEX in TEXT, or nil.
+Only the nearest unescaped wrapper pair of each supported kind is considered,
+so unrelated or unmatched earlier wrappers cannot poison local lookup.
+Markdown backtick spans take authority over nested prose single quotes."
+  (catch 'authoritative-wrapper
+    (dolist (quote '(?` ?'))
+      (when-let* ((bounds
+                   (pi-coding-agent--text-wrapper-bounds-at-index
+                    text index quote)))
+        (throw
+         'authoritative-wrapper
+         (when-let* ((candidate
+                      (pi-coding-agent--parse-text-file-candidate
+                       (substring text (car bounds) (cdr bounds))
+                       t (car bounds) (cdr bounds)))
+                     (candidate-bounds (plist-get candidate :bounds))
+                     ((<= (car candidate-bounds) index
+                          (cdr candidate-bounds)))
+                     ((pi-coding-agent--text-file-diagnostic-context-p
+                       candidate text (cdr bounds) (1+ (cdr bounds)))))
+           (plist-put candidate :extent
+                      (pi-coding-agent--text-wrapper-extent
+                       text bounds quote))))))))
+
+(defun pi-coding-agent--inside-text-wrapper-p (text index)
+  "Return non-nil when INDEX is inside a supported wrapper in TEXT."
+  (seq-some (lambda (quote)
+              (pi-coding-agent--text-wrapper-bounds-at-index
+               text index quote))
+            '(?' ?`)))
+
+(defun pi-coding-agent--text-file-whitespace-p (character)
+  "Return non-nil when CHARACTER delimits an unquoted candidate."
+  (memq character '(?\s ?\t ?\n ?\r)))
+
+(defun pi-coding-agent--unquoted-text-file-candidate-at-index (text index)
+  "Return the whitespace-bounded candidate at INDEX in TEXT, or nil.
+Scanning stops after `pi-coding-agent--max-text-file-candidate-length'
+characters in either direction.  Markdown wrappers and trailing punctuation
+are excluded exactly as in the strict first-slice grammar."
+  (let* ((length (length text))
+         (probe (cond
+                 ((and (< index length)
+                       (not (pi-coding-agent--text-file-whitespace-p
+                             (aref text index))))
+                  index)
+                 ((and (> index 0)
+                       (not (pi-coding-agent--text-file-whitespace-p
+                             (aref text (1- index)))))
+                  (1- index)))))
+    (when probe
+      (let ((begin probe)
+            (end (1+ probe))
+            (remaining pi-coding-agent--max-text-file-candidate-length)
+            overlong token-begin token-end)
+        (while (and (> begin 0)
+                    (not (pi-coding-agent--text-file-whitespace-p
+                          (aref text (1- begin))))
+                    (> remaining 0))
+          (setq begin (1- begin)
+                remaining (1- remaining)))
+        (when (and (> begin 0)
+                   (not (pi-coding-agent--text-file-whitespace-p
+                         (aref text (1- begin)))))
+          (setq overlong t))
+        (setq remaining pi-coding-agent--max-text-file-candidate-length)
+        (while (and (< end length)
+                    (not (pi-coding-agent--text-file-whitespace-p
+                          (aref text end)))
+                    (> remaining 0))
+          (setq end (1+ end)
+                remaining (1- remaining)))
+        (when (and (< end length)
+                   (not (pi-coding-agent--text-file-whitespace-p
+                         (aref text end))))
+          (setq overlong t))
+        (unless (or overlong
+                    (> (- end begin)
+                       pi-coding-agent--max-text-file-candidate-length))
+          (setq token-begin begin
+                token-end end)
+          (let (html-closing-tag)
+            (while (and (< begin end)
+                        (memq (aref text begin) '(?\( ?\[ ?\{)))
+              (setq begin (1+ begin)))
+            (setq html-closing-tag
+                  (and (< (1+ begin) end)
+                       (eq (aref text begin) ?<)
+                       (eq (aref text (1+ begin)) ?/)))
+            (while (and (< begin end) (eq (aref text begin) ?<))
+              (setq begin (1+ begin)))
+            (while (and (< begin end)
+                        (memq (aref text (1- end))
+                              (string-to-list ".,;!?)]}>")))
+              (setq end (1- end)))
+            (when (and (<= begin index end)
+                       (not html-closing-tag))
+              (let ((raw (substring text begin end)))
+                ;; Quote-aware parsing owns tokens containing supported quotes.
+                (unless (string-match-p "[`']" raw)
+                  (when-let* ((candidate
+                               (pi-coding-agent--parse-text-file-candidate
+                                raw nil begin end))
+                              (candidate-bounds
+                               (plist-get candidate :bounds))
+                              ((<= begin index (cdr candidate-bounds)))
+                              ((or
+                                (not (plist-get
+                                      candidate :diagnostic-separator))
+                                (and (= end token-end)
+                                     (pi-coding-agent--text-file-diagnostic-context-p
+                                      candidate text end token-end)))))
+                    (plist-put candidate :extent
+                               (cons token-begin token-end))))))))))))
+
+(defun pi-coding-agent--text-file-candidate-at-index (text index)
+  "Return the strict file candidate at INDEX in one-line TEXT, or nil.
+Lookup is exact rather than nearest-on-line: INDEX must fall within, or at the
+exclusive end boundary of, the candidate text.  Work and allocations are
+bounded around INDEX; unrelated candidates are never collected or parsed."
+  (when (and (stringp text) (integerp index)
+             (<= 0 index) (<= index (length text)))
+    (or (pi-coding-agent--quoted-text-file-candidate-at-index text index)
+        (pi-coding-agent--unquoted-text-file-candidate-at-index text index))))
+
+(defun pi-coding-agent--bounded-line-window-at-point ()
+  "Return bounded current-line window metadata around point.
+The plist contains `:start', `:end', `:start-complete', and `:end-complete'.
+Complete edges are real line or buffer boundaries; incomplete edges are the
+explicit candidate scan limit.  No operation searches farther than that limit."
+  (let* ((origin (point))
+         (lower (max (point-min)
+                     (- origin pi-coding-agent--text-file-input-radius)))
+         (upper (min (point-max)
+                     (+ origin pi-coding-agent--text-file-input-radius)))
+         start end start-complete end-complete)
+    (save-excursion
+      (goto-char origin)
+      (if (search-backward "\n" lower t)
+          (setq start (1+ (point))
+                start-complete t)
+        (setq start lower
+              start-complete (= lower (point-min))))
+      (goto-char origin)
+      (if (search-forward "\n" upper t)
+          (setq end (1- (point))
+                end-complete t)
+        (setq end upper
+              end-complete (= upper (point-max)))))
+    (list :start start :end end
+          :start-complete start-complete :end-complete end-complete)))
+
+(defun pi-coding-agent--raw-text-file-candidate-visible-p
+    (candidate window-start)
+  "Return non-nil when raw CANDIDATE text is visible at WINDOW-START.
+Wrapper delimiters are outside candidate bounds.  Hidden text inside the raw
+candidate instead belongs to visible projection, which will derive a candidate
+from what the user actually sees."
+  (let* ((bounds (plist-get candidate :bounds))
+         (start (+ window-start (car bounds)))
+         (end (+ window-start (cdr bounds))))
+    (equal (plist-get candidate :raw)
+           (substring-no-properties
+            (pi-coding-agent--visible-text start end)))))
+
+(defun pi-coding-agent--raw-diagnostic-context-visible-p
+    (candidate window-start)
+  "Return non-nil when CANDIDATE's context at WINDOW-START is visible.
+Hidden Markdown may not fabricate the separator, required space, or first
+diagnostic character.  Ordinary non-diagnostic candidates always pass."
+  (or (not (plist-get candidate :diagnostic-separator))
+      (let* ((bounds (plist-get candidate :bounds))
+             (separator (+ window-start (cdr bounds)))
+             (following
+              (+ window-start
+                 (cdr (or (plist-get candidate :extent) bounds)))))
+        (and (pi-coding-agent--visible-text-span-p separator)
+             (pi-coding-agent--visible-text-span-p following)
+             (pi-coding-agent--visible-text-span-p (1+ following))))))
+
+(defun pi-coding-agent--target-closing-markdown-source-p (start end)
+  "Return non-nil when omitted source in START..END only closes target markup.
+Accept emphasis/code delimiter runs or one link-label close plus a simple hidden
+destination and trailing delimiters.  This intentionally narrow grammar keeps
+unrelated invisible text from fabricating diagnostic context."
+  (let ((source (buffer-substring-no-properties start end)))
+    (or (string-empty-p source)
+        (string-match-p "\\`[*_`]+\\'" source)
+        (string-match-p
+         "\\`]\\(?:([^ \t\r\n()]*)\\)?[*_`]*\\'" source))))
+
+(defun pi-coding-agent--visible-diagnostic-context-source-p
+    (candidate visible-input)
+  "Return non-nil when projected CANDIDATE has literal diagnostic text.
+VISIBLE-INPUT supplies its visible-to-source position map.  Only narrow
+source-proven target-closing Markdown may lie between the separator and its
+visible space.  The first diagnostic character must immediately follow that
+space in source.  Thus unrelated hidden markup cannot fabricate the grammar."
+  (or (not (plist-get candidate :diagnostic-separator))
+      (let* ((separator (cdr (plist-get candidate :bounds)))
+             (positions (plist-get visible-input :positions))
+             (separator-source (aref positions separator))
+             (space-source (aref positions (1+ separator)))
+             (diagnostic-source (aref positions (+ separator 2))))
+        (and (= diagnostic-source (1+ space-source))
+             (pi-coding-agent--target-closing-markdown-source-p
+              (1+ separator-source) space-source)))))
+
+(defun pi-coding-agent--visible-file-candidate-buffer-bounds
+    (candidate visible-input)
+  "Map nonempty visible CANDIDATE bounds through VISIBLE-INPUT.
+Return the real buffer envelope.  Internal hidden markup remains inside that
+envelope, while hidden delimiters and link destinations remain outside it."
+  (let* ((bounds (plist-get candidate :bounds))
+         (start (car bounds))
+         (end (cdr bounds))
+         (positions (plist-get visible-input :positions)))
+    (when (< start end)
+      (cons (aref positions start)
+            (1+ (aref positions (1- end)))))))
+
+(defun pi-coding-agent--markdown-code-span-at-point-p (start end)
+  "Return non-nil when point is fontified as inline code in START..END.
+Check both sides of a visible boundary.  This preserves authoritative code-span
+semantics when its delimiters are outside the bounded resolver window."
+  (seq-some
+   (lambda (position)
+     (let ((face (and (<= start position) (< position end)
+                      (get-char-property position 'face))))
+       (or (eq face 'md-ts-code)
+           (and (listp face) (memq 'md-ts-code face)))))
+   (list (point) (1- (point)))))
+
+(define-error 'pi-coding-agent-semantic-link-parser-error
+  "Semantic Markdown parser failure")
+
+(defvar pi-coding-agent--semantic-link-resolver-parsers nil
+  "Dynamically bound identities of live semantic resolver parsers.
+The `:active' sentinel distinguishes resolver lookup from direct helper tests.
+A parser remains registered only when its direct deletion fails, allowing outer
+cleanup to retry that exact identity without claiming unrelated new parsers.")
+
+(defvar pi-coding-agent--semantic-code-span-at-point nil
+  "Dynamically record code-span ownership during semantic resolution.
+The `:active' sentinel limits this side channel to the public resolver call;
+direct capture-helper tests do not mutate global state.")
+
+(defconst pi-coding-agent--semantic-link-query
+  '(((inline_link) @link)
+    ((image) @link)
+    ((full_reference_link) @link)
+    ((collapsed_reference_link) @link)
+    ((shortcut_link) @link)
+    ((code_span) @opaque)
+    ((html_tag) @opaque)
+    ((link_destination) @opaque)
+    ((link_title) @opaque))
+  "Tree-sitter query for Markdown links relevant to file ownership.")
+
+(defconst pi-coding-agent--max-semantic-link-host-length (* 256 1024)
+  "Maximum characters parsed as one semantic Markdown inline host.
+Semantic parsing must see a complete canonical `inline' or `pipe_table_cell'
+host: parsing a clipped fragment can lose real ownership or invent links inside
+an enclosing construct.  A 262,144-character cap keeps press-time native parser
+work and recovery scanning explicitly bounded while covering the existing
+100,000-character generated-line case and labels well beyond the old 16,388
+character plain-text window.  Hosts beyond this cap fail closed and suppress
+strict text fallback.")
+
+(defun pi-coding-agent--semantic-link-child (node type)
+  "Return NODE's first named child whose tree-sitter type is TYPE."
+  (seq-find (lambda (child)
+              (string= (treesit-node-type child) type))
+            (treesit-node-children node t)))
+
+(defun pi-coding-agent--semantic-link-code-projection (pairs)
+  "Normalize code-span PAIRS while retaining one source position per character.
+PAIRS are (CHARACTER . BUFFER-POSITION) entries with delimiters removed.
+Markdown code spans render line endings as spaces.  When non-space content is
+wrapped by a space at both ends, one space is removed from each end."
+  (let (normalized)
+    (while pairs
+      (let* ((pair (pop pairs))
+             (character (car pair)))
+        (cond
+         ((and (eq character ?\r) pairs (eq (caar pairs) ?\n))
+          (push (cons ?\s (cdr pair)) normalized)
+          (pop pairs))
+         ((memq character '(?\r ?\n))
+          (push (cons ?\s (cdr pair)) normalized))
+         (t (push pair normalized)))))
+    (setq normalized (nreverse normalized))
+    (if (and (> (length normalized) 2)
+             (eq (caar normalized) ?\s)
+             (eq (car (car (last normalized))) ?\s)
+             (seq-some (lambda (pair) (not (eq (car pair) ?\s))) normalized))
+        (butlast (cdr normalized))
+      normalized)))
+
+(defun pi-coding-agent--semantic-link-label-projection (label)
+  "Return rendered source projection for tree-sitter LABEL.
+The returned plist has rendered `:raw-text', control-safe `:text', and a
+`:positions' vector parallel to `:raw-text'.  Its `:bounds' is the source
+envelope from the
+first through last emitted label character.  Emphasis, strong, and code
+delimiters are omitted; punctuation escapes emit only their escaped character;
+and nested links/images emit only their recursively rendered label text.  Every
+emitted character keeps its exact source position, so internal hidden markup
+remains inside the envelope but never becomes actionable.
+
+Traversal uses an explicit work stack, so deeply nested labels remain bounded
+by the complete host cap rather than Emacs Lisp recursion depth.  Projection
+derives solely from source and tree shape, never from font-lock, invisibility,
+faces, display, buttons, or overlays."
+  (let ((work (list (list :node label)))
+        output)
+    (while work
+      (let* ((action (pop work))
+             (kind (car action)))
+        (pcase kind
+          (:source
+           (let ((start (nth 1 action))
+                 (end (nth 2 action)))
+             (while (< start end)
+               (push (cons (char-after start) start) output)
+               (setq start (1+ start)))))
+          (:pairs
+           (dolist (pair (nth 1 action))
+             (push pair output)))
+          (:node
+           (let* ((node (nth 1 action))
+                  (type (treesit-node-type node)))
+             (cond
+              ((member type '("emphasis_delimiter" "code_span_delimiter"
+                              "html_tag")))
+              ((string= type "backslash_escape")
+               (push (list :source
+                           (min (treesit-node-end node)
+                                (1+ (treesit-node-start node)))
+                           (treesit-node-end node))
+                     work))
+              ((and (string= type "image")
+                    (or (pi-coding-agent--semantic-link-child
+                         node "link_destination")
+                        (pi-coding-agent--semantic-link-child
+                         node "link_label")))
+               (when-let* ((description
+                            (pi-coding-agent--semantic-link-child
+                             node "image_description")))
+                 (push (list :node description) work)))
+              ((and (member type '("inline_link" "full_reference_link"
+                                   "collapsed_reference_link"))
+                    (or (not (string= type "inline_link"))
+                        (pi-coding-agent--semantic-link-child
+                         node "link_destination")))
+               (when-let* ((text (pi-coding-agent--semantic-link-child
+                                  node "link_text")))
+                 (push (list :node text) work)))
+              ((string= type "code_span")
+               (let* ((delimiters
+                       (seq-filter
+                        (lambda (child)
+                          (string= (treesit-node-type child)
+                                   "code_span_delimiter"))
+                        (treesit-node-children node t)))
+                      (start (and delimiters
+                                  (treesit-node-end (car delimiters))))
+                      (end (and delimiters
+                                (treesit-node-start (car (last delimiters))))))
+                 (when (and start end (<= start end))
+                   (let (pairs)
+                     (while (< start end)
+                       (push (cons (char-after start) start) pairs)
+                       (setq start (1+ start)))
+                     (push (list :pairs
+                                 (pi-coding-agent--semantic-link-code-projection
+                                  (nreverse pairs)))
+                           work)))))
+              (t
+               (let ((cursor (treesit-node-start node))
+                     actions)
+                 (dolist (child (treesit-node-children node t))
+                   (when (< cursor (treesit-node-start child))
+                     (push (list :source cursor (treesit-node-start child))
+                           actions))
+                   (push (list :node child) actions)
+                   (setq cursor (treesit-node-end child)))
+                 (when (< cursor (treesit-node-end node))
+                   (push (list :source cursor (treesit-node-end node)) actions))
+                 (setq work (nconc (nreverse actions) work))))))))))
+    (let ((pairs (nreverse output)))
+      (when pairs
+        (let* ((raw-text (apply #'string (mapcar #'car pairs)))
+               (positions (vconcat (mapcar #'cdr pairs))))
+          (list :raw-text raw-text
+                :text (pi-coding-agent--escape-control-chars-for-display
+                       raw-text)
+                :positions positions
+                :bounds (cons (aref positions 0)
+                              (1+ (aref positions
+                                        (1- (length positions)))))))))))
+
+(defun pi-coding-agent--semantic-link-parent-owner (node)
+  "Return a semantic label owner containing nested NODE, or nil.
+Inline and reference hyperlinks own nested image alt text.  A standalone image
+likewise owns any nested link or image source in its visible description.  The
+ancestor must physically contain NODE in its `link_text' or
+`image_description', so destination ancestry can never establish ownership."
+  (let ((ancestor (treesit-node-parent node))
+        owner)
+    (while (and ancestor (not owner))
+      (let* ((type (treesit-node-type ancestor))
+             (label-type (if (string= type "image")
+                             "image_description" "link_text")))
+        (when (member type '("inline_link" "image" "full_reference_link"
+                             "collapsed_reference_link" "shortcut_link"))
+          (when-let* ((label (pi-coding-agent--semantic-link-child
+                              ancestor label-type))
+                      ((<= (treesit-node-start label)
+                           (treesit-node-start node)
+                           (treesit-node-end node)
+                           (treesit-node-end label))))
+            (setq owner ancestor))))
+      (setq ancestor (treesit-node-parent ancestor)))
+    owner))
+
+(defun pi-coding-agent--semantic-link-fragment-index (destination)
+  "Return the first unescaped fragment marker index in DESTINATION.
+Backslash-escaped punctuation follows Markdown destination source semantics."
+  (let ((index 0)
+        (limit (length destination))
+        found)
+    (while (and (< index limit) (not found))
+      (cond
+       ((and (eq (aref destination index) ?\\)
+             (< (1+ index) limit)
+             (string-match-p "[[:punct:]]"
+                             (char-to-string
+                              (aref destination (1+ index)))))
+        (setq index (+ index 2)))
+       ((eq (aref destination index) ?#)
+        (setq found index))
+       (t (setq index (1+ index)))))
+    found))
+
+(defun pi-coding-agent--semantic-link-unescape (destination)
+  "Decode basic Markdown punctuation escapes in local DESTINATION.
+Other backslashes remain literal and are subsequently rejected by the strict
+file-path grammar rather than being assigned broader path semantics."
+  (let ((index 0)
+        (limit (length destination))
+        pieces)
+    (while (< index limit)
+      (if (and (eq (aref destination index) ?\\)
+               (< (1+ index) limit)
+               (string-match-p "[[:punct:]]"
+                               (char-to-string
+                                (aref destination (1+ index)))))
+          (progn
+            (push (char-to-string (aref destination (1+ index))) pieces)
+            (setq index (+ index 2)))
+        (push (char-to-string (aref destination index)) pieces)
+        (setq index (1+ index))))
+    (apply #'concat (nreverse pieces))))
+
+(defun pi-coding-agent--semantic-link-malformed-end (start limit)
+  "Return malformed inline-link ownership end after shortcut ending at START.
+A shortcut immediately followed by `(' is the installed grammar's recovery
+shape for an incomplete or malformed inline link.  Scan no farther than LIMIT,
+which is the end of a complete capped host.  Backslash escapes skip the next
+character; bare destinations balance nested parentheses; an angle destination
+is recognized only at destination start and ignores parentheses through its
+unescaped `>'; and title quotes/parentheses are recognized only immediately
+after destination whitespace.  Return the position after the real outer close,
+or LIMIT for an incomplete streamed tail."
+  (when (and (< start limit) (eq (char-after start) ?\())
+    (let ((cursor (1+ start))
+          (depth 1)
+          (phase :destination)
+          (destination-start t)
+          angle quote done)
+      (while (and (< cursor limit) (not done))
+        (let ((character (char-after cursor)))
+          (cond
+           (quote
+            (cond
+             ((eq character ?\\)
+              (setq cursor (min limit (+ cursor 2))))
+             ((eq character quote)
+              (setq quote nil
+                    phase :after-title
+                    cursor (1+ cursor)))
+             (t (setq cursor (1+ cursor)))))
+           (angle
+            ;; CommonMark angle destinations cannot contain line endings, even
+            ;; after a backslash.  Leave invalid angle state at that boundary
+            ;; so the next outer close terminates malformed ownership.
+            (cond
+             ((memq character '(?\n ?\r))
+              (setq angle nil
+                    phase :trailing
+                    cursor (1+ cursor)))
+             ((and (eq character ?\\) (< (1+ cursor) limit))
+              (if (memq (char-after (1+ cursor)) '(?\n ?\r))
+                  (setq angle nil
+                        phase :trailing)
+                (setq destination-start nil))
+              (setq cursor (min limit (+ cursor 2))))
+             ((eq character ?>)
+              (setq angle nil
+                    phase :destination-ended
+                    cursor (1+ cursor)))
+             (t (setq cursor (1+ cursor)))))
+           ;; Escape parity follows naturally: skipping a pair leaves the next
+           ;; backslash or close to be interpreted on the following iteration.
+           ((eq character ?\\)
+            (cond
+             ((eq phase :destination) (setq destination-start nil))
+             ((memq phase '(:destination-ended :after-destination
+                             :after-title))
+              (setq phase :trailing)))
+            (setq cursor (min limit (+ cursor 2))))
+           ((and (eq phase :destination) destination-start
+                 (eq character ?<))
+            (setq angle t
+                  destination-start nil
+                  cursor (1+ cursor)))
+           ((and (eq phase :destination) (= depth 1)
+                 (memq character '(?\s ?\t ?\n ?\r)))
+            (setq phase :after-destination
+                  cursor (1+ cursor)))
+           ((and (eq phase :destination-ended)
+                 (memq character '(?\s ?\t ?\n ?\r)))
+            (setq phase :after-destination
+                  cursor (1+ cursor)))
+           ((and (memq phase '(:after-destination :after-title))
+                 (memq character '(?\s ?\t ?\n ?\r)))
+            (setq cursor (1+ cursor)))
+           ((and (eq phase :after-destination)
+                 (memq character '(?\" ?')))
+            (setq quote character
+                  cursor (1+ cursor)))
+           ((and (eq phase :after-destination) (eq character ?\())
+            (setq phase :parenthesized-title
+                  depth (1+ depth)
+                  cursor (1+ cursor)))
+           ((and (eq phase :parenthesized-title) (eq character ?\())
+            (setq depth (1+ depth)
+                  cursor (1+ cursor)))
+           ((and (eq phase :destination) (eq character ?\())
+            (setq destination-start nil
+                  depth (1+ depth)
+                  cursor (1+ cursor)))
+           ((eq character ?\))
+            (setq depth (1- depth)
+                  cursor (1+ cursor))
+            (cond
+             ((= depth 0) (setq done t))
+             ((and (= depth 1) (eq phase :parenthesized-title))
+              (setq phase :after-title))))
+           ((memq phase '(:after-destination :after-title))
+            (setq phase :trailing
+                  cursor (1+ cursor)))
+           (t
+            (cond
+             ((eq phase :destination) (setq destination-start nil))
+             ((eq phase :destination-ended) (setq phase :trailing)))
+            (setq cursor (1+ cursor))))))
+      (if done cursor limit))))
+
+(defun pi-coding-agent--semantic-link-markdown-host-parser ()
+  "Return md-ts-mode's trustworthy canonical Markdown host parser.
+The canonical host parser is the sole unrestricted Markdown parser whose
+actual root covers the accessible buffer and lookup position.  md-ts-mode uses
+that shape for its document parser and restricted, no-reuse parsers for local
+work.  Requiring this shape avoids parser-list ordering and refuses ambiguous
+or partial host state rather than querying the wrong Markdown document."
+  (let ((positions (delete-dups
+                    (list (point)
+                          (max (point-min) (1- (point))))))
+        candidates)
+    (dolist (parser (treesit-parser-list))
+      ;; Test included ranges before asking for a root: arbitrary restricted
+      ;; parsers are not trusted and cannot break canonical selection.
+      (when (and (eq (treesit-parser-language parser) 'markdown)
+                 (null (treesit-parser-included-ranges parser)))
+        (let ((root (treesit-parser-root-node parser)))
+          (when (and (eq (treesit-node-language root) 'markdown)
+                     (<= (treesit-node-start root) (point-min))
+                     (>= (treesit-node-end root) (point-max))
+                     (seq-every-p
+                      (lambda (position)
+                        (<= (treesit-node-start root) position
+                            (treesit-node-end root)))
+                      positions))
+            (push parser candidates)))))
+    (unless (= (length candidates) 1)
+      (signal 'pi-coding-agent-semantic-link-parser-error
+              '("No unique canonical Markdown host parser")))
+    (car candidates)))
+
+(defun pi-coding-agent--semantic-link-inline-host-node-at-point ()
+  "Return the Markdown host node whose inline grammar owns point.
+Installed md-ts-mode injects `markdown-inline' only into Markdown `inline' and
+`pipe_table_cell' nodes.  Consult its canonical unrestricted host tree so
+fenced/indented code, reference definitions, restricted competing parsers, and
+other block source cannot be reinterpreted merely because it resembles inline
+syntax."
+  (let* ((parser (pi-coding-agent--semantic-link-markdown-host-parser))
+         (root (treesit-parser-root-node parser)))
+    (catch 'host
+      (dolist (position (delete-dups
+                         (list (point)
+                               (max (point-min) (1- (point))))))
+        (let ((node (treesit-node-descendant-for-range
+                     root position position)))
+          (while node
+            (when (member (treesit-node-type node)
+                          '("inline" "pipe_table_cell"))
+              (throw 'host node))
+            (setq node (treesit-node-parent node))))))))
+
+(defun pi-coding-agent--semantic-link-host-at-point ()
+  "Return complete canonical inline-host metadata at point, or nil.
+Only the host types used by md-ts-mode's established local inline range rules,
+`inline' and `pipe_table_cell', are accepted.  The returned plist contains the
+complete host bounds and `:over-cap' when safely parsing that host would exceed
+`pi-coding-agent--max-semantic-link-host-length'.  No clipped source fragment is
+ever presented to the inline grammar."
+  (when-let* ((host (pi-coding-agent--semantic-link-inline-host-node-at-point)))
+    (let ((start (treesit-node-start host))
+          (end (treesit-node-end host)))
+      (when (<= start (point) end)
+        (list :start start :end end
+              :over-cap
+              (> (- end start)
+                 pi-coding-agent--max-semantic-link-host-length))))))
+
+(defun pi-coding-agent--semantic-link-range-projection (start end)
+  "Project rendered inline source from START through END in the current buffer.
+This is used only for a grammar recovery label whose outer link node was lost
+because the inline grammar cannot resolve an inner shortcut reference without
+document-wide definitions."
+  (let ((parser (treesit-parser-create 'markdown-inline nil t)))
+    (when pi-coding-agent--semantic-link-resolver-parsers
+      (push parser pi-coding-agent--semantic-link-resolver-parsers))
+    (unwind-protect
+        (progn
+          (treesit-parser-set-included-ranges parser (list (cons start end)))
+          (pi-coding-agent--semantic-link-label-projection
+           (treesit-parser-root-node parser)))
+      (treesit-parser-delete parser)
+      (setq pi-coding-agent--semantic-link-resolver-parsers
+            (delq parser pi-coding-agent--semantic-link-resolver-parsers)))))
+
+(defun pi-coding-agent--semantic-link-reparse-shortcut-outer (candidate)
+  "Return detached outer owner recovered from shortcut CANDIDATE.
+CANDIDATE records source `:start', `:open', `:label-end', and `:end'.
+Temporarily copy only that bounded source and replace nested shortcut brackets
+with equal-width braces.  This models this phase's explicit unresolved-shortcut
+deferral without changing the chat buffer or shifting source offsets."
+  (let* ((source-start (plist-get candidate :start))
+         (open (plist-get candidate :open))
+         (label-end (plist-get candidate :label-end))
+         (source-end (plist-get candidate :end))
+         (source (buffer-substring-no-properties source-start source-end))
+         metadata)
+    ;; The temporary parse establishes only the recovered outer destination.
+    ;; Neutralize every nested square delimiter in its label at equal width;
+    ;; the original source is projected independently below, preserving valid
+    ;; nested image rendering and literal malformed/shortcut text exactly.
+    (let ((cursor (- (1+ open) source-start))
+          (limit (- label-end source-start)))
+      (while (< cursor limit)
+        (pcase (aref source cursor)
+          (?\[ (aset source cursor ?{))
+          (?\] (aset source cursor ?})))
+        (setq cursor (1+ cursor))))
+    (with-temp-buffer
+      (insert source)
+      (let ((parser (treesit-parser-create 'markdown-inline nil t)))
+        (when pi-coding-agent--semantic-link-resolver-parsers
+          (push parser pi-coding-agent--semantic-link-resolver-parsers))
+        (unwind-protect
+            (let* ((root (treesit-parser-root-node parser))
+                   (outer
+                    (seq-find
+                     (lambda (capture)
+                       (let ((node (cdr capture)))
+                         (and (= (treesit-node-start node) (point-min))
+                              (= (treesit-node-end node) (point-max))
+                              (member (treesit-node-type node)
+                                      '("inline_link" "image")))))
+                     (treesit-query-capture
+                      root pi-coding-agent--semantic-link-query
+                      (point-min) (point-max)))))
+              (when outer
+                (let* ((node (cdr outer))
+                       (type (treesit-node-type node))
+                       (destination
+                        (pi-coding-agent--semantic-link-child
+                         node "link_destination")))
+                  (when destination
+                    (setq metadata
+                          (list
+                           :type type
+                           :destination-start
+                           (+ source-start
+                              (- (treesit-node-start destination)
+                                 (point-min)))
+                           :destination-end
+                           (+ source-start
+                              (- (treesit-node-end destination)
+                                 (point-min)))))))))
+          (treesit-parser-delete parser)
+          (setq pi-coding-agent--semantic-link-resolver-parsers
+                (delq parser
+                      pi-coding-agent--semantic-link-resolver-parsers)))))
+    (if metadata
+        (append
+         (list :start source-start
+               :end source-end
+               :label-start (1+ open)
+               :label-end label-end
+               :label-projection
+               (pi-coding-agent--semantic-link-range-projection
+                (1+ open) label-end)
+               :parent-owner-start nil
+               :reference-image nil
+               :malformed nil)
+         metadata)
+      (list :type "shortcut_link" :start source-start :end source-end
+            :malformed source-end))))
+
+(defun pi-coding-agent--semantic-link-unescaped-bang-before-p (position start)
+  "Return non-nil when POSITION follows an unescaped `!' after START."
+  (when (and (> position start) (eq (char-before position) ?!))
+    (let ((cursor (- position 2))
+          (backslashes 0))
+      (while (and (>= cursor start) (eq (char-after cursor) ?\\))
+        (setq backslashes (1+ backslashes)
+              cursor (1- cursor)))
+      (zerop (% backslashes 2)))))
+
+(defun pi-coding-agent--semantic-link-recover-shortcut-outer
+    (captures start end position)
+  "Recover an outer construct from CAPTURES in START..END at POSITION.
+The installed inline grammar treats every shortcut as a link before definition
+lookup and therefore cannot emit a containing hyperlink.  This phase explicitly
+defers shortcut definitions, so balance source brackets once, find an enclosing
+outer label followed by a parenthesized tail, and reparse only that complete
+bounded construct with nested shortcuts neutralized."
+  (let ((shortcut-starts (make-hash-table :test #'eql))
+        (open-for-shortcut (make-hash-table :test #'eql))
+        (close-for-open (make-hash-table :test #'eql))
+        (opaque-ends (make-hash-table :test #'eql))
+        (seen-opens (make-hash-table :test #'eql))
+        stack outer-image best)
+    (dolist (capture captures)
+      (cond
+       ((string= (plist-get capture :type) "shortcut_link")
+        (puthash (plist-get capture :start) t shortcut-starts))
+       ((member (plist-get capture :type)
+                '("code_span" "html_tag" "link_destination" "link_title"))
+        (puthash (plist-get capture :start)
+                 (plist-get capture :end) opaque-ends))))
+    (let ((cursor start))
+      (while (< cursor end)
+        (let ((character (char-after cursor)))
+          (cond
+           ((gethash cursor opaque-ends)
+            (setq cursor (gethash cursor opaque-ends)))
+           ((eq character ?\\)
+            (setq cursor (min end (+ cursor 2))))
+           ((eq character ?\[)
+            (when (gethash cursor shortcut-starts)
+              ;; Only the nearest lexical opener and outermost image opener
+              ;; can establish additional ownership.  Persisting/traversing
+              ;; the full stack for every shortcut would be quadratic.
+              (puthash cursor
+                       (delete-dups
+                        (delq nil (list (caar stack) outer-image)))
+                       open-for-shortcut))
+            (push (cons cursor outer-image) stack)
+            (when (and (not outer-image)
+                       (pi-coding-agent--semantic-link-unescaped-bang-before-p
+                        cursor start))
+              (setq outer-image cursor))
+            (setq cursor (1+ cursor)))
+           ((eq character ?\])
+            (when stack
+              (let ((entry (pop stack)))
+                (puthash (car entry) cursor close-for-open)
+                (when (eq (car entry) outer-image)
+                  (setq outer-image (cdr entry)))))
+            (setq cursor (1+ cursor)))
+           (t (setq cursor (1+ cursor)))))))
+    (catch 'recovered
+      (dolist (capture captures)
+        (dolist (open (gethash (plist-get capture :start)
+                               open-for-shortcut))
+          (when-let* ((label-end (gethash open close-for-open))
+                      ((< label-end end))
+                      ((eq (char-after (1+ label-end)) ?\())
+                      ((not (gethash open seen-opens)))
+                      (seen (puthash open t seen-opens))
+                      ((<= open position))
+                      (source-end
+                       (pi-coding-agent--semantic-link-malformed-end
+                        (1+ label-end) end))
+                      ((< position source-end)))
+            (let* ((imagep
+                    (pi-coding-agent--semantic-link-unescaped-bang-before-p
+                     open start))
+                   (source-start (if imagep (1- open) open))
+                   (nested-link
+                    (and (not imagep)
+                         (seq-some
+                          (lambda (inner)
+                            (and (member (plist-get inner :type)
+                                         '("inline_link"
+                                           "full_reference_link"
+                                           "collapsed_reference_link"))
+                                 (< open (plist-get inner :start))
+                                 (<= (plist-get inner :end) label-end)))
+                          captures))))
+              ;; CommonMark permits links inside image descriptions but never
+              ;; links inside links.  Do not fabricate an apparent recovered
+              ;; hyperlink by neutralizing a completed nested hyperlink.
+              (unless nested-link
+                (let ((owner
+                       (pi-coding-agent--semantic-link-reparse-shortcut-outer
+                        (list :start source-start :open open
+                              :label-end label-end :end source-end))))
+                  (cond
+                   ((not (plist-get owner :malformed))
+                    (when (or (not best)
+                              (and (string= (plist-get owner :type) "image")
+                                   (not (string= (plist-get best :type)
+                                                 "image")))
+                              (< (plist-get owner :start)
+                                 (plist-get best :start)))
+                      (setq best owner)))
+                   ((not best) (setq best owner)))
+                  ;; An incomplete malformed tail consumes the host remainder;
+                  ;; no later candidate can supply a containing outer close.
+                  (when (and (plist-get owner :malformed)
+                             (= source-end end))
+                    (throw 'recovered best)))))))))
+    best))
+
+(defun pi-coding-agent--semantic-link-select-owner (captures start end position)
+  "Select one semantic owner from CAPTURES at POSITION in START..END.
+Malformed recovery has source-order priority.  Completed recovery extents are
+skipped before scanning later captures, so total malformed scanning is linear
+in the complete capped host.  Otherwise label ancestry removes nested activation
+captures, and explicit grammar type order selects the owner.  Ambiguous owners
+of one semantic type fail closed before label projection."
+  (let* ((ordered
+          (sort (copy-sequence captures)
+                (lambda (left right)
+                  (< (plist-get left :start) (plist-get right :start)))))
+         (parent-owner-starts (make-hash-table :test #'eql))
+         (scanned-through (point-min))
+         malformed-owner owners)
+    (dolist (capture captures)
+      (when-let* ((parent-start
+                   (plist-get capture :parent-owner-start)))
+        (puthash parent-start t parent-owner-starts)))
+    ;; Find the earliest malformed extent that reaches point.  Once an extent
+    ;; closes before point, captures nested inside it cannot own point and are
+    ;; skipped.  This avoids rescanning the same recovery tail for every nested
+    ;; shortcut capture.
+    (catch 'owned-malformed
+      (dolist (capture ordered)
+        (let ((type (plist-get capture :type))
+              (node-start (plist-get capture :start))
+              (node-end (plist-get capture :end)))
+          (when (and (not (plist-get capture :parent-owner-start))
+                     (>= node-start scanned-through)
+                     (<= node-start position)
+                     (or (string= type "shortcut_link")
+                         (and (string= type "image")
+                              (null (plist-get capture :destination-start))
+                              (not (plist-get capture :reference-image)))))
+            (when-let* ((malformed-end
+                         (pi-coding-agent--semantic-link-malformed-end
+                          node-end end)))
+              (if (< position malformed-end)
+                  (progn
+                    (setq malformed-owner
+                          (append (list :end malformed-end
+                                        :malformed malformed-end)
+                                  capture))
+                    (throw 'owned-malformed malformed-owner))
+                (setq scanned-through (max scanned-through malformed-end))))))))
+    (or (pi-coding-agent--semantic-link-recover-shortcut-outer
+         ordered start end position)
+        malformed-owner
+        (progn
+          ;; Markdown label ancestry is activation ancestry.  Hyperlinks
+          ;; (including unsupported shortcut/reference forms) own nested image
+          ;; alt text; standalone images own nested link/image descriptions.
+          (dolist (capture captures)
+            (let ((type (plist-get capture :type))
+                  (node-start (plist-get capture :start))
+                  (node-end (plist-get capture :end)))
+              (when (and (or (not (string= type "shortcut_link"))
+                             (gethash node-start parent-owner-starts))
+                         (<= node-start position)
+                         (< position node-end))
+                (push (append (list :end node-end :malformed nil) capture)
+                      owners))))
+          (setq owners
+                (seq-remove
+                 (lambda (owner) (plist-get owner :parent-owner-start))
+                 owners))
+          (catch 'owner
+            (dolist (type '("inline_link" "full_reference_link"
+                            "collapsed_reference_link" "shortcut_link"
+                            "image"))
+              (let ((matches
+                     (seq-filter
+                      (lambda (owner)
+                        (string= (plist-get owner :type) type))
+                      owners)))
+                (when (> (length matches) 1)
+                  (signal 'pi-coding-agent-semantic-link-parser-error
+                          (list (format "Ambiguous semantic %s owners" type))))
+                (when matches (throw 'owner (car matches))))))))))
+
+(defun pi-coding-agent--semantic-link-captures (start end)
+  "Return detached installed-grammar owner metadata in complete START..END.
+Use a short-lived independent `markdown-inline' parser so raw, fontified, and
+streaming buffers have identical semantics.  Query captures are reduced to the
+single semantic owner at point before projecting only that owner's label.  This
+keeps deeply nested/recovery trees linear and fails ambiguity closed before
+expensive projection.  All node types, bounds, labels, and destinations are
+copied to a plist before deleting the parser; no caller observes a tree node
+after its parser lifetime.  Installed md-ts-mode 0.3 creates its own local
+inline parsers lazily during fontification and exposes no public link resolver.
+This parser never changes text, overlays, font-lock properties, visibility, or
+the mode's parser set."
+  (let ((parser (treesit-parser-create 'markdown-inline nil t)))
+    (when pi-coding-agent--semantic-link-resolver-parsers
+      (push parser pi-coding-agent--semantic-link-resolver-parsers))
+    (unwind-protect
+        (progn
+          (treesit-parser-set-included-ranges parser (list (cons start end)))
+          (let* ((captures
+                  (mapcar
+                   (lambda (capture)
+                     (let* ((node (cdr capture))
+                            (type (treesit-node-type node))
+                            (label-type (if (string= type "image")
+                                            "image_description" "link_text"))
+                            (label (pi-coding-agent--semantic-link-child
+                                    node label-type))
+                            (destination
+                             (pi-coding-agent--semantic-link-child
+                              node "link_destination"))
+                            (parent-owner
+                             (pi-coding-agent--semantic-link-parent-owner node)))
+                       (list :type type
+                             :start (treesit-node-start node)
+                             :end (treesit-node-end node)
+                             :label-start
+                             (and label (treesit-node-start label))
+                             :label-end (and label (treesit-node-end label))
+                             :label-node label
+                             :parent-owner-start
+                             (and parent-owner
+                                  (treesit-node-start parent-owner))
+                             :reference-image
+                             (and (string= type "image") label
+                                  (null destination)
+                                  (> (treesit-node-end node)
+                                     (1+ (treesit-node-end label))))
+                             :destination-start
+                             (and destination (treesit-node-start destination))
+                             :destination-end
+                             (and destination (treesit-node-end destination)))))
+                   (treesit-query-capture
+                    (treesit-parser-root-node parser)
+                    pi-coding-agent--semantic-link-query start end)))
+                 (_code-span
+                  (when (eq pi-coding-agent--semantic-code-span-at-point
+                            :active)
+                    (setq pi-coding-agent--semantic-code-span-at-point
+                          (and
+                           (seq-some
+                            (lambda (capture)
+                              (and
+                               (string= (plist-get capture :type) "code_span")
+                               (seq-some
+                                (lambda (position)
+                                  (<= (plist-get capture :start) position
+                                      (1- (plist-get capture :end))))
+                                (delete-dups
+                                 (list (point)
+                                       (max (point-min) (1- (point))))))))
+                            captures)
+                           t))))
+                 (owner (pi-coding-agent--semantic-link-select-owner
+                         captures start end (point))))
+            (when owner
+              (when (and (not (plist-get owner :malformed))
+                         (member (plist-get owner :type)
+                                 '("inline_link" "image"))
+                         (plist-get owner :destination-start)
+                         (plist-get owner :label-node)
+                         (not (plist-get owner :label-projection)))
+                (plist-put
+                 owner :label-projection
+                 (pi-coding-agent--semantic-link-label-projection
+                  (plist-get owner :label-node))))
+              ;; Tree nodes must not escape the short-lived parser.
+              (plist-put owner :label-node nil)
+              (list owner))))
+      (treesit-parser-delete parser)
+      (setq pi-coding-agent--semantic-link-resolver-parsers
+            (delq parser pi-coding-agent--semantic-link-resolver-parsers)))))
+
+(defun pi-coding-agent--semantic-link-owner-at-point (host)
+  "Return the semantic activation owner at point inside complete HOST.
+The result is detached metadata containing physical, projected-label, and
+destination extents.  Label ancestry decides nested ownership explicitly:
+hyperlinks own nested image alt text, while standalone images own nested label
+constructs.  Unsupported shortcut references do not own ordinary bracketed
+text, preserving Phase 1's strict wrapper behavior.  However, a shortcut link
+or non-reference shortcut image immediately followed by an opening parenthesis
+is malformed inline recovery and owns its balanced, escape-aware tail.  Full
+and collapsed references always own and suppress fallback."
+  (car (pi-coding-agent--semantic-link-captures
+        (plist-get host :start) (plist-get host :end))))
+
+(defun pi-coding-agent--semantic-link-target (owner)
+  "Return the valid local file target for semantic link OWNER, or nil.
+Only an inline link or inline image with a strict local destination qualifies.
+URL schemes, mailto links, protocol-relative links, fragment-only links, empty
+or malformed destinations, bare filenames, and reference forms are owned but
+invalid.  A local fragment is returned separately and is never interpreted as
+line metadata."
+  (let* ((type (plist-get owner :type))
+         (label-projection (plist-get owner :label-projection))
+         (label-positions (plist-get label-projection :positions))
+         (destination-start (plist-get owner :destination-start))
+         (destination-end (plist-get owner :destination-end))
+         (position (point)))
+    (when (and (not (plist-get owner :malformed))
+               (member type '("inline_link" "image"))
+               label-positions destination-start destination-end
+               ;; A point activates only at the leading source boundary of an
+               ;; emitted label character.  No trailing boundary is accepted
+               ;; when it is physically a hidden Markdown delimiter.
+               (seq-contains-p label-positions position #'=))
+      (let* ((raw (buffer-substring-no-properties
+                   destination-start destination-end))
+             (angle (and (> (length raw) 1)
+                         (string-prefix-p "<" raw)
+                         (string-suffix-p ">" raw)))
+             (source (if angle (substring raw 1 -1) raw))
+             (fragment-index
+              (pi-coding-agent--semantic-link-fragment-index source))
+             (path-source (if fragment-index
+                              (substring source 0 fragment-index)
+                            source))
+             (fragment (and fragment-index
+                            (substring source (1+ fragment-index))))
+             (path (pi-coding-agent--semantic-link-unescape path-source))
+             (case-fold-search t))
+        (when (and (not (string-empty-p path))
+                   (not (string-prefix-p "#" source))
+                   (not (string-prefix-p "//" source))
+                   (not (string-match-p
+                         "\\`[[:alpha:]][[:alnum:]+.-]*:" source))
+                   (pi-coding-agent--strict-text-file-path-p path angle))
+          (let* ((anchor (pi-coding-agent--chat-session-directory))
+                 (emacs-path (pi-coding-agent--emacs-path path anchor))
+                 (label (plist-get label-projection :text)))
+            (pi-coding-agent--make-file-target
+             :link raw emacs-path
+             :bounds (plist-get label-projection :bounds)
+             :fragment fragment
+             :label label)))))))
+
+(defun pi-coding-agent--semantic-link-parser-overlays ()
+  "Return every inline-parser overlay md-ts could adopt in this buffer.
+Use `overlay-lists' rather than positional overlay APIs: local ranges are
+half-open, so `overlays-at' misses a host whose exclusive end is point.  md-ts
+adopts any overlapping overlay carrying a matching parser even when host and
+timestamp metadata are incomplete, so all such preexisting identities must be
+isolated and restored."
+  (seq-filter
+   (lambda (overlay)
+     (when-let* ((parser (overlay-get overlay 'treesit-parser)))
+       (eq (treesit-parser-language parser) 'markdown-inline)))
+   (append (car (overlay-lists)) (cdr (overlay-lists)))))
+
+(defun pi-coding-agent--semantic-link-parser-state ()
+  "Snapshot parser identities/ranges and complete local-overlay state."
+  (list
+   :parsers
+   (mapcar (lambda (parser)
+             (cons parser (treesit-parser-included-ranges parser)))
+           (treesit-parser-list))
+   :overlays
+   (mapcar
+    (lambda (overlay)
+      (let ((parser (overlay-get overlay 'treesit-parser)))
+        (list overlay (overlay-start overlay) (overlay-end overlay)
+              parser (treesit-parser-included-ranges parser)
+              (overlay-get overlay 'treesit-parser-ov-timestamp))))
+    (pi-coding-agent--semantic-link-parser-overlays))))
+
+(defun pi-coding-agent--semantic-link-isolate-parser-state (state)
+  "Hide preexisting local parsers in STATE during resolver-owned parsing.
+A stale md-ts local parser would otherwise be replaced as a side effect of
+lazy range discovery.  Temporarily hiding both identifying properties makes
+md-ts create disposable resolver-owned state instead."
+  (dolist (entry (plist-get state :overlays))
+    (let ((overlay (car entry)))
+      (overlay-put overlay 'treesit-parser nil)
+      (overlay-put overlay 'treesit-parser-ov-timestamp nil))))
+
+(defun pi-coding-agent--semantic-link-cleanup-parser-state (state)
+  "Restore preexisting parser STATE after isolated semantic lookup.
+Local range discovery is dynamically disabled, so lookup cannot create or adopt
+parser overlays.  Preexisting identities are still restored defensively with
+their ranges, bounds, and timestamps.  Cleanup is best-effort across every
+identity before its first error is re-signaled."
+  (let* ((old-parser-state (plist-get state :parsers))
+         (old-overlay-state (plist-get state :overlays))
+         cleanup-error)
+    (cl-labels ((remember-error
+                 (error-data)
+                 (unless cleanup-error
+                   (setq cleanup-error error-data))))
+      (unwind-protect
+          (progn
+            ;; Retry only an explicitly registered resolver parser whose direct
+            ;; unwind deletion failed.  Identity, not "newness", establishes
+            ;; ownership and preserves foreign parsers created during lookup.
+            (dolist (parser
+                     (delq :active
+                           (copy-sequence
+                            pi-coding-agent--semantic-link-resolver-parsers)))
+              (condition-case error-data
+                  (progn
+                    (treesit-parser-delete parser)
+                    (setq pi-coding-agent--semantic-link-resolver-parsers
+                          (delq
+                           parser
+                           pi-coding-agent--semantic-link-resolver-parsers)))
+                (error (remember-error error-data))))
+            (let ((current-parsers (treesit-parser-list)))
+              (dolist (entry old-parser-state)
+                (let ((parser (car entry))
+                      (ranges (cdr entry)))
+                  (when (memq parser current-parsers)
+                    (condition-case error-data
+                        (unless (equal
+                                 ranges
+                                 (treesit-parser-included-ranges parser))
+                          (treesit-parser-set-included-ranges parser ranges))
+                      (error (remember-error error-data))))))))
+        ;; Restore every preexisting overlay even if disposal or another
+        ;; restoration fails.  Identity comes first so an error cannot leave an
+        ;; overlay hidden from md-ts and later lifecycle cleanup.
+        (dolist (entry old-overlay-state)
+          (let ((overlay (nth 0 entry))
+                (start (nth 1 entry))
+                (end (nth 2 entry))
+                (parser (nth 3 entry))
+                (ranges (nth 4 entry))
+                (timestamp (nth 5 entry)))
+            (when (overlay-buffer overlay)
+              (condition-case error-data
+                  (progn
+                    (overlay-put overlay 'treesit-parser parser)
+                    (overlay-put overlay 'treesit-parser-ov-timestamp timestamp)
+                    (move-overlay overlay start end)
+                    (unless (equal
+                             ranges
+                             (treesit-parser-included-ranges parser))
+                      (treesit-parser-set-included-ranges parser ranges)))
+                (error (remember-error error-data)))))))
+      (when cleanup-error
+        (signal (car cleanup-error) (cdr cleanup-error))))))
+
+(defun pi-coding-agent--semantic-link-file-target-at-point ()
+  "Return explicit tri-state semantic Markdown link resolution at point.
+The `:status' value is exactly one of `:not-a-link', `:owned-valid', or
+`:owned-invalid'.  Ownership is source/tree based, independent of font-lock,
+invisibility, faces, buttons, file existence, and unreleased md-ts-mode APIs.
+This distinction prevents an owned non-file or malformed link from falling
+through to a path-like visible label.
+
+A missing/ambiguous canonical host or any tree/query/node failure signals
+`pi-coding-agent-semantic-link-parser-error'; parser failure is never semantic
+absence.  Only a complete canonical inline/table-cell host is parsed, up to
+`pi-coding-agent--max-semantic-link-host-length'; an over-cap host returns
+owned-invalid and cannot reach text fallback.  Lookup snapshots parser state,
+isolates every preexisting inline overlay md-ts could adopt, and dynamically
+disables local range discovery.  It therefore creates no md-ts parser overlays,
+including at half-open host endpoints.  Lookup temporarily widens so buffer
+narrowing cannot clip semantic ownership; the caller's restriction is restored."
+  (save-restriction
+    (widen)
+    (let ((pi-coding-agent--semantic-link-resolver-parsers (list :active))
+          (pi-coding-agent--semantic-code-span-at-point :active)
+          state parse-result)
+    (condition-case error-data
+        (setq state (pi-coding-agent--semantic-link-parser-state))
+      (error
+       (signal 'pi-coding-agent-semantic-link-parser-error
+               (list (error-message-string error-data)))))
+    (unwind-protect
+        (setq parse-result
+              (condition-case error-data
+                  (progn
+                    (pi-coding-agent--semantic-link-isolate-parser-state state)
+                    (cl-labels
+                        ((resolve
+                          ()
+                          (let* ((host
+                                  (pi-coding-agent--semantic-link-host-at-point))
+                                 (owner
+                                  (and
+                                   host
+                                   (not (plist-get host :over-cap))
+                                   (pi-coding-agent--semantic-link-owner-at-point
+                                    host))))
+                            (cond
+                             ((and host (plist-get host :over-cap))
+                              (list :status :owned-invalid
+                                    :reason :host-over-cap))
+                             ((not owner)
+                              (append
+                               (list :status :not-a-link)
+                               (and
+                                (eq pi-coding-agent--semantic-code-span-at-point
+                                    t)
+                                (list :markdown-code-span t))))
+                             (t (list :status :owner :owner owner))))))
+                      ;; The resolver queries only the canonical block tree and
+                      ;; its own short-lived inline parser.  Disable md-ts range
+                      ;; discovery dynamically so lookup cannot create, adopt,
+                      ;; or partially initialize local parser overlays at all.
+                      (let ((treesit-range-settings nil))
+                        (resolve))))
+                (pi-coding-agent-semantic-link-parser-error
+                 (signal (car error-data) (cdr error-data)))
+                (error
+                 (signal 'pi-coding-agent-semantic-link-parser-error
+                         (list (error-message-string error-data))))))
+      (condition-case error-data
+          (pi-coding-agent--semantic-link-cleanup-parser-state state)
+        (pi-coding-agent-semantic-link-parser-error
+         (signal (car error-data) (cdr error-data)))
+        (error
+         (signal 'pi-coding-agent-semantic-link-parser-error
+                 (list (error-message-string error-data))))))
+    ;; Path normalization is outside the parser-failure boundary: controlled
+    ;; path `user-error' values retain their established target contract.
+    (if (eq (plist-get parse-result :status) :owner)
+        (if-let* ((target
+                   (pi-coding-agent--semantic-link-target
+                    (plist-get parse-result :owner))))
+            (list :status :owned-valid :target target)
+          (list :status :owned-invalid))
+      parse-result))))
+
+(defun pi-coding-agent--text-file-target-at-point (&optional markdown-code-span)
+  "Return a strict markup-visible file target on the current line, or nil.
+MARKDOWN-CODE-SPAN means semantic parsing already established code-span
+ownership at point.  This buffer layer snapshots a fixed-size window around
+point.  Supported raw quote wrappers complete within that snapshot remain
+authoritative, including invalid quoted prose or commands; semantically owned
+or fontified Markdown code remains authoritative when its delimiters lie
+outside the snapshot.  Otherwise it first uses an
+already-visible raw token, then projects backing buffer text according to
+fontified chat markup, maps point into that projection, delegates pure candidate
+parsing, and maps candidate bounds back to real buffer positions.  It never
+widens, fontifies, or scans the whole current line.  Hidden
+link destinations and syntax do not become candidate text.
+
+The projection follows backing-buffer text properties, not synthetic overlay
+replacement strings such as wrapped table displays, which lack character-level
+source positions."
+  (let* ((window (pi-coding-agent--bounded-line-window-at-point))
+         (window-start (plist-get window :start))
+         (window-end (plist-get window :end))
+         (text (buffer-substring-no-properties window-start window-end))
+         (index (- (point) window-start))
+         (wrapped (or markdown-code-span
+                      (pi-coding-agent--inside-text-wrapper-p text index)
+                      (pi-coding-agent--markdown-code-span-at-point-p
+                       window-start window-end)))
+         candidate bounds input-length)
+    ;; A failed wrapper parse owns the result: never expose an inner path from
+    ;; fontified `cat src/foo.el' or single-quoted prose.  Without a wrapper, a
+    ;; normal visible token takes the cheap path before projection is allocated.
+    (unless (pi-coding-agent--position-inside-omitted-text-p
+             (point) window-start window-end)
+      (let* ((raw-candidate
+              (if wrapped
+                  (pi-coding-agent--quoted-text-file-candidate-at-index
+                   text index)
+                (pi-coding-agent--text-file-candidate-at-index text index)))
+             (raw-text-visible
+              (and raw-candidate
+                   (pi-coding-agent--raw-text-file-candidate-visible-p
+                    raw-candidate window-start)))
+             (raw-context-visible
+              (and raw-candidate
+                   (pi-coding-agent--raw-diagnostic-context-visible-p
+                    raw-candidate window-start)))
+             (raw-visible (and raw-text-visible raw-context-visible))
+             ;; An otherwise visible diagnostic candidate with hidden separator
+             ;; context is authoritative-invalid.  If instead target markup is
+             ;; hidden, normal visible projection remains authoritative.
+             (hidden-diagnostic-context
+              (and raw-candidate raw-text-visible
+                   (plist-get raw-candidate :diagnostic-separator)
+                   (not raw-context-visible))))
+        (when raw-visible
+          (let ((raw-bounds (plist-get raw-candidate :bounds)))
+            (setq candidate raw-candidate
+                  bounds (cons (+ window-start (car raw-bounds))
+                               (+ window-start (cdr raw-bounds)))
+                  input-length (length text))))
+        (when (and (not candidate) (not wrapped)
+                   (not hidden-diagnostic-context))
+          (let* ((visible-input
+                  (pi-coding-agent--visible-text-with-position-map
+                   window-start window-end (point)))
+                 (visible-text (plist-get visible-input :text))
+                 (visible-candidate
+                  (pi-coding-agent--text-file-candidate-at-index
+                   visible-text (plist-get visible-input :index))))
+            (when (and visible-candidate
+                       (pi-coding-agent--visible-diagnostic-context-source-p
+                        visible-candidate visible-input))
+              (setq candidate visible-candidate
+                    bounds
+                    (pi-coding-agent--visible-file-candidate-buffer-bounds
+                     visible-candidate visible-input)
+                    input-length (length visible-text))))))
+      (when-let* ((candidate candidate)
+                  ;; Lexical extent includes wrappers and punctuation trimmed
+                  ;; from returned bounds, so clipped windows cannot fabricate
+                  ;; an apparently complete candidate.
+                  (extent (or (plist-get candidate :extent)
+                              (plist-get candidate :bounds)))
+                  (complete-start
+                   (or (> (car extent) 0)
+                       (plist-get window :start-complete)))
+                  (complete-end
+                   (or (< (cdr extent) input-length)
+                       (plist-get window :end-complete)))
+                  (bounds bounds)
+                  (raw (plist-get candidate :raw))
+                  (path (plist-get candidate :path))
+                  (anchor (pi-coding-agent--chat-session-directory))
+                  (emacs-path (pi-coding-agent--emacs-path path anchor)))
+        (pi-coding-agent--make-file-target
+         :text raw emacs-path
+         :line (plist-get candidate :line)
+         :column (plist-get candidate :column)
+         :range (plist-get candidate :range)
+         :bounds bounds)))))
+
+(defun pi-coding-agent--tool-overlay-at-point ()
+  "Return the authoritative hot tool overlay at physical point, or nil.
+Any chat restriction is restored exactly after lookup."
+  (save-restriction
+    (widen)
+    (seq-find (lambda (overlay)
+                (overlay-get overlay 'pi-coding-agent-tool-block))
+              (overlays-at (point)))))
+
+(defun pi-coding-agent--tool-file-target-from-metadata
+    (stored-path raw-path path-error bounds line-function)
+  "Return an authoritative tool target from stored metadata, or nil.
+STORED-PATH, RAW-PATH, and PATH-ERROR retain the render-time path decision.
+BOUNDS identify the owning hot or cold block.  LINE-FUNCTION is called only
+for a valid path.  A stored error signals `user-error'; explicit path absence
+returns nil."
+  (cond
+   (stored-path
+    (unless (stringp stored-path)
+      (user-error "Tool path metadata is not a string"))
+    (let* ((emacs-path (pi-coding-agent--tool-emacs-path stored-path))
+           (raw (if (stringp raw-path) raw-path stored-path)))
+      (pi-coding-agent--make-file-target
+       :tool raw emacs-path
+       :line (funcall line-function)
+       :bounds bounds)))
+   (path-error
+    (user-error "%s" path-error))))
+
+(defun pi-coding-agent--tool-file-target (overlay)
+  "Return the authoritative file target for hot tool OVERLAY, or nil."
+  (pi-coding-agent--tool-file-target-from-metadata
+   (overlay-get overlay 'pi-coding-agent-tool-path)
+   (overlay-get overlay 'pi-coding-agent-tool-raw-path)
+   (overlay-get overlay 'pi-coding-agent-tool-path-error)
+   (cons (overlay-start overlay) (overlay-end overlay))
+   (lambda () (pi-coding-agent--tool-line-at-point overlay))))
+
+(defun pi-coding-agent--cold-tool-block-at-point ()
+  "Return authoritative cold-tool metadata and physical bounds at point.
+Return nil outside a cold tool.  Any chat restriction is restored exactly."
+  (save-restriction
+    (widen)
+    (when-let* ((metadata
+                 (get-text-property (point)
+                                    'pi-coding-agent-cold-tool-block)))
+      (let ((start (or (previous-single-property-change
+                        (1+ (point)) 'pi-coding-agent-cold-tool-block
+                        nil (point-min))
+                       (point-min)))
+            (end (or (next-single-property-change
+                      (point) 'pi-coding-agent-cold-tool-block
+                      nil (point-max))
+                     (point-max))))
+        (list :metadata metadata :bounds (cons start end))))))
+
+(defun pi-coding-agent--cold-tool-line-at-point (cold-block)
+  "Calculate the physical meaningful file line at point for COLD-BLOCK."
+  (save-restriction
+    (widen)
+    (let* ((metadata (plist-get cold-block :metadata))
+           (bounds (plist-get cold-block :bounds))
+           (header-length (plist-get metadata :header-length))
+           (header-end (and (integerp header-length)
+                            (+ (car bounds) header-length)))
+           (line-map (plist-get metadata :line-map)))
+      (pi-coding-agent--tool-line-from-metadata
+       (plist-get metadata :tool-name)
+       (plist-get metadata :offset)
+       line-map header-end line-map))))
+
+(defun pi-coding-agent--cold-tool-file-target (cold-block)
+  "Return the authoritative file target for COLD-BLOCK, or nil."
+  (let ((metadata (plist-get cold-block :metadata)))
+    (pi-coding-agent--tool-file-target-from-metadata
+     (plist-get metadata :path)
+     (plist-get metadata :raw-path)
+     (plist-get metadata :path-error)
+     (plist-get cold-block :bounds)
+     (lambda () (pi-coding-agent--cold-tool-line-at-point cold-block)))))
+
+(defun pi-coding-agent--file-target-at-point ()
+  "Return the file target at point, or nil.
+Resolution priority is authoritative hot/cold tool metadata, semantic Markdown
+link ownership, then strict visible text.  Invalid or absent tool metadata never
+falls through.  Semantic lookup is explicitly tri-state, so an owned non-file,
+reference, or malformed link also never falls through to a path-like label."
+  (if-let* ((overlay (pi-coding-agent--tool-overlay-at-point)))
+      (pi-coding-agent--tool-file-target overlay)
+    (if-let* ((cold-block (pi-coding-agent--cold-tool-block-at-point)))
+        (pi-coding-agent--cold-tool-file-target cold-block)
+      (pcase (pi-coding-agent--semantic-link-file-target-at-point)
+        (`(:status :owned-valid :target ,target) target)
+        (`(:status :owned-invalid) nil)
+        (`(:status :not-a-link . ,properties)
+         (pi-coding-agent--text-file-target-at-point
+          (plist-get properties :markdown-code-span)))))))
+
+(defconst pi-coding-agent--shell-execution-buffer-variables
+  '(process-environment exec-path shell-file-name shell-command-switch
+    process-connection-type coding-system-for-read coding-system-for-write
+    default-process-coding-system process-coding-system-alist
+    inherit-process-coding-system process-adaptive-read-buffering
+    async-shell-command-width comint-terminfo-terminal
+    tramp-remote-process-environment)
+  "Narrow process-launch variables captured for one shell execution.")
+
+(defconst pi-coding-agent--shell-execution-dynamic-variables
+  '(connection-local-profile-alist connection-local-criteria-alist
+    connection-local-default-application enable-connection-local-variables)
+  "Global connection-local configuration captured for one shell execution.")
+
+(defun pi-coding-agent--copy-shell-execution-value (value)
+  "Copy VALUE for an execution snapshot, including nested strings."
+  (cond
+   ((stringp value) (copy-sequence value))
+   ((consp value)
+    (cons (pi-coding-agent--copy-shell-execution-value (car value))
+          (pi-coding-agent--copy-shell-execution-value (cdr value))))
+   ((vectorp value)
+    (apply #'vector
+           (mapcar #'pi-coding-agent--copy-shell-execution-value value)))
+   (t value)))
+
+(defun pi-coding-agent--shell-execution-snapshot (directory)
+  "Snapshot shell execution state for DIRECTORY in the current chat buffer.
+The snapshot is taken before prompting and owns one command launch.  It includes
+DIRECTORY; effective process environment, executable path, shell and switch;
+process/coding values; and remote connection configuration used by native
+file-process dispatch.  Local asynchronous terminal variables are resolved now
+so an existing output buffer cannot replace the invocation environment."
+  (require 'comint)
+  (let* ((directory (copy-sequence directory))
+         (remote-p (file-remote-p directory))
+         (buffer-variables
+          (if remote-p
+              pi-coding-agent--shell-execution-buffer-variables
+            (remq 'tramp-remote-process-environment
+                  pi-coding-agent--shell-execution-buffer-variables)))
+         (buffer-values
+          (delq nil
+                (mapcar
+                 (lambda (variable)
+                   (and (boundp variable)
+                        (cons variable
+                              (pi-coding-agent--copy-shell-execution-value
+                               (symbol-value variable)))))
+                 buffer-variables)))
+         (base-environment
+          (pi-coding-agent--copy-shell-execution-value process-environment))
+         (default-directory directory)
+         (async-environment
+          (append
+           (and (natnump async-shell-command-width)
+                (list (format "COLUMNS=%d" async-shell-command-width)))
+           (comint-term-environment)
+           base-environment)))
+    (list
+     :directory directory
+     :buffer-values buffer-values
+     :async-process-environment async-environment
+     :dynamic-values
+     ;; A remote handler can recalculate effective values from these global
+     ;; tables.  Freeze them only for remote dispatch; local launches need no
+     ;; broad connection-profile capture.
+     (and remote-p
+          (delq nil
+                (mapcar
+                 (lambda (variable)
+                   (and (boundp variable)
+                        (cons variable
+                              (pi-coding-agent--copy-shell-execution-value
+                               (symbol-value variable)))))
+                 pi-coding-agent--shell-execution-dynamic-variables))))))
+
+(defun pi-coding-agent--call-with-shell-buffer-values (values function)
+  "Call FUNCTION after temporarily installing buffer-local VALUES.
+VALUES is an alist from an execution snapshot.  Restore both each value and its
+original localness after the launch attempt, including when installation fails."
+  (let ((buffer (current-buffer))
+        originals)
+    (unwind-protect
+        (progn
+          (dolist (entry values)
+            (let ((variable (car entry)))
+              (push (list variable
+                          (local-variable-p variable buffer)
+                          (boundp variable)
+                          (and (boundp variable) (symbol-value variable)))
+                    originals)
+              (set (make-local-variable variable) (cdr entry))))
+          (funcall function))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (dolist (original originals)
+            (cond
+             ((not (nth 1 original))
+              (kill-local-variable (car original)))
+             ((nth 2 original)
+              (set (make-local-variable (car original)) (nth 3 original)))
+             (t
+              (make-local-variable (car original))
+              (makunbound (car original))))))))))
+
+(defun pi-coding-agent--async-shell-mode ()
+  "Enter the native asynchronous shell output mode for this Emacs version."
+  (if (and (>= emacs-major-version 30)
+           (boundp 'async-shell-command-mode))
+      (funcall async-shell-command-mode)
+    (shell-mode)))
+
+(defun pi-coding-agent--async-shell-display-action (&optional deferred)
+  "Return native async display action, with version handling for DEFERRED.
+Immediate display uses `allow-no-window' on Emacs 29 and later.  Deferred
+first-output display gained that action in Emacs 30."
+  (and (or (not deferred) (>= emacs-major-version 30))
+       '(nil (allow-no-window . t))))
+
+(defun pi-coding-agent--start-snapshotted-async-shell-command
+    (snapshot command &optional output-buffer)
+  "Start local asynchronous COMMAND under SNAPSHOT with native shell UI.
+COMMAND has no terminal ampersand.  OUTPUT-BUFFER, when non-nil, is the buffer
+or name reused by native revert behavior.  This mirrors only the Emacs
+29.4/30.1 local async branch that surrounds process launch; compatibility
+helpers centralize their mode and display differences.  Preserve native buffer
+naming, conflict policy, output retention, process name, sentinel, filter,
+revert, and display behavior while replacing only process-launch values."
+  (let* ((buffer (get-buffer-create
+                  (or output-buffer shell-command-buffer-name-async
+                      "*Async Shell Command*")))
+         (buffer-name (buffer-name buffer))
+         (process (get-buffer-process buffer))
+         (directory (plist-get snapshot :directory)))
+    (when process
+      (cond
+       ((eq async-shell-command-buffer 'confirm-kill-process)
+        (shell-command--same-buffer-confirm "Kill it")
+        (kill-process process))
+       ((eq async-shell-command-buffer 'confirm-new-buffer)
+        (shell-command--same-buffer-confirm "Use a new buffer")
+        (setq buffer (generate-new-buffer buffer-name)))
+       ((eq async-shell-command-buffer 'new-buffer)
+        (setq buffer (generate-new-buffer buffer-name)))
+       ((eq async-shell-command-buffer 'confirm-rename-buffer)
+        (shell-command--same-buffer-confirm "Rename it")
+        (with-current-buffer buffer (rename-uniquely))
+        (setq buffer (get-buffer-create buffer-name)))
+       ((eq async-shell-command-buffer 'rename-buffer)
+        (with-current-buffer buffer (rename-uniquely))
+        (setq buffer (get-buffer-create buffer-name)))))
+    (with-current-buffer buffer
+      (shell-command-save-pos-or-erase)
+      (setq default-directory directory)
+      (require 'shell)
+      (let* ((values (copy-tree (plist-get snapshot :buffer-values)))
+             (environment-entry (assq 'process-environment values)))
+        (if environment-entry
+            (setcdr environment-entry
+                    (copy-sequence
+                     (plist-get snapshot :async-process-environment)))
+          (push (cons 'process-environment
+                      (copy-sequence
+                       (plist-get snapshot :async-process-environment)))
+                values))
+        (cl-progv (mapcar #'car values) (mapcar #'cdr values)
+          (setq process
+                (start-process-shell-command "Shell" buffer command))))
+      (setq mode-line-process '(":%s"))
+      (pi-coding-agent--async-shell-mode)
+      (setq-local revert-buffer-function
+                  (lambda (&rest _)
+                    (pi-coding-agent--start-snapshotted-async-shell-command
+                     snapshot command buffer)))
+      (set-process-sentinel process #'shell-command-sentinel)
+      (set-process-filter process #'comint-output-filter)
+      (if async-shell-command-display-buffer
+          (display-buffer buffer (pi-coding-agent--async-shell-display-action))
+        (let ((nonce (make-symbol "nonce")))
+          (add-function
+           :before (process-filter process)
+           (lambda (proc _string)
+             (let ((output (process-buffer proc)))
+               (when (buffer-live-p output)
+                 (remove-function (process-filter proc) nonce)
+                 (display-buffer
+                  output (pi-coding-agent--async-shell-display-action t)))))
+           `((name . ,nonce))))))))
+
+(defun pi-coding-agent--call-native-shell-command (snapshot command)
+  "Run COMMAND through native shell machinery under execution SNAPSHOT."
+  (let* ((dynamic-values (plist-get snapshot :dynamic-values))
+         (dynamic-symbols (mapcar #'car dynamic-values))
+         (dynamic-bindings (mapcar #'cdr dynamic-values)))
+    (cl-progv dynamic-symbols dynamic-bindings
+      (pi-coding-agent--call-with-shell-buffer-values
+       (plist-get snapshot :buffer-values)
+       (lambda ()
+         (let* ((default-directory (plist-get snapshot :directory))
+                (handler
+                 (find-file-name-handler
+                  (directory-file-name default-directory) 'shell-command)))
+           (if (and (not handler)
+                    (string-match "[ \t]*&[ \t]*\\'" command))
+               (pi-coding-agent--start-snapshotted-async-shell-command
+                snapshot (substring command 0 (match-beginning 0)))
+             (shell-command command))))))))
+
+(defun pi-coding-agent--call-with-shell-directory (directory function)
+  "Call FUNCTION with DIRECTORY as the current shell working directory.
+Stay in the current buffer so its shell and process environment apply.  If a
+canonical chat session transition occurs during the call, keep that transition's
+new `default-directory' after the temporary binding unwinds."
+  (let ((session-directory (pi-coding-agent--chat-session-directory)))
+    (unwind-protect
+        (let ((default-directory directory))
+          (funcall function))
+      (let ((current-session-directory
+             (pi-coding-agent--chat-session-directory)))
+        (unless (equal session-directory current-session-directory)
+          (setq default-directory current-session-directory))))))
+
+(defun pi-coding-agent-shell-command-at-point ()
+  "Read and run a Dired-inspired command on the file target at point.
+One command word followed only by whitespace-delimited options beginning with
+`-' automatically receives the safely quoted target.  All other command text,
+including ordinary arguments, compound/control syntax, and multiple lines,
+must place a textual isolated `*' bounded on each side by a space, tab, or
+string edge.  A terminal whitespace-delimited ` &' uses asynchronous shell
+output.  Prompting and execution use a snapshot of the target session's local
+or TRAMP execution environment."
+  (interactive)
+  (let* ((target (or (pi-coding-agent--file-target-at-point)
+                     (user-error "No file at point")))
+         ;; Do this before opening the minibuffer: shell-only target failures
+         ;; must not consume input, and TARGET must remain a stable snapshot.
+         (argument (pi-coding-agent--file-target-shell-argument target))
+         (shell-directory (plist-get target :shell-directory))
+         (execution-snapshot
+          (pi-coding-agent--shell-execution-snapshot shell-directory))
+         (command
+          (pi-coding-agent--call-with-shell-directory
+           shell-directory
+           (lambda ()
+             (read-shell-command
+              (format "! on %s: " (plist-get target :display))))))
+         (shell-command-text
+          (pi-coding-agent--shell-command-with-file command argument)))
+    ;; Reuse the target snapshot even if the chat changed sessions while the
+    ;; prompt was active.
+    (pi-coding-agent--call-with-shell-directory
+     shell-directory
+     (lambda ()
+       (pi-coding-agent--call-native-shell-command
+        execution-snapshot shell-command-text)))))
+
+(defun pi-coding-agent--goto-file-target-location (line column)
+  "Move to optional one-based physical LINE and COLUMN in the current file.
+A nil LINE preserves the point, mark, and restriction established by native
+file visiting.  Explicit locations are computed against the full file, clamp
+at physical EOF or EOL, and deactivate any stale region after a successful
+move.  COLUMN uses display columns and never inserts text.  If the resulting
+position is inaccessible, obey `widen-automatically': widen when non-nil, or
+signal `user-error' without changing point or the restriction when nil.  Range
+starts are already represented by LINE; range ends and link fragments do not
+affect navigation."
+  (when line
+    (let ((position
+           (save-excursion
+             (save-restriction
+               (widen)
+               (goto-char (point-min))
+               (forward-line (1- line))
+               (when column
+                 ;; Emacs 29's `move-to-column' requires a fixnum, while strict
+                 ;; target parsing can produce a larger integer.  Either value
+                 ;; is past any real line end, so this preserves EOL clamping.
+                 (move-to-column (min (1- column) most-positive-fixnum)))
+               (point)))))
+      (cond
+       ((and (<= (point-min) position) (<= position (point-max))))
+       (widen-automatically (widen))
+       (t (user-error "Position is outside accessible part of buffer")))
+      (goto-char position)
+      (deactivate-mark))))
+
+(defun pi-coding-agent--validate-file-target-location (source line column)
+  "Validate SOURCE's optional one-based LINE and COLUMN before opening.
+Tool rows retain their established controlled error for any absent or malformed
+mapped LINE.  Other sources may omit a location, but explicit coordinates must
+be positive integers and COLUMN requires LINE."
+  (cond
+   ((eq source :tool)
+    (unless (pi-coding-agent--positive-location-p line)
+      (user-error "No file line at point")))
+   ((and line (not (pi-coding-agent--positive-location-p line)))
+    (user-error "File line must be a positive integer")))
+  (cond
+   ((and column (not (pi-coding-agent--positive-location-p line)))
+    (user-error "File column requires a valid line"))
+   ((and column (not (pi-coding-agent--positive-location-p column)))
+    (user-error "File column must be a positive integer"))))
+
+(defun pi-coding-agent--visit-file-target (target toggle)
+  "Visit TARGET, honoring TOGGLE's window inversion.
+Validate locations before requesting a native opener.  After opening, apply a
+location only when the resulting buffer actually visits a file; native Dired
+buffers and other non-file buffers retain the point and mark chosen by Emacs.
+A target without a location preserves native behavior."
+  (let ((source (plist-get target :source))
+        (path (plist-get target :emacs-path))
+        (line (plist-get target :line))
+        (column (plist-get target :column)))
+    (pi-coding-agent--validate-file-target-location source line column)
+    (let ((use-other-window
+           (if toggle
+               (not pi-coding-agent-visit-file-other-window)
+             pi-coding-agent-visit-file-other-window)))
+      (funcall (if use-other-window #'find-file-other-window #'find-file)
+               path))
+    ;; Decide applicability from public post-open buffer semantics.  In
+    ;; particular, do not preflight local or remote paths to detect directories.
+    (when (and line
+               (buffer-file-name (current-buffer))
+               (not (derived-mode-p 'dired-mode)))
+      (pi-coding-agent--goto-file-target-location line column))))
+
+(defun pi-coding-agent--dispatch-button
+    (&optional position use-mouse-action strict-return)
+  "Dispatch a remapped chat button at POSITION.
+On keyboard RET, a Pi tool toggle retains its standard button action.  Every
+other button resolves once through the strict file-target visitor: authoritative
+tool ownership is preserved, while only a semantically owned local Markdown
+link is accepted outside tools.  Invalid, non-local, reference, malformed, and
+non-Markdown buttons fail closed.  Other keyboard keys, mouse events, and direct
+calls to `push-button' retain standard behavior.  USE-MOUSE-ACTION has the same
+meaning as for `push-button'.  STRICT-RETURN is non-nil only for interactive
+RET."
+  (interactive
+   (list (if (integerp last-command-event) (point) last-command-event)
+         nil
+         (equal (this-single-command-keys) [?\r])))
+  (if (not strict-return)
+      (push-button position use-mouse-action)
+    (if-let* ((button (button-at (or position (point)))))
+        (if (button-get button 'pi-coding-agent-tool-toggle)
+            (push-button position use-mouse-action)
+          (let ((target (or (pi-coding-agent--file-target-at-point)
+                            (user-error "No file at point"))))
+            (if (memq (plist-get target :source) '(:tool :link))
+                (pi-coding-agent--visit-file-target
+                 target current-prefix-arg)
+              (user-error "No file at point"))))
+      (push-button position use-mouse-action))))
 
 (defun pi-coding-agent-visit-file (&optional toggle)
-  "Visit the file associated with the tool block at point.
-If on a diff line, go to the corresponding line number.
-For read/write, go to the line within the displayed content.
-By default, uses `pi-coding-agent-visit-file-other-window' to decide
-whether to open in another window.  With prefix arg TOGGLE, invert
-that behavior."
+  "Visit one strict file target at point.
+Targets may be file-content rows in tool output, plain path references, or
+labels of local Markdown links.  Tool headers and other non-content rows are
+not visitable.  Plain path locations use a one-based physical file line and
+optional one-based column; a line range visits its first line only.  Explicit
+locations obey `widen-automatically' in file-visiting buffers and are ignored in
+native Dired buffers.  Targets without a location preserve native point,
+mark, and narrowing.  By default, `pi-coding-agent-visit-file-other-window'
+selects which native opener Pi requests; Emacs display policy controls final
+placement.  With prefix argument TOGGLE, invert the opener request."
   (interactive "P")
-  (if-let* ((ov (seq-find (lambda (o) (overlay-get o 'pi-coding-agent-tool-block))
-                          (overlays-at (point)))))
-      (let* ((stored-path (overlay-get ov 'pi-coding-agent-tool-path))
-             (path-error (overlay-get ov 'pi-coding-agent-tool-path-error))
-             (path (cond
-                    ((not stored-path) nil)
-                    ((not (stringp stored-path))
-                     (setq path-error "Tool path metadata is not a string")
-                     nil)
-                    (t
-                     (condition-case err
-                         (pi-coding-agent--tool-emacs-path stored-path)
-                       (error
-                        (setq path-error (error-message-string err))
-                        nil))))))
-        (if path
-            (if-let* ((line (pi-coding-agent--tool-line-at-point ov)))
-                (let ((use-other-window
-                       (if toggle
-                           (not pi-coding-agent-visit-file-other-window)
-                         pi-coding-agent-visit-file-other-window)))
-                  (funcall (if use-other-window #'find-file-other-window #'find-file)
-                           path)
-                  (goto-char (point-min))
-                  (forward-line (1- line)))
-              (user-error "No file line at point"))
-          (user-error "%s" (or path-error "No file at point"))))
-    (user-error "No file at point")))
+  (let ((target (or (pi-coding-agent--file-target-at-point)
+                    (user-error "No file at point"))))
+    (pi-coding-agent--visit-file-target target toggle)))
 
 ;;;; Diff Overlay Highlighting
 

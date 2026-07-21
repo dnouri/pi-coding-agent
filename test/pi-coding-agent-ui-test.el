@@ -669,6 +669,39 @@ Closes the category from issue #234: any instance without a usable
         (pi-coding-agent-test--kill-session-buffers root)
         (delete-other-windows)))))
 
+;;; Chat Keymap
+
+(ert-deftest pi-coding-agent-test-chat-mode-map-shell-command-at-point ()
+  "The chat `!' key runs one file command without changing other actions."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--set-chat-session-identity "/tmp/project/")
+    (let ((inhibit-read-only t))
+      (insert "src/report.el"))
+    (goto-char (+ (point-min) 2))
+    (let (prompt command command-directory)
+      (cl-letf (((symbol-function 'read-shell-command)
+                 (lambda (value)
+                   (setq prompt value)
+                   "file *"))
+                ((symbol-function 'shell-command)
+                 (lambda (value)
+                   (setq command value
+                         command-directory default-directory))))
+        (let ((binding (key-binding (kbd "!"))))
+          (should (eq binding #'pi-coding-agent-shell-command-at-point))
+          (call-interactively binding)))
+      (should (equal "! on src/report.el: " prompt))
+      (should (equal "file /tmp/project/src/report.el" command))
+      (should (equal "/tmp/project/" command-directory)))
+    (should (eq (lookup-key pi-coding-agent-chat-mode-map (kbd "RET"))
+                #'pi-coding-agent-visit-file))
+    (should (eq (lookup-key pi-coding-agent-chat-mode-map
+                            [remap push-button])
+                #'pi-coding-agent--dispatch-button))
+    (dolist (key '("&" "E" "o"))
+      (should-not (lookup-key pi-coding-agent-chat-mode-map (kbd key))))))
+
 ;;; Startup Header
 
 (ert-deftest pi-coding-agent-test-startup-header-shows-version ()
@@ -963,6 +996,26 @@ Buffer is read-only with `inhibit-read-only' used for insertion.
   (pi-coding-agent-test--with-chat-markup "Just plain text with no markup"
     (should (equal (pi-coding-agent--visible-text (point-min) (point-max))
                    "Just plain text with no markup"))))
+
+(ert-deftest pi-coding-agent-test-visible-text-position-map-preserves-source-envelope ()
+  "Visible character indices map exactly across omitted property spans."
+  (with-temp-buffer
+    (insert "aXXbcYYd")
+    (put-text-property 2 4 'invisible 'md-ts--markup)
+    (put-text-property 6 8 'invisible 'md-ts--markup)
+    (let ((at-boundary
+           (pi-coding-agent--visible-text-with-position-map 1 9 6))
+          (inside-hidden
+           (pi-coding-agent--visible-text-with-position-map 1 9 7)))
+      (should (equal "abcd" (plist-get at-boundary :text)))
+      (should (equal [1 4 5 8] (plist-get at-boundary :positions)))
+      (should (= 3 (plist-get at-boundary :index)))
+      (should (= 3 (plist-get inside-hidden :index)))
+      ;; Visible [1,3) is "bc" and maps to the real half-open envelope 4..6.
+      (let ((positions (plist-get at-boundary :positions)))
+        (should (equal (cons (aref positions 1)
+                             (1+ (aref positions 2)))
+                       '(4 . 6)))))))
 
 (ert-deftest pi-coding-agent-test-copy-raw-markdown-defcustom-default ()
   "pi-coding-agent-copy-raw-markdown defcustom defaults to nil."
