@@ -738,8 +738,9 @@ Closes the category from issue #234: any instance without a usable
 (ert-deftest pi-coding-agent-test-pi-version-outdated-compares-segments-numerically ()
   "Compare pi versions numerically, not lexically."
   (should (pi-coding-agent--pi-version-outdated-p "0.79.0"))
-  (should-not (pi-coding-agent--pi-version-outdated-p "0.79.1"))
-  (should-not (pi-coding-agent--pi-version-outdated-p "0.79.10"))
+  (should (pi-coding-agent--pi-version-outdated-p "0.80.99"))
+  (should-not (pi-coding-agent--pi-version-outdated-p "0.81.0"))
+  (should-not (pi-coding-agent--pi-version-outdated-p "0.81.1"))
   (should-not (pi-coding-agent--pi-version-outdated-p "1.0.0")))
 
 (ert-deftest pi-coding-agent-test-finish-pi-version-process-parses-stderr ()
@@ -906,7 +907,7 @@ Closes the category from issue #234: any instance without a usable
             (funcall callback "0.79.0")
             (should (equal pi-coding-agent--process-version "0.79.0"))
             (should (string-match-p "0.79.0" warning-text))
-            (should (string-match-p "0.79.1" warning-text))
+            (should (string-match-p "0.81.0" warning-text))
             (should (string-match-p
                      "npm install -g @earendil-works/pi-coding-agent"
                      warning-text))
@@ -935,8 +936,8 @@ Closes the category from issue #234: any instance without a usable
                        (setq warning-called t))))
             (pi-coding-agent--set-process proc)
             (should callback)
-            (funcall callback "0.79.1")
-            (should (equal pi-coding-agent--process-version "0.79.1"))
+            (funcall callback "0.81.0")
+            (should (equal pi-coding-agent--process-version "0.81.0"))
             (should-not warning-called)))
       (when (process-live-p proc)
         (delete-process proc)))))
