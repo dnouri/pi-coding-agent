@@ -4200,10 +4200,33 @@ no spurious faces are applied to plain colon-ending lines."
     (should (eq (key-binding (kbd "C-c C-c")) 'pi-coding-agent-send))
     (should (eq (key-binding (kbd "C-c C-k")) 'pi-coding-agent-abort))
     (should (eq (key-binding (kbd "C-c C-p")) 'pi-coding-agent-menu))
+    (should (eq (key-binding (kbd "C-c C-n")) 'pi-coding-agent-new-session))
+    (should (eq (key-binding (kbd "C-c C-r")) 'pi-coding-agent-resume-session))
+    (should (eq (key-binding (kbd "C-c C-e")) 'pi-coding-agent-export-html))
+    (should (eq (key-binding (kbd "C-c C-m")) 'pi-coding-agent-select-model))
+    (should (eq (key-binding (kbd "C-c C-t")) 'pi-coding-agent-cycle-thinking))
+    (should (eq (key-binding (kbd "C-c C-y")) 'pi-coding-agent-copy-last-message))
     (should (eq (key-binding (kbd "M-p")) 'pi-coding-agent-previous-input))
     (should (eq (key-binding (kbd "M-n")) 'pi-coding-agent-next-input))
     (should (eq (key-binding (kbd "TAB")) 'pi-coding-agent-complete))
     (should (eq (key-binding (kbd "C-c C-s")) 'pi-coding-agent-queue-steering))))
+
+(ert-deftest pi-coding-agent-test-input-chat-c-c-key-parity ()
+  "Input mode mirrors chat mode's C-c session-management chords.
+Every C-c chord in `pi-coding-agent-chat-mode-map' is bound to the
+same command in `pi-coding-agent-input-mode-map', except C-c C-c,
+which means `pi-coding-agent-send' in the input buffer."
+  (let ((chat-c-c (lookup-key pi-coding-agent-chat-mode-map (kbd "C-c")))
+        (input-c-c (lookup-key pi-coding-agent-input-mode-map (kbd "C-c"))))
+    (should (keymapp chat-c-c))
+    (map-keymap
+     (lambda (event def)
+       (when (symbolp def)
+         (if (eq event ?\C-c)
+             (should (eq (lookup-key input-c-c (vector event))
+                         'pi-coding-agent-send))
+           (should (eq (lookup-key input-c-c (vector event)) def)))))
+     chat-c-c)))
 
 ;;; Input-Buffer Chat Navigation
 

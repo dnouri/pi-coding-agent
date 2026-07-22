@@ -225,15 +225,20 @@ and error thresholds.
 ** Common keys ⌨️
 
 
-| Key              | Context | Description                                    |
-|------------------+---------+------------------------------------------------|
+| Key              | Context | Description                                   |
+|------------------+---------+-----------------------------------------------|
 | =C-c C-c=        | input   | 📮 Send prompt, or queue follow-up if busy    |
 | =C-c C-s=        | input   | 🐎 Send steering message while Pi is busy     |
 | =C-c C-k=        | input   | 🪓 Abort current response or compaction       |
-| =C-c C-p=        | input   | 🎛️ Open transient menu                        |
+| =C-c C-p=        | input   | 🎛️ Open transient menu                         |
+| =C-c C-n=        | input   | 🌱 New session                                |
 | =C-c C-r=        | input   | 📼 Resume a previous session                  |
-| =M-p= / =M-n=    | input   | 🕰️ Prompt history (=C-↑= / =C-↓= also work)   |
-| =C-r=            | input   | 🕵️ Incremental prompt-history search          |
+| =C-c C-e=        | input   | 🖨️ Export session to HTML                      |
+| =C-c C-m=        | input   | 🧠 Select model                               |
+| =C-c C-t=        | input   | 🌀 Cycle thinking level                       |
+| =C-c C-y=        | input   | 📋 Copy last message                          |
+| =M-p= / =M-n=    | input   | 🕰️ Prompt history (=C-↑= / =C-↓= also work)    |
+| =C-r=            | input   | 🕵️ Incremental prompt-history search           |
 | =TAB=            | input   | 🪄 Complete paths, and =/= commands           |
 | =M+<prior/next>= | input   | 🛗 Scroll linked chat window                  |
 | =TAB=            | chat    | 🪗 Toggle thinking block, tool block, or turn |
@@ -245,8 +250,8 @@ and error thresholds.
 | =C-c C-k=        | chat    | 🪓 Abort current operation                    |
 | =C-c C-n=        | chat    | 🌱 New session                                |
 | =C-c C-r=        | chat    | 📼 Resume a previous session                  |
-| =C-c C-e=        | chat    | 🖨️ Export session to HTML                     |
-| =C-c C-c=        | chat    | 🗜️ Compact conversation context               |
+| =C-c C-e=        | chat    | 🖨️ Export session to HTML                      |
+| =C-c C-c=        | chat    | 🗜️ Compact conversation context                |
 | =C-c C-m=        | chat    | 🧠 Select model                               |
 | =C-c C-t=        | chat    | 🌀 Cycle thinking level                       |
 | =C-c C-y=        | chat    | 📋 Copy last message                          |
