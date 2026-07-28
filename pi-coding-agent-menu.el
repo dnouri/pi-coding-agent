@@ -947,10 +947,46 @@ Optional INITIAL-INPUT pre-fills the completion prompt for filtering."
                                (force-mode-line-update))
                              (message "Pi: Model set to %s" choice)))))))))
 
-(defconst pi-coding-agent--thinking-levels '("off" "minimal" "low" "medium" "high" "xhigh")
-  "Thinking levels accepted by `set_thinking_level' RPC.
+(defun pi-coding-agent--thinking-level-effective-value (level model)
+  "Return LEVEL's provider value for MODEL.
+Return `:null' when MODEL explicitly marks LEVEL unsupported."
+  (let* ((key (intern (concat ":" level)))
+         (level-map (plist-get model :thinkingLevelMap)))
+    (cond
+     ((equal level "off") "off")
+     ((and level-map (plist-member level-map key)) (plist-get level-map key))
+     (t level))))
 
-Unsupported levels are clamped to the current model's capabilities.")
+(defun pi-coding-agent--filter-thinking-level-aliases (levels model)
+  "Remove unsupported and duplicate provider aliases from LEVELS for MODEL."
+  (let (result seen)
+    (dolist (level levels (nreverse result))
+      (let ((effective (pi-coding-agent--thinking-level-effective-value level model)))
+        (unless (or (eq effective :null)
+                    (member effective seen)
+                    (and (stringp effective)
+                         (not (equal level effective))
+                         (member effective levels)))
+          (push effective seen)
+          (push level result))))))
+
+(defun pi-coding-agent--get-available-thinking-levels (proc &optional model)
+  "Fetch thinking levels for the current MODEL from PROC via RPC.
+Signal a user error when capability discovery is unavailable rather
+than offering levels the current model may not support."
+  (let ((response (pi-coding-agent--rpc-sync
+                   proc '(:type "get_available_thinking_levels") 3)))
+    (unless response
+      (user-error "Timed out fetching thinking levels from Pi"))
+    (unless (eq (plist-get response :success) t)
+      (user-error "Failed to fetch thinking levels: %s"
+                  (or (plist-get response :error) "unknown error")))
+    (let* ((raw-levels (plist-get (plist-get response :data) :levels))
+           (levels (cond
+                    ((vectorp raw-levels) (append raw-levels nil))
+                    (raw-levels raw-levels)
+                    (t '("off")))))
+      (pi-coding-agent--filter-thinking-level-aliases levels model))))
 
 (defun pi-coding-agent-cycle-thinking ()
   "Cycle through thinking levels."
@@ -995,9 +1031,11 @@ including any model-specific clamping."
       (user-error "No pi session buffer"))
     (let* ((state (pi-coding-agent--menu-state))
            (current (or (plist-get state :thinking-level) "off"))
+           (available (pi-coding-agent--get-available-thinking-levels
+                       proc (plist-get state :model)))
            (choice (completing-read
                     (format "Thinking level (current: %s): " current)
-                    pi-coding-agent--thinking-levels
+                    available
                     nil t)))
       (unless (equal choice current)
         (pi-coding-agent--rpc-async

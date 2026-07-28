@@ -3479,6 +3479,36 @@ The tree is built iteratively to avoid recursion in test setup."
     (should completing-read-called)
     (should (equal captured-initial "opus"))))
 
+(ert-deftest pi-coding-agent-test-filter-thinking-levels-removes-model-aliases ()
+  "Thinking selector only offers distinct provider reasoning levels."
+  (should
+   (equal
+    (pi-coding-agent--filter-thinking-level-aliases
+     '("off" "minimal" "low" "medium" "high" "xhigh" "max")
+     '(:thinkingLevelMap
+       (:minimal "low" :low "low" :medium "medium"
+        :high "high" :xhigh "max" :max "max")))
+    '("off" "low" "medium" "high" "max"))))
+
+(ert-deftest pi-coding-agent-test-filter-thinking-levels-removes-unsupported-levels ()
+  "Explicitly unsupported model thinking levels are omitted."
+  (should
+   (equal
+    (pi-coding-agent--filter-thinking-level-aliases
+     '("off" "minimal" "low" "medium" "high" "xhigh" "max")
+     '(:thinkingLevelMap
+       (:minimal :null :low :null :medium :null :high "high"
+        :xhigh "xhigh" :max :null)))
+    '("off" "high" "xhigh"))))
+
+(ert-deftest pi-coding-agent-test-get-available-thinking-levels-errors-on-rpc-failure ()
+  "Thinking-level selection does not offer unsupported fallback values."
+  (cl-letf (((symbol-function 'pi-coding-agent--rpc-sync)
+             (lambda (&rest _)
+               '(:success :false :error "Unknown command"))))
+    (should-error (pi-coding-agent--get-available-thinking-levels :fake-proc)
+                  :type 'user-error)))
+
 (ert-deftest pi-coding-agent-test-select-thinking-refreshes-state-from-server ()
   "Thinking selector refreshes state so server clamping is visible in the UI."
   (let (captured-prompt captured-collection rpc-commands last-message)
@@ -3491,6 +3521,11 @@ The tree is built iteratively to avoid recursion in test setup."
                    (setq captured-prompt prompt
                          captured-collection collection)
                    "high"))
+                ((symbol-function 'pi-coding-agent--rpc-sync)
+                 (lambda (_proc cmd _timeout)
+                   (when (equal (plist-get cmd :type) "get_available_thinking_levels")
+                     '(:success t
+                       :data (:levels ["off" "minimal" "low" "medium" "high" "xhigh"])))))
                 ((symbol-function 'pi-coding-agent--rpc-async)
                  (lambda (_proc cmd callback)
                    (push cmd rpc-commands)
@@ -3528,6 +3563,11 @@ The tree is built iteratively to avoid recursion in test setup."
             pi-coding-agent--state '(:thinking-level "medium"))
       (cl-letf (((symbol-function 'completing-read)
                  (lambda (&rest _) "medium"))
+                ((symbol-function 'pi-coding-agent--rpc-sync)
+                 (lambda (_proc cmd _timeout)
+                   (when (equal (plist-get cmd :type) "get_available_thinking_levels")
+                     '(:success t
+                       :data (:levels ("off" "minimal" "low" "medium" "high" "xhigh"))))))
                 ((symbol-function 'pi-coding-agent--rpc-async)
                  (lambda (&rest _)
                    (setq rpc-called t))))
@@ -3549,6 +3589,11 @@ The tree is built iteratively to avoid recursion in test setup."
             pi-coding-agent--state '(:thinking-level "low"))
       (cl-letf (((symbol-function 'completing-read)
                  (lambda (&rest _) "high"))
+                ((symbol-function 'pi-coding-agent--rpc-sync)
+                 (lambda (_proc cmd _timeout)
+                   (when (equal (plist-get cmd :type) "get_available_thinking_levels")
+                     '(:success t
+                       :data (:levels ("off" "minimal" "low" "medium" "high" "xhigh"))))))
                 ((symbol-function 'pi-coding-agent--rpc-async)
                  (lambda (_proc cmd callback)
                    (push cmd rpc-commands)
@@ -3572,6 +3617,11 @@ The tree is built iteratively to avoid recursion in test setup."
             pi-coding-agent--state '(:thinking-level "low"))
       (cl-letf (((symbol-function 'completing-read)
                  (lambda (&rest _) "high"))
+                ((symbol-function 'pi-coding-agent--rpc-sync)
+                 (lambda (_proc cmd _timeout)
+                   (when (equal (plist-get cmd :type) "get_available_thinking_levels")
+                     '(:success t
+                       :data (:levels ("off" "minimal" "low" "medium" "high" "xhigh"))))))
                 ((symbol-function 'pi-coding-agent--rpc-async)
                  (lambda (_proc cmd callback)
                    (pcase (plist-get cmd :type)
