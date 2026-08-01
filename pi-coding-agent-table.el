@@ -623,5 +623,131 @@ Called from `pi-coding-agent--cleanup-on-kill' when a chat buffer dies."
     (kill-buffer pi-coding-agent--visible-string-buffer)
     (setq pi-coding-agent--visible-string-buffer nil)))
 
+;;;; Toggle (reveal raw table text for inspection / copy)
+
+;; When a table is toggled to raw (its display overlays removed so the
+;; canonical pipe text is visible for inspection / copy), we mark it
+;; with a lightweight overlay (`pi-coding-agent-table-raw') so the
+;; resize / re-decoration path leaves it alone.  State is overlay
+;; presence -- no separate bookkeeping -- mirroring the established
+;; Emacs pattern of `org-latex-preview' and `org-toggle-inline-images'.
+
+(defun pi-coding-agent--table-raw-p (beg end)
+  "Return non-nil when the table at BEG..END is marked raw (toggled off)."
+  (cl-some (lambda (ov) (overlay-get ov 'pi-coding-agent-table-raw))
+           (overlays-in beg end)))
+
+(defun pi-coding-agent--table-pretty-p (beg end)
+  "Return non-nil when the table at BEG..END currently has display overlays."
+  (cl-some (lambda (ov) (overlay-get ov 'pi-coding-agent-table-display))
+           (overlays-in beg end)))
+
+(defun pi-coding-agent--mark-table-raw (beg end)
+  "Mark the table at BEG..END as raw so resize won't re-decorate it."
+  (pi-coding-agent--unmark-table-raw beg end)
+  (let ((ov (make-overlay beg end nil nil nil)))
+    (overlay-put ov 'pi-coding-agent-table-raw t)
+    (overlay-put ov 'evaporate t)))
+
+(defun pi-coding-agent--unmark-table-raw (beg end)
+  "Remove the raw marker from the table at BEG..END."
+  (dolist (ov (overlays-in beg end))
+    (when (overlay-get ov 'pi-coding-agent-table-raw)
+      (delete-overlay ov))))
+
+(defun pi-coding-agent--table-at-point ()
+  "Return (BEG . END) for the tree-sitter table at point, or nil."
+  (cl-find-if (lambda (r)
+                (and (>= (point) (car r)) (< (point) (cdr r))))
+              (pi-coding-agent--treesit-table-regions
+               (point-min) (point-max))))
+
+(defun pi-coding-agent--force-table-state (state regions width)
+  "Apply STATE (`pretty' or `raw') to REGIONS at WIDTH."
+  (dolist (r regions)
+    (let ((beg (car r)) (end (cdr r)))
+      (pcase state
+        ('pretty
+         (pi-coding-agent--unmark-table-raw beg end)
+         (pi-coding-agent--remove-table-overlays beg end)
+         (pi-coding-agent--decorate-table beg end width))
+        ('raw
+         (pi-coding-agent--remove-table-overlays beg end)
+         (pi-coding-agent--mark-table-raw beg end))))))
+
+(defun pi-coding-agent-toggle-table-pretty (&optional arg)
+  "Toggle the pretty rendering of the table at point, or all tables.
+Point-aware, like `org-latex-preview':
+  - Point on a table  → toggle that table (pretty⇄raw).
+  - Point off-table, no region → toggle all tables in the buffer (if
+    any are pretty, make all raw; otherwise make all pretty).
+  - Active region      → toggle tables whose start falls in the region.
+  - `C-u'              → force pretty on all tables in the buffer.
+  - `C-u C-u'          → force raw on all tables in the buffer.
+
+The buffer text is always canonical (display-only overlays); toggling
+a table to raw reveals it for inspection / copy.  Toggle state is
+disposable: on resume / reload, pi re-renders all tables pretty from
+canonical (the default)."
+  (interactive "P")
+  (let ((width (pi-coding-agent--chat-display-width))
+        (all (pi-coding-agent--treesit-table-regions
+              (point-min) (point-max))))
+    (cond
+     ;; C-u C-u → force raw on all.
+     ((equal arg '(16))
+      (pi-coding-agent--force-table-state 'raw all width)
+      (message "Tables raw (%d)" (length all)))
+     ;; C-u → force pretty on all.
+     ((equal arg '(4))
+      (pi-coding-agent--force-table-state 'pretty all width)
+      (message "Tables pretty (%d)" (length all)))
+     ;; Active region → toggle tables starting in the region.
+     ((use-region-p)
+      (let* ((regs (pi-coding-agent--treesit-table-regions
+                    (region-beginning) (region-end)))
+             (any-pretty (cl-some
+                          (lambda (r)
+                            (pi-coding-agent--table-pretty-p
+                             (car r) (cdr r)))
+                          regs))
+             (state (if any-pretty 'raw 'pretty)))
+        (pi-coding-agent--force-table-state state regs width)
+        (message "Region tables %s (%d)"
+                 (if (eq state 'raw) "raw" "pretty") (length regs))))
+     ;; Point on a table → toggle it.
+     ((pi-coding-agent--table-at-point)
+      (let* ((bounds (pi-coding-agent--table-at-point))
+             (pretty (pi-coding-agent--table-pretty-p
+                      (car bounds) (cdr bounds))))
+        (pi-coding-agent--force-table-state
+         (if pretty 'raw 'pretty) (list bounds) width)
+        (message "Table %s" (if pretty "raw" "pretty"))))
+     ;; Point off-table → toggle all.
+     (t
+      (let ((any-pretty (cl-some
+                          (lambda (r)
+                            (pi-coding-agent--table-pretty-p
+                             (car r) (cdr r)))
+                          all)))
+        (pi-coding-agent--force-table-state
+         (if any-pretty 'raw 'pretty) all width)
+        (message "Tables %s (%d)"
+                 (if any-pretty "raw" "pretty") (length all)))))))
+
+;; Keep the re-decoration path (resize, resume, hot-tail refresh) from
+;; re-decorating tables that have been explicitly toggled to raw.
+;; Generalizes the existing overlay machinery so a user can dynamically
+;; disable rendering for a given table (or the whole buffer) without the
+;; next refresh clobbering that choice.  Purely additive: when no raw
+;; markers are present, behaviour is unchanged.
+(defun pi-coding-agent--skip-raw-tables (orig-fn beg end width)
+  "Skip decoration when the table at BEG..END is marked raw."
+  (unless (pi-coding-agent--table-raw-p beg end)
+    (funcall orig-fn beg end width)))
+(with-eval-after-load 'pi-coding-agent-table
+  (advice-add 'pi-coding-agent--decorate-table :around
+              #'pi-coding-agent--skip-raw-tables))
+
 (provide 'pi-coding-agent-table)
 ;;; pi-coding-agent-table.el ends here
