@@ -914,5 +914,172 @@ When fringes like `display-line-numbers-mode' consume columns,
         (should (= (pi-coding-agent--chat-window-width) 90))
         (should (equal (nreverse calls) '(nil)))))))
 
+
+;;; Toggle (reveal raw table text)
+
+(defconst pi-coding-agent-test--two-tables
+  (concat "| a | b |\n|---|---|\n| 1 | 2 |\n\n"
+          "| c | d |\n|---|---|\n| 3 | 4 |\n")
+  "Two pipe tables separated by a blank line, for toggle-all tests.")
+
+(defun pi-coding-agent-test--display-overlays ()
+  "Return pi table display overlays in the current buffer."
+  (cl-remove-if-not
+   (lambda (ov) (overlay-get ov 'pi-coding-agent-table-display))
+   (overlays-in (point-min) (point-max))))
+
+(defun pi-coding-agent-test--raw-overlays ()
+  "Return pi table raw-marker overlays in the current buffer."
+  (cl-remove-if-not
+   (lambda (ov) (overlay-get ov 'pi-coding-agent-table-raw))
+   (overlays-in (point-min) (point-max))))
+
+(defun pi-coding-agent-test--decorate-all-tables (&optional width)
+  "Decorate every table in the current buffer at WIDTH (default 80)."
+  (pi-coding-agent--decorate-tables-in-region
+   (point-min) (point-max) (or width 80)))
+
+(ert-deftest pi-coding-agent-test-toggle-on-table-reveals-raw ()
+  "Toggling a table at point removes its display overlays and marks it raw."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert pi-coding-agent-test--wide-table))
+    (font-lock-ensure)
+    (pi-coding-agent-test--decorate-all-tables)
+    (should (>= (length (pi-coding-agent-test--display-overlays)) 1))
+    (should (null (pi-coding-agent-test--raw-overlays)))
+    (goto-char (point-min))
+    (pi-coding-agent-toggle-table-pretty)
+    (should (null (pi-coding-agent-test--display-overlays)))
+    (should (= 1 (length (pi-coding-agent-test--raw-overlays))))))
+
+(ert-deftest pi-coding-agent-test-toggle-on-table-restores-pretty ()
+  "Toggling a raw table at point re-renders it and clears the raw marker."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert pi-coding-agent-test--wide-table))
+    (font-lock-ensure)
+    (pi-coding-agent-test--decorate-all-tables)
+    (goto-char (point-min))
+    (pi-coding-agent-toggle-table-pretty) ; pretty -> raw
+    (should (null (pi-coding-agent-test--display-overlays)))
+    (pi-coding-agent-toggle-table-pretty) ; raw -> pretty
+    (should (>= (length (pi-coding-agent-test--display-overlays)) 1))
+    (should (null (pi-coding-agent-test--raw-overlays)))))
+
+(ert-deftest pi-coding-agent-test-toggle-off-table-toggles-all ()
+  "Point off-table toggles every table in the buffer."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert pi-coding-agent-test--two-tables))
+    (font-lock-ensure)
+    (pi-coding-agent-test--decorate-all-tables)
+    (should (= 2 (length (pi-coding-agent--treesit-table-regions
+                          (point-min) (point-max)))))
+    ;; Point after the last table (off-table).
+    (goto-char (point-max))
+    (pi-coding-agent-toggle-table-pretty) ; all pretty -> all raw
+    (should (null (pi-coding-agent-test--display-overlays)))
+    (should (= 2 (length (pi-coding-agent-test--raw-overlays))))
+    (pi-coding-agent-toggle-table-pretty) ; all raw -> all pretty
+    (should (>= (length (pi-coding-agent-test--display-overlays)) 2))
+    (should (null (pi-coding-agent-test--raw-overlays)))))
+
+(ert-deftest pi-coding-agent-test-toggle-c-u-forces-pretty-on-all ()
+  "`C-u' forces pretty on every table, clearing any raw markers."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert pi-coding-agent-test--two-tables))
+    (font-lock-ensure)
+    (pi-coding-agent-test--decorate-all-tables)
+    ;; Toggle the first table to raw; the second stays pretty.
+    (goto-char (point-min))
+    (pi-coding-agent-toggle-table-pretty)
+    (should (= 1 (length (pi-coding-agent-test--raw-overlays))))
+    (should (>= (length (pi-coding-agent-test--display-overlays)) 1))
+    ;; C-u forces pretty on all: both tables re-decorated, raw cleared.
+    (pi-coding-agent-toggle-table-pretty '(4))
+    (should (>= (length (pi-coding-agent-test--display-overlays)) 2))
+    (should (null (pi-coding-agent-test--raw-overlays)))))
+
+(ert-deftest pi-coding-agent-test-toggle-c-u-c-u-forces-raw-on-all ()
+  "`C-u C-u' forces raw on every table, removing all display overlays."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert pi-coding-agent-test--two-tables))
+    (font-lock-ensure)
+    (pi-coding-agent-test--decorate-all-tables)
+    (should (>= (length (pi-coding-agent-test--display-overlays)) 2))
+    (pi-coding-agent-toggle-table-pretty '(16))
+    (should (null (pi-coding-agent-test--display-overlays)))
+    (should (= 2 (length (pi-coding-agent-test--raw-overlays))))))
+
+(ert-deftest pi-coding-agent-test-toggle-region-toggles-tables-in-region ()
+  "An active region toggles only tables whose start falls within it."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert pi-coding-agent-test--two-tables))
+    (font-lock-ensure)
+    (pi-coding-agent-test--decorate-all-tables)
+    (let ((transient-mark-mode t))
+      ;; Select a region covering only the second table.
+      (goto-char (point-min))
+      (search-forward "| c")
+      (set-mark (line-beginning-position))
+      (search-forward "| 4")
+      (end-of-line)
+      (setq mark-active t)
+      (pi-coding-agent-toggle-table-pretty)
+      ;; Second table raw, first table still pretty.
+      (should (= 1 (length (pi-coding-agent-test--raw-overlays))))
+      (let ((raw-start (overlay-start
+                        (car (pi-coding-agent-test--raw-overlays)))))
+        (should (> raw-start (point-min))))
+      (should (>= (length (pi-coding-agent-test--display-overlays)) 1)))))
+
+(ert-deftest pi-coding-agent-test-toggle-raw-survives-redecoration ()
+  "A table toggled to raw is skipped by the re-decoration path (resize/resume)."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert pi-coding-agent-test--two-tables))
+    (font-lock-ensure)
+    (pi-coding-agent-test--decorate-all-tables)
+    ;; Toggle the first table to raw; the second stays pretty.
+    (goto-char (point-min))
+    (pi-coding-agent-toggle-table-pretty)
+    (should (= 1 (length (pi-coding-agent-test--raw-overlays))))
+    (should (>= (length (pi-coding-agent-test--display-overlays)) 1))
+    ;; Simulate the resize / resume / hot-tail refresh path.
+    (pi-coding-agent-test--decorate-all-tables)
+    ;; The raw table stays raw; the second table (not marked) gets re-decorated.
+    (should (= 1 (length (pi-coding-agent-test--raw-overlays))))
+    (should (>= (length (pi-coding-agent-test--display-overlays)) 1))
+    ;; The raw marker is still on the first table.
+    (let ((raw-start (overlay-start
+                      (car (pi-coding-agent-test--raw-overlays)))))
+      (should (= raw-start (point-min))))))
+
+(ert-deftest pi-coding-agent-test-toggle-preserves-buffer-text ()
+  "Toggling never alters the canonical buffer text."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert pi-coding-agent-test--two-tables))
+    (font-lock-ensure)
+    (let ((before (buffer-string)))
+      (pi-coding-agent-test--decorate-all-tables)
+      (pi-coding-agent-toggle-table-pretty)        ; all pretty -> all raw
+      (pi-coding-agent-toggle-table-pretty '(4))   ; force pretty
+      (pi-coding-agent-toggle-table-pretty '(16))  ; force raw
+      (pi-coding-agent-test--decorate-all-tables)  ; resize path
+      (should (equal before (buffer-string))))))
+
 (provide 'pi-coding-agent-table-test)
 ;;; pi-coding-agent-table-test.el ends here
