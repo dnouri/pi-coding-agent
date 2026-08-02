@@ -682,8 +682,13 @@ Point-aware, like `org-latex-preview':
   - Point off-table, no region → toggle all tables in the buffer (if
     any are pretty, make all raw; otherwise make all pretty).
   - Active region      → toggle tables whose start falls in the region.
-  - `C-u'              → force pretty on all tables in the buffer.
-  - `C-u C-u'          → force raw on all tables in the buffer.
+  - \\[universal-argument] → force pretty on all tables in the buffer.
+  - \\[universal-argument] \\[universal-argument]
+    → force raw on all tables in the buffer.
+
+The optional prefix ARG overrides the toggle direction: a single
+\\[universal-argument] forces pretty on all tables, two force raw, and
+nil toggles as described above.
 
 The buffer text is always canonical (display-only overlays); toggling
 a table to raw reveals it for inspection / copy.  Toggle state is
@@ -742,12 +747,13 @@ canonical (the default)."
 ;; next refresh clobbering that choice.  Purely additive: when no raw
 ;; markers are present, behaviour is unchanged.
 (defun pi-coding-agent--skip-raw-tables (orig-fn beg end width)
-  "Skip decoration when the table at BEG..END is marked raw."
+  "Call ORIG-FN to decorate the table at BEG..END at WIDTH, unless raw.
+Used as `:around' advice on `pi-coding-agent--decorate-table' so the
+resize / resume / hot-tail re-decoration path skips tables marked raw."
   (unless (pi-coding-agent--table-raw-p beg end)
     (funcall orig-fn beg end width)))
-(with-eval-after-load 'pi-coding-agent-table
-  (advice-add 'pi-coding-agent--decorate-table :around
-              #'pi-coding-agent--skip-raw-tables))
+(advice-add 'pi-coding-agent--decorate-table :around
+            #'pi-coding-agent--skip-raw-tables)
 
 (provide 'pi-coding-agent-table)
 ;;; pi-coding-agent-table.el ends here
