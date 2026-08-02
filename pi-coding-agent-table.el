@@ -51,6 +51,20 @@
 ;; chat sessions cannot race.
 (defvar pi-coding-agent--visible-string-buffer nil)
 
+;;;; User Options
+
+(defcustom pi-coding-agent-table-cell-render-function nil
+  "Function to render a table cell for display, or nil for the default.
+When non-nil, called with the raw cell string (after pipe-splitting) and
+must return a propertized display string (delimiters may be folded,
+faces applied).  When nil, cells are rendered via
+`pi-coding-agent--markdown-visible-string' (markdown fontification).
+This lets an external table styler plug in WITHOUT pi depending on it —
+pi only calls whatever function the user sets here."
+  :type '(choice (const :tag "Default (markdown fontification)" nil)
+                 (function :tag "Custom cell render function"))
+  :group 'pi-coding-agent)
+
 ;;;; Buffer-Local State
 
 (defvar-local pi-coding-agent--last-table-display-width nil
@@ -401,7 +415,9 @@ Plain tables (no prefix) take a fast path that skips prefix splitting."
               (lambda (cell)
                 (or (gethash cell visible-cache)
                     (puthash cell
-                             (pi-coding-agent--markdown-visible-string cell)
+                             (if pi-coding-agent-table-cell-render-function
+                                 (funcall pi-coding-agent-table-cell-render-function cell)
+                               (pi-coding-agent--markdown-visible-string cell))
                              visible-cache))))
              (display-headers (mapcar display-cell headers))
              (display-rows
