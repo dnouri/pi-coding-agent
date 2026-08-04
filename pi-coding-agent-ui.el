@@ -824,6 +824,10 @@ Derives from `md-ts-mode' for tree-sitter syntax highlighting.
 This is a read-only buffer showing the conversation history."
   :group 'pi-coding-agent
   (setq-local buffer-read-only t)
+  ;; Chat buffers are generated read-only views.  Recording every incremental
+  ;; streaming and rendering update retains large undo trees for content the
+  ;; user cannot edit, so keep undo disabled for the lifetime of the buffer.
+  (buffer-disable-undo)
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
   ;; Hide markdown markup (**, `, ```) for cleaner display

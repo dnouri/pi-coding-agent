@@ -92,6 +92,16 @@ This ensures all files get code fences for consistent display."
     (pi-coding-agent-chat-mode)
     (should buffer-read-only)))
 
+(ert-deftest pi-coding-agent-test-chat-mode-disables-undo-history ()
+  "Generated chat updates do not accumulate undo history."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (should (eq buffer-undo-list t))
+    (let ((inhibit-read-only t))
+      (insert "streamed response")
+      (delete-region (point-min) (point-max)))
+    (should (eq buffer-undo-list t))))
+
 (ert-deftest pi-coding-agent-test-chat-mode-has-word-wrap ()
   "pi-coding-agent-chat-mode enables word wrap."
   (with-temp-buffer
