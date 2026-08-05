@@ -919,6 +919,106 @@ still mock the RPC boundary, so the process is never used for I/O."
         (delete-process proc))
       (pi-coding-agent-test--kill-session-buffers root))))
 
+(ert-deftest pi-coding-agent-test-setup-session-ignores-stale-startup-error ()
+  "A replaced startup process must not render into the newer process chat."
+  (let ((root (pi-coding-agent-test--make-temp-directory
+               "pi-coding-agent-test-stale-startup-error-"))
+        (old-proc (start-process "pi-coding-agent-old-startup" nil "cat"))
+        (new-proc (start-process "pi-coding-agent-new-startup" nil "cat"))
+        (state-callback nil)
+        (chat nil))
+    (unwind-protect
+        (progn
+          (set-process-query-on-exit-flag old-proc nil)
+          (set-process-query-on-exit-flag new-proc nil)
+          (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                    ((symbol-function 'pi-coding-agent--start-process)
+                     (lambda (_) old-proc))
+                    ((symbol-function 'pi-coding-agent--fetch-commands)
+                     (lambda (&rest _) nil))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (proc cmd callback)
+                       (should (eq proc old-proc))
+                       (should (equal (plist-get cmd :type) "get_state"))
+                       (setq state-callback callback))))
+            (setq chat (pi-coding-agent--setup-session root nil)))
+          (should state-callback)
+          (with-current-buffer chat
+            (pi-coding-agent--set-process new-proc))
+          (delete-process old-proc)
+          (funcall state-callback
+                   '(:type "response"
+                     :command "get_state"
+                     :success :false
+                     :processExit t
+                     :error "Process exited: old startup failed"
+                     :stderr "OLD-STARTUP-STDERR"
+                     :exitCode 1))
+          (with-current-buffer chat
+            (should (eq pi-coding-agent--process new-proc))
+            (should-not (string-match-p "OLD-STARTUP-STDERR"
+                                        (buffer-string)))
+            (should-not (string-match-p "pi failed to start"
+                                        (buffer-string))))
+          (should-not (process-get old-proc
+                                   'pi-coding-agent-exit-error-rendered)))
+      (pi-coding-agent-test--kill-session-buffers root)
+      (pi-coding-agent--unregister-display-handler old-proc)
+      (when (process-live-p old-proc)
+        (delete-process old-proc))
+      (when (process-live-p new-proc)
+        (delete-process new-proc)))))
+
+(ert-deftest pi-coding-agent-test-setup-session-deduplicates-dead-startup-exit ()
+  "A dead initial get_state process renders its stderr only once."
+  (let ((root (pi-coding-agent-test--make-temp-directory
+               "pi-coding-agent-test-startup-exit-dedup-"))
+        (proc (start-process "pi-coding-agent-startup-exit-dedup" nil
+                             "sh" "-c" "exit 1"))
+        (response '(:type "response"
+                    :command "get_state"
+                    :success :false
+                    :processExit t
+                    :error "Process exited: exited abnormally with code 1"
+                    :stderr "ECOMPROMISED: lock was compromised"
+                    :exitCode 1))
+        (chat nil))
+    (unwind-protect
+        (progn
+          (set-process-sentinel proc nil)
+          (set-process-query-on-exit-flag proc nil)
+          (should (pi-coding-agent-test-wait-for-process-exit proc))
+          (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                    ((symbol-function 'pi-coding-agent--start-process)
+                     (lambda (_) proc))
+                    ((symbol-function 'pi-coding-agent--fetch-commands)
+                     (lambda (&rest _) nil))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (rpc-proc cmd callback)
+                       (should (eq rpc-proc proc))
+                       (should (equal (plist-get cmd :type) "get_state"))
+                       ;; Core dispatches pending callbacks before the exit
+                       ;; handler, so reproduce that order here.
+                       (funcall callback response)
+                       (funcall (process-get proc
+                                            'pi-coding-agent-exit-handler)
+                                response))))
+            (setq chat (pi-coding-agent--setup-session root nil)))
+          (should (process-get proc
+                               'pi-coding-agent-exit-error-rendered))
+          (with-current-buffer chat
+            (let ((chat-text (buffer-string)))
+              (should (= (pi-coding-agent-test--count-matches
+                          "ECOMPROMISED" chat-text)
+                         1))
+              (should (= (pi-coding-agent-test--count-matches
+                          "pi failed to start" chat-text)
+                         1))
+              (should-not (string-match-p "pi process exited" chat-text)))))
+      (when (process-live-p proc)
+        (delete-process proc))
+      (pi-coding-agent-test--kill-session-buffers root))))
+
 (ert-deftest pi-coding-agent-test-setup-session-shows-startup-env-node-hint ()
   "Initial env/node startup failures should explain subprocess PATH."
   (let ((root (pi-coding-agent-test--make-temp-directory

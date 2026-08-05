@@ -616,6 +616,7 @@ containing EVENT, then clears this process's pending request tables."
          (error-response
           (append (list :type "response"
                         :success :false
+                        :processExit t
                         :error (format "Process exited: %s" (string-trim event))
                         :exitCode exit-code)
                   (when stderr

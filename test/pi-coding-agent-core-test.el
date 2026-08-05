@@ -1297,6 +1297,7 @@ and starting in DIRECTORY or `/tmp/'."
                    (pi-coding-agent--get-pending-requests fake-proc))
           (pi-coding-agent--handle-process-exit
            fake-proc "exited abnormally with code 127")
+          (should (eq (plist-get response :processExit) t))
           (should (equal (plist-get response :exitCode) 127)))
       (when (process-live-p fake-proc)
         (delete-process fake-proc)))))
