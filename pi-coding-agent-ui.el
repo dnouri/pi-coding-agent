@@ -235,10 +235,10 @@ For example:
   :group 'pi-coding-agent)
 
 (defcustom pi-coding-agent-quit-without-confirmation nil
-  "Whether `pi-coding-agent-quit' skips confirmation for a live process.
-When non-nil, quitting a session never asks whether a running pi process
-should be terminated.  When nil, `pi-coding-agent-quit' and direct buffer
-kills prompt before killing a live process."
+  "Whether quitting skips confirmation for a live process.
+When non-nil, closing a session never asks whether a running pi process
+should be terminated.  When nil, `pi-coding-agent-quit', direct buffer
+kills, and exiting Emacs all prompt before killing a live process."
   :type 'boolean
   :group 'pi-coding-agent)
 
@@ -1534,6 +1534,23 @@ Works from either chat or input buffer."
   (let ((proc (pi-coding-agent--get-process)))
     (or (not (pi-coding-agent--process-kill-confirmation-required-p proc))
         (yes-or-no-p "Pi session has a running process; kill it? "))))
+
+(defun pi-coding-agent--session-kill-emacs-query ()
+  "Ask before exiting Emacs terminates a live pi session process.
+Session processes are started with `:noquery', so Emacs' own exit query
+does not see them; this function replaces it with pi's confirmation.
+Return nil to abort the exit."
+  (or (not (cl-some (lambda (proc)
+                      (and (process-get proc 'pi-coding-agent-chat-buffer)
+                           (pi-coding-agent--process-kill-confirmation-required-p
+                            proc)))
+                    (process-list)))
+      (yes-or-no-p "Pi session has a running process; exit anyway? ")))
+
+;; Closing the last frame kills Emacs without killing session buffers, so
+;; `kill-buffer-query-functions' never runs.  Guard that path explicitly.
+(add-hook 'kill-emacs-query-functions
+          #'pi-coding-agent--session-kill-emacs-query)
 
 (defun pi-coding-agent--retarget-session-buffers (dir)
   "Retarget the current chat/input session buffers to DIR."
