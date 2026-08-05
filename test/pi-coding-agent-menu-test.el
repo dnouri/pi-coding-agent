@@ -390,6 +390,51 @@ BINDING-SPEC is (DIR CHAT-NAME INPUT-NAME PROC).  DIR is evaluated once."
       (should (process-live-p proc))
       (should-not (process-query-on-exit-flag proc)))))
 
+(ert-deftest pi-coding-agent-test-kill-emacs-query-is-installed ()
+  "Exiting Emacs consults pi sessions via `kill-emacs-query-functions'."
+  (should (memq #'pi-coding-agent--session-kill-emacs-query
+                kill-emacs-query-functions)))
+
+(ert-deftest pi-coding-agent-test-kill-emacs-query-prompts-for-live-session ()
+  "Exiting Emacs asks once when a session process is still running."
+  (let ((prompt-count 0))
+    (pi-coding-agent-test--with-quit-confirmable-session
+        ("/tmp/pi-coding-agent-test-kill-emacs-query/" chat-name input-name proc)
+      (cl-letf (((symbol-function 'process-list) (lambda () (list proc)))
+                ((symbol-function 'yes-or-no-p)
+                 (lambda (prompt)
+                   (cl-incf prompt-count)
+                   (should (equal prompt
+                                  "Pi session has a running process; exit anyway? "))
+                   nil)))
+        (should-not (pi-coding-agent--session-kill-emacs-query))
+        (should (= prompt-count 1)))
+      (cl-letf (((symbol-function 'process-list) (lambda () (list proc)))
+                ((symbol-function 'yes-or-no-p) (lambda (_) t)))
+        (should (pi-coding-agent--session-kill-emacs-query)))
+      (should (get-buffer chat-name))
+      (should (get-buffer input-name))
+      (should (process-live-p proc)))))
+
+(ert-deftest pi-coding-agent-test-kill-emacs-query-asks-only-when-required ()
+  "Exit stays silent for dead, skipped, or configured-away processes."
+  (pi-coding-agent-test--with-quit-confirmable-session
+      ("/tmp/pi-coding-agent-test-kill-emacs-silent/" _chat _input proc)
+    (cl-letf (((symbol-function 'process-list) (lambda () (list proc)))
+              ((symbol-function 'yes-or-no-p)
+               (lambda (&rest _)
+                 (ert-fail "kill-emacs query prompted unexpectedly"))))
+      ;; Intentional teardown marks the process; exit must not ask again.
+      (pi-coding-agent--skip-process-kill-confirmation proc)
+      (should (pi-coding-agent--session-kill-emacs-query))
+      (process-put proc 'pi-coding-agent-skip-kill-confirmation nil)
+      ;; Opt-out defcustom applies to Emacs exit as it does to quit.
+      (let ((pi-coding-agent-quit-without-confirmation t))
+        (should (pi-coding-agent--session-kill-emacs-query)))
+      ;; A dead process is nothing to protect.
+      (delete-process proc)
+      (should (pi-coding-agent--session-kill-emacs-query)))))
+
 (ert-deftest pi-coding-agent-test-kill-input-cancelled-preserves-session ()
   "Killing input buffer asks before terminating the linked live process."
   (let ((prompt-count 0))
