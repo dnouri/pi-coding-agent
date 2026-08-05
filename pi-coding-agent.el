@@ -152,10 +152,19 @@ Returns the chat buffer."
                             (pi-coding-agent--display-no-model-warning)))))
                   (when (buffer-live-p buf)
                     (with-current-buffer buf
-                      (pi-coding-agent--display-startup-error
-                       (plist-get response :error)
-                       (plist-get response :stderr)
-                       (plist-get response :exitCode)))))))
+                      (when (eq pi-coding-agent--process proc)
+                        (pi-coding-agent--display-startup-error
+                         (plist-get response :error)
+                         (plist-get response :stderr)
+                         (plist-get response :exitCode))
+                        ;; Core invokes pending callbacks before the generic exit
+                        ;; handler.  Remember this dead process was rendered so
+                        ;; that handler does not append the same diagnostic again.
+                        (when (and (plist-get response :processExit)
+                                   (processp proc)
+                                   (not (process-live-p proc)))
+                          (process-put
+                           proc 'pi-coding-agent-exit-error-rendered t))))))))
             ;; Fetch commands via RPC (independent of get_state)
             (pi-coding-agent--fetch-commands proc
               (lambda (commands)

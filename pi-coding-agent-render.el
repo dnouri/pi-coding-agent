@@ -876,23 +876,43 @@ Shows success or final failure with raw error."
                          line))
                (throw 'found t)))))))
 
+(defun pi-coding-agent--format-process-error
+    (heading error-msg &optional stderr detail)
+  "Format process error HEADING and ERROR-MSG.
+Include optional STDERR in a text fence and optional DETAIL before it."
+  (let ((stderr (and (stringp stderr)
+                     (not (string-empty-p stderr))
+                     stderr)))
+    (concat "\n"
+            (propertize heading 'face 'pi-coding-agent-error-notice)
+            "\n\n"
+            (or error-msg "unknown error")
+            (when detail (concat "\n\n" detail))
+            (when stderr
+              (concat "\n\n"
+                      (propertize "stderr:"
+                                  'face 'pi-coding-agent-retry-notice)
+                      "\n```text\n"
+                      stderr
+                      (unless (string-suffix-p "\n" stderr) "\n")
+                      "```\n")))))
+
 (defun pi-coding-agent--display-startup-error (error-msg &optional stderr exit-code)
   "Display a pi startup ERROR-MSG, optional STDERR, and EXIT-CODE."
   (pi-coding-agent--append-to-chat
-   (concat "\n"
-           (propertize "✗ pi failed to start"
-                       'face 'pi-coding-agent-error-notice)
-           "\n\n"
-           (or error-msg "unknown error")
-           (when stderr
-             (concat "\n\n"
-                     (propertize "stderr:" 'face 'pi-coding-agent-retry-notice)
-                     "\n```text\n"
-                     stderr
-                     (unless (string-suffix-p "\n" stderr) "\n")
-                     "```\n"))
+   (concat (pi-coding-agent--format-process-error
+            "✗ pi failed to start" error-msg stderr)
            (when (pi-coding-agent--startup-env-node-error-p exit-code stderr)
              (concat "\n" pi-coding-agent--startup-env-node-hint "\n")))))
+
+(defun pi-coding-agent--display-process-exit-error
+    (error-msg &optional stderr exit-code)
+  "Display a pi process exit ERROR-MSG, optional STDERR, and EXIT-CODE."
+  (pi-coding-agent--append-to-chat
+   (pi-coding-agent--format-process-error
+    "✗ pi process exited" error-msg stderr
+    (when exit-code
+      (format "Exit code: %s" exit-code)))))
 
 (defun pi-coding-agent--display-extension-error (event)
   "Display extension error from extension_error EVENT."
@@ -1129,20 +1149,27 @@ which asks upfront before any buffers are touched."
 
 (defun pi-coding-agent--mark-process-exited (process response)
   "Mark current chat buffer idle after PROCESS exits with RESPONSE."
-  (setq pi-coding-agent--status 'idle)
-  (setq pi-coding-agent--state-timestamp (float-time))
-  (setq pi-coding-agent--state
-        (plist-put pi-coding-agent--state :last-error
-                   (plist-get response :error)))
   (when (eq pi-coding-agent--process process)
-    (pi-coding-agent--set-process nil))
-  (pi-coding-agent--set-activity-phase "idle")
-  (setq pi-coding-agent--local-user-message nil)
-  (setq pi-coding-agent--pre-compaction-status nil)
-  (pi-coding-agent--cancel-followup-drain-timer)
-  (pi-coding-agent--invalidate-prompt-start-wait)
-  (pi-coding-agent--restore-followup-queue-to-input)
-  (force-mode-line-update t))
+    (let ((error-msg (or (plist-get response :error) "Process exited")))
+      (setq pi-coding-agent--status 'idle)
+      (setq pi-coding-agent--state-timestamp (float-time))
+      (setq pi-coding-agent--state
+            (plist-put pi-coding-agent--state :last-error error-msg))
+      (unwind-protect
+          (unless (process-get process 'pi-coding-agent-exit-error-rendered)
+            (pi-coding-agent--display-process-exit-error
+             error-msg
+             (plist-get response :stderr)
+             (plist-get response :exitCode))
+            (process-put process 'pi-coding-agent-exit-error-rendered t))
+        (pi-coding-agent--set-process nil)
+        (pi-coding-agent--set-activity-phase "idle")
+        (setq pi-coding-agent--local-user-message nil)
+        (setq pi-coding-agent--pre-compaction-status nil)
+        (pi-coding-agent--cancel-followup-drain-timer)
+        (pi-coding-agent--invalidate-prompt-start-wait)
+        (pi-coding-agent--restore-followup-queue-to-input)
+        (force-mode-line-update t)))))
 
 (defun pi-coding-agent--display-custom-message (content)
   "Display visible custom CONTENT in the current chat buffer."

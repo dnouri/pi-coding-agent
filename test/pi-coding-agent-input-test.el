@@ -831,8 +831,10 @@ When user aborts, they want to stop everything - including queued messages."
             (setq pi-coding-agent--process fake-proc)
             (pi-coding-agent--register-display-handler fake-proc)
             (should (process-get fake-proc 'pi-coding-agent-display-handler))
+            (should (process-get fake-proc 'pi-coding-agent-exit-handler))
             (pi-coding-agent--cleanup-on-kill)
-            (should-not (process-get fake-proc 'pi-coding-agent-display-handler)))
+            (should-not (process-get fake-proc 'pi-coding-agent-display-handler))
+            (should-not (process-get fake-proc 'pi-coding-agent-exit-handler)))
         (when (process-live-p fake-proc)
           (delete-process fake-proc))))))
 
@@ -3330,14 +3332,22 @@ Pi handles command expansion on the server side."
       (pi-coding-agent-test--kill-live-buffers input-buf chat-buf))))
 
 (ert-deftest pi-coding-agent-test-process-exit-resets-busy-chat-and-restores-queue ()
-  "Process exit leaves the frontend idle and surfaces queued local work."
+  "Process exit leaves the frontend idle, visible, and restores queued work."
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-process-exit-chat*"))
         (input-buf (get-buffer-create "*pi-coding-agent-test-process-exit-input*"))
-        (proc (start-process "test-process-exit" nil "cat")))
+        (stderr-buf (generate-new-buffer
+                     " *pi-coding-agent-test-process-exit-stderr*"))
+        (proc (start-process "test-process-exit" nil "sh" "-c" "exit 1")))
     (unwind-protect
         (progn
           (set-process-sentinel proc nil)
           (set-process-query-on-exit-flag proc nil)
+          (should (pi-coding-agent-test-wait-for-process-exit proc))
+          (with-current-buffer stderr-buf
+            (insert "ECOMPROMISED: lock was compromised\n"
+                    (make-string 5000 ?x)
+                    "\nEND provider stack\n"))
+          (process-put proc 'pi-coding-agent-stderr-buf stderr-buf)
           (process-put proc 'pi-coding-agent-chat-buffer chat-buf)
           (pi-coding-agent--register-display-handler proc)
           (with-current-buffer input-buf
@@ -3352,21 +3362,148 @@ Pi handles command expansion on the server side."
                   pi-coding-agent--local-user-message "pending echo"
                   pi-coding-agent--followup-queue '("queued after crash")
                   pi-coding-agent--prompt-start-generation 7)
-            (pi-coding-agent--handle-process-exit proc "exited abnormally with code 1\n")
+            (pi-coding-agent--handle-process-exit proc
+                                                  "exited abnormally with code 1\n")
             (should (eq pi-coding-agent--status 'idle))
             (should (equal pi-coding-agent--activity-phase "idle"))
             (should (null pi-coding-agent--process))
             (should (null pi-coding-agent--local-user-message))
             (should (null pi-coding-agent--followup-queue))
             (should (> pi-coding-agent--prompt-start-generation 7))
-            (should (string-match-p "Process exited"
-                                    (plist-get pi-coding-agent--state :last-error))))
+            (should (equal (plist-get pi-coding-agent--state :last-error)
+                           "Process exited: exited abnormally with code 1"))
+            (let ((chat-text (buffer-string)))
+              (should (string-match-p "pi process exited" chat-text))
+              (should (string-match-p
+                       "Process exited: exited abnormally with code 1"
+                       chat-text))
+              (should (string-match-p "Exit code: 1" chat-text))
+              (should (string-match-p "ECOMPROMISED" chat-text))
+              (should (string-match-p "stderr truncated" chat-text))
+              (should (string-match-p "END provider stack" chat-text))
+              (should (< (length chat-text) 4500))))
+          (should-not (buffer-live-p stderr-buf))
           (with-current-buffer input-buf
             (should (equal (buffer-string) "queued after crash"))))
+      (when (buffer-live-p stderr-buf)
+        (kill-buffer stderr-buf))
       (when (process-live-p proc)
         (delete-process proc))
       (kill-buffer chat-buf)
       (kill-buffer input-buf))))
+
+(ert-deftest pi-coding-agent-test-process-exit-without-stderr-is-visible ()
+  "A current process exit remains visible when no stderr was captured."
+  (let ((chat-buf (get-buffer-create
+                   "*pi-coding-agent-test-process-exit-no-stderr-chat*"))
+        (proc (start-process "test-process-exit-no-stderr" nil
+                             "sh" "-c" "exit 2")))
+    (unwind-protect
+        (progn
+          (set-process-sentinel proc nil)
+          (set-process-query-on-exit-flag proc nil)
+          (should (pi-coding-agent-test-wait-for-process-exit proc))
+          (process-put proc 'pi-coding-agent-chat-buffer chat-buf)
+          (pi-coding-agent--register-display-handler proc)
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--process proc)
+            (pi-coding-agent--handle-process-exit proc
+                                                  "exited abnormally with code 2\n")
+            (let ((chat-text (buffer-string)))
+              (should (string-match-p "pi process exited" chat-text))
+              (should (string-match-p "Process exited" chat-text))
+              (should (string-match-p "Exit code: 2" chat-text))
+              (should-not (string-match-p "stderr:" chat-text)))))
+      (when (process-live-p proc)
+        (delete-process proc))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-process-exit-cleans-up-when-display-errors ()
+  "Current process cleanup and queue restoration survive a display error."
+  (let ((chat-buf (generate-new-buffer
+                   "*pi-coding-agent-test-process-exit-display-error-chat*"))
+        (input-buf (generate-new-buffer
+                    "*pi-coding-agent-test-process-exit-display-error-input*"))
+        (proc (start-process "test-process-exit-display-error" nil "cat"))
+        (mode-line-updates 0))
+    (unwind-protect
+        (progn
+          (set-process-query-on-exit-flag proc nil)
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf))
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'streaming
+                  pi-coding-agent--activity-phase "replying"
+                  pi-coding-agent--process proc
+                  pi-coding-agent--input-buffer input-buf
+                  pi-coding-agent--local-user-message "pending echo"
+                  pi-coding-agent--pre-compaction-status 'streaming
+                  pi-coding-agent--followup-queue '("restore after error")
+                  pi-coding-agent--prompt-start-generation 11)
+            (cl-letf (((symbol-function
+                        'pi-coding-agent--display-process-exit-error)
+                       (lambda (&rest _)
+                         (error "display failed")))
+                      ((symbol-function 'force-mode-line-update)
+                       (lambda (&optional _all)
+                         (setq mode-line-updates (1+ mode-line-updates)))))
+              (should-error
+               (pi-coding-agent--mark-process-exited
+                proc '(:success :false
+                       :error "Process exited: display failure"
+                       :exitCode 1))
+               :type 'error)
+              (should (eq pi-coding-agent--status 'idle))
+              (should (equal pi-coding-agent--activity-phase "idle"))
+              (should (null pi-coding-agent--process))
+              (should (null pi-coding-agent--local-user-message))
+              (should (null pi-coding-agent--pre-compaction-status))
+              (should (null pi-coding-agent--followup-queue))
+              (should (> pi-coding-agent--prompt-start-generation 11))
+              (should (>= mode-line-updates 2))))
+          (with-current-buffer input-buf
+            (should (equal (buffer-string) "restore after error"))))
+      (when (process-live-p proc)
+        (delete-process proc))
+      (pi-coding-agent-test--kill-live-buffers input-buf chat-buf))))
+
+(ert-deftest pi-coding-agent-test-stale-process-exit-is-not-rendered ()
+  "A registered process that is not current must not show a crash block."
+  (let ((current-proc (start-process "test-current-process" nil "cat"))
+        (stale-proc (start-process "test-stale-process" nil "cat")))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (setq pi-coding-agent--process current-proc
+                pi-coding-agent--status 'streaming
+                pi-coding-agent--activity-phase "replying"
+                pi-coding-agent--state '(:last-error "keep me")
+                pi-coding-agent--local-user-message "in flight"
+                pi-coding-agent--followup-queue '("still queued"))
+          (process-put stale-proc 'pi-coding-agent-chat-buffer
+                       (current-buffer))
+          (pi-coding-agent--register-display-handler stale-proc)
+          (funcall (process-get stale-proc 'pi-coding-agent-exit-handler)
+                   '(:success :false
+                     :error "Process exited: stale transition failed"
+                     :exitCode 1
+                     :stderr "ECOMPROMISED: stale process"))
+          (should (eq pi-coding-agent--process current-proc))
+          (should (eq pi-coding-agent--status 'streaming))
+          (should (equal pi-coding-agent--activity-phase "replying"))
+          (should (equal (plist-get pi-coding-agent--state :last-error)
+                         "keep me"))
+          (should (equal pi-coding-agent--local-user-message "in flight"))
+          (should (equal pi-coding-agent--followup-queue '("still queued")))
+          (should-not (string-match-p "pi process exited" (buffer-string))))
+      (pi-coding-agent--unregister-display-handler stale-proc)
+      (when (process-live-p current-proc)
+        (delete-process current-proc))
+      (when (process-live-p stale-proc)
+        (delete-process stale-proc)))))
 
 (ert-deftest pi-coding-agent-test-process-exit-restores-direct-pending-prompt ()
   "Process exit restores a direct prompt whose RPC preflight never completed."
