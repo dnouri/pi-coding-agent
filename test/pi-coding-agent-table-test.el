@@ -496,6 +496,53 @@ formatting (bold, italic) in the display string's text properties."
       (should (string-match-p "0xAF" display))
       (should (string-match-p "bold" display)))))
 
+(ert-deftest pi-coding-agent-test-table-cell-render-function-is-used ()
+  "A non-nil `pi-coding-agent-table-cell-render-function' renders cells.
+display-cell calls it INSTEAD of the built-in markdown fontification,
+so an external table styler can shape cell display without pi depending
+on it.  Here the styler upcases cells — observable behavior that
+fontification would never produce."
+  (let ((pi-coding-agent-table-cell-render-function
+         (lambda (cell) (upcase cell))))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t))
+        (insert "| name |\n|------|\n| alice |\n"))
+      (font-lock-ensure)
+      (pi-coding-agent--decorate-tables-in-region (point-min) (point-max) 40)
+      (let ((display (mapconcat #'identity
+                                (pi-coding-agent-test--table-overlay-displays-in-region
+                                 (point-min) (point-max))
+                                "\n")))
+        ;; the custom styler upcased the cell (fontification never would).
+        ;; Bind case-fold-search nil: string-match-p otherwise matches
+        ;; "alice" against "ALICE" case-insensitively.
+        (let ((case-fold-search nil))
+          (should (string-match-p "ALICE" display))
+          (should-not (string-match-p "alice" display)))
+        ;; canonical buffer text is untouched
+        (should (string-match-p "| alice |" (buffer-string)))))))
+
+(ert-deftest pi-coding-agent-test-table-cell-render-function-faces-survive ()
+  "Faces applied by a custom render function reach the display string.
+`pi-coding-agent--neutralize-fonts' resolves them to attribute plists,
+so an external styler's faces (e.g. bold) render just like built-in
+markdown faces do."
+  (let ((pi-coding-agent-table-cell-render-function
+         (lambda (cell) (propertize cell 'face 'bold))))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((inhibit-read-only t))
+        (insert "| name |\n|------|\n| alice |\n"))
+      (font-lock-ensure)
+      (pi-coding-agent--decorate-tables-in-region (point-min) (point-max) 40)
+      (let ((display (mapconcat #'identity
+                                (pi-coding-agent-test--table-overlay-displays-in-region
+                                 (point-min) (point-max))
+                                "\n")))
+        (should (string-match-p "alice" display))
+        (should (pi-coding-agent-test--string-has-face-attr-p display :weight 'bold))))))
+
 (ert-deftest pi-coding-agent-test-decorate-table-keeps-blockquote-prefix ()
   "Display-only wrapping preserves blockquote prefixes on every visual line."
   (with-temp-buffer
