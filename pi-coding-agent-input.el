@@ -310,12 +310,16 @@ The /compact command is handled locally; other slash commands sent to pi."
   (interactive)
   (let* ((text (string-trim (buffer-string)))
          (chat-buf (pi-coding-agent--get-chat-buffer))
-         (transitioning (and chat-buf
+         (chat-live-p (buffer-live-p chat-buf))
+         (transitioning (and chat-live-p
                              (pi-coding-agent--session-transition-active-p
                               chat-buf)))
-         (busy (and chat-buf (pi-coding-agent--session-busy-p chat-buf))))
+         (busy (and chat-live-p
+                    (pi-coding-agent--session-busy-p chat-buf))))
     (cond
      ((string-empty-p text) nil)
+     ((not chat-live-p)
+      (message "Pi: No chat session available"))
      (transitioning
       (message "Pi: Cannot send while session is switching"))
      ((and busy (pi-coding-agent--builtin-command-text-p text))
@@ -331,11 +335,11 @@ The /compact command is handled locally; other slash commands sent to pi."
 
 (defun pi-coding-agent-abort ()
   "Abort the current pi operation.
-Works while streaming or compacting."
+Works while sending, streaming, or compacting."
   (interactive)
   (when-let* ((chat-buf (pi-coding-agent--get-chat-buffer)))
     (let ((status (buffer-local-value 'pi-coding-agent--status chat-buf)))
-      (when (memq status '(streaming compacting))
+      (when (memq status '(sending streaming compacting))
         (when (eq status 'streaming)
           (with-current-buffer chat-buf
             (pi-coding-agent--set-aborted t)))
@@ -388,12 +392,16 @@ Includes both built-in commands and commands from pi's `get_commands' RPC."
   (when (and (eq (char-after (point-min)) ?/)
              (> (point) (point-min)))
     (let* ((start (1+ (point-min)))
-           (end (point))
+           (end (save-excursion
+                  (goto-char start)
+                  (skip-chars-forward "^ \t\n")
+                  (point)))
            (builtin-names (mapcar #'car pi-coding-agent--builtin-commands))
            (rpc-names (mapcar (lambda (cmd) (plist-get cmd :name))
                               pi-coding-agent--commands))
            (commands (delete-dups (append builtin-names rpc-names))))
-      (list start end commands :exclusive 'no))))
+      (when (<= start (point) end)
+        (list start end commands :exclusive 'no)))))
 
 ;;;; Editor Features: File Reference (@)
 
@@ -479,15 +487,9 @@ Triggers when @ is typed, provides completion of project files."
                           (point)))))
     (let* ((start (1+ at-pos))
            (end (point))
-           (prefix (buffer-substring-no-properties start end))
-           (files (pi-coding-agent--get-project-files))
-           (candidates (if (string-empty-p prefix)
-                           files
-                         (cl-remove-if-not
-                          (lambda (f) (string-match-p (regexp-quote prefix) f))
-                          files))))
-      (when candidates
-        (list start end candidates
+           (files (pi-coding-agent--get-project-files)))
+      (when files
+        (list start end files
               :exclusive 'no
               :annotation-function (lambda (_) " (file)")
               :company-kind (lambda (_) 'file))))))

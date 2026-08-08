@@ -656,6 +656,14 @@ handled, even when the response failed."
                     (pi-coding-agent--finish-session-transition
                      generation)))))))))))
 
+(defun pi-coding-agent--discard-reload-process (proc)
+  "Detach and terminate temporary reload process PROC."
+  (when (processp proc)
+    (pi-coding-agent--unregister-display-handler proc)
+    (when (process-live-p proc)
+      (delete-process proc))
+    (pi-coding-agent--cleanup-process-stderr-buffer proc)))
+
 ;;;###autoload
 (defun pi-coding-agent-reload ()
   "Reload the current session by restarting the pi process.
@@ -675,6 +683,7 @@ buffer from session history."
       (message "Pi: No session to reload"))
      ((not session-file)
       (message "Pi: No session file available - cannot reload"))
+     ((not (pi-coding-agent--session-transition-ready-p chat-buf "reload")))
      (t
       (message "Pi: Reloading...")
       (with-current-buffer chat-buf
@@ -699,8 +708,12 @@ buffer from session history."
                  new-proc
                  (list :type "switch_session" :sessionPath session-path)
                  (lambda (response)
-                   (when (pi-coding-agent--session-transition-current-p
-                          chat-buf new-proc generation)
+                   (when (or (pi-coding-agent--session-transition-current-p
+                              chat-buf new-proc generation)
+                             (progn
+                               (pi-coding-agent--discard-reload-process
+                                new-proc)
+                               nil))
                      (let* ((data (plist-get response :data))
                             (cancelled (plist-get data :cancelled)))
                        (if (and (eq (plist-get response :success) t)

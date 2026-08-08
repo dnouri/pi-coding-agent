@@ -130,6 +130,9 @@ visible after streaming while hidden."
       (setq pi-coding-agent--table-decoration-pending nil)
       (setq pi-coding-agent--last-table-display-width width)
       (let ((gc-cons-threshold (max gc-cons-threshold (* 8 1024 1024))))
+        ;; Known macOS NS limitation: shrinking a scrolled chat frame can move
+        ;; the top visible line after overlay rewrapping.  Reproduce with
+        ;; `pi-coding-agent-gui-test-table-resize-refreshes-hot-tail-only'.
         (pi-coding-agent--with-scroll-preservation
           (save-excursion
             (pi-coding-agent--refresh-hot-tail-tables width)))))))
@@ -300,6 +303,8 @@ When `pi-coding-agent-prettify-tables' is non-nil, emits Unicode
 box-drawing verticals instead of markdown pipes."
   (let* ((num-cols (length col-widths))
          (padded (append cells (make-list (max 0 (- num-cols (length cells))) "")))
+         (aligns (append aligns
+                         (make-list (max 0 (- num-cols (length aligns))) nil)))
          (wrapped-cells
           (cl-mapcar (lambda (cell column-width)
                        (markdown-table-wrap-cell (or cell "") column-width))
@@ -345,30 +350,35 @@ box-drawing verticals instead of markdown pipes."
   "Render the separator line for COL-WIDTHS and ALIGNS.
 When `pi-coding-agent-prettify-tables' is non-nil, emits a box-drawing
 rule (├─┼─┤) directly; otherwise emits standard markdown syntax."
-  (if pi-coding-agent-prettify-tables
-      (concat "├─" (mapconcat (lambda (w) (make-string (max 1 w) ?─))
-                              col-widths "─┼─")
-              "─┤")
-    (let ((parts
-           (cl-mapcar
-            (lambda (column-width align)
-              (let ((dashes (make-string (max 1 column-width) ?-)))
-                (pcase align
-                  ('left
-                   (if (>= column-width 2)
-                       (concat ":" (substring dashes 1))
-                     ":"))
-                  ('right
-                   (if (>= column-width 2)
-                       (concat (substring dashes 1) ":")
-                     ":"))
-                  ('center
-                   (if (>= column-width 3)
-                       (concat ":" (substring dashes 2) ":")
-                     (if (>= column-width 2) "::" ":")))
-                  (_ dashes))))
-            col-widths aligns)))
-      (concat "| " (mapconcat #'identity parts " | ") " |"))))
+  (let* ((num-cols (length col-widths))
+         (aligns (append aligns
+                         (make-list (max 0 (- num-cols (length aligns))) nil))))
+    (if pi-coding-agent-prettify-tables
+        (concat "├─" (mapconcat (lambda (w) (make-string w ?─))
+                                col-widths "─┼─")
+                "─┤")
+      (let ((parts
+             (cl-mapcar
+              (lambda (column-width align)
+                (if (zerop column-width)
+                    ""
+                  (let ((dashes (make-string column-width ?-)))
+                    (pcase align
+                      ('left
+                       (if (>= column-width 2)
+                           (concat ":" (substring dashes 1))
+                         ":"))
+                      ('right
+                       (if (>= column-width 2)
+                           (concat (substring dashes 1) ":")
+                         ":"))
+                      ('center
+                       (if (>= column-width 3)
+                           (concat ":" (substring dashes 2) ":")
+                         (if (>= column-width 2) "::" ":")))
+                      (_ dashes)))))
+              col-widths aligns)))
+        (concat "| " (mapconcat #'identity parts " | ") " |")))))
 
 (defun pi-coding-agent--table-alignments (separator-line)
   "Return column alignment symbols parsed from SEPARATOR-LINE."

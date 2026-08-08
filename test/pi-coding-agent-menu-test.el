@@ -644,6 +644,88 @@ BINDING-SPEC is (DIR CHAT-NAME INPUT-NAME PROC).  DIR is evaluated once."
             (delete-process pi-coding-agent--process)))
         (kill-buffer chat-buf)))))
 
+(ert-deftest pi-coding-agent-test-reload-refuses-while-transition-active ()
+  "Reload does not start another process during an active session transition."
+  (let ((start-count 0)
+        (shown-message nil)
+        (chat-buf (generate-new-buffer
+                   "*pi-coding-agent-test-reload-reentry-chat*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--state
+                  '(:session-file "/tmp/test-session.json"))
+            (pi-coding-agent--begin-session-transition 'active-transition))
+          (cl-letf (((symbol-function 'pi-coding-agent--get-chat-buffer)
+                     (lambda () chat-buf))
+                    ((symbol-function 'pi-coding-agent--start-process)
+                     (lambda (_dir)
+                       (setq start-count (1+ start-count))
+                       (ert-fail "Reload must not start during a transition")))
+                    ((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (setq shown-message (apply #'format fmt args)))))
+            (pi-coding-agent-reload))
+          (should (= start-count 0))
+          (should (equal shown-message
+                         "Pi: Cannot reload while Pi is busy")))
+      (when (buffer-live-p chat-buf)
+        (kill-buffer chat-buf)))))
+
+(ert-deftest pi-coding-agent-test-stale-reload-callback-cleans-new-process ()
+  "A stale reload callback releases the temporary process it owns."
+  (let ((old-proc nil)
+        (new-proc nil)
+        (new-stderr nil)
+        (switch-callback nil)
+        (chat-buf (generate-new-buffer
+                   "*pi-coding-agent-test-stale-reload-chat*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--state
+                  '(:session-file "/tmp/test-session.json"))
+            (setq old-proc (start-process "test-stale-reload-old" nil "cat")
+                  pi-coding-agent--process old-proc))
+          (cl-letf (((symbol-function 'pi-coding-agent--get-chat-buffer)
+                     (lambda () chat-buf))
+                    ((symbol-function 'pi-coding-agent--start-process)
+                     (lambda (_dir)
+                       (setq new-proc
+                             (start-process "test-stale-reload-new" nil "cat")
+                             new-stderr
+                             (generate-new-buffer
+                              " *pi-coding-agent-test-stale-stderr*"))
+                       (process-put new-proc
+                                    'pi-coding-agent-stderr-buf new-stderr)
+                       new-proc))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_proc command callback)
+                       (when (equal (plist-get command :type) "switch_session")
+                         (setq switch-callback callback))))
+                    ((symbol-function 'message) #'ignore))
+            (pi-coding-agent-reload))
+          (should (functionp switch-callback))
+          (should (process-live-p new-proc))
+          (should (process-get new-proc 'pi-coding-agent-display-handler))
+          (with-current-buffer chat-buf
+            (pi-coding-agent--begin-session-transition 'replacement-process))
+          (funcall switch-callback
+                   '(:success t :data (:cancelled :false)))
+          (should-not (process-live-p new-proc))
+          (should-not
+           (process-get new-proc 'pi-coding-agent-display-handler))
+          (should-not (buffer-live-p new-stderr))
+          (should (process-live-p old-proc)))
+      (when (and old-proc (process-live-p old-proc))
+        (delete-process old-proc))
+      (when (and new-proc (process-live-p new-proc))
+        (delete-process new-proc))
+      (when (buffer-live-p chat-buf)
+        (kill-buffer chat-buf)))))
+
 (ert-deftest pi-coding-agent-test-reload-switch-failure-keeps-old-process ()
   "A failed reload switch does not attach the fresh process to the UI."
   (let* ((old-proc nil)

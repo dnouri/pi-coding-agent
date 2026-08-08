@@ -409,6 +409,33 @@ so visible text still needs consistent alignment across all display lines."
       (let ((widths (mapcar #'string-width (nreverse all-lines))))
         (should (= (length (delete-dups (copy-sequence widths))) 1))))))
 
+(ert-deftest pi-coding-agent-test-zero-width-column-keeps-separator-aligned ()
+  "A zero-width column occupies the same width in rows and separators."
+  (dolist (pretty '(t nil))
+    (let* ((pi-coding-agent-prettify-tables pretty)
+           (widths '(1 0 2))
+           (aligns '(nil nil nil))
+           (row (car (pi-coding-agent--render-table-row-lines
+                      '("a" "" "bc") widths aligns)))
+           (separator (pi-coding-agent--render-table-separator-line
+                       widths aligns)))
+      (should (= (string-width row) (string-width separator))))))
+
+(ert-deftest pi-coding-agent-test-short-alignments-render-all-columns ()
+  "Missing alignment entries default without truncating trailing columns."
+  (dolist (pretty '(t nil))
+    (let* ((pi-coding-agent-prettify-tables pretty)
+           (widths '(1 1 1))
+           (aligns '(left))
+           (row (car (pi-coding-agent--render-table-row-lines
+                      '("a" "b" "c") widths aligns)))
+           (separator (pi-coding-agent--render-table-separator-line
+                       widths aligns)))
+      (should (string-match-p "a" row))
+      (should (string-match-p "b" row))
+      (should (string-match-p "c" row))
+      (should (= (string-width row) (string-width separator))))))
+
 (ert-deftest pi-coding-agent-test-decorate-table-prettifies-visible-separators ()
   "Rendered table display uses box-drawing separators instead of raw pipes."
   (with-temp-buffer

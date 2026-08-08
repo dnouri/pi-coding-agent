@@ -1223,6 +1223,9 @@ Updates buffer-local state and renders display updates."
              (plist-get message :content))))
          (_
           ;; Assistant message - show header if needed, reset markers
+          (setq pi-coding-agent--line-parse-state 'line-start
+                pi-coding-agent--in-code-block nil
+                pi-coding-agent--streaming-table-candidate nil)
           (unless pi-coding-agent--assistant-header-shown
             (pi-coding-agent--append-to-chat
              (concat "\n" (pi-coding-agent--make-separator "Assistant") "\n"))

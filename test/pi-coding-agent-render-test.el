@@ -88,6 +88,30 @@
       (should (= table-scan-count 1))
       (should-not pi-coding-agent--streaming-table-candidate))))
 
+(ert-deftest pi-coding-agent-test-assistant-message-start-resets-line-state ()
+  "A later assistant message starts at a fresh Markdown line."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--line-parse-state 'mid-line
+          pi-coding-agent--assistant-header-shown t)
+    (pi-coding-agent--handle-display-event
+     '(:type "message_start" :message (:role "assistant")))
+    (should (eq pi-coding-agent--line-parse-state 'line-start))
+    (should (equal (pi-coding-agent--transform-delta "# Heading")
+                   "## Heading"))))
+
+(ert-deftest pi-coding-agent-test-assistant-message-start-resets-block-state ()
+  "A later assistant message does not inherit code or table parse state."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--in-code-block t
+          pi-coding-agent--streaming-table-candidate '(10 . 20)
+          pi-coding-agent--assistant-header-shown t)
+    (pi-coding-agent--handle-display-event
+     '(:type "message_start" :message (:role "assistant")))
+    (should-not pi-coding-agent--in-code-block)
+    (should-not pi-coding-agent--streaming-table-candidate)))
+
 (ert-deftest pi-coding-agent-test-delta-transforms-atx-headings ()
   "ATX headings in assistant content are leveled down.
 # becomes ##, ## becomes ###, etc. This keeps our setext H1 separators

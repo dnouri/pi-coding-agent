@@ -53,6 +53,34 @@
           (pi-coding-agent-send)
           (should-not send-called))))))
 
+(ert-deftest pi-coding-agent-test-send-without-chat-preserves-input ()
+  "Sending from an unlinked input buffer preserves the draft and history."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (insert "unsent draft")
+    (let ((shown-message nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (setq shown-message (apply #'format fmt args)))))
+        (pi-coding-agent-send))
+      (should (equal (buffer-string) "unsent draft"))
+      (should (null pi-coding-agent--input-ring))
+      (should (equal shown-message "Pi: No chat session available")))))
+
+(ert-deftest pi-coding-agent-test-send-with-dead-chat-preserves-input ()
+  "Sending with a dead chat link preserves the draft without signaling."
+  (let ((dead-chat (generate-new-buffer
+                    "*pi-coding-agent-test-dead-send-chat*")))
+    (kill-buffer dead-chat)
+    (with-temp-buffer
+      (pi-coding-agent-input-mode)
+      (setq pi-coding-agent--chat-buffer dead-chat)
+      (insert "draft for dead chat")
+      (cl-letf (((symbol-function 'message) #'ignore))
+        (pi-coding-agent-send))
+      (should (equal (buffer-string) "draft for dead chat"))
+      (should (null pi-coding-agent--input-ring)))))
+
 (ert-deftest pi-coding-agent-test-send-queues-locally-while-streaming ()
   "pi-coding-agent-send adds to local queue while streaming, no RPC sent."
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-stream*"))
@@ -783,6 +811,41 @@ Uses :false (JSON false representation) to verify boolean normalization."
         (pi-coding-agent-abort)
         (should (equal (plist-get sent-command :type) "abort"))
         (should-not pi-coding-agent--aborted)))))
+
+(ert-deftest pi-coding-agent-test-abort-sends-command-while-sending ()
+  "pi-coding-agent-abort sends abort while waiting for agent_start."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((sent-command nil)
+          (pi-coding-agent--status 'sending))
+      (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                 (lambda () 'mock-proc))
+                ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                 (lambda () (current-buffer)))
+                ((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (_proc command _callback)
+                   (setq sent-command command))))
+        (pi-coding-agent-abort)
+        (should (equal (plist-get sent-command :type) "abort"))
+        (should-not pi-coding-agent--aborted)))))
+
+(ert-deftest pi-coding-agent-test-abort-sends-command-during-auto-retry ()
+  "pi-coding-agent-abort cancels an auto-retry wait represented by sending."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((sent-command nil))
+      (pi-coding-agent--update-state-from-event
+       '(:type "auto_retry_start" :attempt 2 :errorMessage "retrying"))
+      (should (eq pi-coding-agent--status 'sending))
+      (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                 (lambda () 'mock-proc))
+                ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                 (lambda () (current-buffer)))
+                ((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (_proc command _callback)
+                   (setq sent-command command))))
+        (pi-coding-agent-abort)
+        (should (equal (plist-get sent-command :type) "abort"))))))
 
 (ert-deftest pi-coding-agent-test-abort-noop-when-idle ()
   "pi-coding-agent-abort does nothing when idle."
@@ -2864,6 +2927,29 @@ only offer our own capfs (slash commands, file references, paths)."
       ;; No duplicates
       (should (= (length (seq-filter (lambda (n) (equal n "compact")) names)) 1)))))
 
+(ert-deftest pi-coding-agent-test-command-capf-ignores-arguments ()
+  "Command completion does not treat arguments as part of the command name."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (insert "/compact keep these details")
+    (let ((before (buffer-string)))
+      (should-not (pi-coding-agent--command-capf))
+      (should (equal (buffer-string) before)))))
+
+(ert-deftest pi-coding-agent-test-command-capf-region-stops-before-arguments ()
+  "Command completion replaces only the command token before arguments."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (insert "/comp keep details")
+    (goto-char 6)
+    (let ((completion (pi-coding-agent--command-capf)))
+      (should completion)
+      (should (= (nth 0 completion) 2))
+      (should (= (nth 1 completion) 6))
+      (should (equal (buffer-substring-no-properties
+                      (nth 1 completion) (point-max))
+                     " keep details")))))
+
 (ert-deftest pi-coding-agent-test-send-prompt-sends-literal ()
   "pi-coding-agent--send-prompt sends text literally (no expansion).
 Pi handles command expansion on the server side."
@@ -3954,6 +4040,40 @@ This occurs after compaction before the next assistant message."
     (let ((result (pi-coding-agent--file-reference-capf)))
       (should result)
       (should (member "test.el" (nth 2 result))))))
+
+(ert-deftest pi-coding-agent-test-file-reference-capf-basic-prefix-match ()
+  "Basic completion matches the project-relative path prefix."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (setq pi-coding-agent--project-files-cache
+          '("dir/foo.el" "other/bar.el")
+          pi-coding-agent--project-files-cache-time (float-time))
+    (insert "@dir/f")
+    (let* ((completion-styles '(basic))
+           (capf (pi-coding-agent--file-reference-capf))
+           (input (buffer-substring-no-properties
+                   (nth 0 capf) (nth 1 capf)))
+           (matches (completion-all-completions
+                     input (nth 2 capf) nil (length input))))
+      (should (equal (substring-no-properties (car matches))
+                     "dir/foo.el")))))
+
+(ert-deftest pi-coding-agent-test-file-reference-capf-flex-controls-matching ()
+  "Flex completion can match candidates not selected by literal substring."
+  (with-temp-buffer
+    (pi-coding-agent-input-mode)
+    (setq pi-coding-agent--project-files-cache
+          '("dir/foo.el" "other/bar.el")
+          pi-coding-agent--project-files-cache-time (float-time))
+    (insert "@dfe")
+    (let* ((completion-styles '(flex))
+           (capf (pi-coding-agent--file-reference-capf))
+           (input (buffer-substring-no-properties
+                   (nth 0 capf) (nth 1 capf)))
+           (matches (completion-all-completions
+                     input (nth 2 capf) nil (length input))))
+      (should (equal (substring-no-properties (car matches))
+                     "dir/foo.el")))))
 
 ;;; Path Completion (Tab)
 
