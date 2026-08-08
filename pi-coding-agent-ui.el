@@ -285,6 +285,17 @@ still operate on the raw table source."
   :type 'boolean
   :group 'pi-coding-agent)
 
+(defcustom pi-coding-agent-table-full-grid t
+  "Whether prettified tables draw a full cell grid (web-style borders).
+When non-nil, and `pi-coding-agent-prettify-tables' is also enabled,
+tables render a top border, a horizontal rule between every row, and a
+bottom border using Unicode box-drawing characters, so each cell is fully
+enclosed like an HTML table.  When nil, tables keep only the column
+verticals and a single header rule.  Has no effect when
+`pi-coding-agent-prettify-tables' is nil (raw markdown pipes are used)."
+  :type 'boolean
+  :group 'pi-coding-agent)
+
 ;;;; Faces
 
 (defface pi-coding-agent-timestamp

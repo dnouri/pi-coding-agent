@@ -380,6 +380,27 @@ rule (├─┼─┤) directly; otherwise emits standard markdown syntax."
               col-widths aligns)))
         (concat "| " (mapconcat #'identity parts " | ") " |")))))
 
+(defun pi-coding-agent--table-full-grid-p ()
+  "Return non-nil when tables should render a full web-style cell grid.
+Requires both `pi-coding-agent-prettify-tables' and
+`pi-coding-agent-table-full-grid' to be enabled."
+  (and pi-coding-agent-prettify-tables
+       pi-coding-agent-table-full-grid))
+
+(defun pi-coding-agent--render-table-grid-rule (col-widths position)
+  "Render a horizontal box-drawing rule for COL-WIDTHS.
+POSITION is one of `top', `middle', or `bottom', selecting the corner
+and junction characters (┌┬┐ / ├┼┤ / └┴┘).  Each column contributes
+`column-width' + 2 horizontal bars to match the one-space cell padding
+used by `pi-coding-agent--render-table-row-lines'."
+  (let ((left  (pcase position ('top "┌") ('bottom "└") (_ "├")))
+        (mid   (pcase position ('top "┬") ('bottom "┴") (_ "┼")))
+        (right (pcase position ('top "┐") ('bottom "┘") (_ "┤"))))
+    (concat left
+            (mapconcat (lambda (w) (make-string (+ w 2) ?─))
+                       col-widths mid)
+            right)))
+
 (defun pi-coding-agent--table-alignments (separator-line)
   "Return column alignment symbols parsed from SEPARATOR-LINE."
   (mapcar (lambda (cell)
@@ -453,20 +474,53 @@ Plain tables (no prefix) take a fast path that skips prefix splitting."
               (mapcar (lambda (row)
                         (pi-coding-agent--render-table-row-lines
                          row col-widths aligns))
-                      display-rows)))
+                      display-rows))
+             ;; Full web-style grid: weave border rules into the existing
+             ;; per-raw-line groups so the group↔raw-line 1:1 invariant that
+             ;; `pi-coding-agent--decorate-table' relies on is preserved.
+             ;; The top border joins the header group, an inter-row rule
+             ;; prefixes every data group after the first, and the bottom
+             ;; border joins the last group (or the separator group when the
+             ;; table has no data rows).
+             (full-grid (pi-coding-agent--table-full-grid-p))
+             (has-data (consp row-groups))
+             (header-group
+              (if full-grid
+                  (cons (pi-coding-agent--render-table-grid-rule col-widths 'top)
+                        header-lines)
+                header-lines))
+             (sep-group
+              (if (and full-grid (not has-data))
+                  (list separator-line
+                        (pi-coding-agent--render-table-grid-rule col-widths 'bottom))
+                (list separator-line)))
+             (data-groups
+              (if (and full-grid has-data)
+                  (let ((mid-rule (pi-coding-agent--render-table-grid-rule
+                                   col-widths 'middle))
+                        (bottom (pi-coding-agent--render-table-grid-rule
+                                 col-widths 'bottom))
+                        (last-index (1- (length row-groups))))
+                    (cl-loop for group in row-groups
+                             for i from 0
+                             collect (append (when (> i 0) (list mid-rule))
+                                             group
+                                             (when (= i last-index) (list bottom)))))
+                row-groups)))
         (if no-prefix
-            (append (list header-lines)
-                    (list (list separator-line))
-                    row-groups)
+            (append (list header-group)
+                    (list sep-group)
+                    data-groups)
           (append
            (list (mapcar (lambda (line) (concat (car prefixes) line))
-                         header-lines))
-           (list (list (concat (nth 1 prefixes) separator-line)))
+                         header-group))
+           (list (mapcar (lambda (line) (concat (nth 1 prefixes) line))
+                         sep-group))
            (cl-mapcar (lambda (prefix row-lines)
                         (mapcar (lambda (line) (concat prefix line))
                                 row-lines))
                       (nthcdr 2 prefixes)
-                      row-groups)))))))
+                      data-groups)))))))
 
 ;;;; Line Mapping
 

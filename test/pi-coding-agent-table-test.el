@@ -457,6 +457,78 @@ so visible text still needs consistent alignment across all display lines."
       (should (string-match-p "Name" all-display))
       (should (string-match-p "Alpha" all-display)))))
 
+(ert-deftest pi-coding-agent-test-render-table-grid-rule-widths-match-rows ()
+  "Top, middle, and bottom grid rules share the width of pretty data rows."
+  (let* ((pi-coding-agent-prettify-tables t)
+         (widths '(5 1 0 3))
+         (aligns '(nil nil nil nil))
+         (row (car (pi-coding-agent--render-table-row-lines
+                    '("a" "b" "" "d") widths aligns)))
+         (top (pi-coding-agent--render-table-grid-rule widths 'top))
+         (mid (pi-coding-agent--render-table-grid-rule widths 'middle))
+         (bot (pi-coding-agent--render-table-grid-rule widths 'bottom)))
+    (should (string-prefix-p "┌" top))
+    (should (string-suffix-p "┐" top))
+    (should (string-match-p "┬" top))
+    (should (string-prefix-p "├" mid))
+    (should (string-suffix-p "┤" mid))
+    (should (string-match-p "┼" mid))
+    (should (string-prefix-p "└" bot))
+    (should (string-suffix-p "┘" bot))
+    (should (string-match-p "┴" bot))
+    (should (= (string-width row) (string-width top)))
+    (should (= (string-width row) (string-width mid)))
+    (should (= (string-width row) (string-width bot)))))
+
+(ert-deftest pi-coding-agent-test-decorate-table-full-grid-encloses-cells ()
+  "With full grid enabled, a decorated table gains top/mid/bottom borders."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-prettify-tables t)
+          (pi-coding-agent-table-full-grid t)
+          (inhibit-read-only t))
+      (insert "| Name | Value |\n|------|-------|\n| Alpha | Beta |\n| Gamma | Delta |\n")
+      (font-lock-ensure)
+      (pi-coding-agent--decorate-tables-in-region (point-min) (point-max) 40)
+      (let* ((displays (pi-coding-agent-test--table-overlay-displays-in-region
+                        (point-min) (point-max)))
+             (all (mapconcat #'identity displays "\n"))
+             ;; Split each overlay individually to avoid empty lines from the
+             ;; trailing newlines already present in each display string.
+             (lines nil))
+        (dolist (display displays)
+          (dolist (line (split-string
+                         (string-trim-right display "\n+") "\n"))
+            (push line lines)))
+        ;; Top border, an inter-row rule, and a bottom border are present.
+        (should (string-match-p "┌.*┬.*┐" all))
+        (should (string-match-p "├.*┼.*┤" all))
+        (should (string-match-p "└.*┴.*┘" all))
+        ;; Every visible line has the same display width (full alignment).
+        (should (= (length (delete-dups
+                            (mapcar #'string-width lines)))
+                   1))
+        ;; The 1:1 group↔raw-line invariant: one overlay per raw line (4).
+        (should (= (length displays) 4))))))
+
+(ert-deftest pi-coding-agent-test-decorate-table-full-grid-off-has-no-outer-border ()
+  "With full grid disabled, only header rule remains (no top/bottom border)."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-prettify-tables t)
+          (pi-coding-agent-table-full-grid nil)
+          (inhibit-read-only t))
+      (insert "| Name | Value |\n|------|-------|\n| Alpha | Beta |\n")
+      (font-lock-ensure)
+      (pi-coding-agent--decorate-tables-in-region (point-min) (point-max) 40)
+      (let ((all (mapconcat #'identity
+                            (pi-coding-agent-test--table-overlay-displays-in-region
+                             (point-min) (point-max))
+                            "\n")))
+        (should (string-match-p "├.*┼.*┤" all))
+        (should-not (string-match-p "┌" all))
+        (should-not (string-match-p "└" all))))))
+
 (ert-deftest pi-coding-agent-test-decorate-table-preserves-pipes-when-prettify-off ()
   "With prettify disabled, rendered tables use standard markdown pipes."
   (with-temp-buffer
