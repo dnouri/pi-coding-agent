@@ -5251,8 +5251,10 @@ Uses the current buffer's completed-thinking display mode."
 (defun pi-coding-agent--history-postprocess-start ()
   "Return the first position that needs eager history post-processing.
 Large resumed histories should render the visible tail promptly.  Older content
-can rely on normal jit-lock when visited, while display-only table decoration is
-kept to the same hot-tail suffix used by resize refreshes."
+relies on jit-lock when visited: tree-sitter fontification and the registered
+`pi-coding-agent--jit-decorate-tables' pass both run as each region scrolls into
+view, so eager decoration is limited to the same hot-tail suffix used by resize
+refreshes."
   (if (markerp pi-coding-agent--hot-tail-start)
       (marker-position pi-coding-agent--hot-tail-start)
     (point-min)))
@@ -5274,8 +5276,10 @@ contain `|' but cannot be pipe tables.")
   "Run consolidated display post-processing after history replay.
 History replay inserts many small user/assistant chunks.  Running fontification
 and table decoration after each chunk is expensive in large sessions, so replay
-defers that work.  Fontification is left to jit-lock on redisplay; the only
-synchronous pass decorates candidate tables in the recent hot tail."
+defers that work.  Fontification and table decoration are both left to jit-lock
+on redisplay (see `pi-coding-agent--jit-decorate-tables'); the only synchronous
+pass here decorates candidate tables in the recent hot tail so the visible tail
+is a grid immediately, without waiting for a redisplay."
   (let ((start (pi-coding-agent--history-postprocess-start))
         (end (point-max)))
     (when (pi-coding-agent--history-table-candidate-p start end)

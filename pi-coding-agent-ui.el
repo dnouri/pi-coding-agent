@@ -60,6 +60,7 @@
 (declare-function pi-coding-agent--cleanup-on-kill "pi-coding-agent-render")
 (declare-function pi-coding-agent--restore-tool-properties "pi-coding-agent-render")
 (declare-function pi-coding-agent--maybe-refresh-hot-tail-tables "pi-coding-agent-table")
+(declare-function pi-coding-agent--jit-decorate-tables "pi-coding-agent-table")
 
 ;; pi-coding-agent-input.el (input buffer commands)
 (declare-function pi-coding-agent-quit "pi-coding-agent-input")
@@ -856,6 +857,12 @@ This is a read-only buffer showing the conversation history."
 
   ;; Run after font-lock to undo markdown damage in tool overlays.
   (jit-lock-register #'pi-coding-agent--restore-tool-properties)
+
+  ;; Decorate pipe tables lazily as they scroll into view.  History replay
+  ;; eagerly decorates only the hot tail; this jit-lock pass renders older
+  ;; tables on the same redisplay that fontifies them, so resumed sessions
+  ;; stay fast to load yet every table becomes a grid once seen.
+  (jit-lock-register #'pi-coding-agent--jit-decorate-tables)
 
   ;; Compute theme-derived faces used by chat overlays.
   (pi-coding-agent--update-theme-derived-faces)

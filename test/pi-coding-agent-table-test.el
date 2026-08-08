@@ -885,6 +885,60 @@ what the parser recognizes as a `pipe_table'."
     (pi-coding-agent--display-message-delta "| Auth | Done |\n")
     (should (>= (pi-coding-agent-test--table-overlay-count) 1))))
 
+(ert-deftest pi-coding-agent-test-jit-decorate-tables-decorates-region ()
+  "jit-decorate-tables renders a table overlapping the requested region."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert pi-coding-agent-test--wide-table))
+    (font-lock-ensure)
+    (pi-coding-agent--jit-decorate-tables (point-min) (point-max))
+    (should (>= (pi-coding-agent-test--table-overlay-count) 1))))
+
+(ert-deftest pi-coding-agent-test-jit-decorate-tables-expands-partial-region ()
+  "A jit-lock chunk that bisects a table still decorates the whole table.
+jit-lock hands out arbitrary boundaries; the region is grown to the full
+tree-sitter table extent so overlays cover every row, not a partial range."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((table-beg nil)
+          (inhibit-read-only t))
+      (insert "Some intro prose before the table.\n\n")
+      (setq table-beg (point))
+      (insert pi-coding-agent-test--wide-table)
+      (font-lock-ensure)
+      ;; Request a range that begins in the middle of the table and ends
+      ;; before its last row -- the worst case for a redisplay chunk.
+      (pi-coding-agent--jit-decorate-tables (+ table-beg 20) (- (point-max) 20))
+      ;; The whole four-line table (header, separator, two data rows) gets
+      ;; one overlay per raw line, so all rows are covered, not just those
+      ;; inside the narrow request.
+      (should (= (pi-coding-agent-test--table-overlay-count) 4)))))
+
+(ert-deftest pi-coding-agent-test-jit-decorate-tables-noop-without-table ()
+  "jit-decorate-tables creates no overlays when the region has no table."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert "Just prose here, no pipe table at all.\n\nMore prose.\n"))
+    (font-lock-ensure)
+    (pi-coding-agent--jit-decorate-tables (point-min) (point-max))
+    (should (= (pi-coding-agent-test--table-overlay-count) 0))))
+
+(ert-deftest pi-coding-agent-test-jit-decorate-tables-respects-raw-toggle ()
+  "jit-decorate-tables leaves user-toggled raw tables undecorated.
+The `pi-coding-agent--skip-raw-tables' advice guards every decoration
+path, including this lazy one, so scrolling a raw table into view does
+not clobber the user's choice."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t))
+      (insert pi-coding-agent-test--wide-table))
+    (font-lock-ensure)
+    (pi-coding-agent--mark-table-raw (point-min) (point-max))
+    (pi-coding-agent--jit-decorate-tables (point-min) (point-max))
+    (should (= (pi-coding-agent-test--table-overlay-count) 0))))
+
 (ert-deftest pi-coding-agent-test-chat-buffer-hidden-p-sees-visible-window-on-other-frame ()
   "A chat buffer visible on another frame is not hidden."
   (with-temp-buffer

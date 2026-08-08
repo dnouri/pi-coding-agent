@@ -35,6 +35,7 @@
 ;; - `pi-coding-agent--decorate-tables-in-region' — stable path
 ;; - `pi-coding-agent--maybe-decorate-streaming-table' — streaming path
 ;; - `pi-coding-agent--maybe-refresh-hot-tail-tables' — resize path
+;; - `pi-coding-agent--jit-decorate-tables' — lazy scroll-into-view path
 ;;
 ;; Depends on `pi-coding-agent-ui' for visible-text extraction and
 ;; scroll preservation, and on `markdown-table-wrap' for the wrapping engine.
@@ -629,6 +630,31 @@ Idempotent: existing table overlays in the region are removed first."
     (dolist (region (pi-coding-agent--treesit-table-regions beg end))
       (when (pi-coding-agent--table-has-data-row-p (car region) (cdr region))
         (pi-coding-agent--decorate-table (car region) (cdr region) width)))))
+
+;;;; Lazy Scroll-Into-View Decoration (jit-lock)
+
+;; History replay only decorates the hot tail eagerly (see
+;; `pi-coding-agent--postprocess-history-buffer'); older tables are left as raw
+;; markdown so large resumed sessions load promptly.  Tree-sitter fontification
+;; already renders lazily as jit-lock brings each region into view, but table
+;; decoration is a display-overlay pass that jit-lock does not know about, so
+;; older tables would stay raw until a resize or manual toggle.  Registering a
+;; jit-lock function closes that gap: as you scroll an older table into view,
+;; it is decorated on the same redisplay pass that fontifies it -- no load-time
+;; cost, because jit-lock only ever runs on regions about to be displayed.
+
+(defun pi-coding-agent--jit-decorate-tables (beg end)
+  "Decorate pipe tables overlapping BEG..END, expanded to whole tables.
+Registered with `jit-lock-register' so tables render when scrolled into
+view.  jit-lock hands out arbitrary chunk boundaries that may bisect a
+table, so the region is grown to the full extent of every overlapping
+table before decorating; this keeps the idempotent overlay-removal in
+`pi-coding-agent--decorate-tables-in-region' aligned to whole tables and
+never leaves a table decorated from a partial range."
+  (when-let* ((regions (pi-coding-agent--treesit-table-regions beg end)))
+    (let ((full-beg (apply #'min beg (mapcar #'car regions)))
+          (full-end (apply #'max end (mapcar #'cdr regions))))
+      (pi-coding-agent--decorate-tables-in-region full-beg full-end))))
 
 ;;;; Cleanup
 
