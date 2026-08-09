@@ -134,6 +134,27 @@ total window height, e.g. 0.3 means 30% for input."
                  (float :tag "Fraction (0.0–1.0)"))
   :group 'pi-coding-agent)
 
+(defcustom pi-coding-agent-input-window-display 'always
+  "How the input window is displayed alongside the chat window.
+When `always' (the default), the input window is shown whenever the
+session is displayed.
+
+When `on-demand', the input window is shown when a session is first
+launched, hidden after each send, and reopened with
+\[pi-coding-agent-open-input].  Redisplaying an existing session
+\(e.g. with `pi-coding-agent-toggle') shows only the chat window.
+
+When `hidden', a session launches with only the chat window visible.
+In every other respect this is like `on-demand': the input is hidden
+after each send, reopened with `pi-coding-agent-open-input', and
+redisplaying an existing session shows only the chat window.  This
+suits a chat-centric workflow where you compose in the input only
+when needed."
+  :type '(choice (const :tag "Always visible" always)
+                 (const :tag "On demand (hide after send)" on-demand)
+                 (const :tag "Hidden at launch (chat only; open on demand)" hidden))
+  :group 'pi-coding-agent)
+
 (defcustom pi-coding-agent-activity-phase-functions nil
   "Functions called after a session activity phase is applied.
 Each function is called with five arguments:
@@ -1683,25 +1704,90 @@ currently selected window."
            below))))
 
 (defun pi-coding-agent--best-input-window (chat-buf input-buf)
-  "Return best visible window for INPUT-BUF in current frame.
+  "Return best visible window for INPUT-BUF in current frame, or nil.
 Prefer the input window below the selected CHAT-BUF window, then the
 selected input window, then the tallest input window."
-  (let* ((input-wins (get-buffer-window-list input-buf nil))
-         (selected (selected-window))
-         (selected-chat-win (and (eq (window-buffer selected) chat-buf)
-                                 selected)))
-    (or (pi-coding-agent--paired-input-window selected-chat-win input-buf)
-        (and (memq selected input-wins)
-             selected)
-        (pi-coding-agent--window-with-most-height input-wins))))
+  (when-let* ((input-wins (get-buffer-window-list input-buf nil)))
+    (let* ((selected (selected-window))
+           (selected-chat-win (and (eq (window-buffer selected) chat-buf)
+                                   selected)))
+      (or (pi-coding-agent--paired-input-window selected-chat-win input-buf)
+          (and (memq selected input-wins)
+               selected)
+          (pi-coding-agent--window-with-most-height input-wins)))))
 
 (defun pi-coding-agent--focus-input-window (chat-buf input-buf)
   "Select a visible INPUT-BUF window for the CHAT-BUF session."
   (when-let* ((win (pi-coding-agent--best-input-window chat-buf input-buf)))
     (select-window win)))
 
-(defun pi-coding-agent--display-buffers (chat-buf input-buf)
+(defun pi-coding-agent--split-input-below-chat (chat-buf input-buf)
+  "Show INPUT-BUF in a new window below the best visible CHAT-BUF window.
+The new window is soft-dedicated so `display-buffer' never targets it.
+Return the new input window, or nil when no chat window can be split."
+  (when-let* ((chat-win
+               (or (and (eq (window-buffer (selected-window)) chat-buf)
+                        (pi-coding-agent--window-can-split-for-input-p
+                         (selected-window))
+                        (selected-window))
+                   (cl-find-if #'pi-coding-agent--window-can-split-for-input-p
+                               (pi-coding-agent--windows-by-height
+                                (get-buffer-window-list chat-buf nil))))))
+    (let ((input-win
+           (split-window
+            chat-win (- (pi-coding-agent--input-height-for-window chat-win))
+            'below)))
+      (set-window-buffer input-win input-buf)
+      ;; Soft-dedicate the input window so `display-buffer' never
+      ;; targets it (magit, help, compilation, etc.).  The 'side
+      ;; value still allows `switch-to-buffer' and `C-x o'.
+      (set-window-dedicated-p input-win 'side)
+      input-win)))
+
+(defun pi-coding-agent-open-input ()
+  "Open the input window below the chat window and select it.
+If an input window is already visible, select it instead.  If no chat
+window is visible either, restore the full session layout."
+  (interactive)
+  (let* ((chat-buf (pi-coding-agent--get-chat-buffer))
+         (input-buf (pi-coding-agent--get-input-buffer)))
+    (unless (and (buffer-live-p chat-buf) (buffer-live-p input-buf))
+      (user-error "No pi session for this buffer"))
+    (cond
+     ((pi-coding-agent--focus-input-window chat-buf input-buf))
+     ((when-let* ((input-win
+                   (pi-coding-agent--split-input-below-chat chat-buf input-buf)))
+        (select-window input-win)))
+     (t (pi-coding-agent--display-buffers chat-buf input-buf)))))
+
+(defun pi-coding-agent--input-window-on-demand-p ()
+  "Return non-nil when the input window is shown on demand.
+True for the `on-demand' and `hidden' values of
+`pi-coding-agent-input-window-display', which both hide the input
+after each send and reopen it with `pi-coding-agent-open-input'."
+  (memq pi-coding-agent-input-window-display '(on-demand hidden)))
+
+(defun pi-coding-agent--maybe-hide-input-window ()
+  "Hide the input window when it is shown on demand.
+Intended to run after `pi-coding-agent-send' accepts input.  When the
+selected window is deleted, select a chat window instead."
+  (when (pi-coding-agent--input-window-on-demand-p)
+    (let* ((input-buf (pi-coding-agent--get-input-buffer))
+           (input-wins (and (buffer-live-p input-buf)
+                            (get-buffer-window-list input-buf nil)))
+           (selected (selected-window)))
+      (dolist (win input-wins)
+        (when (window-parent win)
+          (delete-window win)))
+      (when (and (memq selected input-wins)
+                 (not (window-live-p selected)))
+        (when-let* ((chat-buf (pi-coding-agent--get-chat-buffer))
+                    (chat-win (get-buffer-window chat-buf)))
+          (select-window chat-win))))))
+
+(defun pi-coding-agent--display-buffers (chat-buf input-buf &optional chat-only)
   "Ensure CHAT-BUF and INPUT-BUF are visible.
+When CHAT-ONLY is non-nil, show only the chat window.
 Uses a split window with chat above and input below.  Falls back to a
 larger window when the selected one cannot be split."
   (let* ((chat-wins (get-buffer-window-list chat-buf nil))
@@ -1715,20 +1801,17 @@ larger window when the selected one cannot be split."
     (when (and input-wins (not chat-wins))
       (pi-coding-agent--delete-extra-input-windows input-wins target))
     (with-selected-window target
-      (unless (pi-coding-agent--window-can-split-for-input-p target)
-        (delete-other-windows target))
-      (unless (pi-coding-agent--window-can-split-for-input-p target)
-        (user-error "Window too small for chat + input layout"))
+      (unless chat-only
+        (unless (pi-coding-agent--window-can-split-for-input-p target)
+          (delete-other-windows target))
+        (unless (pi-coding-agent--window-can-split-for-input-p target)
+          (user-error "Window too small for chat + input layout")))
       (switch-to-buffer chat-buf)
       (with-current-buffer chat-buf
         (goto-char (point-max)))
-      (let ((input-height (pi-coding-agent--input-height-for-window target)))
-        (setq input-win (split-window nil (- input-height) 'below))
-        (set-window-buffer input-win input-buf)
-        ;; Soft-dedicate the input window so `display-buffer' never
-        ;; targets it (magit, help, compilation, etc.).  The 'side
-        ;; value still allows `switch-to-buffer' and `C-x o'.
-        (set-window-dedicated-p input-win 'side)))
+      (unless chat-only
+        (setq input-win
+              (pi-coding-agent--split-input-below-chat chat-buf input-buf))))
     (when (window-live-p input-win)
       (select-window input-win))))
 

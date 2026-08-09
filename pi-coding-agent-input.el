@@ -323,9 +323,11 @@ The /compact command is handled locally; other slash commands sent to pi."
                (pi-coding-agent--builtin-command-name text)))
      (busy
       (pi-coding-agent--queue-followup-text chat-buf text)
+      (pi-coding-agent--maybe-hide-input-window)
       (message "Pi: Message queued (will send when Pi is ready)"))
      (t
       (pi-coding-agent--accept-input-text text)
+      (pi-coding-agent--maybe-hide-input-window)
       (with-current-buffer chat-buf
         (pi-coding-agent--prepare-and-send text))))))
 

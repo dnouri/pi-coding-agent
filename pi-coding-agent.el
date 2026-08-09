@@ -182,11 +182,15 @@ Returns the chat buffer."
     chat-buf))
 
 (defun pi-coding-agent--show-session-buffers (chat-buf input-buf)
-  "Show CHAT-BUF and INPUT-BUF, focusing input when both are visible."
+  "Show CHAT-BUF and INPUT-BUF, focusing input when both are visible.
+When `pi-coding-agent-input-window-display' is `hidden', a freshly
+displayed session starts with only the chat window visible."
   (if (and (get-buffer-window-list chat-buf nil)
            (get-buffer-window-list input-buf nil))
       (pi-coding-agent--focus-input-window chat-buf input-buf)
-    (pi-coding-agent--display-buffers chat-buf input-buf)))
+    (pi-coding-agent--display-buffers
+     chat-buf input-buf
+     (eq pi-coding-agent-input-window-display 'hidden))))
 
 (defun pi-coding-agent--dired-regular-file-at-point ()
   "Return Dired's regular file at point, or nil."
@@ -299,9 +303,11 @@ If no session exists, signal an error."
           (and input-buf (get-buffer-window-list input-buf nil)))
       (with-current-buffer chat-buf
         (pi-coding-agent--hide-session-windows)))
-     ;; Session hidden: show it
+     ;; Session hidden: show it (chat only when input is shown on demand)
      (t
-      (pi-coding-agent--display-buffers chat-buf input-buf)))))
+      (pi-coding-agent--display-buffers
+       chat-buf input-buf
+       (pi-coding-agent--input-window-on-demand-p))))))
 
 (provide 'pi-coding-agent)
 ;;; pi-coding-agent.el ends here

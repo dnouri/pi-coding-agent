@@ -438,6 +438,15 @@ Here's some common non-default preferences:
 ;; Make the input pane 25% of the Pi window pair; rebalanced on frame resize:
 (setopt pi-coding-agent-input-window-height 0.25)
 
+;; Show the input pane only when launching a session and while composing;
+;; hide it after each send and reopen it with M-x pi-coding-agent-open-input:
+(setopt pi-coding-agent-input-window-display 'on-demand)
+
+;; Start sessions with only the chat window visible; open the input on
+;; demand (M-x pi-coding-agent-open-input, or `i'/`a' under Evil) and
+;; have it hide again after each send:
+(setopt pi-coding-agent-input-window-display 'hidden)
+
 ;; Copy source Markdown from the chat buffer instead of only visible text:
 (setopt pi-coding-agent-copy-raw-markdown t)
 
