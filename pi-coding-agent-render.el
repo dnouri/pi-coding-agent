@@ -1088,6 +1088,7 @@ decision is made.  For proper cancellation support, use `pi-coding-agent-quit'
 which asks upfront before any buffers are touched."
   (when (derived-mode-p 'pi-coding-agent-chat-mode)
     (pi-coding-agent--cancel-followup-drain-timer)
+    (pi-coding-agent--cancel-tool-update-flush)
     (pi-coding-agent--invalidate-prompt-start-wait)
     (pi-coding-agent--set-activity-phase "idle" 'teardown t)
     (dolist (proc (delete-dups (delq nil (list pi-coding-agent--process
@@ -1298,6 +1299,9 @@ Updates buffer-local state and renders display updates."
             (args (when (and tool-call-id pi-coding-agent--tool-args-cache)
                     (prog1 (gethash tool-call-id pi-coding-agent--tool-args-cache)
                       (remhash tool-call-id pi-coding-agent--tool-args-cache)))))
+       ;; The authoritative result supersedes any pending preview; discard
+       ;; it first so completion renders exactly once.
+       (pi-coding-agent--discard-pending-tool-update tool-call-id)
        (pi-coding-agent--display-tool-end (plist-get event :toolName)
                                           args
                                           (plist-get result :content)
@@ -1305,9 +1309,14 @@ Updates buffer-local state and renders display updates."
                                           (plist-get event :isError)
                                           block)))
     ("tool_execution_update"
-     (pi-coding-agent--display-tool-update
-      (plist-get event :partialResult)
-      (pi-coding-agent--tool-block-get (plist-get event :toolCallId))))
+     (let ((tool-call-id (plist-get event :toolCallId))
+           (partial-result (plist-get event :partialResult)))
+       (if tool-call-id
+           ;; Coalesce: keep only the latest preview per tool call and
+           ;; render at the flush cadence, not once per event.
+           (pi-coding-agent--queue-tool-update tool-call-id partial-result)
+         ;; No toolCallId: render through the legacy compatibility block.
+         (pi-coding-agent--display-tool-update partial-result nil))))
     ("compaction_start"
      (pi-coding-agent--cancel-followup-drain-timer)
      (pi-coding-agent--set-activity-phase "compact")
@@ -1318,6 +1327,9 @@ Updates buffer-local state and renders display updates."
      (pi-coding-agent--cancel-followup-drain-timer)
      (pi-coding-agent--handle-compaction-end-event event))
     ("agent_end"
+     ;; Defensively drop pending previews and cancel the flush timer; any
+     ;; tool still running here is aborted and its block is finalized below.
+     (pi-coding-agent--cancel-tool-update-flush)
      (pi-coding-agent--set-canonical-messages
       (plist-get pi-coding-agent--state :messages))
      (pi-coding-agent--display-agent-end)
@@ -1419,9 +1431,10 @@ Returns a plist with:
   "Delete pi-owned render artifacts in the current chat buffer.
 This removes completed/pending tool overlays, diff overlays, and lightweight
 cold-tool metadata before buffer reset or history rebuild, then clears keyed
-live-tool state, cached execution args, and the compatibility pending overlay
-slot so buffer and render state stay consistent.  Tree-sitter overlays are
-left alone."
+live-tool state, cached execution args, pending coalesced tool updates, and
+the compatibility pending overlay slot so buffer and render state stay
+consistent.  Tree-sitter overlays are left alone."
+  (pi-coding-agent--cancel-tool-update-flush)
   (remove-overlays (point-min) (point-max) 'pi-coding-agent-tool-block t)
   (remove-overlays (point-min) (point-max) 'pi-coding-agent-diff-overlay t)
   (let ((inhibit-read-only t))
@@ -2147,6 +2160,97 @@ shows complete lines only)."
           (pi-coding-agent--tool-block-replace-body
            block display-content show-hidden-indicator lang)
           (pi-coding-agent--tool-block-set-last-tail block cache-key))))))
+
+;;;; Coalesced tool update rendering
+
+;; Pi emits one `tool_execution_update' per extension onUpdate call, with a
+;; cumulative `:partialResult' (replace semantics).  Rendering every event
+;; synchronously multiplied an expensive fenced body replacement by
+;; machine-gun update bursts (median inter-update gap ~1 ms, peaks above
+;; 40 updates/s in real subagent sessions).  Instead, each event only
+;; records the latest partial result for its tool call, and one buffer-local
+;; one-shot timer renders the pending previews at a humane cadence.  Typing
+;; always wins: the flush re-arms instead of rendering while input is pending.
+
+(defconst pi-coding-agent--tool-update-render-interval 0.25
+  "Seconds between coalesced renders of streaming tool output previews.
+The pattern mirrors pi's TUI, which coalesces repaints latest-wins behind
+a minimum render interval; 250 ms is this frontend's humane cadence for
+previews that an authoritative tool_execution_end always supersedes.
+Internal constant, not a user option.")
+
+(defvar-local pi-coding-agent--pending-tool-updates nil
+  "Alist of (TOOL-CALL-ID . PARTIAL-RESULT) awaiting coalesced rendering.
+Only the latest partial result per tool call is kept; superseded snapshots
+are dropped.  New entries are pushed, so flushing iterates the reversed
+alist to render first-queued-first.")
+
+(defvar-local pi-coding-agent--tool-update-flush-timer nil
+  "The one pending one-shot flush timer for tool updates, or nil.
+At most one timer exists per chat buffer; updates never cancel or rearm
+it.  Only the flush itself schedules a further attempt (typing-wins).")
+
+(defun pi-coding-agent--schedule-tool-update-flush ()
+  "Arm the one-shot tool-update flush timer for the current buffer."
+  (setq pi-coding-agent--tool-update-flush-timer
+        (run-at-time pi-coding-agent--tool-update-render-interval nil
+                     #'pi-coding-agent--flush-tool-updates
+                     (current-buffer))))
+
+(defun pi-coding-agent--queue-tool-update (tool-call-id partial-result)
+  "Record PARTIAL-RESULT as the pending preview for TOOL-CALL-ID.
+Latest-wins per tool call; the shared flush timer is armed only when none
+is pending, and an armed timer keeps its deadline.  No chat text changes."
+  (when (and tool-call-id partial-result)
+    (if-let* ((entry (assoc tool-call-id pi-coding-agent--pending-tool-updates)))
+        (setcdr entry partial-result)
+      (push (cons tool-call-id partial-result)
+            pi-coding-agent--pending-tool-updates))
+    (unless pi-coding-agent--tool-update-flush-timer
+      (pi-coding-agent--schedule-tool-update-flush))))
+
+(defun pi-coding-agent--flush-tool-updates (buffer)
+  "Render pending tool update previews in BUFFER, then leave clean state.
+Timer callback for `pi-coding-agent--tool-update-flush-timer'.  Clears the
+timer slot first so updates arriving during the flush can schedule a fresh
+pass.  While user input is pending, renders nothing and schedules one
+retry; typing wins over preview refresh.  Errors during rendering cannot
+wedge the scheduler: the timer slot and pending map are already cleared
+before any preview is painted."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq pi-coding-agent--tool-update-flush-timer nil)
+      (if (input-pending-p)
+          (when pi-coding-agent--pending-tool-updates
+            (pi-coding-agent--schedule-tool-update-flush))
+        (let ((pending (nreverse pi-coding-agent--pending-tool-updates)))
+          (setq pi-coding-agent--pending-tool-updates nil)
+          (dolist (entry pending)
+            (pi-coding-agent--display-tool-update
+             (cdr entry)
+             ;; Falls back to the compatibility block when the tool call
+             ;; has no keyed live block.
+             (pi-coding-agent--tool-block-get (car entry)))))))))
+
+(defun pi-coding-agent--discard-pending-tool-update (tool-call-id)
+  "Drop any pending preview for TOOL-CALL-ID.
+Called on tool_execution_end before the authoritative final render.  A
+still-armed flush timer is left alone: it fires into the remaining (or
+empty) pending map, and flushing nothing is a no-op."
+  (when (and tool-call-id pi-coding-agent--pending-tool-updates)
+    (setq pi-coding-agent--pending-tool-updates
+          (assoc-delete-all tool-call-id
+                            pi-coding-agent--pending-tool-updates))))
+
+(defun pi-coding-agent--cancel-tool-update-flush ()
+  "Cancel any armed tool-update flush timer and discard pending previews.
+Idempotent.  Runs on agent_end and wherever live tool state is torn
+down -- buffer kill, session reset, history rebuild -- so no stale
+timer or preview survives a session transition."
+  (when (timerp pi-coding-agent--tool-update-flush-timer)
+    (cancel-timer pi-coding-agent--tool-update-flush-timer))
+  (setq pi-coding-agent--tool-update-flush-timer nil
+        pi-coding-agent--pending-tool-updates nil))
 
 (defun pi-coding-agent--display-tool-update (partial-result &optional block)
   "Display PARTIAL-RESULT as streaming output in BLOCK.

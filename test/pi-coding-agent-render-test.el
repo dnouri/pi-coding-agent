@@ -10691,6 +10691,8 @@ Regression test: single lines should respect byte limit even with no newlines."
      '(:type "tool_execution_update"
        :toolCallId "test-id"
        :partialResult (:content [(:type "text" :text "streaming output line 1")])))
+    ;; Updates are coalesced; flush renders the latest pending preview
+    (pi-coding-agent-test--flush-tool-updates)
     ;; Should show partial content
     (should (string-match-p "streaming output" (buffer-string)))))
 
@@ -10712,7 +10714,8 @@ Regression test: single lines should respect byte limit even with no newlines."
         (pi-coding-agent--handle-display-event
          `(:type "tool_execution_update"
            :toolCallId "test-id"
-           :partialResult (:content [(:type "text" :text ,many-lines)])))))
+           :partialResult (:content [(:type "text" :text ,many-lines)])))
+        (pi-coding-agent-test--flush-tool-updates)))
     ;; Should show indicator that earlier output is hidden
     (should (string-match-p "earlier output" (buffer-string)))
     ;; Should show last few lines
@@ -10736,7 +10739,8 @@ Regression test: streaming output with no newlines should still be capped."
         (pi-coding-agent--handle-display-event
          `(:type "tool_execution_update"
            :toolCallId "test-id"
-           :partialResult (:content [(:type "text" :text ,long-line)])))))
+           :partialResult (:content [(:type "text" :text ,long-line)])))
+        (pi-coding-agent-test--flush-tool-updates)))
     ;; Output should be truncated - 5 visual lines * 80 chars = 400 chars max
     (let ((buffer-content (buffer-string)))
       ;; Should NOT contain all 1000 x's
@@ -10787,6 +10791,229 @@ Regression test: streaming output with no newlines should still be capped."
       (should (= 1 (pi-coding-agent-test--count-matches "\\$ echo one" content)))
       (should (= 1 (pi-coding-agent-test--count-matches "\\$ echo two" content))))
     (should (= 0 (hash-table-count pi-coding-agent--live-tool-blocks)))))
+
+;; ── Coalesced tool_execution_update rendering ──────────────────────
+
+(defun pi-coding-agent-test--send-tool-execution-update (tool-call-id text)
+  "Send a tool_execution_update event for TOOL-CALL-ID with TEXT output."
+  (pi-coding-agent--handle-display-event
+   `(:type "tool_execution_update"
+     :toolCallId ,tool-call-id
+     :partialResult (:content [(:type "text" :text ,text)]))))
+
+(defun pi-coding-agent-test--flush-tool-updates ()
+  "Run the coalesced tool-update flush in the current buffer."
+  (pi-coding-agent--flush-tool-updates (current-buffer)))
+
+(ert-deftest pi-coding-agent-test-tool-update-queues-without-immediate-render ()
+  "A tool update stores pending state and schedules a flush, but does
+not render synchronously."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash"
+       :toolCallId "call_1"
+       :args (:command "long-running")))
+    (pi-coding-agent-test--send-tool-execution-update "call_1" "line one\n")
+    ;; Nothing rendered yet
+    (should-not (string-match-p "line one" (buffer-string)))
+    ;; ...but the latest partial result is pending and one timer is armed
+    (should (assoc "call_1" pi-coding-agent--pending-tool-updates))
+    (should (timerp pi-coding-agent--tool-update-flush-timer))))
+
+(ert-deftest pi-coding-agent-test-tool-update-supersedes-without-rearm ()
+  "A second update for the same tool call replaces the pending preview
+without rearming the flush timer; one flush renders only the latest."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash"
+       :toolCallId "call_1"
+       :args (:command "long-running")))
+    (pi-coding-agent-test--send-tool-execution-update "call_1" "alpha-first\n")
+    (let ((first-timer pi-coding-agent--tool-update-flush-timer)
+          (replace-calls 0))
+      (pi-coding-agent-test--send-tool-execution-update "call_1" "bravo-second\n")
+      ;; The pending entry was replaced, the timer was not rearmed
+      (should (eq first-timer pi-coding-agent--tool-update-flush-timer))
+      (should (= 1 (length pi-coding-agent--pending-tool-updates)))
+      (let ((orig (symbol-function 'pi-coding-agent--tool-block-replace-body)))
+        (cl-letf (((symbol-function 'pi-coding-agent--tool-block-replace-body)
+                   (lambda (&rest args)
+                     (setq replace-calls (1+ replace-calls))
+                     (apply orig args))))
+          (pi-coding-agent-test--flush-tool-updates)))
+      ;; Only the latest snapshot was rendered, exactly once
+      (should (= 1 replace-calls))
+      (should (string-match-p "bravo-second" (buffer-string)))
+      (should-not (string-match-p "alpha-first" (buffer-string)))
+      ;; Flush leaves clean state
+      (should-not pi-coding-agent--pending-tool-updates)
+      (should-not pi-coding-agent--tool-update-flush-timer))))
+
+(ert-deftest pi-coding-agent-test-tool-update-flush-renders-parallel-tools-in-own-blocks ()
+  "One flush renders pending previews for parallel tool calls, each
+under its own header."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash" :toolCallId "c1" :args (:command "echo one")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash" :toolCallId "c2" :args (:command "echo two")))
+    (pi-coding-agent-test--send-tool-execution-update "c1" "alpha\n")
+    (pi-coding-agent-test--send-tool-execution-update "c2" "bravo\n")
+    (pi-coding-agent-test--flush-tool-updates)
+    (let ((body-c1 (pi-coding-agent-test--tool-stream-body-by-id "c1"))
+          (body-c2 (pi-coding-agent-test--tool-stream-body-by-id "c2")))
+      (should (string-match-p "alpha" body-c1))
+      (should-not (string-match-p "bravo" body-c1))
+      (should (string-match-p "bravo" body-c2))
+      (should-not (string-match-p "alpha" body-c2)))
+    ;; First-queued-first-rendered: c1's preview precedes c2's header
+    (let ((content (buffer-string)))
+      (should (< (string-match "alpha" content)
+                 (string-match "\$ echo two" content))))))
+
+(ert-deftest pi-coding-agent-test-tool-execution-end-discards-pending-preview ()
+  "tool_execution_end drops the pending preview without rendering it
+and renders only the authoritative final result."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash" :toolCallId "call_1" :args (:command "test")))
+    (pi-coding-agent-test--send-tool-execution-update "call_1" "preview text\n")
+    (should (assoc "call_1" pi-coding-agent--pending-tool-updates))
+    ;; End arrives before any flush: the preview must never be painted
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_end"
+       :toolName "bash"
+       :toolCallId "call_1"
+       :result (:content [(:type "text" :text "final text")])
+       :isError nil))
+    (should (string-match-p "final text" (buffer-string)))
+    (should-not (string-match-p "preview text" (buffer-string)))
+    (should-not pi-coding-agent--pending-tool-updates)))
+
+(ert-deftest pi-coding-agent-test-tool-execution-end-keeps-other-pending-updates ()
+  "Completing one tool call neither discards nor renders another
+tool's pending preview, and keeps the flush timer armed."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash" :toolCallId "c1" :args (:command "echo one")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash" :toolCallId "c2" :args (:command "echo two")))
+    (pi-coding-agent-test--send-tool-execution-update "c1" "alpha\n")
+    (pi-coding-agent-test--send-tool-execution-update "c2" "bravo\n")
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_end"
+       :toolName "bash" :toolCallId "c1"
+       :result (:content [(:type "text" :text "final alpha")])
+       :isError nil))
+    ;; c1's pending entry is gone; c2's survives with the timer armed
+    (should-not (assoc "c1" pi-coding-agent--pending-tool-updates))
+    (should (assoc "c2" pi-coding-agent--pending-tool-updates))
+    (should (timerp pi-coding-agent--tool-update-flush-timer))
+    (pi-coding-agent-test--flush-tool-updates)
+    (should (string-match-p "bravo"
+                            (pi-coding-agent-test--tool-stream-body-by-id "c2")))))
+
+(ert-deftest pi-coding-agent-test-tool-update-flush-defers-to-typing ()
+  "While input is pending, the flush renders nothing and re-arms once;
+when input clears, the next flush renders the pending preview."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash" :toolCallId "call_1" :args (:command "test")))
+    (pi-coding-agent-test--send-tool-execution-update "call_1" "deferred text\n")
+    (let ((armed-timer pi-coding-agent--tool-update-flush-timer))
+      (cl-letf (((symbol-function 'input-pending-p) (lambda (&rest _) t)))
+        (pi-coding-agent-test--flush-tool-updates))
+      ;; Typing won: no render, state kept, one fresh one-shot attempt armed
+      (should-not (string-match-p "deferred text" (buffer-string)))
+      (should (assoc "call_1" pi-coding-agent--pending-tool-updates))
+      (should (timerp pi-coding-agent--tool-update-flush-timer))
+      (should-not (eq armed-timer pi-coding-agent--tool-update-flush-timer)))
+    (pi-coding-agent-test--flush-tool-updates)
+    (should (string-match-p "deferred text" (buffer-string)))
+    (should-not pi-coding-agent--pending-tool-updates)
+    (should-not pi-coding-agent--tool-update-flush-timer)))
+
+(ert-deftest pi-coding-agent-test-agent-end-clears-pending-tool-updates ()
+  "agent_end discards pending previews and cancels the flush timer."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash" :toolCallId "call_1" :args (:command "test")))
+    (pi-coding-agent-test--send-tool-execution-update "call_1" "preview\n")
+    (should (timerp pi-coding-agent--tool-update-flush-timer))
+    (pi-coding-agent--handle-display-event '(:type "agent_end"))
+    (should-not pi-coding-agent--pending-tool-updates)
+    (should-not pi-coding-agent--tool-update-flush-timer)))
+
+(ert-deftest pi-coding-agent-test-tool-update-flush-error-leaves-clean-state ()
+  "A rendering error during flush cannot wedge the timer or the
+pending state; later updates flush normally again."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash" :toolCallId "call_1" :args (:command "test")))
+    (pi-coding-agent-test--send-tool-execution-update "call_1" "boom\n")
+    (cl-letf (((symbol-function 'pi-coding-agent--display-tool-update)
+               (lambda (&rest _) (signal 'error '("render failed")))))
+      (should-error (pi-coding-agent-test--flush-tool-updates)
+                    :type 'error))
+    (should-not pi-coding-agent--pending-tool-updates)
+    (should-not pi-coding-agent--tool-update-flush-timer)
+    ;; The queue still works afterwards
+    (pi-coding-agent-test--send-tool-execution-update "call_1" "recovered\n")
+    (pi-coding-agent-test--flush-tool-updates)
+    (should (string-match-p "recovered" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-clear-render-artifacts-discards-pending-tool-updates ()
+  "Session reset/history rebuild discards pending previews and the
+flush timer along with the other live tool state."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolName "bash" :toolCallId "call_1" :args (:command "test")))
+    (pi-coding-agent-test--send-tool-execution-update "call_1" "preview\n")
+    (should (timerp pi-coding-agent--tool-update-flush-timer))
+    (pi-coding-agent--clear-render-artifacts)
+    (should-not pi-coding-agent--pending-tool-updates)
+    (should-not pi-coding-agent--tool-update-flush-timer)))
+
+(ert-deftest pi-coding-agent-test-tool-update-timer-cancelled-on-kill ()
+  "Killing the chat buffer cancels a pending flush timer.
+Uses a non-temporary buffer because `with-temp-buffer' inhibits buffer
+hooks, including `kill-buffer-hook'."
+  (let ((buf (generate-new-buffer "*pi-coding-agent-test-update-kill*"))
+        (pi-coding-agent-quit-without-confirmation t)
+        timer)
+    (unwind-protect
+        (with-current-buffer buf
+          (pi-coding-agent-chat-mode)
+          (pi-coding-agent--handle-display-event
+           '(:type "tool_execution_start"
+             :toolName "bash" :toolCallId "call_1" :args (:command "test")))
+          (pi-coding-agent-test--send-tool-execution-update "call_1" "preview\n")
+          (setq timer pi-coding-agent--tool-update-flush-timer)
+          (should (timerp timer))
+          (kill-buffer buf)
+          (should-not (memq timer timer-list)))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
 
 ;; ── Toolcall streaming (during LLM generation) ─────────────────────
 
@@ -11216,6 +11443,7 @@ authoritative args, header and overlay path are updated."
      '(:type "tool_execution_update"
        :toolCallId "call_1"
        :partialResult (:content [(:type "text" :text "hi\n")])) )
+    (pi-coding-agent-test--flush-tool-updates)
     (should (string-match-p "\\$ echo hi\n```\nhi" (buffer-string)))))
 
 (ert-deftest pi-coding-agent-test-toolcall-delta-streams-multiple-write-previews-independently ()
@@ -11859,7 +12087,8 @@ a slot, so downstream consumers that skip blanks still get N content lines."
      '(:type "tool_execution_update"
        :toolCallId "test-id"
        :partialResult (:content [(:type "text" :text "partial streaming")])))
-    ;; Partial content should be present
+    ;; Partial content should be present once the coalesced flush runs
+    (pi-coding-agent-test--flush-tool-updates)
     (should (string-match-p "partial streaming" (buffer-string)))
     ;; Now end the tool
     (pi-coding-agent--handle-display-event
@@ -12569,6 +12798,7 @@ fence so tree-sitter does not parse it as markdown."
        :partialResult
        (:content [(:type "text"
                    :text "# Heading\necho \"**bold**\"\necho \"__init__.py\"\n")])))
+    (pi-coding-agent-test--flush-tool-updates)
     ;; Simulate jit-lock
     (font-lock-ensure (point-min) (point-max))
     (dolist (pattern '("# Heading" "**bold**" "__init__"))
