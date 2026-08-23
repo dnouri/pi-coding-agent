@@ -1,0 +1,340 @@
+#!/usr/bin/env bash
+# run-tool-update-bench.sh - Run pi-coding-agent tool-update storm benchmarks
+#
+# Usage:
+#   ./bench/run-tool-update-bench.sh                         # GUI via xvfb (primary lane)
+#   ./bench/run-tool-update-bench.sh --batch                 # batch mode (secondary lane)
+#   ./bench/run-tool-update-bench.sh -c 3                    # 3 repetitions per scenario
+#   ./bench/run-tool-update-bench.sh --scenario smoke -c 1   # cheap correctness smoke
+#   ./bench/run-tool-update-bench.sh --scenarios storm,smoke # comma-separated scenarios
+#   ./bench/run-tool-update-bench.sh --out-dir tmp/tu-bench  # write artifacts elsewhere
+#
+# The primary lane uses xvfb-run for GUI Emacs: the measured cost is buffer
+# mutation plus redisplay/fontification, which batch mode cannot reproduce.
+# Batch numbers are a faster secondary lane and CI artifact generator.
+# The script fails on correctness failures, not on timing thresholds.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+BATCH=0
+REPS=3
+OUT_DIR="$PROJECT_DIR/tmp/tool-update-bench"
+SCENARIOS=()
+
+usage() {
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+require_arg() {
+    local opt="$1"
+    if [[ $# -lt 2 || -z "${2:-}" ]]; then
+        echo "ERROR: $opt requires an argument" >&2
+        usage >&2
+        exit 1
+    fi
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --batch) BATCH=1; shift ;;
+        -c|--count)
+            require_arg "$1" "${2:-}"
+            REPS="$2"
+            shift 2
+            ;;
+        --out-dir)
+            require_arg "$1" "${2:-}"
+            OUT_DIR="$2"
+            shift 2
+            ;;
+        --scenario)
+            require_arg "$1" "${2:-}"
+            SCENARIOS+=("$2")
+            shift 2
+            ;;
+        --scenarios)
+            require_arg "$1" "${2:-}"
+            IFS=',' read -r -a SCENARIOS <<< "$2"
+            shift 2
+            ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown argument: $1" >&2; usage >&2; exit 1 ;;
+    esac
+done
+
+if ! [[ "$REPS" =~ ^[0-9]+$ ]] || [[ "$REPS" -lt 1 ]]; then
+    echo "ERROR: repetition count must be a positive integer: $REPS" >&2
+    exit 1
+fi
+
+if [[ ${#SCENARIOS[@]} -eq 0 ]]; then
+    SCENARIOS=(storm)
+fi
+
+case "$OUT_DIR" in
+    /*) ;;
+    *) OUT_DIR="$PWD/$OUT_DIR" ;;
+esac
+while [[ "$OUT_DIR" != "/" && "$OUT_DIR" == */ ]]; do
+    OUT_DIR="${OUT_DIR%/}"
+done
+if [[ -z "$OUT_DIR" || "$OUT_DIR" == "/" ]]; then
+    echo "ERROR: refusing unsafe output directory: $OUT_DIR" >&2
+    exit 1
+fi
+
+BENCH_MARKER="$OUT_DIR/.pi-coding-agent-tool-update-bench"
+if [[ -L "$OUT_DIR" ]]; then
+    echo "ERROR: refusing symlink output directory: $OUT_DIR" >&2
+    exit 1
+fi
+if [[ -e "$OUT_DIR" && ! -d "$OUT_DIR" ]]; then
+    echo "ERROR: refusing to replace non-directory output path: $OUT_DIR" >&2
+    exit 1
+fi
+if [[ -d "$OUT_DIR" && ! -f "$BENCH_MARKER" ]] && find "$OUT_DIR" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+    echo "ERROR: refusing to remove non-empty output directory without benchmark marker: $OUT_DIR" >&2
+    exit 1
+fi
+
+scenario_env() {
+    case "$1" in
+        smoke)
+            cat <<'EOF'
+PI_TU_BENCH_FILL_BASH=6
+PI_TU_BENCH_FILL_READ=2
+PI_TU_BENCH_FILL_WRITE=1
+PI_TU_BENCH_FILL_EDIT=1
+PI_TU_BENCH_FILL_OUTPUT_LINES=8
+PI_TU_BENCH_UPDATES=30
+PI_TU_BENCH_PARALLEL_TOOLS=2
+PI_TU_BENCH_GAP_SCALE=0.2
+PI_TU_BENCH_SEED=20240817
+PI_TU_BENCH_TIMEOUT_SECONDS=60
+EOF
+            ;;
+        storm)
+            cat <<'EOF'
+PI_TU_BENCH_FILL_BASH=58
+PI_TU_BENCH_FILL_READ=5
+PI_TU_BENCH_FILL_WRITE=2
+PI_TU_BENCH_FILL_EDIT=1
+PI_TU_BENCH_FILL_OUTPUT_LINES=20
+PI_TU_BENCH_UPDATES=400
+PI_TU_BENCH_PARALLEL_TOOLS=3
+PI_TU_BENCH_GAP_SCALE=1.0
+PI_TU_BENCH_SEED=20240817
+PI_TU_BENCH_TIMEOUT_SECONDS=240
+EOF
+            ;;
+        *) echo "Unknown scenario: $1" >&2; exit 1 ;;
+    esac
+}
+
+for scenario in "${SCENARIOS[@]}"; do
+    scenario_env "$scenario" >/dev/null
+done
+
+EMACS_INIT=(
+    -Q -L "$PROJECT_DIR"
+    --eval "(setq inhibit-startup-screen t)"
+    --eval "(require 'package)"
+    --eval "(package-initialize)"
+    --eval "(setq load-path (cons (expand-file-name \"$PROJECT_DIR\") load-path))"
+    -l "$SCRIPT_DIR/pi-coding-agent-tool-update-bench.el"
+)
+
+printf '=== pi-coding-agent Tool-Update Storm Benchmarks ===\n'
+printf 'Project: %s\n' "$PROJECT_DIR"
+if [[ "$BATCH" = "1" ]]; then
+    MODE="batch"
+    printf 'Mode: batch (secondary lane), %s reps\n' "$REPS"
+else
+    MODE="gui-xvfb"
+    printf 'Mode: GUI via xvfb (primary lane), %s reps\n' "$REPS"
+    if ! command -v xvfb-run >/dev/null 2>&1; then
+        echo "ERROR: xvfb-run not found. Install xvfb or use --batch." >&2
+        exit 1
+    fi
+fi
+printf 'Scenarios: %s\n\n' "${SCENARIOS[*]}"
+
+rm -rf -- "$OUT_DIR"
+mkdir -p -- "$OUT_DIR"
+touch -- "$BENCH_MARKER"
+
+for scenario in "${SCENARIOS[@]}"; do
+    for ((iter = 1; iter <= REPS; iter++)); do
+        run_dir="$OUT_DIR/$scenario/iter-$(printf '%02d' "$iter")"
+        mkdir -p "$run_dir"
+        env_file="$run_dir/env"
+        scenario_env "$scenario" > "$env_file"
+        set -a
+        # shellcheck disable=SC1090
+        source "$env_file"
+        set +a
+        export PI_TU_BENCH_SCENARIO="$scenario"
+        export PI_TU_BENCH_ITERATION="$iter"
+        export PI_TU_BENCH_OUT_DIR="$run_dir"
+        export PI_TU_BENCH_RUNNER_OUT_DIR="$OUT_DIR"
+        export PI_TU_BENCH_DISPLAY=$([[ "$BATCH" = "1" ]] && echo 0 || echo 1)
+
+        printf '[%s/%s] running\n' "$scenario" "$iter"
+        if [[ "$BATCH" = "1" ]]; then
+            if ! emacs --batch "${EMACS_INIT[@]}" \
+                -f pi-coding-agent-tu-bench-run-batch \
+                > "$run_dir/stdout.log" 2> "$run_dir/stderr.log"; then
+                cat "$run_dir/stdout.log"
+                cat "$run_dir/stderr.log" >&2
+                exit 1
+            fi
+        else
+            if ! xvfb-run -a env GDK_BACKEND=x11 PATH="$PATH" \
+                emacs --geometry 120x40 "${EMACS_INIT[@]}" \
+                --eval "(let ((standard-output #'external-debugging-output)) (kill-emacs (if (pi-coding-agent-tu-bench-run) 0 1)))" \
+                </dev/null > "$run_dir/stdout.log" 2> "$run_dir/stderr.log"; then
+                cat "$run_dir/stdout.log"
+                cat "$run_dir/stderr.log" >&2
+                exit 1
+            fi
+        fi
+    done
+done
+
+python3 - "$OUT_DIR" "$MODE" "$REPS" "${SCENARIOS[*]}" <<'PY'
+from __future__ import annotations
+
+import csv
+import json
+import statistics
+import sys
+from pathlib import Path
+from typing import Any
+
+out = Path(sys.argv[1])
+mode = sys.argv[2]
+reps = sys.argv[3]
+scenarios_arg = sys.argv[4]
+rows: list[dict[str, Any]] = []
+
+for result_path in sorted(out.glob("*/iter-*/result.json")):
+    with result_path.open(encoding="utf-8") as handle:
+        result = json.load(handle)
+    probe = result.get("probe", {})
+    renders = result.get("renders", {})
+    update_stats = next(
+        (row for row in result.get("eventStats", [])
+         if row.get("type") == "tool_execution_update"),
+        {},
+    )
+    failed_checks = [
+        check.get("name")
+        for check in result.get("checks", [])
+        if check.get("ok") is not True
+    ]
+    rows.append({
+        "scenario": result.get("scenario"),
+        "iteration": result.get("iteration"),
+        "ok": result.get("ok") is True and not failed_checks,
+        "wallMs": result.get("wallMs"),
+        "updateMeanMs": update_stats.get("meanMs"),
+        "updateMaxMs": update_stats.get("maxMs"),
+        "replaceBodyCalls": renders.get("replaceBody", {}).get("total"),
+        "displayToolEndCalls": renders.get("displayToolEnd", {}).get("total"),
+        "probeP95Ms": probe.get("p95Ms"),
+        "probeMaxMs": probe.get("maxMs"),
+        "probeOver100Ms": probe.get("over100Ms"),
+        "probeOver250Ms": probe.get("over250Ms"),
+        "bufferBytes": result.get("bufferBytes"),
+        "overlays": result.get("overlays"),
+        "seconds": result.get("seconds"),
+        "failedChecks": ";".join(failed_checks),
+        "error": result.get("error") or "",
+        "resultPath": str(result_path),
+    })
+
+csv_path = out / "summary.csv"
+if rows:
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+summary_lines: list[str] = []
+summary_lines.append("# pi-coding-agent tool-update storm benchmark summary")
+summary_lines.append("")
+summary_lines.append("Synthetic deterministic workload only; no private session content is used.")
+summary_lines.append("")
+summary_lines.append(f"- Mode: `{mode}`")
+summary_lines.append(f"- Repetitions per scenario: `{reps}`")
+summary_lines.append(f"- Scenarios: `{scenarios_arg}`")
+summary_lines.append("- Timing thresholds: `none` (correctness failures still fail the run)")
+summary_lines.append("")
+summary_lines.append("| scenario | wall ms (median) | update mean ms | update max ms | replace-body calls | tool-end renders | probe p95 ms | probe max ms | >100 ms late | >250 ms late | successful runs |")
+summary_lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+
+print("\nsummary")
+print("scenario    wall-med  upd-mean  upd-max  replace-body  tool-end  probe-p95  probe-max  >100ms  >250ms  ok")
+print("--------    --------  --------  -------  ------------  --------  ---------  ---------  ------  ------  --")
+
+failed = [row for row in rows if not row["ok"]]
+for scenario in sorted({str(row["scenario"]) for row in rows}):
+    subset_all = [row for row in rows if str(row["scenario"]) == scenario]
+    subset = [row for row in subset_all if row["ok"]]
+    if not subset:
+        print(f"{scenario:<11} no successful runs")
+        summary_lines.append(f"| {scenario} | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | 0/{len(subset_all)} |")
+        continue
+    walls = sorted(float(row["wallMs"]) for row in subset)
+    upd_mean = statistics.median(float(row["updateMeanMs"]) for row in subset)
+    upd_max = max(float(row["updateMaxMs"]) for row in subset)
+    replace_body = max(int(row["replaceBodyCalls"]) for row in subset)
+    tool_end = max(int(row["displayToolEndCalls"]) for row in subset)
+    p95 = statistics.median(float(row["probeP95Ms"]) for row in subset)
+    pmax = max(float(row["probeMaxMs"]) for row in subset)
+    over100 = max(int(row["probeOver100Ms"]) for row in subset)
+    over250 = max(int(row["probeOver250Ms"]) for row in subset)
+    ok_count = f"{len(subset)}/{len(subset_all)}"
+    print(
+        f"{scenario:<11} {walls[len(walls)//2]:8.0f}  {upd_mean:8.2f}  {upd_max:7.1f}  "
+        f"{replace_body:12d}  {tool_end:8d}  {p95:9.1f}  {pmax:9.1f}  {over100:6d}  {over250:6d}  {ok_count}"
+    )
+    summary_lines.append(
+        f"| {scenario} | {statistics.median(walls):.0f} | {upd_mean:.2f} | {upd_max:.1f} | "
+        f"{replace_body} | {tool_end} | {p95:.1f} | {pmax:.1f} | {over100} | {over250} | {ok_count} |"
+    )
+
+summary_lines.append("")
+summary_lines.append("## Artifacts")
+summary_lines.append("")
+summary_lines.append(f"- CSV: `{csv_path}`")
+summary_lines.append("- Per-run reports: `SCENARIO/iter-NN/report.md`")
+summary_lines.append("- Per-run JSON: `SCENARIO/iter-NN/result.json`")
+summary_lines.append("- Per-run timing TSV: `SCENARIO/iter-NN/times.tsv`")
+
+if failed:
+    summary_lines.append("")
+    summary_lines.append("## Correctness failures")
+    summary_lines.append("")
+    for row in failed:
+        detail = row["error"] or f"failed checks: {row['failedChecks']}"
+        summary_lines.append(
+            f"- {row['scenario']} iter {row['iteration']}: {detail} ({row['resultPath']})"
+        )
+
+summary_path = out / "summary.md"
+summary_path.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
+
+print(f"\nWrote {csv_path}")
+print(f"Wrote {summary_path}")
+
+if not rows:
+    print("ERROR: no benchmark result rows found", file=sys.stderr)
+    raise SystemExit(1)
+if failed:
+    print("ERROR: one or more tool-update correctness checks failed", file=sys.stderr)
+    raise SystemExit(1)
+PY

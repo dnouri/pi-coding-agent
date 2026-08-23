@@ -82,6 +82,9 @@ module, direct `setq` is fine.
 | `bench/pi-coding-agent-reload-resume-bench.el` | Synthetic reload/resume benchmark harness |
 | `bench/fake-pi-reload-resume.py` | Fake JSON-over-stdio pi backend for reload/resume benchmarks |
 | `bench/run-reload-resume-bench.sh` | Reload/resume benchmark runner; GUI uses `xvfb-run`, `--batch` for headless lane |
+| `bench/pi-coding-agent-tool-update-bench.el` | Synthetic tool-update storm benchmark harness |
+| `bench/fake-pi-tool-update-storm.py` | Fake JSON-over-stdio pi backend emitting a tool-update storm |
+| `bench/run-tool-update-bench.sh` | Tool-update storm benchmark runner; GUI uses `xvfb-run`, `--batch` for headless lane |
 | `bench/fixtures/tables.md` | Sample pipe tables used by the table benchmark |
 | `scripts/check.sh` | Pre-commit hook: byte-compile + lint + tests |
 | `scripts/pi-coding-agent-build.el` | Shared batch helpers for dependency and grammar installation |
@@ -143,13 +146,19 @@ make bench-batch                   # table batch lane (no display, secondary)
 make bench-reload-resume           # reload/resume GUI lane via xvfb (primary)
 make bench-reload-resume-batch     # reload/resume batch lane (secondary)
 make bench-reload-resume-smoke     # cheap synthetic correctness smoke
+make bench-tool-update             # tool-update storm GUI lane via xvfb (primary)
+make bench-tool-update-batch       # tool-update storm batch lane (secondary)
+make bench-tool-update-smoke       # cheap synthetic correctness smoke
 ```
 
 The GUI lanes are the primary measurements; batch lanes are quick sanity
 checks and CI artifact generators.  Reload/resume benchmarks use synthetic
 JSONL fixtures only and fail on correctness errors, not timing thresholds.
-Table fixtures live in `bench/fixtures/tables.md`. Reload/resume artifacts are
-written under `tmp/reload-resume-bench/` by default.
+Tool-update storm benchmarks replay a deterministic synthetic
+`tool_execution_update` storm against a fake pi and likewise fail only on
+correctness errors.  Table fixtures live in `bench/fixtures/tables.md`.
+Reload/resume artifacts are written under `tmp/reload-resume-bench/` and
+tool-update artifacts under `tmp/tool-update-bench/` by default.
 
 ## Linting
 
