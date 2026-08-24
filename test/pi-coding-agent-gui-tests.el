@@ -502,18 +502,15 @@ buffer (jit-lock active) to verify under real GUI conditions."
           (switch-to-buffer buf)
           (pi-coding-agent-chat-mode)
           (pi-coding-agent--handle-display-event '(:type "agent_start"))
-          (pi-coding-agent--handle-display-event '(:type "message_start"))
           (pi-coding-agent--handle-display-event
-           `(:type "message_update"
-             :assistantMessageEvent (:type "toolcall_start" :contentIndex 0)
-             :message (:role "assistant"
-                       :content [(:type "toolCall" :id "call_1"
-                                  :name "write"
-                                  :arguments (:path "/tmp/test.py"))])))
+           '(:type "message_start" :message (:role "assistant" :content [])))
+          (pi-coding-agent-test--send-assistant-message-update
+           '(:type "toolcall_start" :contentIndex 0
+             :id "call_1" :toolName "write"))
           (redisplay)
-          (pi-coding-agent-test--send-delta
-           "write" '(:path "/tmp/test.py"
-                     :content "def hello():\n    return 42\n"))
+          (pi-coding-agent-test--send-assistant-message-update
+           '(:type "toolcall_delta" :contentIndex 0
+             :delta "{\"path\":\"/tmp/test.py\",\"content\":\"def hello():\\n    return 42\\n\"}"))
           (font-lock-ensure)
           ;; Fences are in the buffer (for tree-sitter) but invisible
           (let ((visible (pi-coding-agent--visible-text

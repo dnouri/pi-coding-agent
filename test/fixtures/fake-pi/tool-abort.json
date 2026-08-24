@@ -1,0 +1,16 @@
+{
+  "description": "Slow tool generation for deterministic mid-stream abort tests.",
+  "commands": [],
+  "prompt": {
+    "type": "tool_stream",
+    "tool_name": "read",
+    "tool_args": {
+      "path": "/tmp/fake-tool-abort.txt"
+    },
+    "partial_result_text": "must not execute\n",
+    "result_text": "must not complete\n",
+    "assistant_text": "Must not finish",
+    "delay_ms": 1000,
+    "echo_user": true
+  }
+}

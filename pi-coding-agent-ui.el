@@ -1924,7 +1924,7 @@ Returns nil if MS is nil."
 (defconst pi-coding-agent--pi-package "@earendil-works/pi-coding-agent"
   "Npm package name for the pi CLI supported by pi-coding-agent.")
 
-(defconst pi-coding-agent--minimum-pi-version "0.81.0"
+(defconst pi-coding-agent--minimum-pi-version "0.84.2"
   "Minimum supported pi CLI version.")
 
 (defun pi-coding-agent--pi-install-command ()

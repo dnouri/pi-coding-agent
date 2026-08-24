@@ -116,6 +116,26 @@ SPEC is (PROC SCENARIO &rest EXTRA-ARGS)."
   "Return the :type fields from OBJECTS."
   (mapcar (lambda (obj) (plist-get obj :type)) objects))
 
+(defun pi-coding-agent-fake-pi-test--events-of-type (objects type)
+  "Return events from OBJECTS whose top-level type is TYPE."
+  (seq-filter (lambda (obj) (equal (plist-get obj :type) type)) objects))
+
+(defun pi-coding-agent-fake-pi-test--message-events (objects type role)
+  "Return TYPE message events from OBJECTS whose message has ROLE."
+  (seq-filter
+   (lambda (obj)
+     (and (equal (plist-get obj :type) type)
+          (equal (plist-get (plist-get obj :message) :role) role)))
+   objects))
+
+(defun pi-coding-agent-fake-pi-test--message-updates (objects type)
+  "Return message updates from OBJECTS whose nested event has TYPE."
+  (seq-filter
+   (lambda (obj)
+     (and (equal (plist-get obj :type) "message_update")
+          (equal (plist-get (plist-get obj :assistantMessageEvent) :type) type)))
+   objects))
+
 (defun pi-coding-agent-fake-pi-test--run-cli (&rest args)
   "Run fake-pi with ARGS and return `(:exit-code N :output STRING)'."
   (let ((command
@@ -352,23 +372,26 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
                                     (equal (plist-get (plist-get obj :message) :role)
                                            "assistant")))
                              events))
-           (text-deltas (seq-filter
-                         (lambda (obj)
-                           (and (equal (plist-get obj :type) "message_update")
-                                (equal (plist-get (plist-get obj :assistantMessageEvent) :type)
-                                       "text_delta")))
-                         events)))
+           (message-updates
+            (pi-coding-agent-fake-pi-test--events-of-type events "message_update"))
+           (text-deltas
+            (pi-coding-agent-fake-pi-test--message-updates events "text_delta")))
       (should (equal (plist-get response :type) "response"))
       (should (eq (plist-get response :success) t))
       (should (equal (plist-get response :command) "prompt"))
       (should (equal (car (pi-coding-agent-fake-pi-test--event-types events)) "agent_start"))
       (should assistant-start)
       (should (> (length text-deltas) 0))
+      (dolist (update message-updates)
+        (should (plist-member update :usage))
+        (should-not (plist-member update :message))
+        (should-not (plist-member (plist-get update :assistantMessageEvent)
+                                  :partial)))
       (should (equal (car (last (pi-coding-agent-fake-pi-test--event-types events)))
                      "agent_end")))))
 
 (ert-deftest pi-coding-agent-fake-pi-test-tool-stream-emits-tool-events ()
-  "tool_stream scenarios emit the toolcall and tool_execution event surface." 
+  "tool_stream emits an ordered, correlated, delta-only RPC lifecycle."
   (pi-coding-agent-fake-pi-test-with-process (proc "tool-read")
     (pi-coding-agent-fake-pi-test--send proc '(:type "prompt" :message "use the tool"))
     (should (equal (plist-get (pi-coding-agent-fake-pi-test--pop-object proc) :command)
@@ -376,38 +399,156 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
     (let* ((events (pi-coding-agent-fake-pi-test--collect-until
                     proc
                     (lambda (obj) (equal (plist-get obj :type) "agent_end"))))
-           (toolcall-start (seq-find
-                            (lambda (obj)
-                              (and (equal (plist-get obj :type) "message_update")
-                                   (equal (plist-get (plist-get obj :assistantMessageEvent) :type)
-                                          "toolcall_start")))
-                            events))
-           (tool-execution-start (seq-find
-                                  (lambda (obj)
-                                    (equal (plist-get obj :type) "tool_execution_start"))
-                                  events))
-           (tool-execution-update (seq-find
-                                   (lambda (obj)
-                                     (equal (plist-get obj :type) "tool_execution_update"))
-                                   events))
-           (tool-execution-end (seq-find
-                                (lambda (obj)
-                                  (equal (plist-get obj :type) "tool_execution_end"))
-                                events)))
-      (should toolcall-start)
-      (should tool-execution-start)
-      (should tool-execution-update)
-      (should tool-execution-end)
-      (should (equal (plist-get tool-execution-start :toolName) "read"))
-      (should (equal (plist-get (plist-get tool-execution-start :args) :path)
-                     "/tmp/fake-tool.txt"))
-      (should (string-match-p "fake tool output"
-                              (plist-get (aref (plist-get (plist-get tool-execution-update
-                                                                    :partialResult)
-                                                          :content)
-                                                 0)
-                                         :text)))
-      (should (equal (plist-get tool-execution-end :isError) :false)))))
+           (assistant-starts
+            (pi-coding-agent-fake-pi-test--message-events
+             events "message_start" "assistant"))
+           (assistant-ends
+            (pi-coding-agent-fake-pi-test--message-events
+             events "message_end" "assistant"))
+           (tool-result-start
+            (car (pi-coding-agent-fake-pi-test--message-events
+                  events "message_start" "toolResult")))
+           (tool-result-end
+            (car (pi-coding-agent-fake-pi-test--message-events
+                  events "message_end" "toolResult")))
+           (message-updates
+            (pi-coding-agent-fake-pi-test--events-of-type events "message_update"))
+           (toolcall-start-update
+            (car (pi-coding-agent-fake-pi-test--message-updates
+                  events "toolcall_start")))
+           (toolcall-delta-updates
+            (pi-coding-agent-fake-pi-test--message-updates events "toolcall_delta"))
+           (toolcall-end-update
+            (car (pi-coding-agent-fake-pi-test--message-updates
+                  events "toolcall_end")))
+           (text-delta-updates
+            (pi-coding-agent-fake-pi-test--message-updates events "text_delta"))
+           (tool-execution-start
+            (car (pi-coding-agent-fake-pi-test--events-of-type
+                  events "tool_execution_start")))
+           (tool-execution-update
+            (car (pi-coding-agent-fake-pi-test--events-of-type
+                  events "tool_execution_update")))
+           (tool-execution-end
+            (car (pi-coding-agent-fake-pi-test--events-of-type
+                  events "tool_execution_end")))
+           (agent-end (car (last events)))
+           (lifecycle
+            (mapcar
+             (lambda (obj)
+               (pcase (plist-get obj :type)
+                 ((or "message_start" "message_end")
+                  (format "%s:%s"
+                          (plist-get obj :type)
+                          (plist-get (plist-get obj :message) :role)))
+                 ("message_update"
+                  (plist-get (plist-get obj :assistantMessageEvent) :type))
+                 (type type)))
+             events)))
+      (should
+       (equal lifecycle
+              '("agent_start"
+                "message_start:user" "message_end:user"
+                "message_start:assistant"
+                "toolcall_start"
+                "toolcall_delta" "toolcall_delta" "toolcall_delta"
+                "toolcall_end"
+                "message_end:assistant"
+                "tool_execution_start" "tool_execution_update"
+                "tool_execution_end"
+                "message_start:toolResult" "message_end:toolResult"
+                "message_start:assistant"
+                "text_delta" "text_delta"
+                "message_end:assistant"
+                "agent_end")))
+      (should (> (length toolcall-delta-updates) 1))
+      (should (> (length text-delta-updates) 0))
+      (dolist (update message-updates)
+        (should (plist-member update :usage))
+        (should-not (plist-member update :message))
+        (should-not (plist-member (plist-get update :assistantMessageEvent)
+                                  :partial)))
+      (let* ((first-assistant-end (car assistant-ends))
+             (second-assistant-end (cadr assistant-ends))
+             (toolcall-start-event
+              (plist-get toolcall-start-update :assistantMessageEvent))
+             (toolcall-end-event
+              (plist-get toolcall-end-update :assistantMessageEvent))
+             (call-id (plist-get toolcall-start-event :id))
+             (streamed-arguments
+              (mapconcat
+               (lambda (update)
+                 (plist-get (plist-get update :assistantMessageEvent) :delta))
+               toolcall-delta-updates
+               ""))
+             (tool-call (plist-get toolcall-end-event :toolCall))
+             (tool-assistant-message (plist-get first-assistant-end :message))
+             (tool-call-from-message
+              (aref (plist-get tool-assistant-message :content) 0))
+             (tool-result-message (plist-get tool-result-start :message))
+             (final-message (plist-get second-assistant-end :message))
+             (agent-messages (plist-get agent-end :messages)))
+        (dolist (start assistant-starts)
+          (should (= (length (plist-get (plist-get start :message) :content)) 0))
+          (should (equal (plist-get (plist-get start :message) :stopReason)
+                         "pending")))
+        (should (and (stringp call-id) (> (length call-id) 0)))
+        (should (= (plist-get toolcall-start-event :contentIndex) 0))
+        (should (equal (plist-get toolcall-start-event :toolName) "read"))
+        (should (= (plist-get toolcall-end-event :contentIndex) 0))
+        (dolist (update toolcall-delta-updates)
+          (should (= (plist-get (plist-get update :assistantMessageEvent)
+                                :contentIndex)
+                     0)))
+        (should (equal (pi-coding-agent--parse-json-line streamed-arguments)
+                       '(:path "/tmp/fake-tool.txt")))
+        (should (equal tool-call tool-call-from-message))
+        (should (equal (plist-get tool-assistant-message :stopReason) "toolUse"))
+        (should (equal (plist-get tool-call :id) call-id))
+        (should (equal (plist-get tool-call :name) "read"))
+        (should (equal (plist-get (plist-get tool-call :arguments) :path)
+                       "/tmp/fake-tool.txt"))
+        (dolist (event (list tool-execution-start
+                             tool-execution-update
+                             tool-execution-end))
+          (should (equal (plist-get event :toolCallId) call-id))
+          (should (equal (plist-get event :toolName) "read")))
+        (should (equal (plist-get (plist-get tool-execution-start :args) :path)
+                       "/tmp/fake-tool.txt"))
+        (should (equal (plist-get (aref (plist-get (plist-get tool-execution-update
+                                                               :partialResult)
+                                                   :content)
+                                          0)
+                                  :text)
+                       "fake tool output\n"))
+        (should (equal (plist-get tool-execution-end :isError) :false))
+        (should (equal (plist-get tool-result-end :message) tool-result-message))
+        (should (equal (plist-get tool-result-message :toolCallId) call-id))
+        (should (equal (plist-get tool-result-message :toolName) "read"))
+        (should (equal (plist-get tool-result-message :isError) :false))
+        (should (equal (plist-get tool-result-message :content)
+                       (plist-get (plist-get tool-execution-end :result) :content)))
+        (should (equal (plist-get tool-result-message :details)
+                       (plist-get (plist-get tool-execution-end :result) :details)))
+        (should (equal (plist-get (aref (plist-get tool-result-message :content) 0)
+                                  :text)
+                       "fake tool output\nmore output\n"))
+        (should (equal (mapconcat
+                        (lambda (update)
+                          (plist-get (plist-get update :assistantMessageEvent) :delta))
+                        text-delta-updates
+                        "")
+                       "Tool finished"))
+        (should (equal (plist-get final-message :stopReason) "stop"))
+        (should (equal (plist-get (aref (plist-get final-message :content) 0) :text)
+                       "Tool finished"))
+        (should (equal (mapcar (lambda (message) (plist-get message :role))
+                               agent-messages)
+                       '("user" "assistant" "toolResult" "assistant")))
+        (should (equal (plist-get (aref agent-messages 1) :content)
+                       (plist-get tool-assistant-message :content)))
+        (should (equal (plist-get (aref agent-messages 2) :toolCallId) call-id))
+        (should (equal (plist-get agent-end :willRetry) :false))))))
 
 (ert-deftest pi-coding-agent-fake-pi-test-abort-stops-streaming ()
   "abort stops an in-flight prompt and leaves the fake idle."
@@ -416,7 +557,8 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
     (should (equal (plist-get (pi-coding-agent-fake-pi-test--pop-object proc) :command)
                    "prompt"))
     (let ((seen-first-delta nil)
-          (seen-agent-end nil)
+          (agent-end nil)
+          (aborted-message nil)
           (saw-stop-message-end nil)
           (saw-abort-response nil))
       (while (not seen-first-delta)
@@ -427,24 +569,92 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
                      (equal (plist-get msg-event :type) "text_delta"))
             (setq seen-first-delta t))))
       (pi-coding-agent-fake-pi-test--send proc '(:type "abort"))
-      (while (not (and saw-abort-response seen-agent-end))
+      (while (not (and saw-abort-response agent-end))
         (let ((obj (pi-coding-agent-fake-pi-test--pop-object proc)))
           (pcase (plist-get obj :type)
             ("response"
              (when (equal (plist-get obj :command) "abort")
                (setq saw-abort-response (eq (plist-get obj :success) t))))
             ("message_end"
-             (when (equal (plist-get (plist-get obj :message) :stopReason) "stop")
-               (setq saw-stop-message-end t)))
+             (pcase (plist-get (plist-get obj :message) :stopReason)
+               ("aborted" (setq aborted-message (plist-get obj :message)))
+               ("stop" (setq saw-stop-message-end t))))
             ("agent_end"
-             (setq seen-agent-end t)))))
+             (setq agent-end obj)))))
       (should saw-abort-response)
-      (should seen-agent-end)
+      (should aborted-message)
+      (should (equal (plist-get aborted-message :errorMessage)
+                     "Request was aborted"))
       (should-not saw-stop-message-end)
+      (let ((messages (plist-get agent-end :messages)))
+        (should (equal (aref messages (1- (length messages)))
+                       aborted-message)))
       (pi-coding-agent-fake-pi-test--send proc '(:type "get_state"))
       (let* ((state (pi-coding-agent-fake-pi-test--pop-object proc))
              (data (plist-get state :data)))
         (should (eq (plist-get data :isStreaming) :false))))))
+
+(ert-deftest pi-coding-agent-fake-pi-test-tool-abort-ends-partial-assistant-message ()
+  "Aborting tool generation emits its authoritative partial message first."
+  (pi-coding-agent-fake-pi-test-with-process (proc "tool-abort")
+    (pi-coding-agent-fake-pi-test--send proc
+                                        '(:type "prompt" :message "abort tool"))
+    (should (equal (plist-get (pi-coding-agent-fake-pi-test--pop-object proc)
+                              :command)
+                   "prompt"))
+    (let ((events nil)
+          (delta-count 0)
+          (abort-response nil)
+          (agent-end nil))
+      (while (< delta-count 3)
+        (let ((event (pi-coding-agent-fake-pi-test--pop-object proc)))
+          (push event events)
+          (when (and (equal (plist-get event :type) "message_update")
+                     (equal (plist-get
+                             (plist-get event :assistantMessageEvent) :type)
+                            "toolcall_delta"))
+            (setq delta-count (1+ delta-count)))))
+      (pi-coding-agent-fake-pi-test--send proc '(:type "abort"))
+      (while (not (and abort-response agent-end))
+        (let ((event (pi-coding-agent-fake-pi-test--pop-object proc)))
+          (push event events)
+          (pcase (plist-get event :type)
+            ("response"
+             (when (equal (plist-get event :command) "abort")
+               (setq abort-response event)))
+            ("agent_end"
+             (setq agent-end event)))))
+      (setq events (nreverse events))
+      (let* ((aborted-end
+              (seq-find
+               (lambda (event)
+                 (and (equal (plist-get event :type) "message_end")
+                      (equal (plist-get (plist-get event :message) :stopReason)
+                             "aborted")))
+               events))
+             (aborted-message (and aborted-end
+                                   (plist-get aborted-end :message)))
+             (messages (plist-get agent-end :messages)))
+        (should (eq (plist-get abort-response :success) t))
+        (should aborted-message)
+        (should (equal (plist-get aborted-message :errorMessage)
+                       "Request was aborted"))
+        (should (equal (plist-get (aref (plist-get aborted-message :content) 0)
+                                  :name)
+                       "read"))
+        (should (< (seq-position events aborted-end #'eq)
+                   (seq-position events agent-end #'eq)))
+        (should-not
+         (seq-find
+          (lambda (event)
+            (or (equal (plist-get event :type) "tool_execution_start")
+                (and (equal (plist-get event :type) "message_update")
+                     (equal (plist-get
+                             (plist-get event :assistantMessageEvent) :type)
+                            "toolcall_end"))))
+          events))
+        (should (equal (aref messages (1- (length messages)))
+                       aborted-message))))))
 
 (ert-deftest pi-coding-agent-fake-pi-test-steer-queues-another-turn ()
   "steer queues another user turn and delivers it before agent_end."

@@ -190,24 +190,22 @@ Returns non-nil if the process exits before the timeout."
   "Return a toolCall content block for ID, TOOL-NAME, and ARGS."
   `(:type "toolCall" :id ,id :name ,tool-name :arguments ,args))
 
-(defun pi-coding-agent-test--toolcall-message-update
-    (event-type content-index toolcalls &optional delta)
-  "Return a message_update event for EVENT-TYPE over TOOLCALLS.
-CONTENT-INDEX is written into `assistantMessageEvent'.  DELTA is added
-when non-nil.  TOOLCALLS is a list of toolCall content block plists."
-  `(:type "message_update"
-    :assistantMessageEvent ,(append (list :type event-type :contentIndex content-index)
-                                    (when delta (list :delta delta)))
-    :message (:role "assistant" :content ,(vconcat toolcalls))))
+(defun pi-coding-agent-test--send-assistant-message-update (message-event)
+  "Send delta-only MESSAGE-EVENT using Pi's current RPC wire shape."
+  (pi-coding-agent--handle-display-event
+   `(:type "message_update" :assistantMessageEvent ,message-event)))
 
 (defun pi-coding-agent-test--send-toolcall-message-update
-    (event-type content-index toolcalls &optional delta)
-  "Send a toolcall message update for EVENT-TYPE over TOOLCALLS.
-CONTENT-INDEX and optional DELTA are forwarded to
-`pi-coding-agent-test--toolcall-message-update'."
-  (pi-coding-agent--handle-display-event
-   (pi-coding-agent-test--toolcall-message-update
-    event-type content-index toolcalls delta)))
+    (event-type content-index toolcalls &optional _delta)
+  "Render one cumulative toolcall snapshot for focused display tests.
+EVENT-TYPE controls streaming versus completed presentation.  CONTENT-INDEX
+selects the toolCall in TOOLCALLS.  Protocol-facing tests should instead use
+`pi-coding-agent-test--send-assistant-message-update' with raw JSON deltas."
+  (let ((tool-call (nth content-index toolcalls)))
+    (unless tool-call
+      (error "No test tool call at content index %s" content-index))
+    (pi-coding-agent--reconcile-toolcall-preview-block
+     content-index tool-call event-type)))
 
 (defmacro pi-coding-agent-test--with-toolcall (tool-name args &rest body)
   "Set up a chat buffer with a streaming tool call, then run BODY.

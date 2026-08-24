@@ -79,9 +79,10 @@ Example:
 
 ## `tool_stream`
 
-Emits `toolcall_start`, `toolcall_delta`, `tool_execution_start`,
-`tool_execution_update`, and `tool_execution_end`, then completes the assistant
-turn.
+Emits the current delta-only lifecycle: `toolcall_start`, argument
+`toolcall_delta` events, authoritative `toolcall_end` and assistant
+`message_end`, tool execution events, a correlated tool-result message, and the
+final streamed assistant message before `agent_end`.
 
 Example:
 
