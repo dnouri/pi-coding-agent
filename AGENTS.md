@@ -6,13 +6,14 @@ Communicates with the pi CLI via JSON-over-stdio (RPC).
 
 ## Module Architecture
 
-Eight source modules with a strict dependency chain (no cycles), plus
+Nine source modules with a strict dependency chain (no cycles), plus
 an optional Evil integration module:
 
 ```
 pi-coding-agent.el              ← entry point, autoloads
   ├── pi-coding-agent-menu.el   ← transient menu, session management
   ├── pi-coding-agent-input.el  ← input buffer, history, completion
+  ├── pi-coding-agent-browse.el ← session/tree browsers (magit-section UI)
   └── pi-coding-agent-render.el ← chat rendering, tool output
         ├── pi-coding-agent-table.el  ← display-only table decoration
         └── pi-coding-agent-ui.el ← shared state, faces, modes
@@ -46,6 +47,7 @@ module, direct `setq` is fine.
 | `pi-coding-agent-table.el` | Display-only pipe table decoration, wrapping, overlay management |
 | `pi-coding-agent-input.el` | Input history, isearch, send/abort, file/path/slash completion, queuing |
 | `pi-coding-agent-menu.el` | Transient menu, session management, model selection, commands |
+| `pi-coding-agent-browse.el` | Session and tree browsers (magit-section UI); presentation layer over `pi-coding-agent--browse-*' data-seam functions (loading, switching, navigation, labels — currently stubs) |
 | `pi-coding-agent-grammars.el` | Tree-sitter grammar recipes, install prompts, `M-x pi-coding-agent-install-grammars` |
 | `pi-coding-agent-evil.el` | Optional Evil keybindings; auto-loaded by `pi-coding-agent--maybe-load-evil-integration` when a session is set up while Evil is present. Leaf module: requires `ui`, `input`, and `menu` directly (never the top-level feature, to avoid a recursive require during auto-load). Must byte-compile and load without Evil installed |
 
@@ -59,6 +61,7 @@ module, direct `setq` is fine.
 | `test/pi-coding-agent-table-test.el` | Table decoration, overlays, streaming, resize |
 | `test/pi-coding-agent-input-test.el` | History, send/abort, queuing, completion |
 | `test/pi-coding-agent-menu-test.el` | Session management, transient menu, reconnect |
+| `test/pi-coding-agent-browse-test.el` | Session/tree browser helpers, rendering, point restoration, stub seams |
 | `test/pi-coding-agent-build-test.el` | Batch helper scripts for dependency and grammar installation |
 | `test/pi-coding-agent-test.el` | Entry point / cross-module integration |
 | `test/pi-coding-agent-test-common.el` | Shared fixtures: mock-session macro, toolcall helpers, fake-pi launch helpers |
@@ -105,6 +108,7 @@ make test-ui
 make test-render
 make test-input
 make test-menu
+make test-browse
 make test-build
 ```
 
@@ -172,7 +176,7 @@ make check             # byte-compile + lint + all tests (= pre-commit hook)
 
 ## Dependencies
 
-`make test` auto-installs Emacs package deps (`transient`, `md-ts-mode`) on first
+`make test` auto-installs Emacs package deps (`transient`, `magit-section`, `md-ts-mode`) on first
 run and caches via `.deps-stamp`. To force reinstall: `make clean` then `make test`.
 
 ## Pre-commit Hook

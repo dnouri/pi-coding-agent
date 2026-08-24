@@ -1,0 +1,58 @@
+{
+  "type": "response",
+  "id": "req_1",
+  "command": "list_sessions",
+  "success": true,
+  "data": {
+    "sessions": [
+      {
+        "path": "/home/user/.pi/agent/sessions/--home-user-co-project--/2026-02-24_aaa.jsonl",
+        "id": "aaa-111",
+        "cwd": "/home/user/co/project",
+        "created": "2026-02-24T10:00:00.000Z",
+        "modified": "2026-02-24T12:30:00.000Z",
+        "messageCount": 42,
+        "firstMessage": "Fix the authentication bug in login.py"
+      },
+      {
+        "path": "/home/user/.pi/agent/sessions/--home-user-co-project--/2026-02-23_bbb.jsonl",
+        "id": "bbb-222",
+        "cwd": "/home/user/co/project",
+        "name": "Refactor DB Layer",
+        "created": "2026-02-23T09:00:00.000Z",
+        "modified": "2026-02-23T18:00:00.000Z",
+        "messageCount": 128,
+        "firstMessage": "Let's refactor the database layer to use connection pooling"
+      },
+      {
+        "path": "/home/user/.pi/agent/sessions/--home-user-co-project--/2026-02-23_ccc.jsonl",
+        "id": "ccc-333",
+        "cwd": "/home/user/co/project",
+        "parentSessionPath": "/home/user/.pi/agent/sessions/--home-user-co-project--/2026-02-23_bbb.jsonl",
+        "created": "2026-02-23T15:00:00.000Z",
+        "modified": "2026-02-23T17:00:00.000Z",
+        "messageCount": 35,
+        "firstMessage": "Let's refactor the database layer to use connection pooling"
+      },
+      {
+        "path": "/home/user/.pi/agent/sessions/--home-user-co-project--/2026-02-22_ddd.jsonl",
+        "id": "ddd-444",
+        "cwd": "/home/user/co/project",
+        "name": "Setup CI/CD",
+        "created": "2026-02-22T08:00:00.000Z",
+        "modified": "2026-02-22T16:00:00.000Z",
+        "messageCount": 89,
+        "firstMessage": "Help me set up GitHub Actions for this project"
+      },
+      {
+        "path": "/home/user/.pi/agent/sessions/--home-user-co-project--/2026-02-20_eee.jsonl",
+        "id": "eee-555",
+        "cwd": "/home/user/co/project",
+        "created": "2026-02-20T14:00:00.000Z",
+        "modified": "2026-02-20T15:00:00.000Z",
+        "messageCount": 8,
+        "firstMessage": "Quick question: what's the best way to handle env vars?"
+      }
+    ]
+  }
+}

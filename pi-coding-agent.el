@@ -7,7 +7,7 @@
 ;; URL: https://github.com/dnouri/pi-coding-agent
 ;; Keywords: ai llm ai-pair-programming tools
 ;; Version: 2.8.0
-;; Package-Requires: ((emacs "29.1") (transient "0.9.0") (md-ts-mode "0.3.0") (markdown-table-wrap "0.2.0"))
+;; Package-Requires: ((emacs "29.1") (transient "0.9.0") (magit-section "4.0.0") (md-ts-mode "0.3.0") (markdown-table-wrap "0.2.0"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -46,6 +46,8 @@
 ;;   C-u M-x pi-coding-agent                Start a named session
 ;;   M-x pi-coding-agent-open-session-file  Open a JSONL session file as live session
 ;;   M-x pi-coding-agent-toggle             Hide/show session windows in current frame
+;;   M-x pi-coding-agent-session-browser    Browse sessions (filter, switch)
+;;   M-x pi-coding-agent-tree-browser       Browse conversation tree (navigate, label)
 ;;
 ;; Many users define an alias: (defalias 'pi 'pi-coding-agent)
 ;;
@@ -95,6 +97,7 @@
 
 (require 'pi-coding-agent-menu)
 (require 'pi-coding-agent-input)
+(require 'pi-coding-agent-browse)
 
 (declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
 
