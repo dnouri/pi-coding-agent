@@ -11026,9 +11026,9 @@ hooks, including `kill-buffer-hook'."
           (maphash
            (lambda (_content-index stream)
              (when (equal tool-call-id
-                          (pi-coding-agent--toolcall-stream-tool-call-id stream))
+                          (pi-coding-agent--tool-stream-tool-call-id stream))
                (when-let* ((block
-                            (pi-coding-agent--toolcall-stream-block stream)))
+                            (pi-coding-agent--tool-stream-block stream)))
                  (throw 'found (pi-coding-agent--tool-block-overlay block)))))
            pi-coding-agent--toolcall-streams)
           nil))))
@@ -11876,7 +11876,7 @@ Multiple deltas should replace the preview instead of appending forever."
       (should (equal '("call_a" "call_b")
                      (mapcar
                       (lambda (index)
-                        (pi-coding-agent--toolcall-stream-tool-call-id
+                        (pi-coding-agent--tool-stream-tool-call-id
                          (gethash index pi-coding-agent--toolcall-streams)))
                       '(1 3))))
       (should (< (overlay-start first) (overlay-start second)))
@@ -12174,8 +12174,8 @@ Multiple deltas should replace the preview instead of appending forever."
                   :arguments (:path "/tmp/b"))))
     (let* ((first-stream (gethash 0 pi-coding-agent--toolcall-streams))
            (second-stream (gethash 1 pi-coding-agent--toolcall-streams))
-           (first-block (pi-coding-agent--toolcall-stream-block first-stream))
-           (second-block (pi-coding-agent--toolcall-stream-block second-stream))
+           (first-block (pi-coding-agent--tool-stream-block first-stream))
+           (second-block (pi-coding-agent--tool-stream-block second-stream))
            (first-overlay (pi-coding-agent--tool-block-overlay first-block))
            (second-overlay (pi-coding-agent--tool-block-overlay second-block)))
       (should-not (eq first-block second-block))

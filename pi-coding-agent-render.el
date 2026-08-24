@@ -1479,6 +1479,7 @@ consistent.  Tree-sitter overlays are left alone."
   last-tail)
 
 (cl-defstruct (pi-coding-agent--toolcall-stream
+               (:conc-name pi-coding-agent--tool-stream-)
                (:constructor pi-coding-agent--make-toolcall-stream))
   "Incremental preview state for one streamed tool call."
   content-index
@@ -1545,7 +1546,7 @@ implicit insertions still sort after explicitly ordered preview blocks."
     (when pi-coding-agent--toolcall-streams
       (maphash
        (lambda (_content-index stream)
-         (when-let* ((block (pi-coding-agent--toolcall-stream-block stream))
+         (when-let* ((block (pi-coding-agent--tool-stream-block stream))
                      (overlay (pi-coding-agent--tool-block-overlay block))
                      ((overlay-buffer overlay)))
            (unless (memq block blocks)
@@ -2038,8 +2039,8 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
 
 (defun pi-coding-agent--toolcall-preview-property (stream)
   "Return STREAM's preview property for its current top-level JSON key."
-  (let ((key (pi-coding-agent--toolcall-stream-current-key stream)))
-    (pcase (pi-coding-agent--toolcall-stream-tool-name stream)
+  (let ((key (pi-coding-agent--tool-stream-current-key stream)))
+    (pcase (pi-coding-agent--tool-stream-tool-name stream)
       ("bash" (and (equal key "command") :command))
       ((or "read" "edit")
        (pcase key
@@ -2053,10 +2054,10 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
 
 (defun pi-coding-agent--toolcall-stream-append-string (stream text)
   "Append decoded TEXT to STREAM's bounded interesting JSON string."
-  (let ((role (pi-coding-agent--toolcall-stream-string-role stream)))
+  (let ((role (pi-coding-agent--tool-stream-string-role stream)))
     (when (memq role '(key value))
       (unless (string-empty-p text)
-        (setf (pi-coding-agent--toolcall-stream-high-surrogate stream) nil))
+        (setf (pi-coding-agent--tool-stream-high-surrogate stream) nil))
       (let* ((property (and (eq role 'value)
                             (pi-coding-agent--toolcall-preview-property
                              stream)))
@@ -2066,18 +2067,18 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
                       (max 1 pi-coding-agent-preview-max-bytes))
                      (t pi-coding-agent--toolcall-preview-metadata-limit)))
              (combined
-              (concat (pi-coding-agent--toolcall-stream-string-value stream)
+              (concat (pi-coding-agent--tool-stream-string-value stream)
                       text)))
         (when (and (eq property :content) (string-match-p "\n" text))
-          (setf (pi-coding-agent--toolcall-stream-content-render-p stream) t))
-        (setf (pi-coding-agent--toolcall-stream-string-value stream)
+          (setf (pi-coding-agent--tool-stream-content-render-p stream) t))
+        (setf (pi-coding-agent--tool-stream-string-value stream)
               (cond
                ((<= (length combined) limit) combined)
                ((eq property :content)
-                (unless (pi-coding-agent--toolcall-stream-content-truncated stream)
-                  (setf (pi-coding-agent--toolcall-stream-content-render-p stream)
+                (unless (pi-coding-agent--tool-stream-content-truncated stream)
+                  (setf (pi-coding-agent--tool-stream-content-render-p stream)
                         t))
-                (setf (pi-coding-agent--toolcall-stream-content-truncated stream)
+                (setf (pi-coding-agent--tool-stream-content-truncated stream)
                       t)
                 (substring combined (- (length combined) limit)))
                (t (substring combined 0 limit))))))))
@@ -2085,49 +2086,49 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
 (defun pi-coding-agent--toolcall-stream-clear-value (stream)
   "Clear STREAM's preview value before consuming a later JSON value."
   (when-let* ((property (pi-coding-agent--toolcall-preview-property stream)))
-    (setf (pi-coding-agent--toolcall-stream-arguments stream)
-          (plist-put (pi-coding-agent--toolcall-stream-arguments stream)
+    (setf (pi-coding-agent--tool-stream-arguments stream)
+          (plist-put (pi-coding-agent--tool-stream-arguments stream)
                      property nil))
     (when (eq property :content)
-      (setf (pi-coding-agent--toolcall-stream-content-render-p stream) t
-            (pi-coding-agent--toolcall-stream-content-truncated stream)
+      (setf (pi-coding-agent--tool-stream-content-render-p stream) t
+            (pi-coding-agent--tool-stream-content-truncated stream)
             nil))))
 
 (defun pi-coding-agent--toolcall-stream-publish-value (stream)
   "Publish STREAM's current top-level preview string into its arguments."
   (when-let* ((property (pi-coding-agent--toolcall-preview-property stream)))
-    (setf (pi-coding-agent--toolcall-stream-arguments stream)
-          (plist-put (pi-coding-agent--toolcall-stream-arguments stream)
+    (setf (pi-coding-agent--tool-stream-arguments stream)
+          (plist-put (pi-coding-agent--tool-stream-arguments stream)
                      property
-                     (pi-coding-agent--toolcall-stream-string-value stream)))))
+                     (pi-coding-agent--tool-stream-string-value stream)))))
 
 (defun pi-coding-agent--toolcall-stream-start-string (stream role)
   "Start a JSON string with ROLE in STREAM."
-  (setf (pi-coding-agent--toolcall-stream-string-role stream) role
-        (pi-coding-agent--toolcall-stream-string-value stream) ""
-        (pi-coding-agent--toolcall-stream-escape-state stream) nil
-        (pi-coding-agent--toolcall-stream-unicode-value stream) 0
-        (pi-coding-agent--toolcall-stream-unicode-digits stream) 0
-        (pi-coding-agent--toolcall-stream-high-surrogate stream) nil)
+  (setf (pi-coding-agent--tool-stream-string-role stream) role
+        (pi-coding-agent--tool-stream-string-value stream) ""
+        (pi-coding-agent--tool-stream-escape-state stream) nil
+        (pi-coding-agent--tool-stream-unicode-value stream) 0
+        (pi-coding-agent--tool-stream-unicode-digits stream) 0
+        (pi-coding-agent--tool-stream-high-surrogate stream) nil)
   (when (eq role 'value)
     (pi-coding-agent--toolcall-stream-publish-value stream)))
 
 (defun pi-coding-agent--toolcall-stream-finish-string (stream)
   "Finish STREAM's current JSON string and advance its root parser."
-  (let ((role (pi-coding-agent--toolcall-stream-string-role stream))
-        (value (pi-coding-agent--toolcall-stream-string-value stream)))
+  (let ((role (pi-coding-agent--tool-stream-string-role stream))
+        (value (pi-coding-agent--tool-stream-string-value stream)))
     (when (eq role 'value)
       (pi-coding-agent--toolcall-stream-publish-value stream))
-    (setf (pi-coding-agent--toolcall-stream-string-role stream) nil
-          (pi-coding-agent--toolcall-stream-string-value stream) ""
-          (pi-coding-agent--toolcall-stream-escape-state stream) nil
-          (pi-coding-agent--toolcall-stream-high-surrogate stream) nil)
+    (setf (pi-coding-agent--tool-stream-string-role stream) nil
+          (pi-coding-agent--tool-stream-string-value stream) ""
+          (pi-coding-agent--tool-stream-escape-state stream) nil
+          (pi-coding-agent--tool-stream-high-surrogate stream) nil)
     (pcase role
       ('key
-       (setf (pi-coding-agent--toolcall-stream-current-key stream) value
-             (pi-coding-agent--toolcall-stream-root-state stream) 'colon))
+       (setf (pi-coding-agent--tool-stream-current-key stream) value
+             (pi-coding-agent--tool-stream-root-state stream) 'colon))
       ((or 'value 'root-value)
-       (setf (pi-coding-agent--toolcall-stream-root-state stream)
+       (setf (pi-coding-agent--tool-stream-root-state stream)
              'after-value)))))
 
 (defun pi-coding-agent--json-hex-digit-value (char)
@@ -2139,10 +2140,10 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
 
 (defun pi-coding-agent--toolcall-stream-append-codepoint (stream codepoint)
   "Append decoded Unicode CODEPOINT to STREAM's current JSON string."
-  (let ((high (pi-coding-agent--toolcall-stream-high-surrogate stream)))
+  (let ((high (pi-coding-agent--tool-stream-high-surrogate stream)))
     (cond
      ((and high (>= codepoint #xdc00) (<= codepoint #xdfff))
-      (setf (pi-coding-agent--toolcall-stream-high-surrogate stream) nil)
+      (setf (pi-coding-agent--tool-stream-high-surrogate stream) nil)
       (pi-coding-agent--toolcall-stream-append-string
        stream
        (char-to-string
@@ -2150,10 +2151,10 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
            (ash (- high #xd800) 10)
            (- codepoint #xdc00)))))
      (high
-      (setf (pi-coding-agent--toolcall-stream-high-surrogate stream) nil)
+      (setf (pi-coding-agent--tool-stream-high-surrogate stream) nil)
       (pi-coding-agent--toolcall-stream-append-codepoint stream codepoint))
      ((and (>= codepoint #xd800) (<= codepoint #xdbff))
-      (setf (pi-coding-agent--toolcall-stream-high-surrogate stream)
+      (setf (pi-coding-agent--tool-stream-high-surrogate stream)
             codepoint))
      ((and (>= codepoint #xdc00) (<= codepoint #xdfff)))
      ((<= codepoint #x10ffff)
@@ -2162,46 +2163,46 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
 
 (defun pi-coding-agent--toolcall-stream-feed-string-char (stream char)
   "Consume one JSON string CHAR for STREAM."
-  (pcase (pi-coding-agent--toolcall-stream-escape-state stream)
+  (pcase (pi-coding-agent--tool-stream-escape-state stream)
     ('unicode
      (if-let* ((digit (pi-coding-agent--json-hex-digit-value char)))
-         (let ((count (1+ (pi-coding-agent--toolcall-stream-unicode-digits
+         (let ((count (1+ (pi-coding-agent--tool-stream-unicode-digits
                            stream)))
-               (value (+ (ash (pi-coding-agent--toolcall-stream-unicode-value
+               (value (+ (ash (pi-coding-agent--tool-stream-unicode-value
                                stream)
                               4)
                          digit)))
-           (setf (pi-coding-agent--toolcall-stream-unicode-digits stream)
+           (setf (pi-coding-agent--tool-stream-unicode-digits stream)
                  count
-                 (pi-coding-agent--toolcall-stream-unicode-value stream)
+                 (pi-coding-agent--tool-stream-unicode-value stream)
                  value)
            (when (= count 4)
-             (setf (pi-coding-agent--toolcall-stream-escape-state stream) nil
-                   (pi-coding-agent--toolcall-stream-unicode-digits stream) 0
-                   (pi-coding-agent--toolcall-stream-unicode-value stream) 0)
+             (setf (pi-coding-agent--tool-stream-escape-state stream) nil
+                   (pi-coding-agent--tool-stream-unicode-digits stream) 0
+                   (pi-coding-agent--tool-stream-unicode-value stream) 0)
              (pi-coding-agent--toolcall-stream-append-codepoint stream value)))
        ;; Pi repairs malformed provider escapes by preserving the backslash.
        ;; Publish the literal prefix and reprocess CHAR so a quote still closes
        ;; the string rather than corrupting all later top-level fields.
-       (let* ((count (pi-coding-agent--toolcall-stream-unicode-digits stream))
-              (value (pi-coding-agent--toolcall-stream-unicode-value stream))
+       (let* ((count (pi-coding-agent--tool-stream-unicode-digits stream))
+              (value (pi-coding-agent--tool-stream-unicode-value stream))
               (digits (if (= count 0)
                           ""
                         (format (format "%%0%dX" count) value))))
-         (setf (pi-coding-agent--toolcall-stream-escape-state stream) nil
-               (pi-coding-agent--toolcall-stream-unicode-digits stream) 0
-               (pi-coding-agent--toolcall-stream-unicode-value stream) 0
-               (pi-coding-agent--toolcall-stream-high-surrogate stream) nil)
+         (setf (pi-coding-agent--tool-stream-escape-state stream) nil
+               (pi-coding-agent--tool-stream-unicode-digits stream) 0
+               (pi-coding-agent--tool-stream-unicode-value stream) 0
+               (pi-coding-agent--tool-stream-high-surrogate stream) nil)
          (pi-coding-agent--toolcall-stream-append-string
           stream (concat "\\u" digits))
          (pi-coding-agent--toolcall-stream-feed-string-char stream char))))
     ('escape
      (if (eq char ?u)
-         (setf (pi-coding-agent--toolcall-stream-escape-state stream) 'unicode
-               (pi-coding-agent--toolcall-stream-unicode-digits stream) 0
-               (pi-coding-agent--toolcall-stream-unicode-value stream) 0)
-       (setf (pi-coding-agent--toolcall-stream-escape-state stream) nil
-             (pi-coding-agent--toolcall-stream-high-surrogate stream) nil)
+         (setf (pi-coding-agent--tool-stream-escape-state stream) 'unicode
+               (pi-coding-agent--tool-stream-unicode-digits stream) 0
+               (pi-coding-agent--tool-stream-unicode-value stream) 0)
+       (setf (pi-coding-agent--tool-stream-escape-state stream) nil
+             (pi-coding-agent--tool-stream-high-surrogate stream) nil)
        (pi-coding-agent--toolcall-stream-append-string
         stream
         (pcase char
@@ -2217,11 +2218,11 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
     (_
      (cond
       ((eq char ?\\)
-       (setf (pi-coding-agent--toolcall-stream-escape-state stream) 'escape))
+       (setf (pi-coding-agent--tool-stream-escape-state stream) 'escape))
       ((eq char ?\")
        (pi-coding-agent--toolcall-stream-finish-string stream))
       (t
-       (setf (pi-coding-agent--toolcall-stream-high-surrogate stream) nil)
+       (setf (pi-coding-agent--tool-stream-high-surrogate stream) nil)
        (pi-coding-agent--toolcall-stream-append-string
         stream (char-to-string char)))))))
 
@@ -2231,36 +2232,36 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
 
 (defun pi-coding-agent--toolcall-stream-feed-structure-char (stream char)
   "Consume one non-string JSON CHAR for STREAM's top-level object parser."
-  (let ((depth (pi-coding-agent--toolcall-stream-depth stream)))
+  (let ((depth (pi-coding-agent--tool-stream-depth stream)))
     (cond
      ((= depth 0)
       (when (eq char ?{)
-        (setf (pi-coding-agent--toolcall-stream-depth stream) 1
-              (pi-coding-agent--toolcall-stream-root-state stream) 'key)))
+        (setf (pi-coding-agent--tool-stream-depth stream) 1
+              (pi-coding-agent--tool-stream-root-state stream) 'key)))
      ((> depth 1)
       (cond
        ((eq char ?\")
         (pi-coding-agent--toolcall-stream-start-string stream 'nested))
        ((or (eq char ?{) (eq char ?\[))
-        (setf (pi-coding-agent--toolcall-stream-depth stream) (1+ depth)))
+        (setf (pi-coding-agent--tool-stream-depth stream) (1+ depth)))
        ((or (eq char ?}) (eq char ?\]))
         (let ((new-depth (1- depth)))
-          (setf (pi-coding-agent--toolcall-stream-depth stream) new-depth)
+          (setf (pi-coding-agent--tool-stream-depth stream) new-depth)
           (when (= new-depth 1)
-            (setf (pi-coding-agent--toolcall-stream-root-state stream)
+            (setf (pi-coding-agent--tool-stream-root-state stream)
                   'after-value))))))
      (t
-      (pcase (pi-coding-agent--toolcall-stream-root-state stream)
+      (pcase (pi-coding-agent--tool-stream-root-state stream)
         ('key
          (cond
           ((eq char ?\")
            (pi-coding-agent--toolcall-stream-start-string stream 'key))
           ((eq char ?})
-           (setf (pi-coding-agent--toolcall-stream-depth stream) 0
-                 (pi-coding-agent--toolcall-stream-root-state stream) 'done))))
+           (setf (pi-coding-agent--tool-stream-depth stream) 0
+                 (pi-coding-agent--tool-stream-root-state stream) 'done))))
         ('colon
          (when (eq char ?:)
-           (setf (pi-coding-agent--toolcall-stream-root-state stream) 'value)))
+           (setf (pi-coding-agent--tool-stream-root-state stream) 'value)))
         ('value
          (unless (pi-coding-agent--json-whitespace-char-p char)
            ;; JSON's last occurrence wins.  Clear a prior preview before
@@ -2274,33 +2275,33 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
                   'value
                 'root-value)))
             ((or (eq char ?{) (eq char ?\[))
-             (setf (pi-coding-agent--toolcall-stream-depth stream) 2
-                   (pi-coding-agent--toolcall-stream-root-state stream) 'nested))
+             (setf (pi-coding-agent--tool-stream-depth stream) 2
+                   (pi-coding-agent--tool-stream-root-state stream) 'nested))
             ((eq char ?,)
-             (setf (pi-coding-agent--toolcall-stream-root-state stream) 'key
-                   (pi-coding-agent--toolcall-stream-current-key stream) nil))
+             (setf (pi-coding-agent--tool-stream-root-state stream) 'key
+                   (pi-coding-agent--tool-stream-current-key stream) nil))
             ((eq char ?})
-             (setf (pi-coding-agent--toolcall-stream-depth stream) 0
-                   (pi-coding-agent--toolcall-stream-root-state stream) 'done))
+             (setf (pi-coding-agent--tool-stream-depth stream) 0
+                   (pi-coding-agent--tool-stream-root-state stream) 'done))
             (t
-             (setf (pi-coding-agent--toolcall-stream-root-state stream)
+             (setf (pi-coding-agent--tool-stream-root-state stream)
                    'scalar)))))
         ('scalar
          (cond
           ((eq char ?,)
-           (setf (pi-coding-agent--toolcall-stream-root-state stream) 'key
-                 (pi-coding-agent--toolcall-stream-current-key stream) nil))
+           (setf (pi-coding-agent--tool-stream-root-state stream) 'key
+                 (pi-coding-agent--tool-stream-current-key stream) nil))
           ((eq char ?})
-           (setf (pi-coding-agent--toolcall-stream-depth stream) 0
-                 (pi-coding-agent--toolcall-stream-root-state stream) 'done))))
+           (setf (pi-coding-agent--tool-stream-depth stream) 0
+                 (pi-coding-agent--tool-stream-root-state stream) 'done))))
         ('after-value
          (cond
           ((eq char ?,)
-           (setf (pi-coding-agent--toolcall-stream-root-state stream) 'key
-                 (pi-coding-agent--toolcall-stream-current-key stream) nil))
+           (setf (pi-coding-agent--tool-stream-root-state stream) 'key
+                 (pi-coding-agent--tool-stream-current-key stream) nil))
           ((eq char ?})
-           (setf (pi-coding-agent--toolcall-stream-depth stream) 0
-                 (pi-coding-agent--toolcall-stream-root-state stream) 'done)))))))))
+           (setf (pi-coding-agent--tool-stream-depth stream) 0
+                 (pi-coding-agent--tool-stream-root-state stream) 'done)))))))))
 
 (defun pi-coding-agent--toolcall-stream-feed (stream delta)
   "Append raw argument JSON DELTA to STREAM's display-only preview state."
@@ -2308,8 +2309,8 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
     (let ((index 0)
           (length (length delta)))
       (while (< index length)
-        (if (and (pi-coding-agent--toolcall-stream-string-role stream)
-                 (null (pi-coding-agent--toolcall-stream-escape-state stream)))
+        (if (and (pi-coding-agent--tool-stream-string-role stream)
+                 (null (pi-coding-agent--tool-stream-escape-state stream)))
             ;; Plain string runs dominate write payloads.  Append each run once
             ;; rather than repeatedly copying the accumulated value per char.
             (let ((special (string-match "[\"\\\\]" delta index)))
@@ -2325,11 +2326,11 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
                  stream (substring delta index))
                 (setq index length)))
           (let ((char (aref delta index)))
-            (if (pi-coding-agent--toolcall-stream-string-role stream)
+            (if (pi-coding-agent--tool-stream-string-role stream)
                 (pi-coding-agent--toolcall-stream-feed-string-char stream char)
               (pi-coding-agent--toolcall-stream-feed-structure-char stream char)))
           (setq index (1+ index)))))
-    (when (eq (pi-coding-agent--toolcall-stream-string-role stream) 'value)
+    (when (eq (pi-coding-agent--tool-stream-string-role stream) 'value)
       (pi-coding-agent--toolcall-stream-publish-value stream)))
   stream)
 
@@ -2347,8 +2348,8 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
 
 (defun pi-coding-agent--toolcall-stream-header-key (stream)
   "Return STREAM metadata whose change requires a header repaint."
-  (let ((args (pi-coding-agent--toolcall-stream-arguments stream)))
-    (pcase (pi-coding-agent--toolcall-stream-tool-name stream)
+  (let ((args (pi-coding-agent--tool-stream-arguments stream)))
+    (pcase (pi-coding-agent--tool-stream-tool-name stream)
       ("bash" (pi-coding-agent--tool-arg-get args :command))
       ((or "read" "write" "edit")
        (pi-coding-agent--tool-arg-path args))
@@ -2357,40 +2358,40 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
 (defun pi-coding-agent--render-toolcall-stream (stream _event-type)
   "Render changed, visible parts of generation STREAM."
   (when (pi-coding-agent--tool-name-p
-         (pi-coding-agent--toolcall-stream-tool-name stream))
-    (let* ((tool-name (pi-coding-agent--toolcall-stream-tool-name stream))
-           (args (pi-coding-agent--toolcall-stream-arguments stream))
+         (pi-coding-agent--tool-stream-tool-name stream))
+    (let* ((tool-name (pi-coding-agent--tool-stream-tool-name stream))
+           (args (pi-coding-agent--tool-stream-arguments stream))
            (header-key (pi-coding-agent--toolcall-stream-header-key stream))
-           (block (pi-coding-agent--toolcall-stream-block stream)))
+           (block (pi-coding-agent--tool-stream-block stream)))
       (unless block
         ;; Generation identity is contentIndex, not a provider ID that may be
         ;; empty, duplicated, or corrected at either authoritative end event.
         (setq block
               (pi-coding-agent--display-tool-start
                tool-name args nil
-               (pi-coding-agent--toolcall-stream-content-index stream)
+               (pi-coding-agent--tool-stream-content-index stream)
                'streaming 'defer))
-        (setf (pi-coding-agent--toolcall-stream-block stream) block
-              (pi-coding-agent--toolcall-stream-rendered-header-key stream)
+        (setf (pi-coding-agent--tool-stream-block stream) block
+              (pi-coding-agent--tool-stream-rendered-header-key stream)
               header-key))
       (setq pi-coding-agent--pending-tool-overlay
             (pi-coding-agent--tool-block-overlay block))
       (unless (equal header-key
-                     (pi-coding-agent--toolcall-stream-rendered-header-key
+                     (pi-coding-agent--tool-stream-rendered-header-key
                       stream))
         (pi-coding-agent--display-tool-update-header
          tool-name args block 'streaming)
-        (setf (pi-coding-agent--toolcall-stream-rendered-header-key stream)
+        (setf (pi-coding-agent--tool-stream-rendered-header-key stream)
               header-key)
         (when (and (equal tool-name "write")
                    (pi-coding-agent--tool-arg-member args :content))
-          (setf (pi-coding-agent--toolcall-stream-content-render-p stream)
+          (setf (pi-coding-agent--tool-stream-content-render-p stream)
                 t)))
       ;; The write preview displays complete lines only.  Avoid rewriting its
       ;; fenced body for every token that merely extends a partial line.
       (when (and (equal tool-name "write")
                  (pi-coding-agent--tool-arg-member args :content)
-                 (pi-coding-agent--toolcall-stream-content-render-p stream))
+                 (pi-coding-agent--tool-stream-content-render-p stream))
         (let* ((content (pi-coding-agent--tool-arg-get args :content))
                (complete-content
                 (pi-coding-agent--toolcall-complete-content content)))
@@ -2402,9 +2403,9 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
                 (pi-coding-agent--tool-path-string
                  (pi-coding-agent--tool-arg-path args)))
                block
-               (pi-coding-agent--toolcall-stream-content-truncated stream))
+               (pi-coding-agent--tool-stream-content-truncated stream))
             (pi-coding-agent--clear-toolcall-preview-body block))
-          (setf (pi-coding-agent--toolcall-stream-content-render-p stream)
+          (setf (pi-coding-agent--tool-stream-content-render-p stream)
                 nil))))))
 
 (defun pi-coding-agent--tool-block-rekey (block tool-call-id)
@@ -2432,7 +2433,7 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
          ;; rendered yet (as in tagged Pi 0.84.2), create its block rather than
          ;; adopting another stream's colliding authoritative ID.
          (block (if stream
-                    (or (pi-coding-agent--toolcall-stream-block stream)
+                    (or (pi-coding-agent--tool-stream-block stream)
                         (pi-coding-agent--display-tool-start
                          tool-name args nil content-index nil 'defer))
                   (pi-coding-agent--tool-block-get tool-call-id))))
@@ -2442,12 +2443,12 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
           (pi-coding-agent--reconcile-toolcall-preview-block
            content-index tool-call "toolcall_end" block))
     (when stream
-      (setf (pi-coding-agent--toolcall-stream-tool-call-id stream) tool-call-id
-            (pi-coding-agent--toolcall-stream-tool-name stream)
+      (setf (pi-coding-agent--tool-stream-tool-call-id stream) tool-call-id
+            (pi-coding-agent--tool-stream-tool-name stream)
             (plist-get tool-call :name)
-            (pi-coding-agent--toolcall-stream-arguments stream)
+            (pi-coding-agent--tool-stream-arguments stream)
             (plist-get tool-call :arguments)
-            (pi-coding-agent--toolcall-stream-block stream) block))
+            (pi-coding-agent--tool-stream-block stream) block))
     block))
 
 (defun pi-coding-agent--handle-toolcall-message-event (event)
@@ -2458,7 +2459,7 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
     (pcase event-type
       ("toolcall_start"
        (when-let* ((old-stream (gethash content-index streams))
-                   (old-block (pi-coding-agent--toolcall-stream-block
+                   (old-block (pi-coding-agent--tool-stream-block
                                old-stream)))
          (pi-coding-agent--tool-block-delete old-block))
        (let ((stream (pi-coding-agent--make-toolcall-stream
@@ -2476,7 +2477,7 @@ When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
                            new-stream))))
          ;; Generic tool arguments are hidden while streaming.  Scan only the
          ;; built-ins whose command/path/content drives a live preview.
-         (when (member (pi-coding-agent--toolcall-stream-tool-name stream)
+         (when (member (pi-coding-agent--tool-stream-tool-name stream)
                        '("bash" "read" "edit" "write"))
            (pi-coding-agent--toolcall-stream-feed
             stream (plist-get event :delta)))
@@ -2578,7 +2579,7 @@ nil, reuse a keyed block or create one."
        (lambda (_content-index stream)
          (when (and (not (memq stream excluded))
                     (equal tool-call-id
-                           (pi-coding-agent--toolcall-stream-tool-call-id
+                           (pi-coding-agent--tool-stream-tool-call-id
                             stream)))
            (throw 'found stream)))
        pi-coding-agent--toolcall-streams)
@@ -2596,7 +2597,7 @@ nil, reuse a keyed block or create one."
         (if first
             (unless (eq block (plist-get first :block))
               (when-let* ((stream (plist-get item :stream)))
-                (setf (pi-coding-agent--toolcall-stream-block stream) nil))
+                (setf (pi-coding-agent--tool-stream-block stream) nil))
               (pi-coding-agent--tool-block-delete block)
               (puthash tool-call-id
                        (plist-get first :block)
@@ -2643,7 +2644,7 @@ nil, reuse a keyed block or create one."
           ;; generation-only block now rather than leaving an orphan behind.
           (when block
             (when stream
-              (setf (pi-coding-agent--toolcall-stream-block stream) nil))
+              (setf (pi-coding-agent--tool-stream-block stream) nil))
             (pi-coding-agent--tool-block-delete block)))))
     (setq matched-items
           (pi-coding-agent--dedupe-final-toolcall-items
@@ -2656,9 +2657,9 @@ nil, reuse a keyed block or create one."
     (when streams
       (maphash
        (lambda (_content-index stream)
-         (when-let* ((block (pi-coding-agent--toolcall-stream-block stream)))
+         (when-let* ((block (pi-coding-agent--tool-stream-block stream)))
            (unless (memq block matched-blocks)
-             (setf (pi-coding-agent--toolcall-stream-block stream) nil)
+             (setf (pi-coding-agent--tool-stream-block stream) nil)
              (pi-coding-agent--tool-block-delete block))))
        streams))
     (pi-coding-agent--prune-stale-toolcall-previews tool-call-ids)))
