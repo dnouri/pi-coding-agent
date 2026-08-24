@@ -486,7 +486,7 @@ class FakePiHarness:
                 ),
             )
             if not completed:
-                self._finish_aborted_run()
+                self._finish_aborted_run(assistant_message)
                 return
             emitted_messages.append(assistant_message)
             pending_steer = self._take_pending_steer()
@@ -504,8 +504,9 @@ class FakePiHarness:
     ) -> tuple[bool, JsonDict]:
         """Emit one user->assistant text exchange.
 
-        Returns ``(completed, assistant_message)``.  When ``completed`` is
-        false, the assistant message is undefined because the run was aborted.
+        Returns ``(completed, assistant_message)``.  After an assistant
+        ``message_start``, an aborted result contains the authoritative partial
+        message that must be emitted before ``agent_end``.
         """
         user_message = self._build_user_message(user_text)
         self._persist_user_message(user_message)
@@ -517,22 +518,24 @@ class FakePiHarness:
         if not self._sleep_ms(behavior.delay_ms, abortable=True):
             return False, {}
         self._write_json({"type": "message_start", "message": assistant_placeholder})
+        emitted_chunks: list[str] = []
         for chunk in self._chunk_text(assistant_text, behavior.chunk_count):
             if self._abort_requested.is_set():
-                return False, {}
-            self._write_json(
+                return False, self._build_aborted_assistant_message(
+                    "".join(emitted_chunks)
+                )
+            self._write_message_update(
                 {
-                    "type": "message_update",
-                    "message": assistant_placeholder,
-                    "assistantMessageEvent": {
-                        "type": "text_delta",
-                        "contentIndex": 0,
-                        "delta": chunk,
-                    },
+                    "type": "text_delta",
+                    "contentIndex": 0,
+                    "delta": chunk,
                 }
             )
+            emitted_chunks.append(chunk)
             if not self._sleep_ms(behavior.delay_ms, abortable=True):
-                return False, {}
+                return False, self._build_aborted_assistant_message(
+                    "".join(emitted_chunks)
+                )
         assistant_message = self._build_assistant_message(assistant_text)
         self._persist_assistant_message(assistant_message)
         self._write_json({"type": "message_end", "message": assistant_message})
@@ -590,6 +593,7 @@ class FakePiHarness:
         if self._abort_requested.is_set():
             self._finish_aborted_run()
             return
+
         tool_call_id = f"call-{uuid.uuid4().hex[:8]}"
         tool_call = {
             "type": "toolCall",
@@ -597,35 +601,57 @@ class FakePiHarness:
             "name": behavior.tool_name,
             "arguments": behavior.tool_args,
         }
-        assistant_message: JsonDict = {"role": "assistant", "content": [tool_call]}
+        tool_assistant_message: JsonDict = {
+            "role": "assistant",
+            "content": [tool_call],
+            "timestamp": now_ms(),
+            "stopReason": "toolUse",
+        }
+        tool_assistant_start = {
+            **tool_assistant_message,
+            "content": [],
+            "stopReason": "pending",
+        }
         if not self._sleep_ms(behavior.delay_ms, abortable=True):
             self._finish_aborted_run()
             return
-        self._write_json({"type": "message_start", "message": assistant_message})
-        self._write_json(
+        self._write_json({"type": "message_start", "message": tool_assistant_start})
+        self._write_message_update(
             {
-                "type": "message_update",
-                "message": assistant_message,
-                "assistantMessageEvent": {
-                    "type": "toolcall_start",
-                    "contentIndex": 0,
-                },
+                "type": "toolcall_start",
+                "contentIndex": 0,
+                "id": tool_call_id,
+                "toolName": behavior.tool_name,
             }
         )
-        self._write_json(
-            {
-                "type": "message_update",
-                "message": assistant_message,
-                "assistantMessageEvent": {
+        raw_arguments = json.dumps(
+            behavior.tool_args, separators=(",", ":"), ensure_ascii=False
+        )
+        for chunk in self._chunk_text(raw_arguments, 3):
+            self._write_message_update(
+                {
                     "type": "toolcall_delta",
                     "contentIndex": 0,
-                    "delta": json.dumps(behavior.tool_args, ensure_ascii=False),
-                },
+                    "delta": chunk,
+                }
+            )
+        if not self._sleep_ms(behavior.delay_ms, abortable=True):
+            aborted_message = {
+                **tool_assistant_message,
+                "stopReason": "aborted",
+                "errorMessage": "Request was aborted",
+            }
+            self._finish_aborted_run(aborted_message)
+            return
+        self._write_message_update(
+            {
+                "type": "toolcall_end",
+                "contentIndex": 0,
+                "toolCall": tool_call,
             }
         )
-        if not self._sleep_ms(behavior.delay_ms, abortable=True):
-            self._finish_aborted_run()
-            return
+        self._persist_assistant_message(tool_assistant_message)
+        self._write_json({"type": "message_end", "message": tool_assistant_message})
         self._write_json(
             {
                 "type": "tool_execution_start",
@@ -647,32 +673,49 @@ class FakePiHarness:
         if not self._sleep_ms(behavior.delay_ms, abortable=True):
             self._finish_aborted_run()
             return
+        result = self._tool_result_payload(behavior.result_text)
         self._write_json(
             {
                 "type": "tool_execution_end",
                 "toolCallId": tool_call_id,
                 "toolName": behavior.tool_name,
-                "result": self._tool_result_payload(behavior.result_text),
+                "result": result,
                 "isError": False,
             }
         )
+        tool_result_message: JsonDict = {
+            "role": "toolResult",
+            "toolCallId": tool_call_id,
+            "toolName": behavior.tool_name,
+            **result,
+            "isError": False,
+            "timestamp": now_ms(),
+        }
+        self._persist_tool_result_message(tool_result_message)
+        self._write_json({"type": "message_start", "message": tool_result_message})
+        self._write_json({"type": "message_end", "message": tool_result_message})
+
         final_message = self._build_assistant_message(behavior.assistant_text)
+        final_message_start = {
+            **final_message,
+            "content": [],
+            "stopReason": "pending",
+        }
+        self._write_json({"type": "message_start", "message": final_message_start})
         if behavior.assistant_text:
             for chunk in self._chunk_text(behavior.assistant_text, 2):
-                self._write_json(
+                self._write_message_update(
                     {
-                        "type": "message_update",
-                        "message": final_message,
-                        "assistantMessageEvent": {
-                            "type": "text_delta",
-                            "contentIndex": 0,
-                            "delta": chunk,
-                        },
+                        "type": "text_delta",
+                        "contentIndex": 0,
+                        "delta": chunk,
                     }
                 )
         self._persist_assistant_message(final_message)
         self._write_json({"type": "message_end", "message": final_message})
-        self._finish_run([final_message])
+        self._finish_run(
+            [user_message, tool_assistant_message, tool_result_message, final_message]
+        )
 
     def _build_extension_request(
         self, request_id: str, behavior: ExtensionDialogPrompt
@@ -787,14 +830,21 @@ class FakePiHarness:
 
     def _finish_run(self, messages: list[JsonDict]) -> None:
         """Emit agent_end and reset transient run state."""
-        self._write_json({"type": "agent_end", "messages": messages})
+        self._write_json(
+            {"type": "agent_end", "messages": messages, "willRetry": False}
+        )
         self.state.is_streaming = False
         self._abort_requested.clear()
         self._pending_steer_message = None
 
-    def _finish_aborted_run(self) -> None:
-        """Finish the current run as aborted."""
-        self._finish_run([])
+    def _finish_aborted_run(self, message: JsonDict | None = None) -> None:
+        """Finish the current run, emitting an active aborted MESSAGE first."""
+        messages: list[JsonDict] = []
+        if message:
+            self._persist_assistant_message(message)
+            self._write_json({"type": "message_end", "message": message})
+            messages.append(message)
+        self._finish_run(messages)
 
     def _sleep_ms(self, delay_ms: int, *, abortable: bool) -> bool:
         """Sleep for ``delay_ms`` milliseconds.
@@ -809,6 +859,34 @@ class FakePiHarness:
                 return False
             time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
         return not (abortable and self._abort_requested.is_set())
+
+    def _write_message_update(self, event: JsonDict) -> None:
+        """Emit a delta-only assistant message update in current RPC shape."""
+        self._write_json(
+            {
+                "type": "message_update",
+                "usage": self._zero_usage(),
+                "assistantMessageEvent": event,
+            }
+        )
+
+    @staticmethod
+    def _zero_usage() -> JsonDict:
+        """Return deterministic cumulative usage for fake streaming updates."""
+        return {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 0,
+            "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0,
+            },
+        }
 
     @staticmethod
     def _tool_result_payload(text: str) -> JsonDict:
@@ -833,6 +911,16 @@ class FakePiHarness:
             "content": [{"type": "text", "text": text}],
             "timestamp": now_ms(),
             "stopReason": "stop",
+        }
+
+    def _build_aborted_assistant_message(self, text: str) -> JsonDict:
+        """Return an authoritative partial assistant message for an abort."""
+        return {
+            "role": "assistant",
+            "content": [{"type": "text", "text": text}],
+            "timestamp": now_ms(),
+            "stopReason": "aborted",
+            "errorMessage": "Request was aborted",
         }
 
     def _build_custom_message(self, text: str) -> JsonDict:
@@ -863,6 +951,17 @@ class FakePiHarness:
         """Append a custom message to the real session file."""
         self._append_session_line(
             {"type": "message", "entryId": self._entry_id("custom"), "message": message}
+        )
+        self.state.message_count += 1
+
+    def _persist_tool_result_message(self, message: JsonDict) -> None:
+        """Append a tool-result message to the real session file."""
+        self._append_session_line(
+            {
+                "type": "message",
+                "entryId": self._entry_id("tool-result"),
+                "message": message,
+            }
         )
         self.state.message_count += 1
 
