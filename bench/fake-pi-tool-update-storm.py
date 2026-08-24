@@ -12,12 +12,13 @@ Fill phase
     "line 0042 of bash block 003"); no real paths or session text are used.
 
 Storm phase
-    ``--parallel-tools`` parallel ``subagent`` tool executions in one
-    assistant message, then ``--updates`` ``tool_execution_update`` events
-    distributed round-robin across them, then ``tool_execution_end`` for
-    each (with a final result text), then ``message_end`` and ``agent_end``.
-    Update payloads mimic pi-submarine progress text (150-300 characters,
-    changing every update) and carry a small ``details.run`` object.
+    ``--parallel-tools`` parallel ``subagent`` calls in one completed
+    assistant tool-use message, then ``--updates`` ``tool_execution_update``
+    events distributed round-robin across their executions.  Correlated tool
+    results and a final assistant message complete the run before
+    ``agent_end``.  Update payloads mimic pi-submarine progress text (150-300
+    characters, changing every update) and carry a small ``details.run``
+    object.
 
 Storm gap pattern (deterministic, seeded PRNG; stable for a fixed Python
 version):
@@ -144,6 +145,35 @@ def write_json(payload: JsonDict) -> None:
         sys.stdout.flush()
 
 
+def zero_usage() -> JsonDict:
+    """Return deterministic cumulative usage for a streaming update."""
+    return {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 0,
+        "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0,
+        },
+    }
+
+
+def write_message_update(event: JsonDict) -> None:
+    """Emit one delta-only Pi 0.84 assistant message update."""
+    write_json(
+        {
+            "type": "message_update",
+            "usage": zero_usage(),
+            "assistantMessageEvent": event,
+        }
+    )
+
+
 def respond(command: JsonDict, data: JsonDict | None = None) -> None:
     response: JsonDict = {
         "type": "response",
@@ -192,6 +222,23 @@ def tool_result(text: str, details: JsonDict | None = None) -> JsonDict:
     if details is not None:
         result["details"] = details
     return result
+
+
+def emit_tool_result_message(
+    tool_call: JsonDict, result: JsonDict, timestamp_offset_ms: int
+) -> JsonDict:
+    """Emit and return one authoritative tool-result message."""
+    message: JsonDict = {
+        "role": "toolResult",
+        "toolCallId": tool_call["id"],
+        "toolName": tool_call["name"],
+        **result,
+        "isError": False,
+        "timestamp": TIMESTAMP_BASE_MS + timestamp_offset_ms,
+    }
+    write_json({"type": "message_start", "message": message})
+    write_json({"type": "message_end", "message": message})
+    return message
 
 
 def iso_timestamp(offset_ms: int) -> str:
@@ -259,66 +306,50 @@ def fill_plan(config: JsonDict) -> list[str]:
     return plan
 
 
-def emit_fill_block(block_index: int, tool: str, output_lines: int) -> None:
-    """Emit one completed fill tool execution with surrounding events."""
+def emit_fill_block(block_index: int, tool: str, output_lines: int) -> list[JsonDict]:
+    """Emit one completed fill tool exchange and return its messages."""
     tool_call_id = f"call-fill-{block_index:04d}"
     arguments, result_text = fill_tool_call(block_index, tool, output_lines)
     thinking = fill_thinking(block_index)
+    thinking_block = {"type": "thinking", "thinking": thinking}
     tool_call = {
         "type": "toolCall",
         "id": tool_call_id,
         "name": tool,
         "arguments": arguments,
     }
-    message: JsonDict = {"role": "assistant", "content": [tool_call]}
-    write_json({"type": "message_start", "message": message})
-    write_json(
+    message: JsonDict = {
+        "role": "assistant",
+        "content": [thinking_block, tool_call],
+        "timestamp": TIMESTAMP_BASE_MS + block_index * 10,
+        "stopReason": "toolUse",
+    }
+    message_start = {**message, "content": [], "stopReason": "pending"}
+    write_json({"type": "message_start", "message": message_start})
+    write_message_update({"type": "thinking_start", "contentIndex": 0})
+    write_message_update(
+        {"type": "thinking_delta", "contentIndex": 0, "delta": thinking}
+    )
+    write_message_update(
         {
-            "type": "message_update",
-            "message": message,
-            "assistantMessageEvent": {"type": "thinking_start", "contentIndex": 0},
+            "type": "thinking_end",
+            "contentIndex": 0,
+            "content": thinking,
         }
     )
-    write_json(
+    write_message_update({"type": "toolcall_start", "contentIndex": 1})
+    write_message_update(
         {
-            "type": "message_update",
-            "message": message,
-            "assistantMessageEvent": {
-                "type": "thinking_delta",
-                "contentIndex": 0,
-                "delta": thinking,
-            },
+            "type": "toolcall_delta",
+            "contentIndex": 1,
+            "delta": json.dumps(arguments, separators=(",", ":")),
         }
     )
-    write_json(
-        {
-            "type": "message_update",
-            "message": message,
-            "assistantMessageEvent": {
-                "type": "thinking_end",
-                "contentIndex": 0,
-                "content": thinking,
-            },
-        }
+    write_message_update(
+        {"type": "toolcall_end", "contentIndex": 1, "toolCall": tool_call}
     )
-    write_json(
-        {
-            "type": "message_update",
-            "message": message,
-            "assistantMessageEvent": {"type": "toolcall_start", "contentIndex": 0},
-        }
-    )
-    write_json(
-        {
-            "type": "message_update",
-            "message": message,
-            "assistantMessageEvent": {
-                "type": "toolcall_delta",
-                "contentIndex": 0,
-                "delta": json.dumps(arguments),
-            },
-        }
-    )
+    write_json({"type": "message_end", "message": message})
+
     write_json(
         {
             "type": "tool_execution_start",
@@ -327,16 +358,20 @@ def emit_fill_block(block_index: int, tool: str, output_lines: int) -> None:
             "args": arguments,
         }
     )
+    result = tool_result(result_text)
     write_json(
         {
             "type": "tool_execution_end",
             "toolCallId": tool_call_id,
             "toolName": tool,
-            "result": tool_result(result_text),
+            "result": result,
             "isError": False,
         }
     )
-    write_json({"type": "message_end", "message": message})
+    result_message = emit_tool_result_message(
+        tool_call, result, block_index * 10 + 1
+    )
+    return [message, result_message]
 
 
 def gap_schedule(updates: int, gap_scale: float, rng: random.Random) -> list[float]:
@@ -410,23 +445,29 @@ def final_result_text(tool_id: str, tool_index: int, turns: int) -> str:
 
 
 def run_scenario(config: JsonDict, log_file: Path | None) -> None:
-    """Emit the fill phase, then the storm phase, then end the turn."""
+    """Emit the fill phase, then the storm phase, then end the run."""
     updates = int(config["updates"])
     tools = storm_tool_ids(int(config["parallel_tools"]))
     rng = random.Random(int(config["seed"]))
     delays = gap_schedule(updates, float(config["gap_scale"]), rng)
-    emitted = {"tool_execution_start": 0, "tool_execution_update": 0,
-               "tool_execution_end": 0}
+    emitted = {
+        "tool_execution_start": 0,
+        "tool_execution_update": 0,
+        "tool_execution_end": 0,
+    }
+    messages: list[JsonDict] = []
 
     write_json({"type": "agent_start"})
 
     for block_index, tool in enumerate(fill_plan(config)):
-        emit_fill_block(block_index, tool, int(config["fill_output_lines"]))
+        messages.extend(
+            emit_fill_block(block_index, tool, int(config["fill_output_lines"]))
+        )
         emitted["tool_execution_start"] += 1
         emitted["tool_execution_end"] += 1
         time.sleep(0.002)
 
-    # Storm: parallel subagent tool calls in one assistant message.
+    # Storm: generate all parallel subagent calls in one assistant message.
     tool_calls = [
         {
             "type": "toolCall",
@@ -438,27 +479,34 @@ def run_scenario(config: JsonDict, log_file: Path | None) -> None:
         }
         for index, tool_id in enumerate(tools)
     ]
-    message: JsonDict = {"role": "assistant", "content": tool_calls}
-    write_json({"type": "message_start", "message": message})
+    message: JsonDict = {
+        "role": "assistant",
+        "content": tool_calls,
+        "timestamp": TIMESTAMP_BASE_MS + 100_000,
+        "stopReason": "toolUse",
+    }
+    message_start = {**message, "content": [], "stopReason": "pending"}
+    write_json({"type": "message_start", "message": message_start})
     for index, call in enumerate(tool_calls):
-        write_json(
+        write_message_update({"type": "toolcall_start", "contentIndex": index})
+        write_message_update(
             {
-                "type": "message_update",
-                "message": message,
-                "assistantMessageEvent": {"type": "toolcall_start", "contentIndex": index},
+                "type": "toolcall_delta",
+                "contentIndex": index,
+                "delta": json.dumps(call["arguments"], separators=(",", ":")),
             }
         )
-        write_json(
+        write_message_update(
             {
-                "type": "message_update",
-                "message": message,
-                "assistantMessageEvent": {
-                    "type": "toolcall_delta",
-                    "contentIndex": index,
-                    "delta": json.dumps(call["arguments"]),
-                },
+                "type": "toolcall_end",
+                "contentIndex": index,
+                "toolCall": call,
             }
         )
+    write_json({"type": "message_end", "message": message})
+    messages.append(message)
+
+    for call in tool_calls:
         write_json(
             {
                 "type": "tool_execution_start",
@@ -487,32 +535,62 @@ def run_scenario(config: JsonDict, log_file: Path | None) -> None:
                 },
                 "partialResult": {
                     "content": [
-                        {"type": "text", "text": progress_text(seq, tool_id, turn, activity)}
+                        {
+                            "type": "text",
+                            "text": progress_text(seq, tool_id, turn, activity),
+                        }
                     ],
-                    "details": run_details(tool_id, tool_index, turn, seq, "running"),
+                    "details": run_details(
+                        tool_id, tool_index, turn, seq, "running"
+                    ),
                 },
             }
         )
         emitted["tool_execution_update"] += 1
 
+    completed: list[tuple[JsonDict, JsonDict]] = []
     for index, call in enumerate(tool_calls):
         tool_id = call["id"]
         turns = per_tool_updates[tool_id] // 8 + 1
+        result = tool_result(
+            final_result_text(tool_id, index, turns),
+            details=run_details(tool_id, index, turns, updates, "done"),
+        )
         write_json(
             {
                 "type": "tool_execution_end",
                 "toolCallId": tool_id,
                 "toolName": "subagent",
-                "result": tool_result(
-                    final_result_text(tool_id, index, turns),
-                    details=run_details(tool_id, index, turns, updates, "done"),
-                ),
+                "result": result,
                 "isError": False,
             }
         )
+        completed.append((call, result))
         emitted["tool_execution_end"] += 1
-    write_json({"type": "message_end", "message": message})
-    write_json({"type": "agent_end", "messages": [message]})
+
+    for index, (call, result) in enumerate(completed):
+        messages.append(
+            emit_tool_result_message(call, result, 101_000 + index)
+        )
+
+    final_text = "Synthetic tool-update storm complete."
+    final_message: JsonDict = {
+        "role": "assistant",
+        "content": [{"type": "text", "text": final_text}],
+        "timestamp": TIMESTAMP_BASE_MS + 102_000,
+        "stopReason": "stop",
+    }
+    final_start = {**final_message, "content": [], "stopReason": "pending"}
+    write_json({"type": "message_start", "message": final_start})
+    write_message_update(
+        {"type": "text_delta", "contentIndex": 0, "delta": final_text}
+    )
+    write_json({"type": "message_end", "message": final_message})
+    messages.append(final_message)
+
+    write_json(
+        {"type": "agent_end", "messages": messages, "willRetry": False}
+    )
     log_line(log_file, {"event": "storm-complete", "emitted": emitted})
 
 
@@ -575,7 +653,7 @@ def resolve_config(args: argparse.Namespace) -> JsonDict:
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if raw_argv == ["--version"]:
-        print("0.79.1")
+        print("0.84.2")
         return 0
 
     args, log_file = parse_args([a for a in raw_argv if a != "--version"])

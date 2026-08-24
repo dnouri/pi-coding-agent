@@ -179,13 +179,22 @@ Required behavior:
 
 ### Tool execution path
 
-For deterministic GUI tests, the fake must be able to emit:
+For deterministic GUI and benchmark tests, the fake must emit the current
+lifecycle:
 
-- `message_update` with `assistantMessageEvent.type: "toolcall_start"`
-- optional `toolcall_delta`
-- `tool_execution_start`
-- `tool_execution_update` with accumulated `partialResult`
-- `tool_execution_end`
+1. an assistant `message_start` with pending, empty content;
+2. delta-only `message_update` events for `toolcall_start`, optional
+   `toolcall_delta`, and authoritative `toolcall_end`;
+3. the authoritative assistant `message_end` before execution starts;
+4. `tool_execution_start`, optional updates with accumulated `partialResult`,
+   and `tool_execution_end`;
+5. a correlated `toolResult` message; and
+6. the final assistant response before `agent_end`.
+
+Every `message_update` carries cumulative `usage`, and carries neither the
+legacy top-level `message` nor nested `partial` fields.  Published Pi 0.84.2
+starts may omit `id` and `toolName`; `toolcall_end.toolCall` remains
+authoritative.
 
 Required fields currently consumed by Emacs rendering:
 
