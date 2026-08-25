@@ -1,0 +1,649 @@
+{
+  "tree": [
+    {
+      "entry": {
+        "type": "message",
+        "id": "aa000001",
+        "parentId": null,
+        "timestamp": "2026-03-01T09:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "Why is my build failing? It worked yesterday."
+        }
+      },
+      "children": [
+        {
+          "entry": {
+            "type": "session_info",
+            "id": "aa000002",
+            "parentId": "aa000001",
+            "timestamp": "2026-03-01T09:00:30.000Z",
+            "name": "Build failure hunt"
+          },
+          "children": []
+        },
+        {
+          "entry": {
+            "type": "message",
+            "id": "aa000003",
+            "parentId": "aa000001",
+            "timestamp": "2026-03-01T09:01:00.000Z",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Checking the build config and recent changes."
+                },
+                {
+                  "type": "toolCall",
+                  "id": "tc01",
+                  "name": "read",
+                  "arguments": {
+                    "path": "/srv/demo/src/app.py",
+                    "offset": 10,
+                    "limit": 20
+                  }
+                },
+                {
+                  "type": "toolCall",
+                  "id": "tc02",
+                  "name": "bash",
+                  "arguments": {
+                    "command": "tail -100 /srv/demo/build.log"
+                  }
+                },
+                {
+                  "type": "toolCall",
+                  "id": "tc03",
+                  "name": "list_issues",
+                  "arguments": {
+                    "repo": "acme/api",
+                    "state": "open"
+                  }
+                }
+              ],
+              "stopReason": "tool_calls"
+            }
+          },
+          "children": [
+            {
+              "entry": {
+                "type": "message",
+                "id": "aa000004",
+                "parentId": "aa000003",
+                "timestamp": "2026-03-01T09:01:30.000Z",
+                "message": {
+                  "role": "toolResult",
+                  "toolCallId": "tc01",
+                  "toolName": "read",
+                  "output": [
+                    {
+                      "type": "text",
+                      "text": "(20 lines shown)"
+                    }
+                  ]
+                }
+              },
+              "children": [
+                {
+                  "entry": {
+                    "type": "message",
+                    "id": "aa000005",
+                    "parentId": "aa000004",
+                    "timestamp": "2026-03-01T09:01:40.000Z",
+                    "message": {
+                      "role": "toolResult",
+                      "toolCallId": "tc02",
+                      "toolName": "bash",
+                      "output": [
+                        {
+                          "type": "text",
+                          "text": "last error at 09:42"
+                        }
+                      ]
+                    }
+                  },
+                  "children": [
+                    {
+                      "entry": {
+                        "type": "message",
+                        "id": "aa000006",
+                        "parentId": "aa000005",
+                        "timestamp": "2026-03-01T09:01:50.000Z",
+                        "message": {
+                          "role": "toolResult",
+                          "toolCallId": "tc03",
+                          "toolName": "list_issues",
+                          "output": [
+                            {
+                              "type": "text",
+                              "text": "2 open issues"
+                            }
+                          ]
+                        }
+                      },
+                      "children": [
+                        {
+                          "entry": {
+                            "type": "message",
+                            "id": "aa000007",
+                            "parentId": "aa000006",
+                            "timestamp": "2026-03-01T09:02:00.000Z",
+                            "message": {
+                              "role": "toolResult",
+                              "toolCallId": "tc404",
+                              "toolName": "orphanTool",
+                              "output": [
+                                {
+                                  "type": "text",
+                                  "text": "unknown tool call"
+                                }
+                              ]
+                            }
+                          },
+                          "children": [
+                            {
+                              "entry": {
+                                "type": "message",
+                                "id": "aa000008",
+                                "parentId": "aa000007",
+                                "timestamp": "2026-03-01T09:05:00.000Z",
+                                "message": {
+                                  "role": "user",
+                                  "content": [
+                                    {
+                                      "type": "text",
+                                      "text": "The build log points at scripts/build.sh."
+                                    },
+                                    {
+                                      "type": "text",
+                                      "text": "It fails at the linker step."
+                                    },
+                                    {
+                                      "type": "image",
+                                      "source": "iVBORw0KGgo="
+                                    }
+                                  ]
+                                }
+                              },
+                              "children": [
+                                {
+                                  "entry": {
+                                    "type": "message",
+                                    "id": "aa000009",
+                                    "parentId": "aa000008",
+                                    "timestamp": "2026-03-01T09:06:00.000Z",
+                                    "message": {
+                                      "role": "assistant",
+                                      "content": [
+                                        {
+                                          "type": "text",
+                                          "text": "Reading the build script to check the default target."
+                                        },
+                                        {
+                                          "type": "toolCall",
+                                          "id": "tc04",
+                                          "name": "read",
+                                          "arguments": {
+                                            "path": "/srv/demo/scripts/build.sh",
+                                            "offset": 1,
+                                            "limit": 40
+                                          }
+                                        }
+                                      ],
+                                      "stopReason": "tool_calls"
+                                    }
+                                  },
+                                  "children": [
+                                    {
+                                      "entry": {
+                                        "type": "message",
+                                        "id": "aa00000a",
+                                        "parentId": "aa000009",
+                                        "timestamp": "2026-03-01T09:06:30.000Z",
+                                        "message": {
+                                          "role": "toolResult",
+                                          "toolCallId": "tc04",
+                                          "toolName": "read",
+                                          "output": [
+                                            {
+                                              "type": "text",
+                                              "text": "(40 lines shown)"
+                                            }
+                                          ]
+                                        }
+                                      },
+                                      "children": [
+                                        {
+                                          "entry": {
+                                            "type": "message",
+                                            "id": "aa00000b",
+                                            "parentId": "aa00000a",
+                                            "timestamp": "2026-03-01T09:07:00.000Z",
+                                            "message": {
+                                              "role": "bashExecution",
+                                              "command": "cd /srv/demo && make -j4 2>&1 | tail -5",
+                                              "exitCode": 2
+                                            }
+                                          },
+                                          "children": [
+                                            {
+                                              "entry": {
+                                                "type": "message",
+                                                "id": "aa00000c",
+                                                "parentId": "aa00000b",
+                                                "timestamp": "2026-03-01T09:08:00.000Z",
+                                                "message": {
+                                                  "role": "assistant",
+                                                  "content": [],
+                                                  "stopReason": "aborted"
+                                                }
+                                              },
+                                              "children": [
+                                                {
+                                                  "entry": {
+                                                    "type": "message",
+                                                    "id": "aa00000d",
+                                                    "parentId": "aa00000c",
+                                                    "timestamp": "2026-03-01T09:09:00.000Z",
+                                                    "message": {
+                                                      "role": "assistant",
+                                                      "content": [],
+                                                      "stopReason": "end_turn"
+                                                    }
+                                                  },
+                                                  "children": [
+                                                    {
+                                                      "entry": {
+                                                        "type": "custom",
+                                                        "id": "aa00000e",
+                                                        "parentId": "aa00000d",
+                                                        "timestamp": "2026-03-01T09:09:30.000Z",
+                                                        "customType": "spell_check",
+                                                        "data": {
+                                                          "enabled": false
+                                                        }
+                                                      },
+                                                      "children": []
+                                                    },
+                                                    {
+                                                      "entry": {
+                                                        "type": "message",
+                                                        "id": "aa00000f",
+                                                        "parentId": "aa00000d",
+                                                        "timestamp": "2026-03-01T09:10:00.000Z",
+                                                        "message": {
+                                                          "role": "assistant",
+                                                          "content": [],
+                                                          "stopReason": "error",
+                                                          "errorMessage": "Upstream API error:\nrate limit exceeded\tretry later"
+                                                        }
+                                                      },
+                                                      "children": [
+                                                        {
+                                                          "entry": {
+                                                            "type": "compaction",
+                                                            "id": "aa000010",
+                                                            "parentId": "aa00000f",
+                                                            "timestamp": "2026-03-01T09:11:00.000Z",
+                                                            "summary": "Debugged the build failure; inspected app.py, build.sh, and logs.",
+                                                            "firstKeptEntryId": "aa000008",
+                                                            "tokensBefore": 98432
+                                                          },
+                                                          "children": [
+                                                            {
+                                                              "entry": {
+                                                                "type": "branch_summary",
+                                                                "id": "aa000011",
+                                                                "parentId": "aa000010",
+                                                                "timestamp": "2026-03-01T09:12:00.000Z",
+                                                                "fromId": "aa000008",
+                                                                "summary": "Compared a config fix against a log-search approach."
+                                                              },
+                                                              "children": [
+                                                                {
+                                                                  "entry": {
+                                                                    "type": "custom",
+                                                                    "id": "aa000012",
+                                                                    "parentId": "aa000011",
+                                                                    "timestamp": "2026-03-01T09:12:30.000Z",
+                                                                    "customType": "artifact_index",
+                                                                    "data": {
+                                                                      "version": 2,
+                                                                      "files": [
+                                                                        "app.py",
+                                                                        "build.sh"
+                                                                      ]
+                                                                    }
+                                                                  },
+                                                                  "children": [
+                                                                    {
+                                                                      "entry": {
+                                                                        "type": "custom_message",
+                                                                        "id": "aa000013",
+                                                                        "parentId": "aa000012",
+                                                                        "timestamp": "2026-03-01T09:13:00.000Z",
+                                                                        "customType": "todo",
+                                                                        "content": "Migration checklist started",
+                                                                        "display": true
+                                                                      },
+                                                                      "children": [
+                                                                        {
+                                                                          "entry": {
+                                                                            "type": "custom_message",
+                                                                            "id": "aa000014",
+                                                                            "parentId": "aa000013",
+                                                                            "timestamp": "2026-03-01T09:14:00.000Z",
+                                                                            "customType": "review",
+                                                                            "content": [
+                                                                              {
+                                                                                "type": "text",
+                                                                                "text": "Review pending:"
+                                                                              },
+                                                                              {
+                                                                                "type": "text",
+                                                                                "text": "waiting on CI"
+                                                                              }
+                                                                            ],
+                                                                            "display": false
+                                                                          },
+                                                                          "children": [
+                                                                            {
+                                                                              "entry": {
+                                                                                "type": "model_change",
+                                                                                "id": "aa000015",
+                                                                                "parentId": "aa000014",
+                                                                                "timestamp": "2026-03-01T09:15:00.000Z",
+                                                                                "provider": "anthropic",
+                                                                                "modelId": "claude-sonnet-4-5"
+                                                                              },
+                                                                              "children": [
+                                                                                {
+                                                                                  "entry": {
+                                                                                    "type": "thinking_level_change",
+                                                                                    "id": "aa000016",
+                                                                                    "parentId": "aa000015",
+                                                                                    "timestamp": "2026-03-01T09:16:00.000Z",
+                                                                                    "thinkingLevel": "high"
+                                                                                  },
+                                                                                  "children": [
+                                                                                    {
+                                                                                      "entry": {
+                                                                                        "type": "message",
+                                                                                        "id": "aa000017",
+                                                                                        "parentId": "aa000016",
+                                                                                        "timestamp": "2026-03-01T09:17:00.000Z",
+                                                                                        "message": {
+                                                                                          "role": "user",
+                                                                                          "content": "Let's commit the fix."
+                                                                                        }
+                                                                                      },
+                                                                                      "children": [
+                                                                                        {
+                                                                                          "entry": {
+                                                                                            "type": "message",
+                                                                                            "id": "aa000018",
+                                                                                            "parentId": "aa000017",
+                                                                                            "timestamp": "2026-03-01T09:18:00.000Z",
+                                                                                            "message": {
+                                                                                              "role": "assistant",
+                                                                                              "content": [
+                                                                                                {
+                                                                                                  "type": "text",
+                                                                                                  "text": "Done - committed as 4f2a91c."
+                                                                                                }
+                                                                                              ],
+                                                                                              "stopReason": "end_turn"
+                                                                                            }
+                                                                                          },
+                                                                                          "children": [
+                                                                                            {
+                                                                                              "entry": {
+                                                                                                "type": "label",
+                                                                                                "id": "aa00001f",
+                                                                                                "parentId": "aa000018",
+                                                                                                "timestamp": "2026-03-01T09:20:00.000Z",
+                                                                                                "targetId": "aa000001",
+                                                                                                "label": "checkpoint"
+                                                                                              },
+                                                                                              "children": [
+                                                                                                {
+                                                                                                  "entry": {
+                                                                                                    "type": "label",
+                                                                                                    "id": "aa000020",
+                                                                                                    "parentId": "aa00001f",
+                                                                                                    "timestamp": "2026-03-01T09:20:10.000Z",
+                                                                                                    "targetId": "aa000001"
+                                                                                                  },
+                                                                                                  "children": [
+                                                                                                    {
+                                                                                                      "entry": {
+                                                                                                        "type": "label",
+                                                                                                        "id": "aa000021",
+                                                                                                        "parentId": "aa000020",
+                                                                                                        "timestamp": "2026-03-01T09:20:20.000Z",
+                                                                                                        "targetId": "aa000001",
+                                                                                                        "label": "restored"
+                                                                                                      },
+                                                                                                      "children": [
+                                                                                                        {
+                                                                                                          "entry": {
+                                                                                                            "type": "session_info",
+                                                                                                            "id": "aa000022",
+                                                                                                            "parentId": "aa000021",
+                                                                                                            "timestamp": "2026-03-01T09:20:30.000Z",
+                                                                                                            "name": "Build fixed"
+                                                                                                          },
+                                                                                                          "children": [
+                                                                                                            {
+                                                                                                              "entry": {
+                                                                                                                "type": "label",
+                                                                                                                "id": "aa000023",
+                                                                                                                "parentId": "aa000022",
+                                                                                                                "timestamp": "2026-03-01T09:20:40.000Z",
+                                                                                                                "targetId": "aa000018",
+                                                                                                                "label": "final-answer"
+                                                                                                              },
+                                                                                                              "children": []
+                                                                                                            }
+                                                                                                          ]
+                                                                                                        }
+                                                                                                      ]
+                                                                                                    }
+                                                                                                  ]
+                                                                                                }
+                                                                                              ]
+                                                                                            }
+                                                                                          ],
+                                                                                          "label": "final-answer",
+                                                                                          "labelTimestamp": "2026-03-01T09:20:40.000Z"
+                                                                                        }
+                                                                                      ]
+                                                                                    }
+                                                                                  ]
+                                                                                }
+                                                                              ]
+                                                                            }
+                                                                          ]
+                                                                        }
+                                                                      ]
+                                                                    }
+                                                                  ]
+                                                                }
+                                                              ]
+                                                            }
+                                                          ]
+                                                        }
+                                                      ]
+                                                    }
+                                                  ]
+                                                }
+                                              ]
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                },
+                                {
+                                  "entry": {
+                                    "type": "message",
+                                    "id": "aa000019",
+                                    "parentId": "aa000008",
+                                    "timestamp": "2026-03-01T09:19:00.000Z",
+                                    "message": {
+                                      "role": "assistant",
+                                      "content": [
+                                        {
+                                          "type": "text",
+                                          "text": "Trying the other angle: search the logs first."
+                                        },
+                                        {
+                                          "type": "toolCall",
+                                          "id": "tc04",
+                                          "name": "bash",
+                                          "arguments": {
+                                            "command": "grep -rn 'error' /var/log/demo.log | head -20"
+                                          }
+                                        }
+                                      ],
+                                      "stopReason": "tool_calls"
+                                    }
+                                  },
+                                  "children": [
+                                    {
+                                      "entry": {
+                                        "type": "message",
+                                        "id": "aa00001a",
+                                        "parentId": "aa000019",
+                                        "timestamp": "2026-03-01T09:19:10.000Z",
+                                        "message": {
+                                          "role": "toolResult",
+                                          "toolCallId": "tc04",
+                                          "toolName": "bash",
+                                          "output": [
+                                            {
+                                              "type": "text",
+                                              "text": "build.sh:42: undefined reference"
+                                            }
+                                          ]
+                                        }
+                                      },
+                                      "children": [
+                                        {
+                                          "entry": {
+                                            "type": "message",
+                                            "id": "aa00001b",
+                                            "parentId": "aa00001a",
+                                            "timestamp": "2026-03-01T09:19:20.000Z",
+                                            "message": {
+                                              "role": "assistant",
+                                              "content": [
+                                                {
+                                                  "type": "text",
+                                                  "text": "The linker flags live in the Makefile; checking them."
+                                                },
+                                                {
+                                                  "type": "toolCall",
+                                                  "id": "tc05",
+                                                  "name": "grep",
+                                                  "arguments": {
+                                                    "pattern": "ldflags",
+                                                    "path": "/srv/demo/Makefile"
+                                                  }
+                                                }
+                                              ],
+                                              "stopReason": "tool_calls"
+                                            }
+                                          },
+                                          "children": [
+                                            {
+                                              "entry": {
+                                                "type": "message",
+                                                "id": "aa00001c",
+                                                "parentId": "aa00001b",
+                                                "timestamp": "2026-03-01T09:19:30.000Z",
+                                                "message": {
+                                                  "role": "toolResult",
+                                                  "toolCallId": "tc05",
+                                                  "toolName": "grep",
+                                                  "output": [
+                                                    {
+                                                      "type": "text",
+                                                      "text": "Makefile:14: LDFLAGS"
+                                                    }
+                                                  ]
+                                                }
+                                              },
+                                              "children": [
+                                                {
+                                                  "entry": {
+                                                    "type": "message",
+                                                    "id": "aa00001d",
+                                                    "parentId": "aa00001c",
+                                                    "timestamp": "2026-03-01T09:19:40.000Z",
+                                                    "message": {
+                                                      "role": "user",
+                                                      "content": [
+                                                        {
+                                                          "type": "text",
+                                                          "text": "Makefile looks fine."
+                                                        },
+                                                        {
+                                                          "type": "text",
+                                                          "text": "Check the CI cache."
+                                                        }
+                                                      ]
+                                                    }
+                                                  },
+                                                  "children": [
+                                                    {
+                                                      "entry": {
+                                                        "type": "message",
+                                                        "id": "aa00001e",
+                                                        "parentId": "aa00001d",
+                                                        "timestamp": "2026-03-01T09:19:50.000Z",
+                                                        "message": {
+                                                          "role": "assistant",
+                                                          "content": [
+                                                            {
+                                                              "type": "text",
+                                                              "text": "Clearing the CI cache now; rerun the build after."
+                                                            }
+                                                          ],
+                                                          "stopReason": "end_turn"
+                                                        }
+                                                      },
+                                                      "children": []
+                                                    }
+                                                  ]
+                                                }
+                                              ]
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "label": "restored",
+      "labelTimestamp": "2026-03-01T09:20:20.000Z"
+    }
+  ],
+  "leafId": "aa000023"
+}

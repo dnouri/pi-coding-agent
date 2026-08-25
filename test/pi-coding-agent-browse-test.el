@@ -13,23 +13,6 @@
 
 ;;;; Test Fixtures
 
-(defvar pi-coding-agent-test--fixture-dir
-  (expand-file-name "test/fixtures/"
-                    (or (and load-file-name
-                             (file-name-directory
-                              (directory-file-name
-                               (file-name-directory load-file-name))))
-                        (locate-dominating-file default-directory "Makefile")
-                        default-directory))
-  "Directory containing JSON test fixtures.")
-
-(defun pi-coding-agent-test--read-json-fixture (filename)
-  "Read JSON fixture FILENAME from test/fixtures/ and return as plist."
-  (let ((path (expand-file-name filename pi-coding-agent-test--fixture-dir)))
-    (with-temp-buffer
-      (insert-file-contents path)
-      (json-parse-string (buffer-string) :object-type 'plist))))
-
 (defun pi-coding-agent-test--fixture-sessions ()
   "Session items in the browse dialect, from browse-sessions.json.
 Stands in for the dropped `pi-coding-agent--parse-session-list'."

@@ -1,0 +1,312 @@
+{
+  "tree": [
+    {
+      "id": "aa000001",
+      "parentId": null,
+      "timestamp": "2026-03-01T09:00:00.000Z",
+      "label": "restored",
+      "children": [
+        {
+          "id": "aa000003",
+          "parentId": "aa000001",
+          "timestamp": "2026-03-01T09:01:00.000Z",
+          "children": [
+            {
+              "id": "aa000004",
+              "parentId": "aa000003",
+              "timestamp": "2026-03-01T09:01:30.000Z",
+              "children": [
+                {
+                  "id": "aa000005",
+                  "parentId": "aa000004",
+                  "timestamp": "2026-03-01T09:01:40.000Z",
+                  "children": [
+                    {
+                      "id": "aa000006",
+                      "parentId": "aa000005",
+                      "timestamp": "2026-03-01T09:01:50.000Z",
+                      "children": [
+                        {
+                          "id": "aa000007",
+                          "parentId": "aa000006",
+                          "timestamp": "2026-03-01T09:02:00.000Z",
+                          "children": [
+                            {
+                              "id": "aa000008",
+                              "parentId": "aa000007",
+                              "timestamp": "2026-03-01T09:05:00.000Z",
+                              "children": [
+                                {
+                                  "id": "aa000009",
+                                  "parentId": "aa000008",
+                                  "timestamp": "2026-03-01T09:06:00.000Z",
+                                  "children": [
+                                    {
+                                      "id": "aa00000a",
+                                      "parentId": "aa000009",
+                                      "timestamp": "2026-03-01T09:06:30.000Z",
+                                      "children": [
+                                        {
+                                          "id": "aa00000b",
+                                          "parentId": "aa00000a",
+                                          "timestamp": "2026-03-01T09:07:00.000Z",
+                                          "children": [
+                                            {
+                                              "id": "aa00000c",
+                                              "parentId": "aa00000b",
+                                              "timestamp": "2026-03-01T09:08:00.000Z",
+                                              "children": [
+                                                {
+                                                  "id": "aa00000d",
+                                                  "parentId": "aa00000c",
+                                                  "timestamp": "2026-03-01T09:09:00.000Z",
+                                                  "children": [
+                                                    {
+                                                      "id": "aa00000f",
+                                                      "parentId": "aa00000d",
+                                                      "timestamp": "2026-03-01T09:10:00.000Z",
+                                                      "children": [
+                                                        {
+                                                          "id": "aa000010",
+                                                          "parentId": "aa00000f",
+                                                          "timestamp": "2026-03-01T09:11:00.000Z",
+                                                          "children": [
+                                                            {
+                                                              "id": "aa000011",
+                                                              "parentId": "aa000010",
+                                                              "timestamp": "2026-03-01T09:12:00.000Z",
+                                                              "children": [
+                                                                {
+                                                                  "id": "aa000013",
+                                                                  "parentId": "aa000011",
+                                                                  "timestamp": "2026-03-01T09:13:00.000Z",
+                                                                  "children": [
+                                                                    {
+                                                                      "id": "aa000014",
+                                                                      "parentId": "aa000013",
+                                                                      "timestamp": "2026-03-01T09:14:00.000Z",
+                                                                      "children": [
+                                                                        {
+                                                                          "id": "aa000015",
+                                                                          "parentId": "aa000014",
+                                                                          "timestamp": "2026-03-01T09:15:00.000Z",
+                                                                          "children": [
+                                                                            {
+                                                                              "id": "aa000016",
+                                                                              "parentId": "aa000015",
+                                                                              "timestamp": "2026-03-01T09:16:00.000Z",
+                                                                              "children": [
+                                                                                {
+                                                                                  "id": "aa000017",
+                                                                                  "parentId": "aa000016",
+                                                                                  "timestamp": "2026-03-01T09:17:00.000Z",
+                                                                                  "children": [
+                                                                                    {
+                                                                                      "id": "aa000018",
+                                                                                      "parentId": "aa000017",
+                                                                                      "timestamp": "2026-03-01T09:18:00.000Z",
+                                                                                      "label": "final-answer",
+                                                                                      "children": [],
+                                                                                      "type": "message",
+                                                                                      "role": "assistant",
+                                                                                      "preview": "Done - committed as 4f2a91c.",
+                                                                                      "stopReason": "end_turn"
+                                                                                    }
+                                                                                  ],
+                                                                                  "type": "message",
+                                                                                  "role": "user",
+                                                                                  "preview": "Let's commit the fix."
+                                                                                }
+                                                                              ],
+                                                                              "type": "thinking_level_change",
+                                                                              "thinkingLevel": "high"
+                                                                            }
+                                                                          ],
+                                                                          "type": "model_change",
+                                                                          "provider": "anthropic",
+                                                                          "modelId": "claude-sonnet-4-5"
+                                                                        }
+                                                                      ],
+                                                                      "type": "custom_message",
+                                                                      "customType": "review",
+                                                                      "preview": "Review pending: waiting on CI"
+                                                                    }
+                                                                  ],
+                                                                  "type": "custom_message",
+                                                                  "customType": "todo",
+                                                                  "preview": "Migration checklist started"
+                                                                }
+                                                              ],
+                                                              "type": "branch_summary",
+                                                              "summary": "Compared a config fix against a log-search approach."
+                                                            }
+                                                          ],
+                                                          "type": "compaction",
+                                                          "tokensBefore": 98432
+                                                        }
+                                                      ],
+                                                      "type": "message",
+                                                      "role": "assistant",
+                                                      "preview": "Upstream API error: rate limit exceeded retry later",
+                                                      "stopReason": "error",
+                                                      "errorMessage": "Upstream API error:\nrate limit exceeded\tretry later"
+                                                    }
+                                                  ],
+                                                  "type": "message",
+                                                  "role": "assistant",
+                                                  "preview": "(no content)",
+                                                  "stopReason": "end_turn"
+                                                }
+                                              ],
+                                              "type": "message",
+                                              "role": "assistant",
+                                              "preview": "(aborted)",
+                                              "stopReason": "aborted"
+                                            }
+                                          ],
+                                          "type": "message",
+                                          "role": "bashExecution",
+                                          "preview": "[bash: cd /srv/demo && make -j4 2>&1 | tail -5]"
+                                        }
+                                      ],
+                                      "type": "tool_result",
+                                      "toolName": "read",
+                                      "toolArgs": {
+                                        "path": "/srv/demo/scripts/build.sh",
+                                        "offset": 1,
+                                        "limit": 40
+                                      },
+                                      "formattedToolCall": "[read: /srv/demo/scripts/build.sh:1-40]",
+                                      "preview": "[read: /srv/demo/scripts/build.sh:1-40]"
+                                    }
+                                  ],
+                                  "type": "message",
+                                  "role": "assistant",
+                                  "preview": "Reading the build script to check the default target.",
+                                  "stopReason": "tool_calls"
+                                },
+                                {
+                                  "id": "aa000019",
+                                  "parentId": "aa000008",
+                                  "timestamp": "2026-03-01T09:19:00.000Z",
+                                  "children": [
+                                    {
+                                      "id": "aa00001a",
+                                      "parentId": "aa000019",
+                                      "timestamp": "2026-03-01T09:19:10.000Z",
+                                      "children": [
+                                        {
+                                          "id": "aa00001b",
+                                          "parentId": "aa00001a",
+                                          "timestamp": "2026-03-01T09:19:20.000Z",
+                                          "children": [
+                                            {
+                                              "id": "aa00001c",
+                                              "parentId": "aa00001b",
+                                              "timestamp": "2026-03-01T09:19:30.000Z",
+                                              "children": [
+                                                {
+                                                  "id": "aa00001d",
+                                                  "parentId": "aa00001c",
+                                                  "timestamp": "2026-03-01T09:19:40.000Z",
+                                                  "children": [
+                                                    {
+                                                      "id": "aa00001e",
+                                                      "parentId": "aa00001d",
+                                                      "timestamp": "2026-03-01T09:19:50.000Z",
+                                                      "children": [],
+                                                      "type": "message",
+                                                      "role": "assistant",
+                                                      "preview": "Clearing the CI cache now; rerun the build after.",
+                                                      "stopReason": "end_turn"
+                                                    }
+                                                  ],
+                                                  "type": "message",
+                                                  "role": "user",
+                                                  "preview": "Makefile looks fine. Check the CI cache."
+                                                }
+                                              ],
+                                              "type": "tool_result",
+                                              "toolName": "grep",
+                                              "toolArgs": {
+                                                "pattern": "ldflags",
+                                                "path": "/srv/demo/Makefile"
+                                              },
+                                              "formattedToolCall": "[grep: /ldflags/ in /srv/demo/Makefile]",
+                                              "preview": "[grep: /ldflags/ in /srv/demo/Makefile]"
+                                            }
+                                          ],
+                                          "type": "message",
+                                          "role": "assistant",
+                                          "preview": "The linker flags live in the Makefile; checking them.",
+                                          "stopReason": "tool_calls"
+                                        }
+                                      ],
+                                      "type": "tool_result",
+                                      "toolName": "bash",
+                                      "toolArgs": {
+                                        "command": "grep -rn 'error' /var/log/demo.log | head -20"
+                                      },
+                                      "formattedToolCall": "[bash: grep -rn 'error' /var/log/demo.log | head -20]",
+                                      "preview": "[bash: grep -rn 'error' /var/log/demo.log | head -20]"
+                                    }
+                                  ],
+                                  "type": "message",
+                                  "role": "assistant",
+                                  "preview": "Trying the other angle: search the logs first.",
+                                  "stopReason": "tool_calls"
+                                }
+                              ],
+                              "type": "message",
+                              "role": "user",
+                              "preview": "The build log points at scripts/build.sh. It fails at the linker step."
+                            }
+                          ],
+                          "type": "tool_result",
+                          "toolName": "orphanTool",
+                          "preview": "[orphanTool]"
+                        }
+                      ],
+                      "type": "tool_result",
+                      "toolName": "list_issues",
+                      "toolArgs": {
+                        "repo": "acme/api",
+                        "state": "open"
+                      },
+                      "formattedToolCall": "[list_issues: {\"repo\":\"acme/api\",\"state\":\"open\"}]",
+                      "preview": "[list_issues: {\"repo\":\"acme/api\",\"state\":\"open\"}]"
+                    }
+                  ],
+                  "type": "tool_result",
+                  "toolName": "bash",
+                  "toolArgs": {
+                    "command": "tail -100 /srv/demo/build.log"
+                  },
+                  "formattedToolCall": "[bash: tail -100 /srv/demo/build.log]",
+                  "preview": "[bash: tail -100 /srv/demo/build.log]"
+                }
+              ],
+              "type": "tool_result",
+              "toolName": "read",
+              "toolArgs": {
+                "path": "/srv/demo/src/app.py",
+                "offset": 10,
+                "limit": 20
+              },
+              "formattedToolCall": "[read: /srv/demo/src/app.py:10-29]",
+              "preview": "[read: /srv/demo/src/app.py:10-29]"
+            }
+          ],
+          "type": "message",
+          "role": "assistant",
+          "preview": "Checking the build config and recent changes.",
+          "stopReason": "tool_calls"
+        }
+      ],
+      "type": "message",
+      "role": "user",
+      "preview": "Why is my build failing? It worked yesterday."
+    }
+  ],
+  "leafId": "aa000018"
+}
