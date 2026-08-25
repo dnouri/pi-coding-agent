@@ -27,10 +27,12 @@
 
 ;; Pure functions over pi session JSONL files: reading entries, building
 ;; the raw nested session tree, projecting that tree to the flat display
-;; dialect the tree browser consumes, and formatting tool-call previews.
-;; Ports pi's session-manager getTree (plus label folding), the RPC tree
-;; projection, and core format-tool-call.  Depends only on core; nothing
-;; here touches buffers, processes, or state.
+;; dialect the tree browser consumes, formatting tool-call previews, and
+;; discovering session files on disk (sessions root, munged per-cwd
+;; directories, cheap metadata scans).  Ports pi's session-manager
+;; getTree (plus label folding), the RPC tree projection, core
+;; format-tool-call, and config/session-dir path munging.  Depends only
+;; on core; nothing here touches buffers, processes, or state.
 ;;
 ;; Normalization conventions (JSON in, plists out):
 ;;
@@ -81,6 +83,10 @@
 ;;   truncates by characters, so previews of astral-plane text can
 ;;   differ in length.  Accepted; session text is not surrogate-paired
 ;;   in practice.
+;; - `pi-coding-agent-jsonl-read-session-info' reports :modified from
+;;   the file mtime instead of the newest message timestamp (one stat
+;;   versus a per-line compare).  Append-only files agree, and the
+;;   Phase 4 navigation rewrites arguably make mtime more correct.
 ;;
 ;; All tree traversals are iterative (explicit stacks, reversed
 ;; pre-order bottom-up builds); real session trees reach thousands of
@@ -154,6 +160,167 @@ Malformed and blank lines are skipped silently."
                   :leafId (when (> count 0)
                             (plist-get (aref vector (1- count)) :id))
                   :name name)))))))
+
+;;;; Session Discovery
+
+(defconst pi-coding-agent--jsonl-line-type-re
+  "[ \t]*{[ \t]*\"type\"[ \t]*:[ \t]*\"%s\""
+  "Format string matching a JSONL line whose top-level type appears first.
+Pi writes session JSONL with `type' as the first key, so matching that
+cheap prefix routes lines without parsing their full payloads.  Local
+sibling of menu.el's regexp; kept separate so this module depends only
+on core (the duplication is consolidated in Phase 5).")
+
+(defun pi-coding-agent--jsonl-line-type-p (type)
+  "Return non-nil when the current line has top-level session TYPE."
+  (looking-at-p (format pi-coding-agent--jsonl-line-type-re
+                        (regexp-quote type))))
+
+(defun pi-coding-agent--jsonl-parse-current-line ()
+  "Return the current line parsed as a plist, or nil when malformed."
+  (pi-coding-agent--parse-json-line
+   (buffer-substring-no-properties (point) (line-end-position))))
+
+(defun pi-coding-agent-jsonl-sessions-root (&optional anchor)
+  "Return pi's sessions root directory as a directory name (trailing slash).
+The default is PI_CODING_AGENT_DIR, else ~/.pi/agent, plus
+\"sessions\" (a port of pi's getAgentDir), expanded.
+ANCHOR, when remote (see `file-remote-p'), roots the scan on that
+remote instead: the parent of ANCHOR's own directory — pass a session
+FILE, or a directory with a trailing slash.  A local ANCHOR is ignored:
+the expanded default always applies."
+  (if (and anchor (file-remote-p anchor))
+      (file-name-directory
+       (directory-file-name (file-name-directory anchor)))
+    (concat (expand-file-name (or (getenv "PI_CODING_AGENT_DIR")
+                                  "~/.pi/agent"))
+            "/sessions/")))
+
+(defun pi-coding-agent-jsonl-session-dir-for-cwd (cwd &optional root)
+  "Return the munged session directory name for CWD under ROOT.
+A pure string port of pi's getDefaultSessionDirPath: clean CWD's name
+\(trailing slashes collapse), strip ONE leading / or backslash, then
+replace every /, backslash, and : with a dash, wrapped as --…--.
+ROOT defaults to `pi-coding-agent-jsonl-sessions-root'.  The result
+carries no trailing slash; Windows drives munge like \"C:\\x\" to
+--C--x--, exactly like pi's character class."
+  (let* ((base (directory-file-name
+                (or root (pi-coding-agent-jsonl-sessions-root))))
+         (clean (if (string-empty-p cwd) "" (directory-file-name cwd)))
+         (stripped
+          (if (and (not (string-empty-p clean))
+                   (memq (aref clean 0) '(?/ ?\\)))
+              (substring clean 1)
+            clean))
+         (munged (replace-regexp-in-string "[/\\:]" "-" stripped)))
+    (concat (file-name-as-directory base) "--" munged "--")))
+
+(defun pi-coding-agent--jsonl-scan-session-info (path mtime)
+  "Scan the current buffer for session metadata.
+PATH and MTIME feed the :path and :modified keys; see
+`pi-coding-agent-jsonl-read-session-info' for the full contract.
+Return the session plist, or nil when no header line was found."
+  (goto-char (point-min))
+  (let ((header nil)
+        (name nil)
+        (message-count 0)
+        (first-message nil)
+        (fallback-message nil)
+        (parsed-messages 0))
+    (catch 'invalid
+      (while (not (eobp))
+        (cond
+         ((and (null header)
+               (pi-coding-agent--jsonl-line-type-p "session"))
+          (setq header (pi-coding-agent--jsonl-parse-current-line)))
+         ((null header)
+          ;; Leading blank lines are tolerable noise; any other
+          ;; non-session line before the header means this is not a
+          ;; session file.
+          (unless (looking-at-p "[ \t]*\\'")
+            (throw 'invalid nil)))
+         ((pi-coding-agent--jsonl-line-type-p "message")
+          (setq message-count (1+ message-count))
+          (when (and (null first-message) (< parsed-messages 5))
+            (setq parsed-messages (1+ parsed-messages))
+            (let ((data (pi-coding-agent--jsonl-parse-current-line)))
+              (when (consp data)
+                (let* ((message (plist-get data :message))
+                       (text (pi-coding-agent--jsonl-extract-text
+                              (plist-get message :content))))
+                  (cond
+                   ((and (equal (plist-get message :role) "user")
+                         (not (string-empty-p text)))
+                    (setq first-message text))
+                   ((null fallback-message)
+                    (setq fallback-message text))))))))
+         ((pi-coding-agent--jsonl-line-type-p "session_info")
+          (let* ((data (pi-coding-agent--jsonl-parse-current-line))
+                 (raw (when (consp data)
+                        (pi-coding-agent--normalize-string-or-null
+                         (plist-get data :name)))))
+            ;; Latest-wins replay; absent or blank names clear the key.
+            (setq name
+                  (when raw
+                    (let ((trimmed (string-trim raw)))
+                      (unless (string-empty-p trimmed) trimmed))))))
+         ;; Later headers, blanks, label/custom/unknown lines: skip
+         ;; without parsing.
+         (t nil))
+        (forward-line 1)))
+    (when header
+      (let ((id (pi-coding-agent--normalize-string-or-null
+                 (plist-get header :id)))
+            (cwd (pi-coding-agent--normalize-string-or-null
+                  (plist-get header :cwd)))
+            (parent (pi-coding-agent--normalize-string-or-null
+                     (plist-get header :parentSession)))
+            (created (pi-coding-agent--normalize-string-or-null
+                      (plist-get header :timestamp)))
+            (first (or first-message
+                       (and (not (string-empty-p
+                                  (or fallback-message "")))
+                            fallback-message))))
+        (append (list :path path)
+                (when id (list :id id))
+                (when cwd (list :cwd cwd))
+                (when name (list :name name))
+                (when parent (list :parentSessionPath parent))
+                (when created (list :created created))
+                (list :modified
+                      (format-time-string "%Y-%m-%dT%H:%M:%SZ" mtime t)
+                      :messageCount message-count)
+                (when first (list :firstMessage first)))))))
+
+(defun pi-coding-agent-jsonl-read-session-info (path)
+  "Read session metadata for the file at PATH, without building trees.
+Return a plist in the browse session dialect — (:path :id :cwd :name?
+:parentSessionPath? :created? :modified :messageCount :firstMessage?)
+— or nil when PATH is unreadable, empty, lacks a leading \"session\"
+header line, carries a non-session line before the header, or cannot
+be read at all.  Key parity with the session browser is the contract.
+
+The scan is regex-first, mirroring menu.el's
+`pi-coding-agent--session-metadata' (duplication is deliberate until
+Phase 5): lines route by their top-level type prefix and only
+headers, session_info lines, and the first few message lines are
+full-parsed.  :messageCount counts message lines by regex alone
+\(toolResult included).  :firstMessage full-parses at most 5 message
+lines while unset: a user message with extractable text wins,
+otherwise the first parsed message of any role is the fallback.
+:name replays session_info lines in file order with latest-wins
+trimming.  label and custom entries are ignored.  :created is the
+header timestamp; :modified is the file mtime as a second-resolution
+UTC ISO string (see the deviation note in the Commentary)."
+  (condition-case nil
+      (when (file-readable-p path)
+        (with-temp-buffer
+          (insert-file-contents path)
+          (pi-coding-agent--jsonl-scan-session-info
+           path
+           (file-attribute-modification-time
+            (file-attributes path)))))
+    (error nil)))
 
 ;;;; Building Raw Trees
 

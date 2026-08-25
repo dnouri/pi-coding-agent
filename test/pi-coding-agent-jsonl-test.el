@@ -937,5 +937,220 @@ hit this; the expansion guard keeps building total."
                                 stack))))
         (should (= count 2502))))))
 
+;;;; Session Discovery (Phase 2)
+
+(ert-deftest pi-coding-agent-test-jsonl-session-dir-for-cwd ()
+  "session-dir-for-cwd munges a cwd into pi's --…-- directory name.
+Mirrors pi's getDefaultSessionDirPath: clean the directory name, strip
+ONE leading / or \\, then replace every /, \\, and : with a dash, and
+wrap the result in --…-- under ROOT (default: sessions-root)."
+  ;; Unix path under an explicit root.
+  (should (equal (expand-file-name
+                  (pi-coding-agent-jsonl-session-dir-for-cwd
+                   "/home/daniel/co/pi" "/r/sessions"))
+                 "/r/sessions/--home-daniel-co-pi--"))
+  ;; Root defaults to sessions-root (PI_CODING_AGENT_DIR honored).
+  (let ((process-environment '("PI_CODING_AGENT_DIR=/tmp/fake-root")))
+    (should (equal (expand-file-name
+                    (pi-coding-agent-jsonl-session-dir-for-cwd "/a/b"))
+                   "/tmp/fake-root/sessions/--a-b--")))
+  ;; Windows drive letters: each :, /, and \ becomes a dash, exactly
+  ;; like pi's [/\\:] replaceAll (see the deviation note in the plan:
+  ;; pi itself produces --C--x--, not --C-x--).
+  (should (equal (expand-file-name
+                  (pi-coding-agent-jsonl-session-dir-for-cwd
+                   "C:\\x" "/r/sessions"))
+                 "/r/sessions/--C--x--"))
+  ;; A trailing slash is cleaned first.
+  (should (equal (expand-file-name
+                  (pi-coding-agent-jsonl-session-dir-for-cwd
+                   "/home/x/y/" "/r/sessions"))
+                 "/r/sessions/--home-x-y--"))
+  ;; A slash-only cwd munges to the empty string between the dashes.
+  (should (equal (expand-file-name
+                  (pi-coding-agent-jsonl-session-dir-for-cwd
+                   "/" "/r/sessions"))
+                 "/r/sessions/----"))
+  ;; Colons munge like slashes (real pi replaces all three characters).
+  (should (equal (expand-file-name
+                  (pi-coding-agent-jsonl-session-dir-for-cwd
+                   "/a:b/c" "/r/sessions"))
+                 "/r/sessions/--a-b-c--")))
+
+(ert-deftest pi-coding-agent-test-jsonl-sessions-root ()
+  "sessions-root expands the agent dir, always with a trailing slash.
+The default is ~/.pi/agent/sessions (mirroring pi's getAgentDir);
+PI_CODING_AGENT_DIR overrides it.  Remote anchors move the root onto
+the remote (the parent of the anchor file's directory); local anchors
+are ignored."
+  ;; Default: expanded ~/.pi/agent/sessions with a trailing slash.
+  (let ((process-environment '("HOME=/tmp/fake-home")))
+    (should (equal (pi-coding-agent-jsonl-sessions-root)
+                   "/tmp/fake-home/.pi/agent/sessions/")))
+  ;; PI_CODING_AGENT_DIR replaces the default agent dir.
+  (let ((process-environment '("HOME=/tmp/fake-home"
+                               "PI_CODING_AGENT_DIR=/tmp/agent-dir")))
+    (should (equal (pi-coding-agent-jsonl-sessions-root)
+                   "/tmp/agent-dir/sessions/")))
+  ;; A remote session-file anchor roots the scan on that remote: the
+  ;; parent of the anchor's own directory.
+  (should (equal (pi-coding-agent-jsonl-sessions-root
+                  "/ssh:fake:/home/u/.pi/agent/sessions/--home-u-proj--/s.jsonl")
+                 "/ssh:fake:/home/u/.pi/agent/sessions/"))
+  ;; A local anchor is ignored; the expanded default still applies.
+  (let ((process-environment '("HOME=/tmp/fake-home")))
+    (should (equal (pi-coding-agent-jsonl-sessions-root "/local/anchor.jsonl")
+                   "/tmp/fake-home/.pi/agent/sessions/"))))
+
+(ert-deftest pi-coding-agent-test-jsonl-read-session-info-fields ()
+  "read-session-info returns the exact browse session dialect plist.
+Key parity with the session browser is the contract: :path :id :cwd
+:name (latest session_info wins, trimmed) :parentSessionPath :created
+(header timestamp) :modified (mtime as UTC ISO-8601) :messageCount
+(regex count, toolResult included) :firstMessage (first user text,
+unbounded).  label and custom entries are ignored."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-jsonl-info"))
+         (path (expand-file-name "session.jsonl" dir))
+         (mtime (encode-time 45 31 14 2 3 2026)))
+    (pi-coding-agent-test--write-jsonl
+     path
+     (list `(:type "session" :version 3 :id "aaaabbbb-cccc-4ddd-8eee-000000000001"
+             :timestamp "2026-03-02T10:00:00.000Z" :cwd "/tmp/proj"
+             :parentSession "/elsewhere/root.jsonl")
+           (pi-coding-agent-test--jsonl-msg
+            "m1" nil 0 '(:role "user"
+                          :content [(:type "text" :text "hello")
+                                    (:type "text" :text "world")]))
+           (pi-coding-agent-test--jsonl-msg
+            "m2" "m1" 1 '(:role "assistant" :content "interim answer"))
+           (pi-coding-agent-test--jsonl-msg
+            "m3" "m2" 2 '(:role "toolResult" :toolCallId "tc1"
+                           :toolName "read"))
+           (pi-coding-agent-test--jsonl-entry
+            "label" "l1" "m3" 3 :targetId "m1" :label "ignored")
+           (pi-coding-agent-test--jsonl-entry
+            "custom" "c1" "l1" 4 :customType "decoy")
+           (pi-coding-agent-test--jsonl-entry
+            "session_info" "s1" "c1" 5 :name "First")
+           (pi-coding-agent-test--jsonl-entry
+            "session_info" "s2" "s1" 6 :name "  Second  ")))
+    (set-file-times path mtime)
+    (should (equal (pi-coding-agent-jsonl-read-session-info path)
+                   (list :path path
+                         :id "aaaabbbb-cccc-4ddd-8eee-000000000001"
+                         :cwd "/tmp/proj"
+                         :name "Second"
+                         :parentSessionPath "/elsewhere/root.jsonl"
+                         :created "2026-03-02T10:00:00.000Z"
+                         :modified (format-time-string
+                                    "%Y-%m-%dT%H:%M:%SZ" mtime t)
+                         :messageCount 3
+                         :firstMessage "hello world")))))
+
+(ert-deftest pi-coding-agent-test-jsonl-read-session-info-fallbacks ()
+  "read-session-info degrades on budget misses and malformed files.
+The firstMessage budget full-parses at most 5 message lines: a user
+message inside the budget wins, otherwise the first parsed message of
+any role is the fallback.  Files without a leading session header,
+garbage before the header, empty files, and unreadable files all read
+as nil.  No session_info means no :name key at all."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-jsonl-fb"))
+         (late-user (expand-file-name "late-user.jsonl" dir))
+         (budget (expand-file-name "budget.jsonl" dir))
+         (no-header (expand-file-name "no-header.jsonl" dir))
+         (garbage (expand-file-name "garbage.jsonl" dir))
+         (empty (expand-file-name "empty.jsonl" dir))
+         (unnamed (expand-file-name "unnamed.jsonl" dir)))
+    ;; A user message within the 5-line budget beats earlier non-user
+    ;; messages.
+    (pi-coding-agent-test--write-jsonl
+     late-user
+     (list pi-coding-agent-test--jsonl-header
+           (pi-coding-agent-test--jsonl-asst
+            "a1" nil 0 :content "assistant speaks first")
+           (pi-coding-agent-test--jsonl-msg
+            "u1" "a1" 1 '(:role "user" :content "pick me"))))
+    (should (equal (plist-get (pi-coding-agent-jsonl-read-session-info
+                               late-user)
+                              :firstMessage)
+                   "pick me"))
+    ;; Six non-user messages exhaust the budget; the any-role fallback
+    ;; supplies the first message, while messageCount still counts all
+    ;; message lines by regex.
+    (let ((lines (list pi-coding-agent-test--jsonl-header)))
+      (dotimes (i 6)
+        (push (pi-coding-agent-test--jsonl-asst
+               (format "b%d" (1+ i)) (if (zerop i) nil (format "b%d" i))
+               i :content (format "m%d" (1+ i)))
+              lines))
+      (push (pi-coding-agent-test--jsonl-msg
+             "u9" "b6" 10 '(:role "user" :content "too late"))
+            lines)
+      (pi-coding-agent-test--write-jsonl budget (nreverse lines)))
+    (let ((info (pi-coding-agent-jsonl-read-session-info budget)))
+      (should (equal (plist-get info :firstMessage) "m1"))
+      (should (= (plist-get info :messageCount) 7)))
+    ;; No session header line: nil regardless of the entries.
+    (pi-coding-agent-test--write-jsonl
+     no-header
+     (list (pi-coding-agent-test--jsonl-msg
+            "x1" nil 0 '(:role "user" :content "orphaned"))))
+    (should-not (pi-coding-agent-jsonl-read-session-info no-header))
+    ;; Any non-session line before the header bails out early.
+    (with-temp-file garbage
+      (insert "{not json at all\n"
+              (json-encode pi-coding-agent-test--jsonl-header) "\n"))
+    (should-not (pi-coding-agent-jsonl-read-session-info garbage))
+    ;; Empty file: nil.
+    (with-temp-file empty)
+    (should-not (pi-coding-agent-jsonl-read-session-info empty))
+    ;; Unreadable file: nil (the scan skips it silently).  Running as
+    ;; root can always read it, so skip the probe there.
+    (unless (zerop (user-uid))
+      (let ((unreadable (expand-file-name "unreadable.jsonl" dir)))
+        (pi-coding-agent-test--write-jsonl
+         unreadable (list pi-coding-agent-test--jsonl-header))
+        (set-file-modes unreadable #o000)
+        (unwind-protect
+            (should-not (pi-coding-agent-jsonl-read-session-info unreadable))
+          (set-file-modes unreadable #o600))))
+    ;; No session_info entry: the :name key is absent entirely.
+    (pi-coding-agent-test--write-jsonl
+     unnamed
+     (list pi-coding-agent-test--jsonl-header
+           (pi-coding-agent-test--jsonl-msg
+            "u1" nil 0 '(:role "user" :content "hello"))))
+    (should-not (plist-member (pi-coding-agent-jsonl-read-session-info unnamed)
+                              :name))))
+
+(ert-deftest pi-coding-agent-test-jsonl-read-session-info-modified-iso ()
+  ":modified is a second-resolution UTC ISO string that round-trips
+through `date-to-time' and orders lexicographically like time."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-jsonl-iso"))
+         (older (expand-file-name "older.jsonl" dir))
+         (newer (expand-file-name "newer.jsonl" dir))
+         (t1 (encode-time 10 30 12 2 3 2026))
+         (t2 (time-add t1 90)))
+    (pi-coding-agent-test--write-jsonl
+     older (list pi-coding-agent-test--jsonl-header))
+    (pi-coding-agent-test--write-jsonl
+     newer (list pi-coding-agent-test--jsonl-header))
+    (set-file-times older t1)
+    (set-file-times newer t2)
+    (let* ((mod-a (plist-get (pi-coding-agent-jsonl-read-session-info older)
+                             :modified))
+           (mod-b (plist-get (pi-coding-agent-jsonl-read-session-info newer)
+                             :modified)))
+      (dolist (m (list mod-a mod-b))
+        (should (string-match-p
+                 "\\`[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}T[0-9]\\{2\\}:[0-9]\\{2\\}:[0-9]\\{2\\}Z\\'"
+                 m)))
+      ;; Round trip back to the statted second.
+      (should (time-equal-p (date-to-time mod-a) t1))
+      (should (time-equal-p (date-to-time mod-b) t2))
+      ;; Lexicographic order matches chronological order.
+      (should (string< mod-a mod-b))
+      (should (string> mod-b mod-a)))))
+
 (provide 'pi-coding-agent-jsonl-test)
 ;;; pi-coding-agent-jsonl-test.el ends here

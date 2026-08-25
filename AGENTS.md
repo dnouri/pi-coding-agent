@@ -14,8 +14,9 @@ pi-coding-agent.el              ← entry point, autoloads
   ├── pi-coding-agent-menu.el   ← transient menu, session management
   ├── pi-coding-agent-input.el  ← input buffer, history, completion
   ├── pi-coding-agent-browse.el ← session/tree browsers (magit-section UI)
-  │     ┆ pi-coding-agent-jsonl.el — deferred edge: browse wires its data
-  │     ┆ seams to jsonl in Phase 3 (browse will then require jsonl + ui)
+  │     └── pi-coding-agent-jsonl.el ← session scan (read-session-info),
+  │           sessions-root/session-dir munging, rename-append writes;
+  │           tree projection wiring lands in Phase 3
   └── pi-coding-agent-render.el ← chat rendering, tool output
         ├── pi-coding-agent-table.el  ← display-only table decoration
         └── pi-coding-agent-ui.el ← shared state, faces, modes
@@ -52,9 +53,9 @@ module, direct `setq` is fine.
 | `pi-coding-agent-table.el` | Display-only pipe table decoration, wrapping, overlay management |
 | `pi-coding-agent-input.el` | Input history, isearch, send/abort, file/path/slash completion, queuing |
 | `pi-coding-agent-menu.el` | Transient menu, session management, model selection, commands |
-| `pi-coding-agent-browse.el` | Session and tree browsers (magit-section UI); presentation layer over `pi-coding-agent--browse-*' data-seam functions (loading, switching, navigation, labels — currently stubs) |
+| `pi-coding-agent-browse.el` | Session and tree browsers (magit-section UI); presentation layer over `pi-coding-agent--browse-*' data seams — session side live (time-sliced disk scan via jsonl, guarded switch through menu's resume flow, rename via set_session_name or session_info append); tree fetch, navigation, and labels stay stubs until Phases 3-4 |
 | `pi-coding-agent-grammars.el` | Tree-sitter grammar recipes, install prompts, `M-x pi-coding-agent-install-grammars` |
-| `pi-coding-agent-jsonl.el` | JSONL session reading, raw session-tree building (pi getTree shape), RPC-style display projection, tool-call preview formatting; pure functions depending only on core (browse.el wires in during Phase 3) |
+| `pi-coding-agent-jsonl.el` | JSONL session reading, raw session-tree building (pi getTree shape), RPC-style display projection, tool-call preview formatting, session discovery (sessions-root, cwd-munged session dirs, regex-first metadata scans); pure functions depending only on core (browse.el consumes the session-discovery half; tree projection wiring lands in Phase 3) |
 | `pi-coding-agent-evil.el` | Optional Evil keybindings; auto-loaded by `pi-coding-agent--maybe-load-evil-integration` when a session is set up while Evil is present. Leaf module: requires `ui`, `input`, and `menu` directly (never the top-level feature, to avoid a recursive require during auto-load). Must byte-compile and load without Evil installed |
 
 ## Test Files
@@ -67,8 +68,8 @@ module, direct `setq` is fine.
 | `test/pi-coding-agent-table-test.el` | Table decoration, overlays, streaming, resize |
 | `test/pi-coding-agent-input-test.el` | History, send/abort, queuing, completion |
 | `test/pi-coding-agent-menu-test.el` | Session management, transient menu, reconnect |
-| `test/pi-coding-agent-browse-test.el` | Session/tree browser helpers, rendering, point restoration, stub seams |
-| `test/pi-coding-agent-jsonl-test.el` | JSONL reader, raw tree builder, projection adapter, format-tool-call; golden fixtures (browse-session.jsonl, browse-raw.json, browse-projected.json) |
+| `test/pi-coding-agent-browse-test.el` | Session/tree browser helpers, rendering, point restoration; Phase 2 disk scan, chunked loading, switch guards, rename dispatch |
+| `test/pi-coding-agent-jsonl-test.el` | JSONL reader, raw tree builder, projection adapter, format-tool-call, session discovery (sessions-root, dir munging, read-session-info); golden fixtures (browse-session.jsonl, browse-raw.json, browse-projected.json) |
 | `test/pi-coding-agent-build-test.el` | Batch helper scripts for dependency and grammar installation |
 | `test/pi-coding-agent-test.el` | Entry point / cross-module integration |
 | `test/pi-coding-agent-test-common.el` | Shared fixtures: mock-session macro, toolcall helpers, fake-pi launch helpers |

@@ -8,6 +8,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'json)
 (require 'pi-coding-agent-browse)
 (require 'pi-coding-agent-test-common)
 
@@ -1125,17 +1126,28 @@ The type label already shows `sh', so brackets are redundant."
     (should (string-match-p "scan failed" (buffer-string)))))
 
 (ert-deftest pi-coding-agent-test-session-browser-rpc-error-cleared-on-success ()
-  "A successful fetch clears a stale error state."
-  (with-temp-buffer
-    (pi-coding-agent-session-browser-mode)
-    (setq pi-coding-agent--session-browser-error "some error")
-    (cl-letf (((symbol-function 'pi-coding-agent--get-process)
-               (lambda () 'fake)))
-      ;; The Phase 0 stub seam calls back with (nil nil) = success.
-      (pi-coding-agent--session-browser-fetch-and-render))
-    (should-not pi-coding-agent--session-browser-error)
-    (should-not pi-coding-agent--session-browser-loading)
-    (should (string-match-p "No sessions found" (buffer-string)))))
+  "A successful fetch clears a stale error state.
+Phase 2: the fetch reads sessions from disk, so the process mock is
+vestigial and none is consulted.  The environment is isolated to an
+empty sessions root and timers run synchronously so the chunked scan
+completes in-call."
+  (let ((root (pi-coding-agent-test--make-temp-directory "pi-err-clear")))
+    (with-temp-buffer
+      (pi-coding-agent-session-browser-mode)
+      (setq pi-coding-agent--session-browser-error "some error")
+      (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                 (lambda () 'fake))
+                ((symbol-function 'pi-coding-agent--session-list-directory)
+                 (lambda (&optional _chat-buf) nil))
+                ((symbol-function 'run-at-time)
+                 (lambda (_secs _repeat fn &rest args) (apply fn args))))
+        (let ((process-environment
+               (cons (format "PI_CODING_AGENT_DIR=%s" (directory-file-name root))
+                     process-environment)))
+          (pi-coding-agent--session-browser-fetch-and-render)))
+      (should-not pi-coding-agent--session-browser-error)
+      (should-not pi-coding-agent--session-browser-loading)
+      (should (string-match-p "No sessions found" (buffer-string))))))
 
 ;;;; Tree Find Label
 
@@ -1349,6 +1361,267 @@ point to bob.  Phase 0 restores it by section identity (value match)."
     (pi-coding-agent--session-browser-rerender)
     (should (= (point) (point-min)))))
 
+(ert-deftest pi-coding-agent-test-browse-rerender-syncs-window-point ()
+  "Rerender restores `window-point', not just the buffer's own point.
+The final fetch render runs from a timer while ANOTHER window is
+selected: `goto-char' inside `with-current-buffer' moves the buffer's
+point only, and every window displaying the browser buffer keeps its
+own point — which `erase-buffer' already collapsed to bob.  The pane
+shows point-at-top although the restore did work on the buffer's own
+point (the intermittent instrumentation-vs-pane disagreement from
+E2E).  The rerender must also `set-window-point' on live windows
+displaying the buffer (same idiom as
+`pi-coding-agent--with-scroll-preservation' in ui.el)."
+  (let* ((browser (get-buffer-create " *pi-test-browser-winpoint*"))
+         (scratch (get-buffer-create " *pi-test-scratch-winpoint*"))
+         (w (selected-window))
+         (other (split-window))
+         (orig-buffer (window-buffer w)))
+    (unwind-protect
+        (progn
+          (set-window-buffer w browser)
+          (set-window-buffer other scratch)
+          (with-current-buffer browser
+            (pi-coding-agent-session-browser-mode)
+            (setq pi-coding-agent--session-browser-items
+                  (list '(:path "/test/a.jsonl" :name "Session A"
+                          :messageCount 42 :modified "2026-02-24T10:00:00Z")
+                        '(:path "/test/b.jsonl" :name "Session B"
+                          :messageCount 20 :modified "2026-02-23T10:00:00Z")
+                        '(:path "/test/c.jsonl" :name "Session C"
+                          :messageCount 10 :modified "2026-02-22T10:00:00Z")))
+            (setq pi-coding-agent--session-browser-sort "relevance")
+            (pi-coding-agent--session-browser-rerender))
+          ;; Put W's point on the middle row (relevance order is A, B, C),
+          ;; a few columns past bol, while W is selected so the buffer's
+          ;; own point follows.
+          (select-window w)
+          (with-current-buffer browser
+            (goto-char (point-min))
+            (search-forward "Session B")
+            (beginning-of-line)
+            (forward-char 2))
+          ;; Sanity: W's point sits on session B's section.
+          (should (equal (oref (with-current-buffer browser
+                                 (magit-section-at (window-point w)))
+                               value)
+                         "/test/b.jsonl"))
+          ;; Timer-like context: the rerender runs with ANOTHER window
+          ;; selected (the mechanism is window selection, not the timer).
+          (select-window other)
+          (should-not (eq (selected-window) w))
+          (with-current-buffer browser
+            (pi-coding-agent--session-browser-rerender))
+          ;; W's window-point must sit on the same section again (the
+          ;; section is looked up by buffer position, in the browser
+          ;; buffer — `magit-section-at' reads text properties in the
+          ;; current buffer).
+          (let ((pos (window-point w)))
+            (should (equal (oref (with-current-buffer browser
+                                   (magit-section-at pos))
+                                 value)
+                           "/test/b.jsonl"))
+            (should (= (with-current-buffer browser
+                         (save-excursion (goto-char pos) (current-column)))
+                       2))))
+      (delete-other-windows)
+      (set-window-buffer (selected-window) orig-buffer)
+      (kill-buffer browser)
+      (kill-buffer scratch))))
+
+(ert-deftest pi-coding-agent-test-session-browser-fetch-preserves-point ()
+  "The full fetch cycle (`g' refresh) keeps point on the same row.
+`--session-browser-fetch-and-render' renders an intermediate loading
+state with no session sections before the final items render; point
+must survive the whole cycle, not just a plain rerender (E2E defect
+A4: `g' dropped point to bob because the loading render's rerender
+lost the captured section ident)."
+  (with-temp-buffer
+    (pi-coding-agent-session-browser-mode)
+    (let ((items (list '(:path "/test/a.jsonl" :name "Session A"
+                         :messageCount 42 :modified "2026-02-24T10:00:00Z")
+                       '(:path "/test/b.jsonl" :name "Session B"
+                         :messageCount 20 :modified "2026-02-23T10:00:00Z")
+                       '(:path "/test/c.jsonl" :name "Session C"
+                         :messageCount 10 :modified "2026-02-22T10:00:00Z"))))
+      (setq pi-coding-agent--session-browser-items items
+            pi-coding-agent--session-browser-sort "relevance")
+      (pi-coding-agent--session-browser-rerender)
+      ;; Point on the middle row (relevance order is A, B, C), a few
+      ;; columns past bol
+      (goto-char (point-min))
+      (search-forward "Session B")
+      (beginning-of-line)
+      (forward-char 2)
+      (let ((column (current-column)))
+        (should (equal (oref (magit-current-section) value) "/test/b.jsonl"))
+        ;; Refresh: the scan returns the SAME items, synchronously
+        (cl-letf (((symbol-function 'pi-coding-agent--browse-load-sessions)
+                   (lambda (_scope callback)
+                     (funcall callback items nil)))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_secs _repeat fn &rest args)
+                     (apply fn args))))
+          (pi-coding-agent--session-browser-fetch-and-render))
+        (should-not pi-coding-agent--session-browser-loading)
+        ;; Same section under point, same column, after the final render
+        (should (equal (oref (magit-current-section) value) "/test/b.jsonl"))
+        (should (= (current-column) column))))))
+
+(ert-deftest pi-coding-agent-test-session-browser-fetch-point-min-when-gone ()
+  "The fetch cycle falls back to point-min when the row at point is gone.
+A refresh whose new item set no longer contains the pointed-at session
+must leave point at bob, not on a stale neighbor — the same fallback a
+plain rerender already guarantees."
+  (with-temp-buffer
+    (pi-coding-agent-session-browser-mode)
+    (setq pi-coding-agent--session-browser-items
+          (list '(:path "/test/a.jsonl" :name "Session A"
+                  :messageCount 42 :modified "2026-02-24T10:00:00Z")
+                '(:path "/test/b.jsonl" :name "Session B"
+                  :messageCount 20 :modified "2026-02-23T10:00:00Z")
+                '(:path "/test/c.jsonl" :name "Session C"
+                  :messageCount 10 :modified "2026-02-22T10:00:00Z")))
+    (setq pi-coding-agent--session-browser-sort "relevance")
+    (pi-coding-agent--session-browser-rerender)
+    ;; Point on the middle row
+    (goto-char (point-min))
+    (search-forward "Session B")
+    (should (equal (oref (magit-current-section) value) "/test/b.jsonl"))
+    ;; Refresh returns a set without session B (the named-only effect,
+    ;; via a different item set)
+    (cl-letf (((symbol-function 'pi-coding-agent--browse-load-sessions)
+               (lambda (_scope callback)
+                 (funcall callback
+                          (list '(:path "/test/a.jsonl" :name "Session A"
+                                  :messageCount 42 :modified "2026-02-24T10:00:00Z")
+                                '(:path "/test/c.jsonl" :name "Session C"
+                                  :messageCount 10 :modified "2026-02-22T10:00:00Z"))
+                          nil)))
+              ((symbol-function 'run-at-time)
+               (lambda (_secs _repeat fn &rest args)
+                 (apply fn args))))
+      (pi-coding-agent--session-browser-fetch-and-render))
+    (should (= (point) (point-min)))))
+
+(ert-deftest pi-coding-agent-test-session-browser-refresh-during-load-preserves-point ()
+  "Pressing `g' while a load is in flight keeps point on its row.
+A refresh issued during another refresh used to lose point twice
+over: the first fetch's loading render already destroyed the session
+sections (point sits on the bare loading line under the root
+section, so the second fetch captures no anchor), and the
+fetch token drops the older scan before its callback ever renders.
+The surviving fetch's final render then has neither a fresh anchor
+nor a fallback, and point lands at bob.  Point must survive a refresh
+issued during another refresh."
+  (with-temp-buffer
+    (pi-coding-agent-session-browser-mode)
+    (let ((items (list '(:path "/test/a.jsonl" :name "Session A"
+                         :messageCount 42 :modified "2026-02-24T10:00:00Z")
+                       '(:path "/test/b.jsonl" :name "Session B"
+                         :messageCount 20 :modified "2026-02-23T10:00:00Z")
+                       '(:path "/test/c.jsonl" :name "Session C"
+                         :messageCount 10 :modified "2026-02-22T10:00:00Z")))
+          (in-flight-callback nil))
+      (setq pi-coding-agent--session-browser-items items
+            pi-coding-agent--session-browser-sort "relevance")
+      (pi-coding-agent--session-browser-rerender)
+      ;; Point on the middle row (relevance order is A, B, C), a few
+      ;; columns past bol
+      (goto-char (point-min))
+      (search-forward "Session B")
+      (beginning-of-line)
+      (forward-char 2)
+      (let ((column (current-column)))
+        (should (equal (oref (magit-current-section) value) "/test/b.jsonl"))
+        (cl-letf (((symbol-function 'pi-coding-agent--browse-load-sessions)
+                   ;; Fetch A: return control with the scan mid-flight —
+                   ;; capture the callback, funcall nothing yet.
+                   (lambda (_scope callback)
+                     (setq in-flight-callback callback)))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_secs _repeat fn &rest args)
+                     (apply fn args))))
+          (pi-coding-agent--session-browser-fetch-and-render)
+          ;; The first fetch is still loading; its loading render left
+          ;; no session sections to anchor to.
+          (should pi-coding-agent--session-browser-loading)
+          (should (string-match-p "Loading" (buffer-string)))
+          (should in-flight-callback)
+          ;; While loading, press `g' again: fetch B reports the same
+          ;; items synchronously (and, as with the real fetch token,
+          ;; fetch A's callback never runs — it is dropped, not queued).
+          (cl-letf (((symbol-function 'pi-coding-agent--browse-load-sessions)
+                     (lambda (_scope callback)
+                       (funcall callback items nil))))
+            (pi-coding-agent--session-browser-fetch-and-render))
+          (should-not pi-coding-agent--session-browser-loading))
+        ;; The final render lands on the same middle row.
+        (should (equal (oref (magit-current-section) value) "/test/b.jsonl"))
+        (should (= (current-column) column))))))
+
+(ert-deftest pi-coding-agent-test-session-browser-fetch-renders-in-browser-buffer ()
+  "The fetch callback renders in the browser buffer, not the caller's.
+The real async scan reports back from a timer in whatever buffer
+happens to be current; the final rerender must land in the browser
+buffer (latent defect: it used to run outside `with-current-buffer',
+leaving the browser stuck on its loading state)."
+  (let ((items (list '(:path "/test/a.jsonl" :name "Session A"
+                       :messageCount 42 :modified "2026-02-24T10:00:00Z")))
+        (other (get-buffer-create " *pi-test-fetch-other*")))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-session-browser-mode)
+          (cl-letf (((symbol-function 'pi-coding-agent--browse-load-sessions)
+                     (lambda (_scope callback)
+                       ;; Callback fires with some OTHER buffer current.
+                       (with-current-buffer other
+                         (funcall callback items nil))))
+                    ((symbol-function 'run-at-time)
+                     (lambda (_secs _repeat fn &rest args)
+                       (apply fn args))))
+            (pi-coding-agent--session-browser-fetch-and-render))
+          ;; The browser buffer got the rows and cleared loading...
+          (should-not pi-coding-agent--session-browser-loading)
+          (should (string-match-p "Session A" (buffer-string)))
+          ;; ...and the other buffer got no render.
+          (should-not (string-match-p "Session A"
+                                      (with-current-buffer other
+                                        (buffer-string)))))
+      (kill-buffer other))))
+
+(ert-deftest pi-coding-agent-test-tree-browser-fetch-renders-in-browser-buffer ()
+  "The tree fetch callback renders in the browser buffer, not the caller's.
+Same latent defect as the session browser: the async load reports from
+a timer in whatever buffer is current."
+  (let* ((tree-data (pi-coding-agent--parse-tree
+                     (pi-coding-agent-test--read-json-fixture "browse-tree.json")))
+         (other (get-buffer-create " *pi-test-tree-other*")))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-tree-browser-mode)
+          (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                     (lambda () 'fake))
+                    ((symbol-function 'pi-coding-agent--browse-load-tree)
+                     (lambda (callback)
+                       ;; Callback fires with some OTHER buffer current.
+                       (with-current-buffer other
+                         (funcall callback
+                                  (plist-get tree-data :tree)
+                                  (plist-get tree-data :leafId)))))
+                    ((symbol-function 'run-at-time)
+                     (lambda (_secs _repeat fn &rest args)
+                       (apply fn args))))
+            (pi-coding-agent--tree-browser-fetch-and-render))
+          ;; The browser buffer got the tree and cleared loading...
+          (should-not pi-coding-agent--tree-browser-loading)
+          (should (string-match-p "Actually" (buffer-string)))
+          ;; ...and the other buffer got no render.
+          (should-not (string-match-p "Actually"
+                                      (with-current-buffer other
+                                        (buffer-string)))))
+      (kill-buffer other))))
+
 (ert-deftest pi-coding-agent-test-tree-browser-rerender-restores-point ()
   "Tree rerender keeps point on the same node across filter changes."
   (with-temp-buffer
@@ -1371,21 +1644,30 @@ point to bob.  Phase 0 restores it by section identity (value match)."
 
 (ert-deftest pi-coding-agent-test-browse-stub-loaders-render-empty-states ()
   "Phase 0 stub seam callbacks render empty states without errors.
-`--browse-load-sessions' and `--browse-load-tree' are stubs that call
-back with (nil nil); the fetch orchestration must land on the empty
-state, not an error or endless loading."
+The session browser needs no live process (the Phase 2 disk-scan
+relaxation); the tree browser keeps its process guard until Phase 3."
   (let ((session-buf (generate-new-buffer " *test-sessions*"))
-        (tree-buf (generate-new-buffer " *test-tree*")))
+        (tree-buf (generate-new-buffer " *test-tree*"))
+        (root (pi-coding-agent-test--make-temp-directory "pi-stub-root")))
     (unwind-protect
         (progn
           (with-current-buffer session-buf
             (pi-coding-agent-session-browser-mode)
-            (cl-letf (((symbol-function 'pi-coding-agent--get-process)
-                       (lambda () 'fake)))
-              (pi-coding-agent--session-browser-fetch-and-render)
-              (should-not pi-coding-agent--session-browser-loading)
-              (should-not pi-coding-agent--session-browser-error)
-              (should (string-match-p "No sessions found" (buffer-string)))))
+            ;; No --get-process mock: reading from disk needs no process.
+            (let ((default-directory root)
+                  (process-environment
+                   (cons (format "PI_CODING_AGENT_DIR=%s"
+                                (directory-file-name root))
+                         process-environment)))
+              (cl-letf (((symbol-function 'pi-coding-agent--session-list-directory)
+                         (lambda (&optional _chat-buf) nil))
+                        ((symbol-function 'run-at-time)
+                         (lambda (_secs _repeat fn &rest args)
+                           (apply fn args))))
+                (pi-coding-agent--session-browser-fetch-and-render)))
+            (should-not pi-coding-agent--session-browser-loading)
+            (should-not pi-coding-agent--session-browser-error)
+            (should (string-match-p "No sessions found" (buffer-string))))
           (with-current-buffer tree-buf
             (pi-coding-agent-tree-browser-mode)
             (cl-letf (((symbol-function 'pi-coding-agent--get-process)
@@ -1398,17 +1680,681 @@ state, not an error or endless loading."
 
 (ert-deftest pi-coding-agent-test-browse-stub-actions-signal-user-error ()
   "Action seams signal `user-error' instead of pretending to succeed.
-Binder for switch/navigate/label stays interactive-command compatible:
-the error propagates before any window is dismissed."
-  (should-error
-      (pi-coding-agent--browse-switch-session "/test/a.jsonl")
-    :type 'user-error)
+The switch seam's Phase 2 contract is the no-session error when no
+chat buffer is linked; navigate and label stay user-error stubs until
+Phases 3-4."
+  (with-temp-buffer
+    (pi-coding-agent-session-browser-mode)
+    (should (equal (error-message-string
+                    (should-error
+                     (pi-coding-agent--browse-switch-session "/test/a.jsonl")
+                     :type 'user-error))
+                   "No pi session to switch to")))
   (should-error
       (pi-coding-agent--browse-navigate "node-1")
     :type 'user-error)
   (should-error
       (pi-coding-agent--browse-set-label "node-1" "label")
     :type 'user-error))
+
+;;;; Phase 2: Raw Session File Helpers
+
+(defconst pi-coding-agent-test--browse-timestamp "2026-03-02T10:00:00.000Z"
+  "Fixed entry timestamp for browse test session lines.")
+
+(defconst pi-coding-agent-test--iso-second-re
+  "\\`[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}T[0-9]\\{2\\}:[0-9]\\{2\\}:[0-9]\\{2\\}Z\\'"
+  "Regexp for a second-resolution UTC ISO-8601 timestamp.")
+
+(defun pi-coding-agent-test--jsonl-line (type id parent &rest payload)
+  "Return a raw JSONL line for an entry of TYPE, ID, and PARENT id.
+PARENT is an id string or nil (JSON null).  PAYLOAD is the plist tail
+(:message, :targetId, :name, ...)."
+  (json-encode (append (list :type type :id id :parentId parent
+                             :timestamp pi-coding-agent-test--browse-timestamp)
+                       payload)))
+
+(defun pi-coding-agent-test--user-line (id parent text)
+  "Return a raw user message JSONL line with content TEXT."
+  (pi-coding-agent-test--jsonl-line
+   "message" id parent :message `(:role "user" :content ,text)))
+
+(defun pi-coding-agent-test--write-session-lines (path lines &optional omit-final-newline)
+  "Write raw string LINES to PATH, separated by single newlines.
+OMIT-FINAL-NEWLINE skips the trailing newline, producing the shape of a
+crashed or hand-edited session file (rename must re-add the separator)."
+  (with-temp-file path
+    (when lines
+      (insert (mapconcat #'identity lines "\n"))
+      (unless omit-final-newline (insert "\n")))))
+
+(defun pi-coding-agent-test--file-contents (path)
+  "Return the raw contents of PATH."
+  (with-temp-buffer
+    (insert-file-contents path)
+    (buffer-string)))
+
+(defun pi-coding-agent-test--make-session-header (id &rest extra)
+  "Return a raw session header line with id ID and EXTRA plist tail."
+  (json-encode (append (list :type "session" :version 3 :id id
+                             :timestamp pi-coding-agent-test--browse-timestamp
+                             :cwd "/home/fake/a")
+                       extra)))
+
+(defmacro pi-coding-agent-test--with-browse-link (chat-buf &rest body)
+  "Run BODY in a session-browser buffer linked to CHAT-BUF."
+  (declare (indent 1) (debug (sexp body)))
+  `(with-temp-buffer
+     (pi-coding-agent-session-browser-mode)
+     (setq pi-coding-agent--chat-buffer ,chat-buf)
+     ,@body))
+
+;;;; Phase 2: Disk Scan and Chunked Loading
+
+(ert-deftest pi-coding-agent-test-scan-discovers-tree ()
+  "--browse-load-sessions scans the sessions tree from disk.
+scope=all finds every munged --…-- directory under the sessions root,
+threads forks through :parentSessionPath, reads names from
+session_info, and skips non-session JSONL files, .subagents sidecars,
+and non-munged directories.  scope=current scans one directory."
+  (let* ((root (pi-coding-agent-test--make-temp-directory "pi-scan-root"))
+         (sessions (expand-file-name "sessions" root))
+         (dir-a (expand-file-name "--home-fake-a--" sessions))
+         (dir-b (expand-file-name "--home-fake-b--" sessions))
+         (subagents (expand-file-name ".subagents" dir-a))
+         (stray (expand-file-name "straydir" sessions))
+         (root-path (expand-file-name "root.jsonl" dir-a))
+         (fork-path (expand-file-name "fork.jsonl" dir-a))
+         (other-path (expand-file-name "other.jsonl" dir-b))
+         (broken-path (expand-file-name "broken.jsonl" dir-b))
+         (sub-path (expand-file-name "sub.jsonl" subagents))
+         (stray-path (expand-file-name "stray.jsonl" stray))
+         (calls nil))
+    (make-directory dir-a t)
+    (make-directory dir-b t)
+    (make-directory subagents t)
+    (make-directory stray t)
+    (pi-coding-agent-test--write-session-lines
+     root-path
+     (list (pi-coding-agent-test--make-session-header "sid-root")
+           (pi-coding-agent-test--user-line "m1" nil "fix the parser")
+           (pi-coding-agent-test--jsonl-line
+            "message" "m2" "m1"
+            :message '(:role "toolResult" :toolCallId "tc1" :toolName "read"))
+           (pi-coding-agent-test--jsonl-line
+            "message" "m3" "m2"
+            :message '(:role "assistant" :content "done"))
+           (pi-coding-agent-test--jsonl-line
+            "session_info" "s1" "m3" :name "Root work")))
+    (pi-coding-agent-test--write-session-lines
+     fork-path
+     (list (pi-coding-agent-test--make-session-header
+            "sid-fork" :parentSession root-path)
+           (pi-coding-agent-test--user-line "f1" nil "try the other way")))
+    (pi-coding-agent-test--write-session-lines
+     other-path
+     (list (pi-coding-agent-test--make-session-header "sid-other")
+           (pi-coding-agent-test--user-line "o1" nil "unrelated work")))
+    ;; Decoy: a .jsonl file that is not a session (no header line).
+    (pi-coding-agent-test--write-session-lines
+     broken-path
+     (list (pi-coding-agent-test--user-line "x1" nil "decoy")))
+    ;; Valid sessions in excluded locations: a .subagents sidecar (the
+    ;; scan is single-level inside munged dirs) and a non-munged dir.
+    (pi-coding-agent-test--write-session-lines
+     sub-path (list (pi-coding-agent-test--make-session-header "sid-sub")))
+    (pi-coding-agent-test--write-session-lines
+     stray-path (list (pi-coding-agent-test--make-session-header "sid-stray")))
+    (with-temp-buffer
+      (pi-coding-agent-session-browser-mode)
+      (let ((default-directory root)
+            (process-environment
+             (cons (format "PI_CODING_AGENT_DIR=%s" (directory-file-name root))
+                   process-environment)))
+        (cl-letf (((symbol-function 'pi-coding-agent--session-list-directory)
+                   (lambda (&optional _chat-buf) nil))
+                  ;; Synchronous timers: the chunked scan completes here.
+                  ((symbol-function 'run-at-time)
+                   (lambda (_secs _repeat fn &rest args) (apply fn args))))
+          (pi-coding-agent--browse-load-sessions
+           "all" (lambda (items error) (push (list items error) calls))))
+        (should (eq (length calls) 1))
+        (pcase-let ((`(,items ,error) (car calls)))
+          (should-not error)
+          (should (= (length items) 3))
+          (let ((paths (mapcar (lambda (item) (plist-get item :path)) items)))
+            (should (member root-path paths))
+            (should (member fork-path paths))
+            (should (member other-path paths))
+            (should-not (member broken-path paths))
+            (should-not (member sub-path paths))
+            (should-not (member stray-path paths)))
+          (let ((root-item (cl-find root-path items
+                                    :key (lambda (i) (plist-get i :path))
+                                    :test #'equal))
+                (fork-item (cl-find fork-path items
+                                    :key (lambda (i) (plist-get i :path))
+                                    :test #'equal)))
+            (should root-item)
+            (should fork-item)
+            (should (equal (plist-get root-item :id) "sid-root"))
+            (should (equal (plist-get root-item :cwd) "/home/fake/a"))
+            (should (equal (plist-get root-item :created)
+                           pi-coding-agent-test--browse-timestamp))
+            (should (equal (plist-get root-item :name) "Root work"))
+            (should (equal (plist-get root-item :firstMessage) "fix the parser"))
+            (should (= (plist-get root-item :messageCount) 3))
+            (should (string-match-p pi-coding-agent-test--iso-second-re
+                                    (plist-get root-item :modified)))
+            ;; The fork threads to its parent session file.
+            (should (equal (plist-get fork-item :parentSessionPath) root-path))
+            (should-not (plist-get fork-item :name))))
+        ;; scope=current scans exactly one directory: the menu-supplied
+        ;; session list directory.
+        (setq calls nil)
+        (cl-letf (((symbol-function 'pi-coding-agent--session-list-directory)
+                   (lambda (&optional _chat-buf) dir-a))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_secs _repeat fn &rest args) (apply fn args))))
+          (pi-coding-agent--browse-load-sessions
+           "current" (lambda (items error) (push (list items error) calls))))
+        (pcase-let ((`(,items ,error) (car calls)))
+          (should-not error)
+          (should (equal (sort (mapcar (lambda (i) (plist-get i :path)) items)
+                               #'string<)
+                         (sort (list root-path fork-path) #'string<))))))))
+
+(ert-deftest pi-coding-agent-test-load-sessions-chunked ()
+  "--browse-load-sessions chunks long scans and reports once.
+The per-file reader is slowed past the 25 ms slice budget so the scan
+spans several slices.  Synchronous timers deliver exactly one final
+callback with every item, and a superseded fetch's callback is dropped
+by the fetch token."
+  (let* ((root (pi-coding-agent-test--make-temp-directory "pi-chunk-root"))
+         (sessions (expand-file-name "sessions" root))
+         (dir (expand-file-name "--home-fake-a--" sessions))
+         (paths nil))
+    (make-directory dir t)
+    (dotimes (i 60)
+      (let ((path (expand-file-name (format "s%03d.jsonl" i) dir)))
+        (push path paths)
+        (pi-coding-agent-test--write-session-lines
+         path (list (pi-coding-agent-test--make-session-header
+                     (format "sid-%03d" i))))))
+    (setq paths (nreverse paths))
+    (with-temp-buffer
+      (pi-coding-agent-session-browser-mode)
+      (let ((default-directory root)
+            (process-environment
+             (cons (format "PI_CODING_AGENT_DIR=%s" (directory-file-name root))
+                   process-environment)))
+        (cl-letf (((symbol-function 'pi-coding-agent--session-list-directory)
+                   (lambda (&optional _chat-buf) nil))
+                  ;; 2 ms per file: 60 files need several 25 ms slices.
+                  ((symbol-function 'pi-coding-agent-jsonl-read-session-info)
+                   (lambda (path)
+                     (sleep-for 0 2)
+                     (list :path path
+                           :id (file-name-nondirectory path)
+                           :cwd "/home/fake/a"
+                           :created pi-coding-agent-test--browse-timestamp
+                           :modified "2026-03-02T10:00:00Z"
+                           :messageCount 0))))
+          ;; Synchronous timers: one final callback, all 60 items.
+          (let ((calls nil))
+            (cl-letf (((symbol-function 'run-at-time)
+                       (lambda (_secs _repeat fn &rest args) (apply fn args))))
+              (pi-coding-agent--browse-load-sessions
+               "all" (lambda (items error) (push (list items error) calls))))
+            (should (eq (length calls) 1))
+            (pcase-let ((`(,items ,error) (car calls)))
+              (should-not error)
+              (should (= (length items) 60))
+              (should (equal (sort (mapcar (lambda (i) (plist-get i :path)) items)
+                                   #'string<)
+                             (sort (copy-sequence paths) #'string<)))))
+          ;; Deferred timers: the older fetch is superseded before any
+          ;; slice runs, so its callback is dropped by the fetch token.
+          (let ((calls-a nil) (calls-b nil) (queue nil))
+            (cl-letf (((symbol-function 'run-at-time)
+                       (lambda (_secs _repeat fn &rest args)
+                         (push (cons fn args) queue))))
+              (pi-coding-agent--browse-load-sessions
+               "all" (lambda (items error) (push (list items error) calls-a)))
+              (pi-coding-agent--browse-load-sessions
+               "all" (lambda (items error) (push (list items error) calls-b)))
+              (while queue
+                (let ((job (pop queue)))
+                  (apply (car job) (cdr job)))))
+            (should-not calls-a)
+            (should (eq (length calls-b) 1))
+            (pcase-let ((`(,items ,error) (car calls-b)))
+              (should-not error)
+              (should (= (length items) 60))))
+          ;; Mid-flight supersession: A completes one slice (~12 files)
+          ;; before B supersedes it; the token still drops A at its next
+          ;; slice boundary, and B reports alone with every item.
+          (let ((calls-a nil) (calls-b nil) (queue nil))
+            (cl-letf (((symbol-function 'run-at-time)
+                       (lambda (_secs _repeat fn &rest args)
+                         (push (cons fn args) queue))))
+              (pi-coding-agent--browse-load-sessions
+               "all" (lambda (items error) (push (list items error) calls-a)))
+              (let ((job (pop queue)))
+                (apply (car job) (cdr job)))
+              (pi-coding-agent--browse-load-sessions
+               "all" (lambda (items error) (push (list items error) calls-b)))
+              (while queue
+                (let ((job (pop queue)))
+                  (apply (car job) (cdr job)))))
+            (should-not calls-a)
+            (should (eq (length calls-b) 1))
+            (pcase-let ((`(,items ,error) (car calls-b)))
+              (should-not error)
+              (should (= (length items) 60))
+              (should (equal (sort (mapcar (lambda (i) (plist-get i :path)) items)
+                                   #'string<)
+                             (sort (copy-sequence paths) #'string<))))))))))
+
+(ert-deftest pi-coding-agent-test-load-sessions-error-as-string ()
+  "Directory resolution failures surface as an error string, not a signal."
+  (let ((calls nil))
+    (with-temp-buffer
+      (pi-coding-agent-session-browser-mode)
+      (cl-letf (((symbol-function 'pi-coding-agent--session-list-directory)
+                 (lambda (&optional _chat-buf)
+                   (signal 'file-error '("Cannot access sessions directory"))))
+                ((symbol-function 'run-at-time)
+                 (lambda (_secs _repeat fn &rest args) (apply fn args))))
+        (pi-coding-agent--browse-load-sessions
+         "current" (lambda (items error) (push (list items error) calls))))
+      (should (eq (length calls) 1))
+      (pcase-let ((`(,items ,error) (car calls)))
+        (should-not items)
+        (should (stringp error))
+        (should (string-match-p "Cannot list sessions" error))))))
+
+;;;; Phase 2: Fetch Relaxation
+
+(ert-deftest pi-coding-agent-test-fetch-without-process ()
+  "The session browser fetch proceeds without a live pi process.
+Phase 2 reads sessions from disk, so the Phase 0 no-process guard is
+gone for the session browser (the tree browser keeps it until Phase 3)."
+  (let ((root (pi-coding-agent-test--make-temp-directory "pi-noproc-root")))
+    (with-temp-buffer
+      (pi-coding-agent-session-browser-mode)
+      (let ((default-directory root)
+            (process-environment
+             (cons (format "PI_CODING_AGENT_DIR=%s" (directory-file-name root))
+                   process-environment)))
+        (cl-letf (((symbol-function 'pi-coding-agent--session-list-directory)
+                   (lambda (&optional _chat-buf) nil))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_secs _repeat fn &rest args) (apply fn args))))
+          (pi-coding-agent--session-browser-fetch-and-render)))
+      (should-not pi-coding-agent--session-browser-loading)
+      (should-not pi-coding-agent--session-browser-error)
+      (should (string-match-p "No sessions found" (buffer-string))))))
+
+;;;; Phase 2: Switch
+
+(ert-deftest pi-coding-agent-test-switch-calls-resume ()
+  "--browse-switch-session guards, then delegates to the resume flow.
+The busy guard runs first with (CHAT-BUF \"switch\"); the delegation
+receives (PROC CHAT-BUF PATH) verbatim."
+  (let* ((chat-buf (generate-new-buffer " *test-switch-chat*"))
+         (proc (start-process "pi-switch-test" nil "sleep" "30"))
+         (ready-calls nil)
+         (resume-calls nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--process proc))
+          (pi-coding-agent-test--with-browse-link chat-buf
+            (cl-letf (((symbol-function 'pi-coding-agent--session-transition-ready-p)
+                       (lambda (chat-buf action)
+                         (push (list chat-buf action) ready-calls)
+                         t))
+                      ((symbol-function 'pi-coding-agent--resume-selected-session)
+                       (lambda (proc chat-buf path)
+                         (push (list proc chat-buf path) resume-calls))))
+              (pi-coding-agent--browse-switch-session "/tmp/some-session.jsonl")))
+          (should (equal ready-calls (list (list chat-buf "switch"))))
+          (should (equal resume-calls
+                         (list (list proc chat-buf "/tmp/some-session.jsonl")))))
+      (delete-process proc)
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-switch-busy-guard ()
+  "A busy chat session blocks the switch before any resume attempt."
+  (let* ((chat-buf (generate-new-buffer " *test-busy-chat*"))
+         (proc (start-process "pi-busy-test" nil "sleep" "30"))
+         (resume-calls nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--process proc))
+          (pi-coding-agent-test--with-browse-link chat-buf
+            (cl-letf (((symbol-function 'pi-coding-agent--session-transition-ready-p)
+                       (lambda (&rest _) nil))
+                      ((symbol-function 'pi-coding-agent--resume-selected-session)
+                       (lambda (&rest _) (push t resume-calls))))
+              ;; Returns quietly: the guard reports the reason itself.
+              (pi-coding-agent--browse-switch-session "/tmp/some-session.jsonl")))
+          (should-not resume-calls))
+      (delete-process proc)
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-switch-no-session ()
+  "Switching with no linked chat session signals a `user-error'."
+  (with-temp-buffer
+    (pi-coding-agent-session-browser-mode)
+    (should (equal (error-message-string
+                    (should-error
+                     (pi-coding-agent--browse-switch-session "/test/a.jsonl")
+                     :type 'user-error))
+                   "No pi session to switch to"))))
+
+(ert-deftest pi-coding-agent-test-quit-when-settled ()
+  "--browse-quit-when-settled waits out the transition, then quits only
+when the chat landed on the requested session file AND the window still
+shows a session browser.  Timers run synchronously; the transition looks
+busy once, then settles.  A repurposed window, a dead chat buffer, and a
+landed-elsewhere state all leave the window alone."
+  (let* ((chat-buf (generate-new-buffer " *test-settled-chat*"))
+         (win (selected-window))
+         (orig-buf (window-buffer win))
+         (browser-buf (generate-new-buffer " *test-settled-browser*"))
+         (other-buf (generate-new-buffer " *test-settled-other*"))
+         (path "/tmp/target-session.jsonl"))
+    (unwind-protect
+        (let ((quit-calls nil) (polls 0))
+          (with-current-buffer browser-buf
+            (pi-coding-agent-session-browser-mode))
+          (set-window-buffer win browser-buf)
+          ;; Settled onto the target: one busy poll, then quit-window.
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :session-file path)))
+          (cl-letf (((symbol-function 'pi-coding-agent--session-transition-active-p)
+                     (lambda (&optional _chat-buf)
+                       (setq polls (1+ polls))
+                       (<= polls 1)))
+                    ((symbol-function 'run-at-time)
+                     (lambda (_secs _repeat fn &rest args) (apply fn args)))
+                    ((symbol-function 'quit-window)
+                     (lambda (&rest args) (push args quit-calls))))
+            (pi-coding-agent--browse-quit-when-settled chat-buf win path))
+          (should (>= polls 2))
+          (should (equal quit-calls (list (list nil win))))
+          ;; Settled elsewhere: the browser stays open.
+          (setq quit-calls nil polls 0)
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :session-file "/tmp/other.jsonl")))
+          (cl-letf (((symbol-function 'pi-coding-agent--session-transition-active-p)
+                     (lambda (&optional _chat-buf)
+                       (setq polls (1+ polls))
+                       (<= polls 1)))
+                    ((symbol-function 'run-at-time)
+                     (lambda (_secs _repeat fn &rest args) (apply fn args)))
+                    ((symbol-function 'quit-window)
+                     (lambda (&rest args) (push args quit-calls))))
+            (pi-coding-agent--browse-quit-when-settled chat-buf win path))
+          (should (>= polls 2))
+          (should-not quit-calls)
+          ;; Window repurposed mid-poll (browse buffer killed): landing on
+          ;; the target must NOT quit whatever the window shows now.
+          (setq quit-calls nil polls 0)
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :session-file path)))
+          (set-window-buffer win other-buf)
+          (cl-letf (((symbol-function 'pi-coding-agent--session-transition-active-p)
+                     (lambda (&optional _chat-buf)
+                       (setq polls (1+ polls))
+                       (<= polls 1)))
+                    ((symbol-function 'run-at-time)
+                     (lambda (_secs _repeat fn &rest args) (apply fn args)))
+                    ((symbol-function 'quit-window)
+                     (lambda (&rest args) (push args quit-calls))))
+            (pi-coding-agent--browse-quit-when-settled chat-buf win path))
+          (should (>= polls 2))
+          (should-not quit-calls)
+          ;; Dead chat buffer: the poll ends quietly, no signal, no quit.
+          (setq quit-calls nil)
+          (set-window-buffer win browser-buf)
+          (kill-buffer chat-buf)
+          (cl-letf (((symbol-function 'run-at-time)
+                     (lambda (_secs _repeat fn &rest args) (apply fn args)))
+                    ((symbol-function 'quit-window)
+                     (lambda (&rest args) (push args quit-calls))))
+            (pi-coding-agent--browse-quit-when-settled chat-buf win path))
+          (should-not quit-calls))
+      (set-window-buffer win orig-buf)
+      (kill-buffer browser-buf)
+      (kill-buffer other-buf)
+      (when (buffer-live-p chat-buf) (kill-buffer chat-buf)))))
+
+;;;; Phase 2: Rename
+
+(defun pi-coding-agent-test--rename-at-point (item chat-buf input)
+  "Run `session-browser-rename' with INPUT at ITEM's section.
+ITEM is a session plist (its :name locates the section); CHAT-BUF is
+the browse buffer's chat link.  The post-rename refresh is stubbed
+out; callers mock the rename seams they assert on."
+  (with-temp-buffer
+    (pi-coding-agent-session-browser-mode)
+    (setq pi-coding-agent--chat-buffer chat-buf
+          pi-coding-agent--session-browser-items (list item))
+    (pi-coding-agent--session-browser-rerender)
+    (goto-char (point-min))
+    (search-forward (plist-get item :name))
+    (cl-letf (((symbol-function 'read-string)
+               (lambda (_prompt &rest _) input))
+              ((symbol-function 'pi-coding-agent--session-browser-fetch-and-render)
+               #'ignore))
+      (pi-coding-agent-session-browser-rename))))
+
+(ert-deftest pi-coding-agent-test-rename-other-session-appends ()
+  "Renaming a non-current session appends exactly one session_info line.
+The line carries a fresh 8-hex id, parents to the id of the file's last
+line, a UTC ISO timestamp no older than the rename, and the cleaned
+name.  A missing trailing newline gets a separator; prior bytes stay
+byte-for-byte intact."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-rename-append"))
+         (path (expand-file-name "target.jsonl" dir))
+         (current-path (expand-file-name "current.jsonl" dir))
+         (before-lines
+          (list (pi-coding-agent-test--make-session-header "sid-target")
+                (pi-coding-agent-test--user-line "m1" nil "investigate the flaky test")
+                (pi-coding-agent-test--jsonl-line
+                 "message" "m2" "m1"
+                 :message '(:role "assistant" :content "found it"))
+                (pi-coding-agent-test--jsonl-line
+                 "session_info" "s1" "m2" :name "Old name")))
+         (chat-buf (generate-new-buffer " *test-rename-chat*"))
+         (start-iso (format-time-string "%Y-%m-%dT%H:%M:%S.%3NZ" nil t)))
+    ;; No trailing newline: the append must add the separator itself.
+    (pi-coding-agent-test--write-session-lines path before-lines t)
+    (pi-coding-agent-test--write-session-lines
+     current-path (list (pi-coding-agent-test--make-session-header "sid-current")))
+    (unwind-protect
+        (let ((before (pi-coding-agent-test--file-contents path)))
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :session-file current-path)))
+          (pi-coding-agent-test--rename-at-point
+           (list :path path :name "Old name" :messageCount 2
+                 :modified "2026-03-02T10:00:00Z")
+           chat-buf
+           "  Renamed\nSession  ")
+          (let* ((after (pi-coding-agent-test--file-contents path)))
+            ;; Exactly one line was appended, after a separator.
+            (should-not (equal after before))
+            (let* ((appended (car (split-string (substring after (length before))
+                                                 "\n" t)))
+                   (entry (json-parse-string appended :object-type 'plist)))
+              (should (string-prefix-p before after))
+              (should (string-suffix-p (concat appended "\n") after))
+              (should (equal (plist-get entry :type) "session_info"))
+              (should (string-match-p "\\`[0-9a-f]\\{8\\}\\'"
+                                     (plist-get entry :id)))
+              (should (not (member (plist-get entry :id)
+                                   '("m1" "m2" "s1"))))
+              ;; parentId is the id of the last line before the append.
+              (should (equal (plist-get entry :parentId) "s1"))
+              ;; The name is trimmed with newlines collapsed.
+              (should (equal (plist-get entry :name) "Renamed Session"))
+              (let ((ts (plist-get entry :timestamp)))
+                (should (string-match-p
+                         "\\`[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}T[0-9]\\{2\\}:[0-9]\\{2\\}:[0-9]\\{2\\}\\.[0-9]\\{3\\}Z\\'"
+                         ts))
+                (should (not (string< ts start-iso)))))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-rename-append-garbage-tail ()
+  "Renaming a session with a garbage final line parents past the garbage.
+pi's loader skips malformed lines, so the append's :parentId must be the
+id of the last PARSEABLE line — parenting to the garbage (or to nil)
+would detach the whole conversation from the reload context.  The
+garbage bytes stay byte-for-byte intact."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-rename-garbage"))
+         (path (expand-file-name "torn.jsonl" dir))
+         (garbage "{\"type\":\"message\",\"id\":\"torn\",\"paren")
+         (chat-buf (generate-new-buffer " *test-garbage-chat*")))
+    (pi-coding-agent-test--write-session-lines
+     path
+     (list (pi-coding-agent-test--make-session-header "sid-g")
+           (pi-coding-agent-test--user-line "g1" nil "check the flaky test")
+           (pi-coding-agent-test--jsonl-line
+            "message" "g2" "g1"
+            :message '(:role "assistant" :content "fixed"))
+           garbage))
+    (unwind-protect
+        (let ((before (pi-coding-agent-test--file-contents path)))
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state
+                  (list :session-file "/tmp/somewhere-else.jsonl")))
+          (pi-coding-agent-test--rename-at-point
+           (list :path path :name "Torn tail session" :messageCount 2
+                 :modified "2026-03-02T10:00:00Z")
+           chat-buf "Fixed name")
+          (let* ((after (pi-coding-agent-test--file-contents path))
+                 (appended (car (split-string (substring after (length before))
+                                              "\n" t)))
+                 (entry (json-parse-string appended :object-type 'plist))
+                 (state (pi-coding-agent--browse-session-file-state path)))
+            (should (string-prefix-p before after))
+            ;; The collision set sees every id in the file, torn line or not.
+            (dolist (id '("sid-g" "g1" "g2" "torn"))
+              (should (gethash id (plist-get state :ids))))
+            (should-not (gethash "no-such-id" (plist-get state :ids)))
+            ;; Parent is the last parseable line, not the torn one.
+            (should (equal (plist-get entry :parentId) "g2"))
+            ;; Fresh id: collides with nothing already in the file.
+            (should (not (member (plist-get entry :id)
+                                 '("sid-g" "g1" "g2" "torn"))))
+            (should (equal (plist-get entry :name) "Fixed name"))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-rename-append-unreadable-file ()
+  "Renaming a session whose file vanished cancels with a message.
+No line is appended, no file is created, and the browser is not
+refreshed (the fetch-and-render seam stays silent)."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-rename-missing"))
+         (path (expand-file-name "ghost.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-missing-chat*"))
+         (messages nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state
+                  (list :session-file "/tmp/somewhere-else.jsonl")))
+          (cl-letf (((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (push (apply #'format fmt args) messages))))
+            (pi-coding-agent-test--rename-at-point
+             (list :path path :name "Ghost session" :messageCount 0
+                   :modified "2026-03-02T10:00:00Z")
+             chat-buf "Ghost name"))
+          (should-not (file-exists-p path))
+          (should (cl-some (lambda (m) (string-match-p "unreadable" m))
+                           messages)))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-rename-dispatch ()
+  "Rename routes by current-vs-other session and cancels on empty input.
+Current: `set-session-name' RPC only, no file append.  Other: file
+append only, no RPC.  Empty (whitespace) input cancels with a message:
+no RPC, no append (no clearing in Phase 2)."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-rename-dispatch"))
+         (path (expand-file-name "target.jsonl" dir))
+         (current-path (expand-file-name "current.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-dispatch-chat*"))
+         (set-name-calls nil)
+         (messages nil))
+    (pi-coding-agent-test--write-session-lines
+     path
+     (list (pi-coding-agent-test--make-session-header "sid-target")
+           (pi-coding-agent-test--user-line "m1" nil "other session")
+           (pi-coding-agent-test--jsonl-line
+            "session_info" "s1" "m1" :name "Target name")))
+    (pi-coding-agent-test--write-session-lines
+     current-path (list (pi-coding-agent-test--make-session-header "sid-current")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :session-file current-path)))
+          ;; Current session: RPC rename, no append to any file.
+          (let ((target-before (pi-coding-agent-test--file-contents path))
+                (current-before (pi-coding-agent-test--file-contents current-path)))
+            (cl-letf (((symbol-function 'pi-coding-agent-set-session-name)
+                       (lambda (&rest args)
+                         (interactive)
+                         (push args set-name-calls))))
+              (pi-coding-agent-test--rename-at-point
+               (list :path current-path :name "Current session" :messageCount 0
+                     :modified "2026-03-02T10:00:00Z")
+               chat-buf "  New\nName  "))
+            (should (equal set-name-calls '(("New Name"))))
+            (should (equal (pi-coding-agent-test--file-contents path)
+                           target-before))
+            (should (equal (pi-coding-agent-test--file-contents current-path)
+                           current-before)))
+          ;; Other session: append, no RPC.
+          (setq set-name-calls nil)
+          (let ((before (pi-coding-agent-test--file-contents path)))
+            (cl-letf (((symbol-function 'pi-coding-agent-set-session-name)
+                       (lambda (&rest args)
+                         (interactive)
+                         (push args set-name-calls))))
+              (pi-coding-agent-test--rename-at-point
+               (list :path path :name "Target name" :messageCount 1
+                     :modified "2026-03-02T10:00:00Z")
+               chat-buf "Fresh name"))
+            (should-not set-name-calls)
+            (should-not (equal (pi-coding-agent-test--file-contents path) before))
+            (should (string-match-p "Fresh name"
+                                    (pi-coding-agent-test--file-contents path))))
+          ;; Empty input: cancelled for both paths; message only.
+          (setq set-name-calls nil)
+          (let ((target-before (pi-coding-agent-test--file-contents path))
+                (current-before (pi-coding-agent-test--file-contents current-path)))
+            (cl-letf (((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (push (apply #'format fmt args) messages)))
+                      ((symbol-function 'pi-coding-agent-set-session-name)
+                       (lambda (&rest args)
+                         (interactive)
+                         (push args set-name-calls))))
+              (pi-coding-agent-test--rename-at-point
+               (list :path path :name "Target name" :messageCount 1
+                     :modified "2026-03-02T10:00:00Z")
+               chat-buf "  \n "))
+            (should-not set-name-calls)
+            (should (equal (pi-coding-agent-test--file-contents path)
+                           target-before))
+            (should (equal (pi-coding-agent-test--file-contents current-path)
+                           current-before))
+            (should (member "Pi: Rename cancelled" messages))))
+      (kill-buffer chat-buf))))
 
 (provide 'pi-coding-agent-browse-test)
 ;;; pi-coding-agent-browse-test.el ends here

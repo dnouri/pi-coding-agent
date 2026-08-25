@@ -31,21 +31,31 @@
 ;;   - Session Browser: find, filter, switch sessions (like TUI /resume)
 ;;   - Tree Browser: navigate conversation tree, label nodes (like TUI /tree)
 ;;
-;; Presentation-only skeleton: rendering, filtering, sorting, and the
-;; magit-section UI are final; the data layer arrives in Phases 2-4 via
-;; the `pi-coding-agent--browse-*' seam functions near the end of this
-;; file (currently stubs).
+;; Presentation is final; the data layer is phased.  Phase 2 landed the
+;; session side: `pi-coding-agent--browse-load-sessions' scans real
+;; session files from disk (time-sliced), switching routes through
+;; menu.el's guarded resume flow, and rename works for any session via
+;; an out-of-band session_info append.  The tree side (fetch via get_tree,
+;; navigation, labels) is still stubbed for Phases 3-4 via the
+;; `pi-coding-agent--browse-*' seam functions near the end of this file.
 
 ;;; Code:
 
 (require 'pi-coding-agent-core)
 (require 'pi-coding-agent-ui)
+(require 'pi-coding-agent-jsonl)
 (require 'cl-lib)
 (require 'magit-section)
 (require 'transient)
 
 ;; Forward declarations for functions in other modules (avoid circular deps)
 (declare-function pi-coding-agent-set-session-name "pi-coding-agent-menu" (name))
+(declare-function pi-coding-agent--resume-selected-session "pi-coding-agent-menu"
+                  (proc chat-buf selected-path))
+(declare-function pi-coding-agent--session-transition-ready-p "pi-coding-agent-menu"
+                  (chat-buf action))
+(declare-function pi-coding-agent--session-list-directory "pi-coding-agent-menu"
+                  (&optional chat-buf))
 
 ;;;; Response Parsers
 
@@ -546,8 +556,21 @@ Groups: \"Today\", \"Yesterday\", \"This Week\", \"Older\"."
 (defvar-local pi-coding-agent--session-browser-loading nil
   "Non-nil while a fetch is in progress.")
 
+(defvar-local pi-coding-agent--session-browser-fetch-anchor nil
+  "Point anchor carried across the in-flight fetch cycle.
+Set to the anchor captured at fetch start.  A refresh issued while
+loading captures no anchor of its own (the loading render already
+destroyed the sections), so it reuses this one instead.  Cleared when
+the cycle's final render runs.")
+
 (defvar-local pi-coding-agent--session-browser-error nil
   "Error message string from last fetch, or nil on success.")
+
+(defvar-local pi-coding-agent--session-browser-fetch-token 0
+  "Generation counter for session-browser fetches.
+`pi-coding-agent--browse-load-sessions' bumps it per fetch; callbacks
+from superseded fetches are dropped by comparing their captured token
+against the buffer's current one.")
 
 ;;;; Session Browser Dispatch Transient
 
@@ -820,38 +843,192 @@ Message count and age are rendered as a right-margin overlay."
   (interactive)
   (if-let* ((section (magit-current-section))
             (path (oref section value)))
-      (pi-coding-agent--browse-switch-session
-       path
-       (let ((win (selected-window)))
-         (lambda () (when (window-live-p win) (quit-window nil win)))))
+      (pi-coding-agent--browse-switch-session path)
     (message "Pi: No session at point")))
 
+(defun pi-coding-agent--browse-clean-session-name (name)
+  "Return NAME cleaned for a session_info append.
+CR/LF runs collapse to single spaces, then surrounding whitespace
+trims (pi's appendSessionInfo order)."
+  (string-trim (replace-regexp-in-string "[\r\n]+" " " name)))
+
+(defun pi-coding-agent--browse-last-entry-id-in-buffer ()
+  "Return the id of the last parseable non-header line in the current buffer.
+Blank or malformed trailing lines are skipped: pi's loader ignores them,
+so parenting an append to one would detach it from the conversation (the
+leaf walk would stop at a null parent).  The header ends the search — a
+header-only file reads as nil."
+  (goto-char (point-max))
+  (catch 'done
+    (while t
+      (skip-chars-backward " \t\r\n")
+      (if (bobp)
+          (throw 'done nil)
+        (let* ((bol (line-beginning-position))
+               (data (and (> (point) bol)
+                          (pi-coding-agent--parse-json-line
+                           (buffer-substring-no-properties bol (point))))))
+          (cond
+           ((and (consp data) (equal (plist-get data :type) "session"))
+            (throw 'done nil))
+           ((consp data)
+            (throw 'done (pi-coding-agent--normalize-string-or-null
+                          (plist-get data :id))))
+           ;; Blank or malformed line: step over it and retry.
+           (t (goto-char bol))))))))
+
+(defun pi-coding-agent--browse-session-file-state (path)
+  "Re-read session file PATH fresh and describe its tail for an append.
+Return a plist (:last-id ID-OR-NIL :ids HASH :newline-p BOOL), or nil when
+PATH is missing or unreadable.  :last-id is the id of the last parseable
+non-header line (see `pi-coding-agent--browse-last-entry-id-in-buffer').
+:ids holds every id-shaped string in the file — a superset of pi's entry
+index — for fresh-id collision checks.  :newline-p reports whether the
+file already ends in a newline.  The whole file is inserted once, fresh:
+a live pi process appends concurrently, so the state must reflect the
+physical file, never cached browser data."
+  (condition-case nil
+      (when (file-readable-p path)
+        (with-temp-buffer
+          (insert-file-contents path)
+          (let ((ids (make-hash-table :test #'equal)))
+            (goto-char (point-min))
+            (while (re-search-forward
+                    "\"id\"[ \t]*:[ \t]*\"\\([^\"]+\\)\"" nil t)
+              (puthash (match-string-no-properties 1) t ids))
+            (list :last-id (pi-coding-agent--browse-last-entry-id-in-buffer)
+                  :ids ids
+                  :newline-p (and (> (point-max) (point-min))
+                                  (eq (char-before (point-max)) ?\n))))))
+    (error nil)))
+
+(defun pi-coding-agent--browse-fresh-entry-id (ids)
+  "Return a random 8-hex entry id absent from IDS, like pi's generateId.
+Collision checking is not optional: pi keys entries by id and walks
+parent chains without a cycle guard, so a colliding id can wedge its
+loader on the next session load.  After 100 failed tries fall back to a
+wider 16-hex id, mirroring pi's full-UUID fallback."
+  (cl-loop repeat 100
+           for id = (format "%08x" (random #x100000000))
+           when (not (gethash id ids))
+           return id
+           finally return (format "%08x%08x"
+                                  (random #x100000000)
+                                  (random #x100000000))))
+
+(defun pi-coding-agent--browse-append-session-info (path name)
+  "Append a session_info entry naming session file PATH to NAME, out-of-band.
+Mirrors pi's appendSessionInfo without a live process.  The file is
+re-read immediately before the append via
+`pi-coding-agent--browse-session-file-state' so :parentId is the id of
+the current last parseable line (never the browser's cached leaf), which
+keeps the entry from orphaning the context on the next load, and the
+fresh id is checked against every id already in the file (pi's loader
+cannot tolerate duplicates — see
+`pi-coding-agent--browse-fresh-entry-id').  When the file does not end
+in a newline a separator is inserted first — bytes are never glued onto
+a partial line.  Return non-nil when the line was appended; nil (with a
+message) when PATH is unreadable.  Races: a concurrent pi append between
+the read and the write turns our line into a benign sibling (name
+resolution is file-order latest-wins and projection filters
+session_info entries), and stale-parent orphans are impossible by
+construction.  A session live elsewhere sees the new name on its next
+state refresh."
+  (if-let* ((state (pi-coding-agent--browse-session-file-state path)))
+      (let ((line (json-encode
+                   (list :type "session_info"
+                         :id (pi-coding-agent--browse-fresh-entry-id
+                              (plist-get state :ids))
+                         :parentId (plist-get state :last-id)
+                         :timestamp (format-time-string
+                                     "%Y-%m-%dT%H:%M:%S.%3NZ" (current-time) t)
+                         :name name))))
+        (let ((coding-system-for-write 'utf-8))
+          (write-region
+           (concat (unless (plist-get state :newline-p) "\n") line "\n")
+           nil path 'append))
+        t)
+    (message "Pi: Cannot rename: session file is unreadable: %s" path)
+    nil))
+
 (defun pi-coding-agent-session-browser-rename ()
-  "Rename the current session.
-Only works for the currently active session."
+  "Rename the session at point.
+Prompt once; empty or whitespace-only input cancels with a message
+\(names cannot be cleared in Phase 2, matching the TUI).  Dispatch on
+current-vs-other session (see
+`pi-coding-agent--browse-session-file-matches-p'):
+  - Current session: `pi-coding-agent-set-session-name' RPC, then
+    refresh.  Known benign race: the refresh may beat pi's
+    session_info flush, leaving a stale name visible until
+    \\[pi-coding-agent-browse-refresh].
+  - Other session: `pi-coding-agent--browse-append-session-info'
+    appends out-of-band, then refreshes; an unreadable file cancels
+    with a message and no refresh."
   (interactive)
-  (when-let* ((section (magit-current-section))
-              (path (oref section value))
-              (state (and (pi-coding-agent--get-chat-buffer)
-                          (buffer-local-value 'pi-coding-agent--state
-                                              (pi-coding-agent--get-chat-buffer))))
-              (current-file (plist-get state :session-file)))
-    (if (equal path current-file)
-        (call-interactively #'pi-coding-agent-set-session-name)
-      (message "Pi: Can only rename the current session (upstream limitation)"))))
+  (if-let* ((section (magit-current-section))
+            (path (oref section value)))
+      (let* ((item (cl-find path pi-coding-agent--session-browser-items
+                            :key (lambda (it) (plist-get it :path))
+                            :test #'equal))
+             (existing (and item
+                            (pi-coding-agent--normalize-string-or-null
+                             (plist-get item :name))))
+             (input (read-string "Rename session: " (or existing "")))
+             (clean (pi-coding-agent--browse-clean-session-name input)))
+        (if (string-empty-p clean)
+            (message "Pi: Rename cancelled")
+          (if (pi-coding-agent--browse-session-file-matches-p
+               (pi-coding-agent--get-chat-buffer) path)
+              (progn
+                (pi-coding-agent-set-session-name clean)
+                (pi-coding-agent--session-browser-fetch-and-render))
+            (when (pi-coding-agent--browse-append-session-info path clean)
+              (pi-coding-agent--session-browser-fetch-and-render)))))
+    (message "Pi: No session at point")))
 
 ;;;; Point-Preserving Rerender
 
-(defun pi-coding-agent--browse-rerender-preserving-point (buf render-fn)
+(defun pi-coding-agent--browse-capture-point-anchor ()
+  "Return the point anchor (IDENT . OFFSET) for the section at point.
+IDENT is the section's `magit-section-ident'; OFFSET is the distance
+from the section start.  Return nil when point sits on no content
+section: either there is no section at point, or only the root
+section, which every render recreates over the whole buffer and which
+carries no identity (a loading-state render produces nothing else).
+Used to both capture point before a render and to carry a position
+across a fetch cycle whose intermediate renders destroy sections."
+  (let ((section (magit-current-section)))
+    (when (and section (not (eq section magit-root-section)))
+      (cons (magit-section-ident section)
+            (- (point) (oref section start))))))
+
+(defun pi-coding-agent--browse-rerender-preserving-point (buf render-fn
+                                                            &optional fallback)
   "Erase BUF, render via RENDER-FN, restore point by section identity.
 The section at point is captured as a `magit-section-ident' before the
 erase; after rendering, point moves to that section's start (plus the
 captured intra-section column offset).  Falls back to `point-min' when
-the section no longer exists (e.g. filtered away or state change)."
+the section no longer exists (e.g. filtered away or state change).
+
+FALLBACK, when non-nil, is a `(IDENT . OFFSET)' anchor (from
+`pi-coding-agent--browse-capture-point-anchor') captured before an
+intermediate render destroyed the sections point sat on — the fetch
+cycle renders a loading state before the final render.  It is used
+only when the point-local capture yields no anchor, so a plain
+rerender (no FALLBACK) behaves exactly as before.
+
+After the restore, every live window displaying BUF is synced to the
+restored position: `erase-buffer' clamps all displaying windows to
+bob and `goto-char' moves only the buffer's own point, so without
+`set-window-point' a pane whose window is not selected keeps showing
+point-at-top (same idiom as `pi-coding-agent--with-scroll-preservation'
+in ui.el).  The sync covers both restore paths — the point-min
+fallback included."
   (with-current-buffer buf
-    (let* ((section (magit-current-section))
-           (ident (and section (magit-section-ident section)))
-           (offset (if section (- (point) (oref section start)) 0)))
+    (let* ((anchor (or (pi-coding-agent--browse-capture-point-anchor)
+                       fallback))
+           (ident (car anchor))
+           (offset (cdr anchor)))
       (let ((inhibit-read-only t))
         (erase-buffer)
         (funcall render-fn buf)
@@ -863,6 +1040,13 @@ the section no longer exists (e.g. filtered away or state change)."
                 (when (> offset 0)
                   (forward-char (min offset (1- (- (or end (point-max)) start))))))
             (goto-char (point-min)))
+          ;; `erase-buffer' clamped every displaying window's point to
+          ;; bob; the `goto-char' above moved only the buffer's own
+          ;; point.  Sync all live windows displaying BUF — the list
+          ;; spans live frames and yields only live windows (same
+          ;; idiom as `pi-coding-agent--with-scroll-preservation').
+          (dolist (w (get-buffer-window-list buf nil t))
+            (set-window-point w (point)))
           (when-let ((cur (magit-current-section)))
             (magit-section-show cur))
           (force-mode-line-update))))))
@@ -870,27 +1054,47 @@ the section no longer exists (e.g. filtered away or state change)."
 ;;;; Fetch and Render
 
 (defun pi-coding-agent--session-browser-fetch-and-render ()
-  "Fetch sessions and re-render the session browser."
-  (let ((buf (current-buffer))
-        (proc (pi-coding-agent--get-process)))
-    (if (not proc)
-        (message "Pi: No active process")
-      (setq pi-coding-agent--session-browser-loading t)
-      (pi-coding-agent--session-browser-rerender)
-      (pi-coding-agent--browse-load-sessions
-       pi-coding-agent--session-browser-scope
-       (lambda (items error)
-         (when (buffer-live-p buf)
-           (with-current-buffer buf
-             (setq pi-coding-agent--session-browser-loading nil
-                   pi-coding-agent--session-browser-error error
-                   pi-coding-agent--session-browser-items items))
-           (pi-coding-agent--session-browser-rerender)))))))
+  "Fetch sessions and re-render the session browser.
+Phase 2 relaxation: sessions are read from disk, so no live pi process
+is required (the tree browser keeps its process guard until Phase 3).
 
-(defun pi-coding-agent--session-browser-rerender ()
-  "Re-render the session browser from local state, preserving point."
+The point anchor is captured before the loading-state render — that
+render destroys the session sections, so without carrying the anchor
+across the cycle the final render would find nothing under point to
+restore (E2E defect A4).  A refresh issued while another fetch is
+still loading finds no sections to capture and reuses the in-flight
+cycle's anchor (see `pi-coding-agent--session-browser-fetch-anchor')."
+  (let* ((buf (current-buffer))
+         (anchor (or (pi-coding-agent--browse-capture-point-anchor)
+                     ;; Mid-flight refresh: the loading render already
+                     ;; destroyed the sections under point, so carry
+                     ;; the anchor the in-flight cycle captured.
+                     (and pi-coding-agent--session-browser-loading
+                          pi-coding-agent--session-browser-fetch-anchor))))
+    (setq pi-coding-agent--session-browser-loading t
+          pi-coding-agent--session-browser-fetch-anchor anchor)
+    ;; Loading-state render: default point behavior (nothing to keep).
+    (pi-coding-agent--session-browser-rerender)
+    (pi-coding-agent--browse-load-sessions
+     pi-coding-agent--session-browser-scope
+     (lambda (items error)
+       (when (buffer-live-p buf)
+         ;; The scan calls back from a timer in whatever buffer is
+         ;; current; render in the browser buffer, not that one.
+         (with-current-buffer buf
+           (setq pi-coding-agent--session-browser-loading nil
+                 pi-coding-agent--session-browser-fetch-anchor nil
+                 pi-coding-agent--session-browser-error error
+                 pi-coding-agent--session-browser-items items)
+           (pi-coding-agent--session-browser-rerender anchor)))))))
+
+(defun pi-coding-agent--session-browser-rerender (&optional fallback)
+  "Re-render the session browser from local state, preserving point.
+FALLBACK is a pre-fetch `(IDENT . OFFSET)' anchor handed to
+`pi-coding-agent--browse-rerender-preserving-point' for the fetch
+cycle's final render."
   (pi-coding-agent--browse-rerender-preserving-point
-   (current-buffer) #'pi-coding-agent--session-browser-render))
+   (current-buffer) #'pi-coding-agent--session-browser-render fallback))
 
 ;;;; Tree Browser Section Classes and Keymaps
 
@@ -955,6 +1159,12 @@ Cached to avoid re-flattening the tree in the header-line.")
 
 (defvar-local pi-coding-agent--tree-browser-loading nil
   "Non-nil while a fetch is in progress.")
+
+(defvar-local pi-coding-agent--tree-browser-fetch-anchor nil
+  "Point anchor carried across the in-flight fetch cycle.
+Same lifecycle as `pi-coding-agent--session-browser-fetch-anchor': set
+from the anchor captured at fetch start, reused by a refresh issued
+while loading, cleared when the cycle's final render runs.")
 
 (defconst pi-coding-agent--tree-filter-modes
   '("no-tools" "default" "user-only" "labeled-only" "all")
@@ -1303,16 +1513,113 @@ Returns the label string or nil."
             (push (aref children i) stack)))))
     result))
 
-;;;; Data Layer Seams (Phase 0 stubs)
+;;;; Data Layer Seams (session side live; tree side stubbed)
+
+(defun pi-coding-agent--browse-current-session-directory ()
+  "Return the session directory for the \"current\" scope, or nil.
+Resolution order: the menu-supplied session list directory (from the
+linked chat buffer's state), then the munged stable session directory
+of the linked chat buffer — rooted on that directory's own host when
+remote — then the munged project directory; the last works with no
+session at all.  Signals when resolution itself fails."
+  (or (pi-coding-agent--session-list-directory)
+      (when-let ((chat-buf pi-coding-agent--chat-buffer))
+        (and (buffer-live-p chat-buf)
+             (let ((cwd (pi-coding-agent--chat-session-directory chat-buf)))
+               (pi-coding-agent-jsonl-session-dir-for-cwd
+                cwd (pi-coding-agent-jsonl-sessions-root cwd)))))
+      (pi-coding-agent-jsonl-session-dir-for-cwd
+       (pi-coding-agent--session-directory))))
+
+(defun pi-coding-agent--browse-session-directories (scope)
+  "Return the list of session directories to scan for SCOPE.
+\"current\" is the single current-project directory (see
+`pi-coding-agent--browse-current-session-directory').  \"all\" is
+every root-level munged --…-- directory under the sessions root —
+remote-anchored when a current directory is known — so .subagents
+sidecars and non-munged directories are excluded by construction.
+Missing roots read as empty; signals when resolution itself fails."
+  (if (not (equal scope "all"))
+      (list (pi-coding-agent--browse-current-session-directory))
+    (let* ((cur (pi-coding-agent--browse-current-session-directory))
+           (root (if cur
+                     (pi-coding-agent-jsonl-sessions-root
+                      (file-name-as-directory cur))
+                   (pi-coding-agent-jsonl-sessions-root))))
+      (delq nil
+            (mapcar (lambda (dir)
+                      (and (file-directory-p dir) dir))
+                    (condition-case nil
+                        (directory-files root t "\\`--")
+                      (error nil)))))))
+
+(defun pi-coding-agent--browse-session-files (dirs)
+  "Return every \\.jsonl file directly inside DIRS, in listing order.
+Unreadable or missing directories are skipped silently (empty)."
+  (apply #'append
+         (mapcar (lambda (dir)
+                   (condition-case nil
+                       (directory-files dir t "\\.jsonl\\'")
+                     (error nil)))
+                 dirs)))
+
+(defun pi-coding-agent--browse-scan-session-files (buf token files items callback)
+  "Scan FILES for sessions in 25 ms time slices, then call CALLBACK once.
+Each slice processes whole files until 25 ms elapse (a single huge file
+is atomic — one ~0.2 s hiccup is possible, documented), then defers
+the rest to the next slice via `(run-at-time 0 nil ...)`.  The FIRST
+slice is scheduled the same way, so a superseding fetch drops an older
+scan before any slice runs and the callback is uniformly asynchronous.
+A slice is dropped when BUF died or a newer fetch bumped the fetch
+TOKEN, and a dropped scan never calls CALLBACK.  ITEMS accumulates the
+session plists (already in the browse dialect: the scan is an identity
+mapping over `pi-coding-agent-jsonl-read-session-info' output)."
+  (if (and (buffer-live-p buf)
+           (eq token (buffer-local-value
+                      'pi-coding-agent--session-browser-fetch-token buf)))
+      (let ((deadline (+ (float-time) 0.025)))
+        (while (and files (< (float-time) deadline))
+          (let ((info (pi-coding-agent-jsonl-read-session-info (car files))))
+            (when info (push info items)))
+          (setq files (cdr files)))
+        (if files
+            (run-at-time 0 nil #'pi-coding-agent--browse-scan-session-files
+                         buf token files items callback)
+          (funcall callback (nreverse items) nil)))
+    ;; Stale or orphaned fetch: drop silently.
+    nil))
 
 (defun pi-coding-agent--browse-load-sessions (scope callback)
   "Load session items for SCOPE, then call CALLBACK with (ITEMS ERROR).
 ITEMS is a list of session plists in the browse session dialect:
 \(:path :id :cwd :name? :parentSessionPath? :created :modified
- :messageCount :firstMessage).  ERROR is an error string or nil.
-Phase 0 stub: no data source; calls back with (nil nil)."
-  (ignore scope)                      ; Phase 2 reads SCOPE (disk scan)
-  (funcall callback nil nil))
+:messageCount :firstMessage) — the identity over
+`pi-coding-agent-jsonl-read-session-info' output.  ERROR is an error
+string or nil.  SCOPE is \"current\" (one project directory) or \"all\" (every
+munged directory under the sessions root).  The scan is
+chunked (see `pi-coding-agent--browse-scan-session-files'), shows a
+loading state throughout, and reports exactly once; a superseded
+fetch's callback is dropped by the fetch token — a superseding fetch
+cancels an older one before any slice runs.  Directory resolution
+failures surface synchronously as the ERROR string \"Cannot list
+sessions: …\"."
+  (let ((buf (current-buffer)))
+    (setq pi-coding-agent--session-browser-fetch-token
+          (1+ pi-coding-agent--session-browser-fetch-token))
+    (let ((token pi-coding-agent--session-browser-fetch-token))
+      (let ((dirs nil)
+            (failure nil))
+        (condition-case err
+            (setq dirs (pi-coding-agent--browse-session-directories scope))
+          (error
+           (setq failure (format "Cannot list sessions: %s"
+                                (error-message-string err)))))
+        (if failure
+            (funcall callback nil failure)
+          (run-at-time 0 nil #'pi-coding-agent--browse-scan-session-files
+                       buf token
+                       (pi-coding-agent--browse-session-files dirs)
+                       nil callback))))))
 
 (defun pi-coding-agent--browse-load-tree (callback)
   "Load the conversation tree, then call CALLBACK with (TREE LEAF-ID).
@@ -1322,16 +1629,73 @@ Phase 0 stub: calls back with (nil nil).  Phase 3: get_tree RPC,
 `pi-coding-agent--parse-tree', projection via pi-coding-agent-jsonl."
   (funcall callback nil nil))
 
-(defun pi-coding-agent--browse-switch-session (path &optional on-success)
+(defun pi-coding-agent--browse-session-file-matches-p (chat-buf path)
+  "Return non-nil when CHAT-BUF's current session file is PATH.
+Compares `expand-file-name' spellings (anchored at CHAT-BUF so relative
+session files resolve like the chat does) with `file-equal-p' as the
+symlink-aware fallback."
+  (and (buffer-live-p chat-buf)
+       (with-current-buffer chat-buf
+         (let ((current (plist-get pi-coding-agent--state :session-file)))
+           (and (stringp current)
+                (or (equal (expand-file-name current)
+                           (expand-file-name path))
+                    (file-equal-p current path)))))))
+
+(defun pi-coding-agent--browse-switch-session (path)
   "Switch the linked chat session to session file PATH.
-ON-SUCCESS is called with no args after the chat buffer is rebuilt
-\(used to dismiss the browser window).
-Phase 0 stub: signals `user-error'.  Phase 2:
-`pi-coding-agent--session-transition-ready-p' guard, then
-`pi-coding-agent--resume-selected-session' (proc chat-buf path)."
-  (ignore path on-success)          ; Phase 2: path feeds the resume flow,
-                                    ; ON-SUCCESS is invoked after rebuild
-  (user-error "Session switching is not implemented yet"))
+Guards, in order: a live linked chat buffer (else `user-error'), a live
+pi process (else `user-error'), and
+`pi-coding-agent--session-transition-ready-p' (which reports its own
+refusal and returns quietly).  Delegation is
+`pi-coding-agent--resume-selected-session' (PROC CHAT-BUF PATH); its
+synchronous `user-error's (bad cwd, duplicate open) surface in the
+browser.  Afterwards `pi-coding-agent--browse-quit-when-settled' waits
+out the transition and dismisses the browser window only when the chat
+landed on PATH; a failed switch leaves the browser open (menu already
+messaged).  No extra refresh logic: \\[pi-coding-agent-browse-refresh]
+re-derives the \"current\" scope live and the entry point opens a fresh
+browser per project directory."
+  (let ((chat-buf pi-coding-agent--chat-buffer))
+    (unless (and chat-buf (buffer-live-p chat-buf))
+      (user-error "No pi session to switch to"))
+    (let ((proc (buffer-local-value 'pi-coding-agent--process chat-buf)))
+      (unless (pi-coding-agent--session-live-process-p proc)
+        (user-error "Pi process is not running"))
+      (when (pi-coding-agent--session-transition-ready-p chat-buf "switch")
+        (pi-coding-agent--resume-selected-session proc chat-buf path)
+        (pi-coding-agent--browse-quit-when-settled
+         chat-buf (selected-window) path)))))
+
+(defun pi-coding-agent--browse-poll-settled (chat-buf win path deadline)
+  "Polling body of `pi-coding-agent--browse-quit-when-settled'.
+CHAT-BUF, WIN, and PATH are the parent's arguments; give up silently
+once DEADLINE (an absolute time) has passed.  A dead CHAT-BUF also ends
+the poll quietly — there is nothing left to wait for, and probing a
+killed buffer would signal inside the timer."
+  (if (not (buffer-live-p chat-buf))
+      nil
+    (if (pi-coding-agent--session-transition-active-p chat-buf)
+        (when (time-less-p (current-time) deadline)
+          (run-at-time 0.05 nil #'pi-coding-agent--browse-poll-settled
+                       chat-buf win path deadline))
+      (when (and (pi-coding-agent--browse-session-file-matches-p chat-buf path)
+                 (window-live-p win)
+                 (with-current-buffer (window-buffer win)
+                   (derived-mode-p 'pi-coding-agent-session-browser-mode)))
+        (quit-window nil win)))))
+
+(defun pi-coding-agent--browse-quit-when-settled (chat-buf win path)
+  "Wait out CHAT-BUF's session transition, then dismiss the browser window.
+Polls `pi-coding-agent--session-transition-active-p' every 0.05 s with
+a 30 s timeout.  Once settled, WIN is quit ONLY when the chat state's
+:session-file matches PATH — a failed switch already messaged via the
+menu, so a mismatch silently leaves the browser open — and only when
+WIN still shows a session browser: a dead or repurposed window (the
+buffer was killed mid-poll) is left alone so `quit-window' can never
+close whatever replaced it."
+  (pi-coding-agent--browse-poll-settled
+   chat-buf win path (time-add (current-time) 30)))
 
 (defun pi-coding-agent--browse-navigate (node-id)
   "Move the live conversation to tree node NODE-ID.
@@ -1351,26 +1715,47 @@ to the session file out-of-band, then refresh the tree browser."
 ;;;; Tree Browser Fetch and Render
 
 (defun pi-coding-agent--tree-browser-fetch-and-render ()
-  "Fetch tree and re-render the tree browser."
-  (let ((buf (current-buffer))
-        (proc (pi-coding-agent--get-process)))
+  "Fetch tree and re-render the tree browser.
+The point anchor is captured before the loading-state render — that
+render destroys the node sections, so without carrying the anchor
+across the cycle the final render would find nothing under point to
+restore (see `pi-coding-agent--browse-rerender-preserving-point').
+A refresh issued while another fetch is still loading finds no
+sections to capture and reuses the in-flight cycle's anchor (see
+`pi-coding-agent--tree-browser-fetch-anchor')."
+  (let* ((buf (current-buffer))
+         (proc (pi-coding-agent--get-process))
+         (anchor (or (pi-coding-agent--browse-capture-point-anchor)
+                     ;; Mid-flight refresh: the loading render already
+                     ;; destroyed the sections under point, so carry
+                     ;; the anchor the in-flight cycle captured.
+                     (and pi-coding-agent--tree-browser-loading
+                          pi-coding-agent--tree-browser-fetch-anchor))))
     (if (not proc)
         (message "Pi: No active process")
-      (setq pi-coding-agent--tree-browser-loading t)
+      (setq pi-coding-agent--tree-browser-loading t
+            pi-coding-agent--tree-browser-fetch-anchor anchor)
+      ;; Loading-state render: default point behavior (nothing to keep).
       (pi-coding-agent--tree-browser-rerender)
       (pi-coding-agent--browse-load-tree
        (lambda (tree leaf-id)
          (when (buffer-live-p buf)
+           ;; The load calls back from a timer in whatever buffer is
+           ;; current; render in the browser buffer, not that one.
            (with-current-buffer buf
              (setq pi-coding-agent--tree-browser-loading nil
+                   pi-coding-agent--tree-browser-fetch-anchor nil
                    pi-coding-agent--tree-browser-tree tree
-                   pi-coding-agent--tree-browser-leaf-id leaf-id))
-           (pi-coding-agent--tree-browser-rerender)))))))
+                   pi-coding-agent--tree-browser-leaf-id leaf-id)
+             (pi-coding-agent--tree-browser-rerender anchor))))))))
 
-(defun pi-coding-agent--tree-browser-rerender ()
-  "Re-render the tree browser from local state, preserving point."
+(defun pi-coding-agent--tree-browser-rerender (&optional fallback)
+  "Re-render the tree browser from local state, preserving point.
+FALLBACK is a pre-fetch `(IDENT . OFFSET)' anchor handed to
+`pi-coding-agent--browse-rerender-preserving-point' for the fetch
+cycle's final render."
   (pi-coding-agent--browse-rerender-preserving-point
-   (current-buffer) #'pi-coding-agent--tree-browser-render))
+   (current-buffer) #'pi-coding-agent--tree-browser-render fallback))
 
 ;;;; Tree Browser Refresh Integration
 
