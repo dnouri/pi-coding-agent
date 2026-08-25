@@ -10,6 +10,7 @@
 (require 'ert)
 (require 'json)
 (require 'pi-coding-agent-browse)
+(require 'pi-coding-agent-jsonl)
 (require 'pi-coding-agent-test-common)
 
 ;;;; Test Fixtures
@@ -1293,24 +1294,29 @@ the summarize feature (needs navigate_tree RPC)."
           (kill-buffer buf))))))
 
 (ert-deftest pi-coding-agent-test-tree-browser-startup-message ()
-  "Tree browser shows help hint message on first creation."
-  (let ((messages nil))
-    (cl-letf (((symbol-function 'message)
-               (lambda (fmt &rest args)
-                 (push (apply #'format fmt args) messages)))
-              ((symbol-function 'pi-coding-agent--tree-browser-fetch-and-render)
-               #'ignore)
-              ((symbol-function 'pi-coding-agent--get-chat-buffer)
-               (lambda () nil))
-              ((symbol-function 'pi-coding-agent--session-directory)
-               (lambda () "/tmp/pi-test/")))
-      (pi-coding-agent-tree-browser)
-      (unwind-protect
-          (should (member "Pi: Press ? for available commands" messages))
-        (when-let ((buf (get-buffer
-                         (pi-coding-agent--tree-browser-buffer-name
-                          "/tmp/pi-test/"))))
-          (kill-buffer buf))))))
+  "Tree browser shows help hint message on first creation.
+Phase 3's entry-point guard requires a live chat link, so the test
+provides one — a plain live buffer suffices; only liveness is
+checked, and the fetch seam stays stubbed out."
+  (let ((messages nil)
+        (chat-buf (generate-new-buffer " *test-tree-startup-chat*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (push (apply #'format fmt args) messages)))
+                  ((symbol-function 'pi-coding-agent--tree-browser-fetch-and-render)
+                   #'ignore)
+                  ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                   (lambda () chat-buf))
+                  ((symbol-function 'pi-coding-agent--session-directory)
+                   (lambda () "/tmp/pi-test/")))
+          (pi-coding-agent-tree-browser)
+          (should (member "Pi: Press ? for available commands" messages)))
+      (when-let ((buf (get-buffer
+                       (pi-coding-agent--tree-browser-buffer-name
+                        "/tmp/pi-test/"))))
+        (kill-buffer buf))
+      (kill-buffer chat-buf))))
 
 ;;;; Point Restoration (Phase 0 fix)
 
@@ -1592,23 +1598,25 @@ leaving the browser stuck on its loading state)."
 
 (ert-deftest pi-coding-agent-test-tree-browser-fetch-renders-in-browser-buffer ()
   "The tree fetch callback renders in the browser buffer, not the caller's.
-Same latent defect as the session browser: the async load reports from
-a timer in whatever buffer is current."
+Same latent defect as the session browser: the deferred disk read calls
+back from a timer in whatever buffer is current.  The Phase 3 seam
+callback receives (TREE LEAF-ID MESSAGE); the mock reports success, so
+MESSAGE is nil and no process mock is needed anywhere (the tree comes
+from disk, not the RPC)."
   (let* ((tree-data (pi-coding-agent--parse-tree
                      (pi-coding-agent-test--read-json-fixture "browse-tree.json")))
          (other (get-buffer-create " *pi-test-tree-other*")))
     (unwind-protect
         (with-temp-buffer
           (pi-coding-agent-tree-browser-mode)
-          (cl-letf (((symbol-function 'pi-coding-agent--get-process)
-                     (lambda () 'fake))
-                    ((symbol-function 'pi-coding-agent--browse-load-tree)
+          (cl-letf (((symbol-function 'pi-coding-agent--browse-load-tree)
                      (lambda (callback)
                        ;; Callback fires with some OTHER buffer current.
                        (with-current-buffer other
                          (funcall callback
                                   (plist-get tree-data :tree)
-                                  (plist-get tree-data :leafId)))))
+                                  (plist-get tree-data :leafId)
+                                  nil))))
                     ((symbol-function 'run-at-time)
                      (lambda (_secs _repeat fn &rest args)
                        (apply fn args))))
@@ -1643,9 +1651,11 @@ a timer in whatever buffer is current."
 ;;;; Phase 0 Stub Seams
 
 (ert-deftest pi-coding-agent-test-browse-stub-loaders-render-empty-states ()
-  "Phase 0 stub seam callbacks render empty states without errors.
-The session browser needs no live process (the Phase 2 disk-scan
-relaxation); the tree browser keeps its process guard until Phase 3."
+  "Seam callbacks render empty and error states without signaling.
+Both browsers read from disk, so neither needs a live process or a
+--get-process mock: the session browser (Phase 2 disk scan) renders
+its empty state with no sessions, and the tree browser (Phase 3 disk
+read) with no linked chat renders its link-error message."
   (let ((session-buf (generate-new-buffer " *test-sessions*"))
         (tree-buf (generate-new-buffer " *test-tree*"))
         (root (pi-coding-agent-test--make-temp-directory "pi-stub-root")))
@@ -1670,19 +1680,24 @@ relaxation); the tree browser keeps its process guard until Phase 3."
             (should (string-match-p "No sessions found" (buffer-string))))
           (with-current-buffer tree-buf
             (pi-coding-agent-tree-browser-mode)
-            (cl-letf (((symbol-function 'pi-coding-agent--get-process)
-                       (lambda () 'fake)))
-              (pi-coding-agent--tree-browser-fetch-and-render)
-              (should-not pi-coding-agent--tree-browser-loading)
-              (should (string-match-p "No conversation tree" (buffer-string))))))
+            ;; No process mock and no chat link: the fetch renders the
+            ;; link-error state instead of signaling.
+            (cl-letf (((symbol-function 'run-at-time)
+                       (lambda (_secs _repeat fn &rest args)
+                         (apply fn args))))
+              (pi-coding-agent--tree-browser-fetch-and-render))
+            (should-not pi-coding-agent--tree-browser-loading)
+            (should (string-match-p "No linked pi chat session"
+                                    (buffer-string)))))
       (kill-buffer session-buf)
       (kill-buffer tree-buf))))
 
 (ert-deftest pi-coding-agent-test-browse-stub-actions-signal-user-error ()
-  "Action seams signal `user-error' instead of pretending to succeed.
+  "Action seam contracts without a linked chat session.
 The switch seam's Phase 2 contract is the no-session error when no
-chat buffer is linked; navigate and label stay user-error stubs until
-Phases 3-4."
+chat buffer is linked; navigate stays a `user-error' stub until Phase
+4; labeling went live in Phase 3 and reports Cannot-label instead of
+signaling."
   (with-temp-buffer
     (pi-coding-agent-session-browser-mode)
     (should (equal (error-message-string
@@ -1693,9 +1708,15 @@ Phases 3-4."
   (should-error
       (pi-coding-agent--browse-navigate "node-1")
     :type 'user-error)
-  (should-error
-      (pi-coding-agent--browse-set-label "node-1" "label")
-    :type 'user-error))
+  ;; Labeling without a resolvable session file: message, no signal.
+  (let ((messages nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (push (apply #'format fmt args) messages))))
+      (pi-coding-agent--browse-set-label "node-1" "label"))
+    (should (cl-some (lambda (m)
+                       (string-match-p "Cannot label: no session file" m))
+                     messages))))
 
 ;;;; Phase 2: Raw Session File Helpers
 
@@ -2354,6 +2375,627 @@ no RPC, no append (no clearing in Phase 2)."
             (should (equal (pi-coding-agent-test--file-contents current-path)
                            current-before))
             (should (member "Pi: Rename cancelled" messages))))
+      (kill-buffer chat-buf))))
+
+;;;; Phase 3: Tree Browser Live (disk-based) + Labels
+
+(defmacro pi-coding-agent-test--with-tree-link (chat-buf &rest body)
+  "Run BODY in a tree-browser buffer linked to CHAT-BUF."
+  (declare (indent 1) (debug (sexp body)))
+  `(with-temp-buffer
+     (pi-coding-agent-tree-browser-mode)
+     (setq pi-coding-agent--chat-buffer ,chat-buf)
+     ,@body))
+
+(defun pi-coding-agent-test--live-session-lines (&optional with-label)
+  "Return raw session lines for a realistic small session.
+Header, a user prompt, an assistant grep tool round-trip, and a final
+assistant text turn.  WITH-LABEL appends one label line targeting the
+user message, so the raw leaf is a filtered label entry and the
+projected leaf resolves up to the last visible entry."
+  (append
+   (list (pi-coding-agent-test--make-session-header "sid-live")
+         (pi-coding-agent-test--user-line "m1" nil "fix the parser")
+         (pi-coding-agent-test--jsonl-line
+          "message" "m2" "m1"
+          :message '(:role "assistant"
+                     :content [(:type "text" :text "checking the Makefile")
+                               (:type "toolCall" :id "tc1" :name "grep"
+                                      :arguments (:pattern "ldflags"
+                                                  :path "/srv/demo/Makefile"))]
+                     :stopReason "tool_calls"))
+         (pi-coding-agent-test--jsonl-line
+          "message" "m3" "m2"
+          :message '(:role "toolResult" :toolCallId "tc1" :toolName "grep"
+                     :output [(:type "text" :text "Makefile:14: LDFLAGS")]))
+         (pi-coding-agent-test--jsonl-line
+          "message" "m4" "m3"
+          :message '(:role "assistant" :content "done"
+                             :stopReason "end_turn")))
+   (when with-label
+     (list (pi-coding-agent-test--jsonl-line
+            "label" "l1" "m4" :targetId "m1" :label "checkpoint")))))
+
+(defun pi-coding-agent-test--tree-find-node (tree id)
+  "Find the projected node with :id ID in TREE; nil when absent.
+Traversal is iterative."
+  (let ((stack (append tree nil))
+        (found nil))
+    (while (and stack (not found))
+      (let ((node (pop stack)))
+        (if (equal (plist-get node :id) id)
+            (setq found node)
+          (setq stack (append (append (plist-get node :children) nil)
+                              stack)))))
+    found))
+
+(defun pi-coding-agent-test--margin-overlay-contains-p (text)
+  "Return non-nil when a right-margin overlay shows TEXT in this buffer."
+  (cl-some
+   (lambda (o)
+     (let* ((bs (overlay-get o 'before-string))
+            (display (and bs (get-text-property 0 'display bs))))
+       (and display (string-match-p (regexp-quote text) (cadr display)))))
+   (overlays-in (point-min) (point-max))))
+
+(defmacro pi-coding-agent-test--sync-timers (body)
+  "Run BODY with `run-at-time' shimmed to run its job synchronously."
+  (declare (indent 0) (debug (lambda)))
+  `(cl-letf (((symbol-function 'run-at-time)
+              (lambda (_secs _repeat fn &rest args)
+                (apply fn args))))
+     (funcall ,body)))
+
+(ert-deftest pi-coding-agent-test-load-tree-reads-and-projects-session-file ()
+  "--browse-load-tree reads and projects the linked chat's session file.
+The seam callback receives (TREE LEAF-ID MESSAGE): TREE and LEAF-ID are
+`equal' to the direct jsonl pipeline (read-file, build-tree,
+project-tree) over the same file, and MESSAGE is nil on success.  The
+label line folds onto its target and the raw leaf (the label entry)
+resolves up to the last visible entry.  The fetch cycle records the
+freshly resolved file in `--tree-browser-loaded-file' and renders it."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-tree-live"))
+         (path (expand-file-name "session.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-tree-live-chat*"))
+         (calls nil))
+    (pi-coding-agent-test--write-session-lines
+     path (pi-coding-agent-test--live-session-lines t))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :session-file path)))
+          (pi-coding-agent-test--with-tree-link chat-buf
+            ;; Direct seam call: the deferred read delivers synchronously
+            ;; under the timer shim.
+            (pi-coding-agent-test--sync-timers
+              (lambda ()
+                (pi-coding-agent--browse-load-tree
+                 (lambda (tree leaf-id message)
+                   (push (list tree leaf-id message) calls)))))
+            (should (equal (length calls) 1))
+            (pcase-let ((`(,tree ,leaf-id ,message) (car calls)))
+              (should-not message)
+              (let* ((session (pi-coding-agent-jsonl-read-file path))
+                     (built (pi-coding-agent-jsonl-build-tree
+                             (plist-get session :entries)))
+                     (expected (pi-coding-agent-jsonl-project-tree
+                                (plist-get built :tree)
+                                (plist-get built :leafId))))
+                (should (equal tree (plist-get expected :tree)))
+                (should (equal leaf-id (plist-get expected :leafId))))
+              ;; The label folds onto its target; the raw leaf is the
+              ;; label entry, whose projected leaf resolves up to m4.
+              (should (equal (plist-get
+                              (pi-coding-agent-test--tree-find-node tree "m1")
+                              :label)
+                             "checkpoint"))
+              (should (equal leaf-id "m4")))
+            ;; Fetch cycle: the loaded file is recorded and the tree
+            ;; renders in the browser buffer.
+            (pi-coding-agent-test--sync-timers
+              (lambda ()
+                (pi-coding-agent--tree-browser-fetch-and-render)))
+            (should (equal pi-coding-agent--tree-browser-loaded-file path))
+            (should-not pi-coding-agent--tree-browser-loading)
+            (should-not pi-coding-agent--tree-browser-error)
+            (should (string-match-p "fix the parser" (buffer-string)))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-load-tree-no-chat-link ()
+  "A tree fetch with no linked chat renders the link error state.
+The message names the pi chat session, the fetch renders it as text
+with a zero visible count, and nothing is treated as loaded.  The
+entry point guards the same condition with a `user-error' before any
+browser buffer is created."
+  (with-temp-buffer
+    (pi-coding-agent-tree-browser-mode)
+    (pi-coding-agent-test--sync-timers
+      (lambda () (pi-coding-agent--tree-browser-fetch-and-render)))
+    (should (string-match-p "No linked pi chat session" (buffer-string)))
+    (should-not pi-coding-agent--tree-browser-loading)
+    (should (string-match-p "chat" pi-coding-agent--tree-browser-error))
+    (should (= pi-coding-agent--tree-browser-visible-count 0))
+    (should-not pi-coding-agent--tree-browser-loaded-file))
+  ;; Entry point: the guard fires before any buffer is created.
+  (let* ((created nil)
+         (guard-buf (generate-new-buffer " *pi-test-tree-guard*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'pi-coding-agent--get-chat-buffer)
+                   (lambda () nil))
+                  ((symbol-function 'pi-coding-agent--get-or-create-tree-browser)
+                   (lambda (&rest _)
+                     (setq created t)
+                     guard-buf))
+                  ((symbol-function 'pop-to-buffer) #'ignore)
+                  ((symbol-function 'pi-coding-agent--browse-apply-margins)
+                   #'ignore)
+                  ((symbol-function
+                    'pi-coding-agent--tree-browser-fetch-and-render)
+                   #'ignore))
+          (should (equal (error-message-string
+                          (should-error (pi-coding-agent-tree-browser)
+                                        :type 'user-error))
+                         "No pi session to browse"))
+          (should-not created))
+      (kill-buffer guard-buf))))
+
+(ert-deftest pi-coding-agent-test-load-tree-no-session-file-yet ()
+  "A live chat link whose session file does not exist yet renders the
+not-yet state — both a state without :session-file and one naming a
+nonexistent path.  No signal in either case; the visible count is zero."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-tree-nofile"))
+         (chat-buf (generate-new-buffer " *test-tree-nofile-chat*")))
+    (unwind-protect
+        (pi-coding-agent-test--with-tree-link chat-buf
+          ;; State without a :session-file key.
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :messageCount 0)))
+          (pi-coding-agent-test--sync-timers
+            (lambda () (pi-coding-agent--tree-browser-fetch-and-render)))
+          (should (string-match-p "No session file yet" (buffer-string)))
+          (should (string-match-p "No session file yet"
+                                  pi-coding-agent--tree-browser-error))
+          (should (= pi-coding-agent--tree-browser-visible-count 0))
+          (should-not pi-coding-agent--tree-browser-loaded-file)
+          ;; State naming a path that does not exist yet: the file is
+          ;; only created on the first assistant reply.
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state
+                  (list :session-file (expand-file-name "pending.jsonl" dir))))
+          (pi-coding-agent-test--sync-timers
+            (lambda () (pi-coding-agent--tree-browser-fetch-and-render)))
+          (should (string-match-p "No session file yet" (buffer-string)))
+          (should (string-match-p "first assistant"
+                                  pi-coding-agent--tree-browser-error)))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-load-tree-unreadable-session-file ()
+  "An existing session file that does not parse as a pi session renders
+the unreadable state naming the file — garbage and headerless files
+both read as nil, which is an error message, never a signal."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-tree-garbage"))
+         (garbage (expand-file-name "garbage.jsonl" dir))
+         (headerless (expand-file-name "headerless.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-tree-garbage-chat*")))
+    (with-temp-file garbage
+      (insert "this is not json\n{\"type\":\"message\",\"id\":\"g1\"}\n"))
+    (pi-coding-agent-test--write-session-lines
+     headerless (list (pi-coding-agent-test--user-line "g1" nil "decoy")))
+    (unwind-protect
+        (pi-coding-agent-test--with-tree-link chat-buf
+          (dolist (path (list garbage headerless))
+            (with-current-buffer chat-buf
+              (setq pi-coding-agent--state (list :session-file path)))
+            (pi-coding-agent-test--sync-timers
+              (lambda () (pi-coding-agent--tree-browser-fetch-and-render)))
+            (should (string-match-p "unreadable" (buffer-string)))
+            (should (string-match-p
+                     (format "Session file is unreadable or not a pi session file: %s"
+                             (regexp-quote path))
+                     pi-coding-agent--tree-browser-error))
+            (should (= pi-coding-agent--tree-browser-visible-count 0))
+            (should-not pi-coding-agent--tree-browser-loaded-file)))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-load-tree-deferred-and-tokened ()
+  "--browse-load-tree defers the disk read and honors the fetch token.
+The read is queued through `run-at-time'; a superseding fetch bumps
+the buffer's fetch token so the older timer drops itself without
+calling back, and the newer one reports exactly once with the
+projected tree and no error."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-tree-defer"))
+         (path (expand-file-name "session.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-tree-defer-chat*")))
+    (pi-coding-agent-test--write-session-lines
+     path (pi-coding-agent-test--live-session-lines))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :session-file path)))
+          (pi-coding-agent-test--with-tree-link chat-buf
+            ;; Deferred timers: A is queued, B supersedes it before any
+            ;; timer runs; running the queue drops A and reports B once.
+            (let ((calls-a nil) (calls-b nil) (queue nil))
+              (cl-letf (((symbol-function 'run-at-time)
+                         (lambda (_secs _repeat fn &rest args)
+                           (push (cons fn args) queue))))
+                (pi-coding-agent--browse-load-tree
+                 (lambda (tree leaf-id message)
+                   (push (list tree leaf-id message) calls-a)))
+                (pi-coding-agent--browse-load-tree
+                 (lambda (tree leaf-id message)
+                   (push (list tree leaf-id message) calls-b)))
+                (while queue
+                  (let ((job (pop queue)))
+                    (apply (car job) (cdr job)))))
+              (should-not calls-a)
+              (should (equal (length calls-b) 1))
+              (pcase-let ((`(,tree ,leaf-id ,message) (car calls-b)))
+                (should-not message)
+                (should (equal leaf-id "m4"))
+                (should (equal (plist-get
+                                (pi-coding-agent-test--tree-find-node tree "m1")
+                                :preview)
+                               "fix the parser"))))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-tree-fetch-without-process ()
+  "The tree browser fetch proceeds without a live pi process.
+Phase 3 reads the tree from the linked chat's session file on disk, so
+the Phase 0 no-process guard is gone: real previews render with no
+--get-process mock anywhere, the loading state clears, and no error is
+recorded."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-tree-noproc"))
+         (path (expand-file-name "session.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-tree-noproc-chat*")))
+    (pi-coding-agent-test--write-session-lines
+     path (pi-coding-agent-test--live-session-lines))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :session-file path)))
+          (pi-coding-agent-test--with-tree-link chat-buf
+            (pi-coding-agent-test--sync-timers
+              (lambda () (pi-coding-agent--tree-browser-fetch-and-render)))
+            (should (string-match-p "fix the parser" (buffer-string)))
+            (should-not pi-coding-agent--tree-browser-loading)
+            (should-not pi-coding-agent--tree-browser-error)))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-set-label-appends-label-entry ()
+  "Setting a label appends exactly one label entry to the session file.
+The line carries a fresh 8-hex id colliding with nothing, :parentId is
+the last parseable line's id, :targetId names the node, the timestamp
+is ISO-ms no older than the call, and prior bytes stay byte-for-byte
+intact (a missing trailing newline gains a separator first).  The
+cached projected tree is patched and re-rendered in place — the file
+is NOT read again — and the label shows as a margin overlay."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-label-append"))
+         (path (expand-file-name "session.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-label-append-chat*"))
+         (start-iso (format-time-string "%Y-%m-%dT%H:%M:%S.%3NZ" nil t))
+         (messages nil)
+         (read-calls 0)
+         (real-read (symbol-function 'pi-coding-agent-jsonl-read-file)))
+    ;; No trailing newline: the append must add the separator itself.
+    (pi-coding-agent-test--write-session-lines
+     path (pi-coding-agent-test--live-session-lines) t)
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :session-file path)))
+          (pi-coding-agent-test--with-tree-link chat-buf
+            (cl-letf (((symbol-function 'pi-coding-agent-jsonl-read-file)
+                       (lambda (p)
+                         (cl-incf read-calls)
+                         (funcall real-read p))))
+              (pi-coding-agent-test--sync-timers
+                (lambda () (pi-coding-agent--tree-browser-fetch-and-render)))
+              (let ((reads-after-fetch read-calls)
+                    (before (pi-coding-agent-test--file-contents path)))
+                (cl-letf (((symbol-function 'message)
+                           (lambda (fmt &rest args)
+                             (push (apply #'format fmt args) messages))))
+                  (pi-coding-agent--browse-set-label "m2" "keep this"))
+                ;; Exactly one line appended after a separator.
+                (let* ((after (pi-coding-agent-test--file-contents path))
+                       (appended (car (split-string
+                                       (substring after (length before))
+                                       "\n" t)))
+                       (entry (json-parse-string appended :object-type 'plist)))
+                  (should (string-prefix-p before after))
+                  (should (string-suffix-p (concat appended "\n") after))
+                  (should (equal (plist-get entry :type) "label"))
+                  (should (equal (plist-get entry :targetId) "m2"))
+                  (should (equal (plist-get entry :label) "keep this"))
+                  (should (string-match-p "\\`[0-9a-f]\\{8\\}\\'"
+                                          (plist-get entry :id)))
+                  (should (not (member (plist-get entry :id)
+                                       '("sid-live" "m1" "m2" "m3" "m4"))))
+                  ;; parentId is the last parseable line's id.
+                  (should (equal (plist-get entry :parentId) "m4"))
+                  (let ((ts (plist-get entry :timestamp)))
+                    (should (string-match-p
+                             "\\`[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}T[0-9]\\{2\\}:[0-9]\\{2\\}:[0-9]\\{2\\}\\.[0-9]\\{3\\}Z\\'"
+                             ts))
+                    (should (not (string< ts start-iso)))))
+                ;; Patched in place: no re-read of the session file.
+                (should (= read-calls reads-after-fetch))
+                (should (equal (plist-get
+                                (pi-coding-agent-test--tree-find-node
+                                 pi-coding-agent--tree-browser-tree "m2")
+                                :label)
+                               "keep this"))
+                (should (pi-coding-agent-test--margin-overlay-contains-p
+                         "keep this"))
+                (should (cl-some (lambda (m) (string-match-p "Label set" m))
+                                 messages))))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-set-label-clear-omits-label-key ()
+  "Clearing a label appends a label entry with the label key omitted.
+pi's appendLabelChange shape omits :label on a clear (the load-time
+fold treats absent as clear), so the raw line has no \"label\" key at
+all; the cached tree loses :label and the margin overlay disappears."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-label-clear"))
+         (path (expand-file-name "session.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-label-clear-chat*"))
+         (messages nil))
+    (pi-coding-agent-test--write-session-lines
+     path (append (pi-coding-agent-test--live-session-lines)
+                  (list (pi-coding-agent-test--jsonl-line
+                         "label" "l1" "m4" :targetId "m2" :label "old tag"))))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :session-file path)))
+          (pi-coding-agent-test--with-tree-link chat-buf
+            (pi-coding-agent-test--sync-timers
+              (lambda () (pi-coding-agent--tree-browser-fetch-and-render)))
+            (should (pi-coding-agent-test--margin-overlay-contains-p "old tag"))
+            (let ((before (pi-coding-agent-test--file-contents path)))
+              (cl-letf (((symbol-function 'message)
+                         (lambda (fmt &rest args)
+                           (push (apply #'format fmt args) messages))))
+                (pi-coding-agent--browse-set-label "m2" nil))
+              (let* ((after (pi-coding-agent-test--file-contents path))
+                     (appended (car (split-string
+                                     (substring after (length before))
+                                     "\n" t)))
+                     (entry (json-parse-string appended :object-type 'plist)))
+                (should (string-prefix-p before after))
+                (should (equal (plist-get entry :type) "label"))
+                (should (equal (plist-get entry :targetId) "m2"))
+                ;; The clear omits the label key entirely — the only
+                ;; "label" substring left is the "type":"label" pair.
+                (should-not (plist-get entry :label))
+                (should-not (string-match-p "\"label\":" appended))
+                ;; parentId is the last parseable line's id (the old
+                ;; label line).
+                (should (equal (plist-get entry :parentId) "l1"))))
+            ;; The cached tree and buffer lose the label.
+            (should-not (plist-get
+                         (pi-coding-agent-test--tree-find-node
+                          pi-coding-agent--tree-browser-tree "m2")
+                         :label))
+            (should-not (pi-coding-agent-test--margin-overlay-contains-p
+                         "old tag"))
+            (should (cl-some (lambda (m) (string-match-p "Label cleared" m))
+                             messages))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-label-survives-refetch ()
+  "An appended label survives a refetch and stays on the same leaf.
+The label folds back from disk, and although the file's last line is
+now the label entry itself (the new raw leaf), the projected leaf
+still resolves up to the pre-label visible leaf."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-label-refetch"))
+         (path (expand-file-name "session.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-label-refetch-chat*")))
+    (pi-coding-agent-test--write-session-lines
+     path (pi-coding-agent-test--live-session-lines))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :session-file path)))
+          (pi-coding-agent-test--with-tree-link chat-buf
+            (pi-coding-agent-test--sync-timers
+              (lambda () (pi-coding-agent--tree-browser-fetch-and-render)))
+            (should (equal pi-coding-agent--tree-browser-leaf-id "m4"))
+            (pi-coding-agent-test--sync-timers
+              (lambda () (pi-coding-agent--tree-browser-fetch-and-render)))
+            (should (equal pi-coding-agent--tree-browser-leaf-id "m4"))
+            (pi-coding-agent--browse-set-label "m1" "checkpoint")
+            ;; The local patch and a fresh disk fold agree exactly: the
+            ;; patched cached tree and leaf equal a whole fresh
+            ;; projection of the file (label pair in the canonical
+            ;; after-:timestamp slot, clear leaving no pair at all).
+            (let ((fresh (pi-coding-agent-jsonl-project-session-file path)))
+              (should (equal pi-coding-agent--tree-browser-tree
+                             (plist-get fresh :tree)))
+              (should (equal pi-coding-agent--tree-browser-leaf-id
+                             (plist-get fresh :leafId))))
+            ;; The file's last line is now the label entry.
+            (let* ((session (pi-coding-agent-jsonl-read-file path))
+                   (raw-leaf (plist-get session :leafId)))
+              (should (string-match-p "\\`[0-9a-f]\\{8\\}\\'" raw-leaf))
+              (should-not (member raw-leaf '("m1" "m2" "m3" "m4"))))
+            ;; Refetch: folded from disk, leaf unchanged, still shown.
+            (pi-coding-agent-test--sync-timers
+              (lambda () (pi-coding-agent--tree-browser-fetch-and-render)))
+            (should (equal pi-coding-agent--tree-browser-leaf-id "m4"))
+            (should (equal (plist-get
+                            (pi-coding-agent-test--tree-find-node
+                             pi-coding-agent--tree-browser-tree "m1")
+                            :label)
+                           "checkpoint"))
+            (should (pi-coding-agent-test--margin-overlay-contains-p
+                     "checkpoint"))
+            (should-not pi-coding-agent--tree-browser-error)))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-load-tree-interrupted-by-quit ()
+  "A quit during the deferred read reports an error state, not a stuck
+loading render.  C-g against a huge file raises `quit' — not `error' —
+inside the blocking read; the seam must still call back so the loading
+state clears and the buffer names the interruption."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-tree-quit"))
+         (path (expand-file-name "session.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-tree-quit-chat*")))
+    (pi-coding-agent-test--write-session-lines
+     path (pi-coding-agent-test--live-session-lines))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :session-file path)))
+          (pi-coding-agent-test--with-tree-link chat-buf
+            (cl-letf (((symbol-function 'pi-coding-agent-jsonl-project-session-file)
+                       (lambda (_path) (signal 'quit nil))))
+              (pi-coding-agent-test--sync-timers
+                (lambda () (pi-coding-agent--tree-browser-fetch-and-render))))
+            (should-not pi-coding-agent--tree-browser-loading)
+            (should (string-match-p "interrupted"
+                                    pi-coding-agent--tree-browser-error))
+            (should (string-match-p "interrupted" (buffer-string)))
+            (should (= pi-coding-agent--tree-browser-visible-count 0))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-load-tree-mid-read-session-switch ()
+  "A chat session switch between fetch start and the deferred read
+leaves `--tree-browser-loaded-file' pinned to the file the fetch
+actually read.  Resolving the link again at callback time would arm
+the labeler against the NEW session while the browser still shows the
+OLD tree, appending a node id from one file into the other; instead
+labeling must refuse with the refresh message and touch nothing."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-tree-midsw"))
+         (path-a (expand-file-name "a.jsonl" dir))
+         (path-b (expand-file-name "b.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-tree-midsw-chat*"))
+         (messages nil))
+    (pi-coding-agent-test--write-session-lines
+     path-a (pi-coding-agent-test--live-session-lines))
+    (pi-coding-agent-test--write-session-lines
+     path-b (pi-coding-agent-test--live-session-lines))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :session-file path-a)))
+          (pi-coding-agent-test--with-tree-link chat-buf
+            (cl-letf* ((real (symbol-function 'pi-coding-agent-jsonl-project-session-file))
+                       ((symbol-function 'pi-coding-agent-jsonl-project-session-file)
+                        (lambda (p)
+                          ;; The chat switches sessions while the
+                          ;; deferred read runs; the read itself
+                          ;; still returns path-a's projection.
+                          (with-current-buffer chat-buf
+                            (setq pi-coding-agent--state
+                                  (list :session-file path-b)))
+                          (funcall real p))))
+              (pi-coding-agent-test--sync-timers
+                (lambda () (pi-coding-agent--tree-browser-fetch-and-render))))
+            (should (equal pi-coding-agent--tree-browser-loaded-file
+                           path-a))
+            ;; Fresh resolution now disagrees: labeling refuses.
+            (let ((before-b (pi-coding-agent-test--file-contents path-b)))
+              (cl-letf (((symbol-function 'message)
+                         (lambda (fmt &rest args)
+                           (push (apply #'format fmt args) messages))))
+                (pi-coding-agent--browse-set-label "m1" "late"))
+              (should (member
+                       "Pi: Session changed since the tree was loaded — refresh with g"
+                       messages))
+              (should (equal (pi-coding-agent-test--file-contents path-b)
+                             before-b)))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-tree-fetch-paints-loading-state ()
+  "The loading render is painted before the deferred read is scheduled.
+Emacs runs due 0-timers before redisplaying, so a single timer hop to
+the read starves the loading paint entirely (verified mechanically:
+mid-read the terminal still shows the previous buffer contents).  The
+fetch must force a `redisplay' between the loading render and the
+seam call."
+  (with-temp-buffer
+    (pi-coding-agent-tree-browser-mode)
+    (let ((log nil))
+      (cl-letf (((symbol-function 'redisplay)
+                 (lambda (&rest _) (push :redisplay log)))
+                ((symbol-function 'pi-coding-agent--browse-load-tree)
+                 (lambda (_callback) (push :load log))))
+        (pi-coding-agent--tree-browser-fetch-and-render))
+      ;; Strict order: the paint lands before the seam (and thus
+      ;; before any deferred read) is even scheduled.
+      (should (equal log '(:load :redisplay))))))
+
+(ert-deftest pi-coding-agent-test-set-label-rejects-stale-session ()
+  "Labeling refuses when the chat moved to another session file.
+The loaded-file guard compares against a fresh resolution of the chat
+link: a mismatch messages instead of appending, and neither the loaded
+nor the current file changes."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-label-stale"))
+         (path-a (expand-file-name "a.jsonl" dir))
+         (path-b (expand-file-name "b.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-label-stale-chat*"))
+         (messages nil))
+    (pi-coding-agent-test--write-session-lines
+     path-a (pi-coding-agent-test--live-session-lines))
+    (pi-coding-agent-test--write-session-lines
+     path-b (pi-coding-agent-test--live-session-lines))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :session-file path-a)))
+          (pi-coding-agent-test--with-tree-link chat-buf
+            (pi-coding-agent-test--sync-timers
+              (lambda () (pi-coding-agent--tree-browser-fetch-and-render)))
+            (should (equal pi-coding-agent--tree-browser-loaded-file path-a))
+            ;; The chat switches sessions behind the browser's back.
+            (with-current-buffer chat-buf
+              (setq pi-coding-agent--state (list :session-file path-b)))
+            (let ((before-a (pi-coding-agent-test--file-contents path-a))
+                  (before-b (pi-coding-agent-test--file-contents path-b)))
+              (cl-letf (((symbol-function 'message)
+                         (lambda (fmt &rest args)
+                           (push (apply #'format fmt args) messages))))
+                (pi-coding-agent--browse-set-label "m1" "late"))
+              (should (member
+                       "Pi: Session changed since the tree was loaded — refresh with g"
+                       messages))
+              (should (equal (pi-coding-agent-test--file-contents path-a)
+                             before-a))
+              (should (equal (pi-coding-agent-test--file-contents path-b)
+                             before-b)))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-set-label-no-session-file ()
+  "Labeling with no resolvable session file reports and writes nothing.
+Both a dead chat link and a live link whose state has no :session-file
+message \"Pi: Cannot label: no session file\"; no file is created or
+appended anywhere."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-label-nofile"))
+         (chat-buf (generate-new-buffer " *test-label-nofile-chat*"))
+         (messages nil))
+    (unwind-protect
+        (progn
+          ;; Live link, state without a session file.
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :messageCount 3)))
+          (pi-coding-agent-test--with-tree-link chat-buf
+            (cl-letf (((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (push (apply #'format fmt args) messages))))
+              (pi-coding-agent--browse-set-label "m1" "nowhere")
+              ;; No chat link at all.
+              (setq pi-coding-agent--chat-buffer nil)
+              (pi-coding-agent--browse-set-label "m1" "nowhere")
+              (should (equal (cl-count-if
+                              (lambda (m)
+                                (string-match-p
+                                 "\\`Pi: Cannot label: no session file\\'" m))
+                              messages)
+                             2))))
+          ;; Nothing was written anywhere in the scratch directory.
+          (should-not (directory-files dir nil "\\.jsonl\\'")))
       (kill-buffer chat-buf))))
 
 (provide 'pi-coding-agent-browse-test)

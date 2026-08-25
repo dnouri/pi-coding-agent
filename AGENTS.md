@@ -15,8 +15,8 @@ pi-coding-agent.el              ← entry point, autoloads
   ├── pi-coding-agent-input.el  ← input buffer, history, completion
   ├── pi-coding-agent-browse.el ← session/tree browsers (magit-section UI)
   │     └── pi-coding-agent-jsonl.el ← session scan (read-session-info),
-  │           sessions-root/session-dir munging, rename-append writes;
-  │           tree projection wiring lands in Phase 3
+  │           sessions-root/session-dir munging, session_info/label
+  │           append writes, tree projection (project-session-file)
   └── pi-coding-agent-render.el ← chat rendering, tool output
         ├── pi-coding-agent-table.el  ← display-only table decoration
         └── pi-coding-agent-ui.el ← shared state, faces, modes
@@ -53,9 +53,9 @@ module, direct `setq` is fine.
 | `pi-coding-agent-table.el` | Display-only pipe table decoration, wrapping, overlay management |
 | `pi-coding-agent-input.el` | Input history, isearch, send/abort, file/path/slash completion, queuing |
 | `pi-coding-agent-menu.el` | Transient menu, session management, model selection, commands |
-| `pi-coding-agent-browse.el` | Session and tree browsers (magit-section UI); presentation layer over `pi-coding-agent--browse-*' data seams — session side live (time-sliced disk scan via jsonl, guarded switch through menu's resume flow, rename via set_session_name or session_info append); tree fetch, navigation, and labels stay stubs until Phases 3-4 |
+| `pi-coding-agent-browse.el` | Session and tree browsers (magit-section UI); presentation layer over `pi-coding-agent--browse-*' data seams — session side live (time-sliced disk scan via jsonl, guarded switch through menu's resume flow, rename via set_session_name or session_info append); tree side live (disk read of the linked chat's session file via jsonl projection, labels via out-of-band label append, no process needed); navigation stays a stub until Phase 4 |
 | `pi-coding-agent-grammars.el` | Tree-sitter grammar recipes, install prompts, `M-x pi-coding-agent-install-grammars` |
-| `pi-coding-agent-jsonl.el` | JSONL session reading, raw session-tree building (pi getTree shape), RPC-style display projection, tool-call preview formatting, session discovery (sessions-root, cwd-munged session dirs, regex-first metadata scans); pure functions depending only on core (browse.el consumes the session-discovery half; tree projection wiring lands in Phase 3) |
+| `pi-coding-agent-jsonl.el` | JSONL session reading, raw session-tree building (pi getTree shape), RPC-style display projection, tool-call preview formatting, session discovery (sessions-root, cwd-munged session dirs, regex-first metadata scans), whole-file read→build→project composition (`project-session-file`, the tree browser's disk seam); pure functions depending only on core (browse.el consumes the session-discovery and tree-projection halves) |
 | `pi-coding-agent-evil.el` | Optional Evil keybindings; auto-loaded by `pi-coding-agent--maybe-load-evil-integration` when a session is set up while Evil is present. Leaf module: requires `ui`, `input`, and `menu` directly (never the top-level feature, to avoid a recursive require during auto-load). Must byte-compile and load without Evil installed |
 
 ## Test Files

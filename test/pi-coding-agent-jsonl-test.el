@@ -226,6 +226,27 @@ PAYLOAD is the plist tail (:message, :targetId, ...)."
                    (pi-coding-agent-test--jsonl-fixture-canonical
                     "browse-projected.json")))))
 
+(ert-deftest pi-coding-agent-test-jsonl-project-session-file-golden ()
+  "project-session-file is the read→build→project composition over PATH.
+  Over the golden session file it returns exactly the chained golden
+  (browse-projected.json); a missing or headerless file reads as nil —
+  there is no tree to render, not an error."
+  (let* ((path (pi-coding-agent-test--jsonl-session-path))
+         (direct (pi-coding-agent-jsonl-project-session-file path)))
+    (should direct)
+    (should (equal (pi-coding-agent-test--jsonl-canonicalize direct)
+                   (pi-coding-agent-test--jsonl-fixture-canonical
+                    "browse-projected.json"))))
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-jsonl-psf"))
+         (headerless (expand-file-name "headerless.jsonl" dir)))
+    (pi-coding-agent-test--write-jsonl
+     headerless
+     (list (pi-coding-agent-test--jsonl-msg
+            "h1" nil 0 '(:role "user" :content "decoy"))))
+    (should-not (pi-coding-agent-jsonl-project-session-file headerless))
+    (should-not (pi-coding-agent-jsonl-project-session-file
+                 (expand-file-name "missing.jsonl" dir)))))
+
 ;;;; read-file
 
 (ert-deftest pi-coding-agent-test-jsonl-read-file-missing ()

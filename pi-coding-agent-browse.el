@@ -35,9 +35,14 @@
 ;; session side: `pi-coding-agent--browse-load-sessions' scans real
 ;; session files from disk (time-sliced), switching routes through
 ;; menu.el's guarded resume flow, and rename works for any session via
-;; an out-of-band session_info append.  The tree side (fetch via get_tree,
-;; navigation, labels) is still stubbed for Phases 3-4 via the
-;; `pi-coding-agent--browse-*' seam functions near the end of this file.
+;; an out-of-band session_info append.  Phase 3 landed the tree side's
+;; data layer: `pi-coding-agent--browse-load-tree' reads the linked
+;; chat's session file from disk (labels appended out-of-band fold back
+;; on every read), and `pi-coding-agent--browse-set-label' appends a
+;; `label' entry the same way — neither needs a live pi process.  The
+;; tree shows the last PERSISTED turn, so it lags an in-flight turn;
+;; refresh manually with `g'.  Navigation stays a Phase 4 stub via
+;; `pi-coding-agent--browse-navigate'.
 
 ;;; Code:
 
@@ -61,7 +66,10 @@
 
 (defun pi-coding-agent--parse-tree (response)
   "Parse a `get_tree' RESPONSE into a tree data plist.
-Returns plist with :tree (vector) and :leafId (string), or nil on failure."
+Returns plist with :tree (vector) and :leafId (string), or nil on failure.
+Currently unused by the disk-based tree seam (`--browse-load-tree'
+reads the session file directly); reserved for a future RPC fallback
+and as the projected-shape fixture loader for tests."
   (when (eq (plist-get response :success) t)
     (plist-get response :data)))
 
@@ -916,40 +924,60 @@ wider 16-hex id, mirroring pi's full-UUID fallback."
                                   (random #x100000000)
                                   (random #x100000000))))
 
-(defun pi-coding-agent--browse-append-session-info (path name)
-  "Append a session_info entry naming session file PATH to NAME, out-of-band.
-Mirrors pi's appendSessionInfo without a live process.  The file is
-re-read immediately before the append via
+(defun pi-coding-agent--browse-append-session-entry (path type payload action)
+  "Append one out-of-band entry of TYPE with PAYLOAD to session file PATH.
+ACTION names the operation for messages (\"rename\", \"label\").
+Mirrors pi's appenders without a live process.  The file is re-read
+immediately before the append via
 `pi-coding-agent--browse-session-file-state' so :parentId is the id of
-the current last parseable line (never the browser's cached leaf), which
-keeps the entry from orphaning the context on the next load, and the
-fresh id is checked against every id already in the file (pi's loader
-cannot tolerate duplicates — see
+the current last parseable line (never the browser's cached leaf),
+which keeps the entry from orphaning the context on the next load, and
+the fresh id is checked against every id already in the file (pi's
+loader cannot tolerate duplicates — see
 `pi-coding-agent--browse-fresh-entry-id').  When the file does not end
-in a newline a separator is inserted first — bytes are never glued onto
-a partial line.  Return non-nil when the line was appended; nil (with a
-message) when PATH is unreadable.  Races: a concurrent pi append between
+in a newline a separator is inserted first — bytes are never glued
+onto a partial line.  PAYLOAD's pairs are encoded verbatim after the
+shared :type/:id/:parentId/:timestamp head, so an omitted key stays
+omitted (clearing a label relies on that: the load-time fold treats an
+absent :label as cleared).
+
+The file is NEVER created: pi's _persist appends per-entry once the
+file exists, and its full-rewrite path is an exclusive create ('wx')
+that only runs when the file never existed — creating it here would
+crash pi's next flush with EEXIST.  So this helper only ever appends
+to an existing readable file.  Races: a concurrent pi append between
 the read and the write turns our line into a benign sibling (name
-resolution is file-order latest-wins and projection filters
-session_info entries), and stale-parent orphans are impossible by
-construction.  A session live elsewhere sees the new name on its next
-state refresh."
+resolution is file-order latest-wins and projection filters these
+bookkeeping entries), and stale-parent orphans are impossible by
+construction.  A session live elsewhere sees the change on its next
+state refresh.  Return non-nil when the line was appended; nil (with a
+message) when PATH is unreadable."
   (if-let* ((state (pi-coding-agent--browse-session-file-state path)))
       (let ((line (json-encode
-                   (list :type "session_info"
-                         :id (pi-coding-agent--browse-fresh-entry-id
-                              (plist-get state :ids))
-                         :parentId (plist-get state :last-id)
-                         :timestamp (format-time-string
-                                     "%Y-%m-%dT%H:%M:%S.%3NZ" (current-time) t)
-                         :name name))))
+                   (append (list :type type
+                                 :id (pi-coding-agent--browse-fresh-entry-id
+                                      (plist-get state :ids))
+                                 :parentId (plist-get state :last-id)
+                                 :timestamp (format-time-string
+                                             "%Y-%m-%dT%H:%M:%S.%3NZ"
+                                             (current-time) t))
+                           payload))))
         (let ((coding-system-for-write 'utf-8))
           (write-region
            (concat (unless (plist-get state :newline-p) "\n") line "\n")
            nil path 'append))
         t)
-    (message "Pi: Cannot rename: session file is unreadable: %s" path)
+    (message "Pi: Cannot %s: session file is unreadable: %s" action path)
     nil))
+
+(defun pi-coding-agent--browse-append-session-info (path name)
+  "Append a session_info entry naming session file PATH to NAME, out-of-band.
+Thin wrapper over `pi-coding-agent--browse-append-session-entry' with
+the session_info payload (:name NAME); see there for the freshness,
+race, and never-create contract.  Return non-nil when the line was
+appended."
+  (pi-coding-agent--browse-append-session-entry
+   path "session_info" (list :name name) "rename"))
 
 (defun pi-coding-agent-session-browser-rename ()
   "Rename the session at point.
@@ -1166,6 +1194,24 @@ Same lifecycle as `pi-coding-agent--session-browser-fetch-anchor': set
 from the anchor captured at fetch start, reused by a refresh issued
 while loading, cleared when the cycle's final render runs.")
 
+(defvar-local pi-coding-agent--tree-browser-error nil
+  "Error message string from the last tree fetch, or nil on success.
+Rendered as an error state with a zero visible count.")
+
+(defvar-local pi-coding-agent--tree-browser-fetch-token 0
+  "Generation counter for tree-browser fetches.
+`pi-coding-agent--browse-load-tree' bumps it per fetch; deferred reads
+from superseded fetches drop themselves by comparing their captured
+token against the buffer's current one (mirrors the session side).")
+
+(defvar-local pi-coding-agent--tree-browser-loaded-file nil
+  "Session file the current tree was loaded from, or nil on error states.
+Set, when a fetch succeeds, to the file the FETCH read (resolved at
+fetch start — a chat session switch mid-read cannot retarget the
+labeler onto a tree the browser is not showing);
+`pi-coding-agent--browse-set-label' compares against it to refuse
+labeling a session the chat has since left.")
+
 (defconst pi-coding-agent--tree-filter-modes
   '("no-tools" "default" "user-only" "labeled-only" "all")
   "Available filter modes for the tree browser.")
@@ -1376,10 +1422,16 @@ Labels are rendered separately as right-margin overlays."
       (magit-insert-section (root)
         (cond
          (pi-coding-agent--tree-browser-loading
+          (setq pi-coding-agent--tree-browser-visible-count 0)
           (insert (pi-coding-agent--propertize-face
                    "Loading tree..."
                    'pi-coding-agent-activity-phase)
                   "\n"))
+         (pi-coding-agent--tree-browser-error
+          (setq pi-coding-agent--tree-browser-visible-count 0)
+          (insert (pi-coding-agent--propertize-face
+                   (format "Error: %s\n" pi-coding-agent--tree-browser-error)
+                   'error)))
          ((or (null tree) (= (length tree) 0))
           (insert "No conversation tree.\n"))
          (t
@@ -1513,6 +1565,95 @@ Returns the label string or nil."
             (push (aref children i) stack)))))
     result))
 
+(defun pi-coding-agent--tree-node-with-label (node label)
+  "Return a copy of projected NODE carrying :label LABEL, or no label.
+LABEL nil removes the label pair entirely — the load-time fold treats
+an absent label as cleared, and projection only emits the pair when a
+label is set, so a patched node stays shape-identical to a fresh read.
+Only NODE's own plist is copied; the :children vector is shared as-is,
+keeping the copy O(1) in tree size — rebuilding the spine above NODE
+is `pi-coding-agent--tree-apply-label's business.  A newly set :label
+pair goes right after :timestamp, the canonical projected position."
+  (let ((out nil)
+        (replaced nil))
+    (while (consp node)
+      (let ((key (pop node)))
+        (if (eq key :label)
+            ;; Drop the old pair wherever it sits.
+            (when (consp node) (pop node))
+          (setq out (nconc out
+                           (list key (if (consp node) (pop node) nil))))
+          (when (and (eq key :timestamp) label)
+            (setq out (nconc out (list :label label))
+                  replaced t)))))
+    (if (or replaced (not label))
+        out
+      ;; No :timestamp anchor (not a projected node): append at the end.
+      (nconc out (list :label label)))))
+
+(defun pi-coding-agent--tree-apply-label (tree node-id label)
+  "Patch TREE so the projected node with NODE-ID carries LABEL, or none.
+Return a fresh tree vector: the root-to-node spine is rebuilt with
+fresh plists and child vectors, with the patched node
+\\(`pi-coding-agent--tree-node-with-label'\\) `aset' into each container,
+while every unvisited subtree is shared — the patch costs O(path
+length), not O(tree size).  Return nil when NODE-ID is not in TREE.
+Both the search and the rebuild are iterative, so deep chains cannot
+overflow the Lisp stack."
+  (when (vectorp tree)
+    (let* ((root-frame (cons tree 0))
+           (stack (list root-frame))
+           ;; PATH holds the reversed (CONTAINER . INDEX) frames of the
+           ;; current DFS chain; once the target is found it is the
+           ;; deepest-first root-to-node path.
+           (path nil)
+           (found nil))
+      (catch 'exited
+        (while stack
+          (let* ((frame (car stack))
+                 (vec (car frame))
+                 (idx (cdr frame)))
+            (if (>= idx (length vec))
+                (progn
+                  (pop stack)
+                  ;; This frame's owner node is done; leave its path
+                  ;; entry too (the root frame has no owner above it).
+                  (unless (eq frame root-frame) (pop path)))
+              (setcdr frame (1+ idx))
+              (let* ((node (aref vec idx))
+                     (children (plist-get node :children))
+                     (descend (and (vectorp children)
+                                   (> (length children) 0))))
+                (push (cons vec idx) path)
+                (when (equal (plist-get node :id) node-id)
+                  (setq found t)
+                  (throw 'exited t))
+                (if descend
+                    (push (cons children 0) stack)
+                  (pop path))))))
+        nil)
+      (when found
+        (let* ((target-frame (car path))
+               (target (aref (car target-frame) (cdr target-frame)))
+               (patched (pi-coding-agent--tree-node-with-label target label))
+               (result nil)
+               (frames path))
+          (while frames
+            (let* ((frame (car frames))
+                   (vec (copy-sequence (car frame))))
+              (aset vec (cdr frame) patched)
+              (if (cdr frames)
+                  ;; The node at the next frame up owns VEC as its
+                  ;; :children: hand it a fresh plist pointing there.
+                  (let* ((owner-frame (cadr frames))
+                         (owner (aref (car owner-frame)
+                                      (cdr owner-frame))))
+                    (setq patched (plist-put (copy-sequence owner)
+                                             :children vec)))
+                (setq result vec)))
+            (setq frames (cdr frames)))
+          result)))))
+
 ;;;; Data Layer Seams (session side live; tree side stubbed)
 
 (defun pi-coding-agent--browse-current-session-directory ()
@@ -1621,13 +1762,103 @@ sessions: …\"."
                        (pi-coding-agent--browse-session-files dirs)
                        nil callback))))))
 
+(defun pi-coding-agent--tree-browser-chat-session-file ()
+  "Return the linked chat buffer's current session file, or nil.
+A live `pi-coding-agent--chat-buffer' link whose state plist carries a
+normalized :session-file — the same key Phase 2's rename guard
+already trusts (populated at startup via get_state
+--apply-state-response, TRAMP-prefixed for Emacs).  The file
+persists after process death, so tree fetches and labels keep working
+with no live pi process.  Nil covers both a dead link and a chat
+whose session file does not exist yet (it is created on the first
+assistant reply)."
+  (when-let ((chat-buf pi-coding-agent--chat-buffer))
+    (when (buffer-live-p chat-buf)
+      (with-current-buffer chat-buf
+        (when (plistp pi-coding-agent--state)
+          (pi-coding-agent--normalize-string-or-null
+           (plist-get pi-coding-agent--state :session-file)))))))
+
 (defun pi-coding-agent--browse-load-tree (callback)
-  "Load the conversation tree, then call CALLBACK with (TREE LEAF-ID).
-TREE is a vector of projected root nodes in the browse node dialect
-\(see BROWSER-CONTEXT); LEAF-ID is the projected leaf entry id.
-Phase 0 stub: calls back with (nil nil).  Phase 3: get_tree RPC,
-`pi-coding-agent--parse-tree', projection via pi-coding-agent-jsonl."
-  (funcall callback nil nil))
+  "Load the conversation tree, then call CALLBACK with (TREE LEAF-ID MESSAGE).
+TREE is a vector of projected root nodes in the browse node dialect,
+LEAF-ID the projected leaf entry id, and MESSAGE an error string or
+nil on success — the same shape as the session side's (ITEMS ERROR)
+callback.  SEAM CHANGE (Phase 3): the callback used to receive
+\\(TREE LEAF-ID\\) with every failure folded into nils; it now takes a
+third MESSAGE argument so callers can render precise error states
+instead of a generic \"no tree\".
+
+The tree comes from the linked chat's session file on DISK —
+`pi-coding-agent-jsonl-project-session-file' — never an RPC get_tree:
+labels appended out-of-band fold back on every disk read (under RPC
+they would vanish on each refresh until a heavy rebind), Phase 4
+navigation rewrites this same file, and no process is needed — the
+state :session-file key persists after process death.  The tree shows
+the last PERSISTED turn, so it lags an in-flight turn; refresh
+manually with \\[pi-coding-agent-browse-refresh].
+
+The buffer's fetch token is bumped here (mirroring
+`pi-coding-agent--browse-load-sessions'); then a missing chat link
+reports the link error and a link with no session file yet — or one
+naming a path that does not exist — reports the not-yet error, both
+synchronously.  Otherwise the read itself is deferred through
+`(run-at-time 0 ...)' so the caller's forced redisplay can paint the
+loading state first (see `pi-coding-agent--tree-browser-fetch-and-render':
+Emacs runs due 0-timers before redisplaying, so without the forced
+paint a single timer hop starves the loading render entirely); then
+it runs as one blocking read (a 53 MB worst-case session reads in
+~0.6 s, typical files in tens of milliseconds; chunking would
+complicate the pure jsonl reader for no UI gain).  A deferred read
+drops itself when a newer fetch has bumped the token, and is wrapped
+in `condition-case': a nil or garbage read reports MESSAGE \"Session
+file is unreadable or not a pi session file: PATH\" instead of
+signaling, and a `quit' during the blocking read (C-g against a huge
+file) reports \"Session file read was interrupted: PATH\" — `quit'
+is not an `error', so without its own handler the callback would
+never run and the browser would sit on its loading state forever."
+  (let ((buf (current-buffer)))
+    (setq pi-coding-agent--tree-browser-fetch-token
+          (1+ pi-coding-agent--tree-browser-fetch-token))
+    (let ((token pi-coding-agent--tree-browser-fetch-token)
+          (linked (and pi-coding-agent--chat-buffer
+                       (buffer-live-p pi-coding-agent--chat-buffer)))
+          (path (pi-coding-agent--tree-browser-chat-session-file)))
+      (cond
+       ((not linked)
+        (funcall callback nil nil
+                 "No linked pi chat session (open the tree browser from a pi chat)"))
+       ((or (not path) (not (file-exists-p path)))
+        (funcall callback nil nil
+                 "No session file yet — it is created on the first assistant reply"))
+       (t
+        (run-at-time
+         0 nil
+         (lambda ()
+           (when (and (buffer-live-p buf)
+                      (eq token (buffer-local-value
+                                 'pi-coding-agent--tree-browser-fetch-token
+                                 buf)))
+             (let ((tree nil)
+                   (leaf-id nil)
+                   (failure nil))
+               (condition-case nil
+                   (let ((result (pi-coding-agent-jsonl-project-session-file
+                                  path)))
+                     (if result
+                         (setq tree (plist-get result :tree)
+                               leaf-id (plist-get result :leafId))
+                       (setq failure
+                             (format "Session file is unreadable or not a pi session file: %s"
+                                     path))))
+                 (quit
+                  (setq failure
+                        (format "Session file read was interrupted: %s" path)))
+                 (error
+                  (setq failure
+                        (format "Session file is unreadable or not a pi session file: %s"
+                                path))))
+               (funcall callback tree leaf-id failure))))))))))
 
 (defun pi-coding-agent--browse-session-file-matches-p (chat-buf path)
   "Return non-nil when CHAT-BUF's current session file is PATH.
@@ -1706,48 +1937,103 @@ reload, prefill."
   (user-error "Tree navigation is not implemented yet"))
 
 (defun pi-coding-agent--browse-set-label (node-id label)
-  "Set LABEL (string or nil to clear) on tree node NODE-ID.
-Phase 0 stub: signals `user-error'.  Phase 3: append a `label' entry
-to the session file out-of-band, then refresh the tree browser."
-  (ignore node-id label)             ; Phase 3 appends the label entry
-  (user-error "Labels are not implemented yet"))
+  "Set LABEL (string, or nil to clear) on tree node NODE-ID.
+Appends a `label' entry to the linked chat's session file out-of-band
+via `pi-coding-agent--browse-append-session-entry' — pi's
+appendLabelChange shape, with the :label key omitted entirely on a
+clear (the load-time fold treats an absent or empty label as
+cleared).  The append also makes the label entry the file's new raw
+leaf; the next fetch's projected leaf still resolves up to the last
+visible entry, so the active path does not move.  Instead of
+re-reading the file, the cached projected tree is patched locally
+\\(`pi-coding-agent--tree-apply-label'\\) and re-rendered: section
+identity is the node id, which labeling never changes, so point
+survives.  Report \"Pi: Label set to LABEL\" or \"Pi: Label cleared\".
+
+Guards: no resolvable session file messages \"Pi: Cannot label: no
+session file\" (nothing is written anywhere — session files are
+append-only and must never be created here); a fresh resolution that
+disagrees with `pi-coding-agent--tree-browser-loaded-file' (the chat
+switched sessions behind the browser's back) messages \"Pi: Session
+changed since the tree was loaded — refresh with g\" and appends
+nothing — writing into the old file would still be harmless for pi (a
+benign sibling), but the browser would then show a label its tree no
+longer reflects."
+  (let ((path (pi-coding-agent--tree-browser-chat-session-file)))
+    (cond
+     ((not path)
+      (message "Pi: Cannot label: no session file"))
+     ((not (equal pi-coding-agent--tree-browser-loaded-file path))
+      (message "Pi: Session changed since the tree was loaded — refresh with g"))
+     (t
+      (when (pi-coding-agent--browse-append-session-entry
+             path "label"
+             (append (list :targetId node-id)
+                     (when label (list :label label)))
+             "label")
+        (setq pi-coding-agent--tree-browser-tree
+              (or (pi-coding-agent--tree-apply-label
+                   pi-coding-agent--tree-browser-tree node-id label)
+                  pi-coding-agent--tree-browser-tree))
+        (pi-coding-agent--tree-browser-rerender)
+        (if label
+            (message "Pi: Label set to %s" label)
+          (message "Pi: Label cleared")))))))
 
 ;;;; Tree Browser Fetch and Render
 
 (defun pi-coding-agent--tree-browser-fetch-and-render ()
   "Fetch tree and re-render the tree browser.
+Phase 3: the tree is read from the linked chat's session file on disk,
+so no live pi process is required — the Phase 0 no-process guard is
+gone.  The seam callback reports (TREE LEAF-ID MESSAGE): a non-nil
+MESSAGE renders as an error state with a zero visible count; on
+success `pi-coding-agent--tree-browser-loaded-file' records the file
+the FETCH read (resolved here, before the deferred read, so a chat
+session switch mid-read leaves the labeler's stale guard comparing
+against the tree actually displayed), and nil on error states.
+
 The point anchor is captured before the loading-state render — that
 render destroys the node sections, so without carrying the anchor
 across the cycle the final render would find nothing under point to
 restore (see `pi-coding-agent--browse-rerender-preserving-point').
 A refresh issued while another fetch is still loading finds no
 sections to capture and reuses the in-flight cycle's anchor (see
-`pi-coding-agent--tree-browser-fetch-anchor')."
+`pi-coding-agent--tree-browser-fetch-anchor').
+
+The loading state is painted EXPLICITLY: the deferred read is a
+single `(run-at-time 0 ...)' hop, and Emacs runs due 0-timers before
+redisplaying, so without the forced `redisplay' here the loading
+render would never become visible (the chunked session scan yields
+to redisplay between its slices; one timer hop never does)."
   (let* ((buf (current-buffer))
-         (proc (pi-coding-agent--get-process))
+         (loaded (pi-coding-agent--tree-browser-chat-session-file))
          (anchor (or (pi-coding-agent--browse-capture-point-anchor)
                      ;; Mid-flight refresh: the loading render already
                      ;; destroyed the sections under point, so carry
                      ;; the anchor the in-flight cycle captured.
                      (and pi-coding-agent--tree-browser-loading
                           pi-coding-agent--tree-browser-fetch-anchor))))
-    (if (not proc)
-        (message "Pi: No active process")
-      (setq pi-coding-agent--tree-browser-loading t
-            pi-coding-agent--tree-browser-fetch-anchor anchor)
-      ;; Loading-state render: default point behavior (nothing to keep).
-      (pi-coding-agent--tree-browser-rerender)
-      (pi-coding-agent--browse-load-tree
-       (lambda (tree leaf-id)
-         (when (buffer-live-p buf)
-           ;; The load calls back from a timer in whatever buffer is
-           ;; current; render in the browser buffer, not that one.
-           (with-current-buffer buf
-             (setq pi-coding-agent--tree-browser-loading nil
-                   pi-coding-agent--tree-browser-fetch-anchor nil
-                   pi-coding-agent--tree-browser-tree tree
-                   pi-coding-agent--tree-browser-leaf-id leaf-id)
-             (pi-coding-agent--tree-browser-rerender anchor))))))))
+    (setq pi-coding-agent--tree-browser-loading t
+          pi-coding-agent--tree-browser-fetch-anchor anchor)
+    ;; Loading-state render: default point behavior (nothing to keep).
+    (pi-coding-agent--tree-browser-rerender)
+    ;; Paint it before scheduling the read — see docstring.
+    (redisplay)
+    (pi-coding-agent--browse-load-tree
+     (lambda (tree leaf-id message)
+       (when (buffer-live-p buf)
+         ;; The load calls back from a timer in whatever buffer is
+         ;; current; render in the browser buffer, not that one.
+         (with-current-buffer buf
+           (setq pi-coding-agent--tree-browser-loading nil
+                 pi-coding-agent--tree-browser-fetch-anchor nil
+                 pi-coding-agent--tree-browser-error message
+                 pi-coding-agent--tree-browser-tree tree
+                 pi-coding-agent--tree-browser-leaf-id leaf-id
+                 pi-coding-agent--tree-browser-loaded-file
+                 (and (not message) loaded))
+           (pi-coding-agent--tree-browser-rerender anchor)))))))
 
 (defun pi-coding-agent--tree-browser-rerender (&optional fallback)
   "Re-render the tree browser from local state, preserving point.
@@ -1793,14 +2079,22 @@ cycle's final render."
 
 ;;;###autoload
 (defun pi-coding-agent-tree-browser ()
-  "Open the tree browser for the current session."
+  "Open the tree browser for the current session.
+Guard first: the tree browser reads the linked chat's session file
+from disk, so without a live chat session there is nothing to browse
+— signal `user-error' \"No pi session to browse\" BEFORE creating any
+browser buffer (a buffer with no link would only render the link
+error forever)."
   (interactive)
+  (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+    (unless (and chat-buf (buffer-live-p chat-buf))
+      (user-error "No pi session to browse")))
   (let* ((dir (pi-coding-agent--session-directory))
          (new-p (not (get-buffer
                       (pi-coding-agent--tree-browser-buffer-name dir))))
          (buf (pi-coding-agent--get-or-create-tree-browser dir)))
     ;; Link to the chat session.  Only the chat buffer is cached here;
-    ;; `pi-coding-agent--get-process' resolves the process live.
+    ;; the session file is resolved live from its state on every fetch.
     (when-let ((chat-buf (pi-coding-agent--get-chat-buffer)))
       (when (buffer-live-p chat-buf)
         (with-current-buffer buf

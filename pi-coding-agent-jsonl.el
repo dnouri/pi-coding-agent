@@ -837,5 +837,20 @@ nearest visible entry.  Traversal is iterative."
           :leafId (pi-coding-agent--jsonl-resolve-projected-leaf-id
                    tree leaf-id))))
 
+(defun pi-coding-agent-jsonl-project-session-file (path)
+  "Read, build, and project the session file at PATH in one step.
+Composition of `pi-coding-agent-jsonl-read-file',
+`pi-coding-agent-jsonl-build-tree', and
+`pi-coding-agent-jsonl-project-tree': return the (:tree :leafId)
+projection, or nil when PATH is missing, empty, or headerless — there
+is no tree to render, never an error.  The composition exists so the
+tree browser's disk-based fetch cannot mix stages from different
+reads of a file a live pi appends to concurrently."
+  (when-let* ((session (pi-coding-agent-jsonl-read-file path)))
+    (let ((built (pi-coding-agent-jsonl-build-tree
+                  (plist-get session :entries))))
+      (pi-coding-agent-jsonl-project-tree
+       (plist-get built :tree) (plist-get built :leafId)))))
+
 (provide 'pi-coding-agent-jsonl)
 ;;; pi-coding-agent-jsonl.el ends here
