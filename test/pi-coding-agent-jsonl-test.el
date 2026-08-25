@@ -1173,5 +1173,362 @@ through `date-to-time' and orders lexicographically like time."
       (should (string< mod-a mod-b))
       (should (string> mod-b mod-a)))))
 
+;;;; Navigation (Phase 4)
+
+(defun pi-coding-agent-test--jsonl-line-string (line)
+  "Return the raw JSON string `--write-jsonl' writes for LINE."
+  (json-encode (pi-coding-agent-test--jsonl-literalize line)))
+
+(defun pi-coding-agent-test--jsonl-session-at (lines)
+  "Write LINES (header first) to a temp file and return the session.
+The `pi-coding-agent-jsonl-read-file' result is what
+`pi-coding-agent-jsonl-navigation-target' consumes."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-jsonl-nav"))
+         (path (expand-file-name "session.jsonl" dir)))
+    (pi-coding-agent-test--write-jsonl path lines)
+    (pi-coding-agent-jsonl-read-file path)))
+
+(ert-deftest pi-coding-agent-test-jsonl-navigation-target-user-message ()
+  "A user-message target rewinds the leaf to its parent with the
+message text as prefill (pi's re-edit rule).  Prefill is the
+contentText port: strings pass through; block content joins with the
+EMPTY separator, unbounded — the preview dialect's space join and
+200-char cap do not apply.  An empty, image-only, or null content
+omits :prefill entirely; the rewind to the parent still applies."
+  (let* ((long (make-string 300 ?z))
+         (session (pi-coding-agent-test--jsonl-session-at
+                   (list pi-coding-agent-test--jsonl-header
+                         (pi-coding-agent-test--jsonl-msg
+                          "u1" nil 0 '(:role "user" :content "root"))
+                         (pi-coding-agent-test--jsonl-msg
+                          "u2" "u1" 1 '(:role "user" :content "hello there"))
+                         (pi-coding-agent-test--jsonl-msg
+                          "u3" "u2" 2 '(:role "user"
+                                        :content [(:type "text" :text "alpha")
+                                                  (:type "text" :text "beta")]))
+                         (pi-coding-agent-test--jsonl-msg
+                          "u4" "u3" 3 `(:role "user" :content ,long))
+                         (pi-coding-agent-test--jsonl-msg
+                          "u5" "u4" 4 '(:role "user" :content ""))
+                         (pi-coding-agent-test--jsonl-msg
+                          "u6" "u5" 5 '(:role "user"
+                                        :content [(:type "image")]))
+                         (pi-coding-agent-test--jsonl-msg
+                          "u7" "u6" 6 '(:role "user" :content :null))))))
+    ;; String content: the leaf is the parent id, the prefill the text.
+    (should (equal (pi-coding-agent-jsonl-navigation-target session "u2")
+                   (list :leaf-id "u1" :prefill "hello there" :current-p nil)))
+    ;; Block content joins with the empty string, not a space.
+    (should (equal (pi-coding-agent-jsonl-navigation-target session "u3")
+                   (list :leaf-id "u2" :prefill "alphabeta" :current-p nil)))
+    ;; Unbounded: no preview-style 200-char cap.
+    (should (equal (pi-coding-agent-jsonl-navigation-target session "u4")
+                   (list :leaf-id "u3" :prefill long :current-p nil)))
+    ;; Empty, image-only, and null contents omit :prefill entirely.
+    (should (equal (pi-coding-agent-jsonl-navigation-target session "u5")
+                   (list :leaf-id "u4" :current-p nil)))
+    (should (equal (pi-coding-agent-jsonl-navigation-target session "u6")
+                   (list :leaf-id "u5" :current-p nil)))
+    (should (equal (pi-coding-agent-jsonl-navigation-target session "u7")
+                   (list :leaf-id "u6" :current-p nil)))))
+
+(ert-deftest pi-coding-agent-test-jsonl-navigation-target-custom-message ()
+  "A custom_message target rewinds like a user message: the leaf is
+its parent id and the prefill is the contentText of the entry's own
+:content (string passthrough; blocks joined with the empty string).
+Empty content omits :prefill; :customType never becomes the prefill."
+  (let ((session (pi-coding-agent-test--jsonl-session-at
+                  (list pi-coding-agent-test--jsonl-header
+                        (pi-coding-agent-test--jsonl-msg
+                         "u1" nil 0 '(:role "user" :content "root"))
+                        (pi-coding-agent-test--jsonl-entry
+                         "custom_message" "c1" "u1" 1
+                         :customType "notice" :content "re-edit me")
+                        (pi-coding-agent-test--jsonl-entry
+                         "custom_message" "c2" "c1" 2
+                         :customType "notice"
+                         :content [(:type "text" :text "part one")
+                                   (:type "text" :text "part two")])
+                        (pi-coding-agent-test--jsonl-entry
+                         "custom_message" "c3" "c2" 3
+                         :customType "notice" :content "")))))
+    (should (equal (pi-coding-agent-jsonl-navigation-target session "c1")
+                   (list :leaf-id "u1" :prefill "re-edit me" :current-p nil)))
+    (should (equal (pi-coding-agent-jsonl-navigation-target session "c2")
+                   (list :leaf-id "c1" :prefill "part onepart two"
+                         :current-p nil)))
+    ;; Empty content: rewind to the parent, no :prefill key at all.
+    (should (equal (pi-coding-agent-jsonl-navigation-target session "c3")
+                   (list :leaf-id "c2" :current-p nil)))))
+
+(ert-deftest pi-coding-agent-test-jsonl-navigation-target-non-user-self-leaf ()
+  "Every other entry type targets ITSELF: assistant, toolResult,
+compaction, model_change, thinking_level_change, and branch_summary
+all keep their own id as the leaf, and none carries :prefill.  The
+literal raw leaf (bs1) is current, matching pi's raw-id no-op and the
+resolved-position truth table; earlier self targets are not."
+  (let ((session (pi-coding-agent-test--jsonl-session-at
+                  (list pi-coding-agent-test--jsonl-header
+                        (pi-coding-agent-test--jsonl-msg
+                         "u1" nil 0 '(:role "user" :content "root"))
+                        (pi-coding-agent-test--jsonl-asst
+                         "a1" "u1" 1 :content "reply" :stopReason "end_turn")
+                        (pi-coding-agent-test--jsonl-msg
+                         "t1" "a1" 2 '(:role "toolResult" :toolCallId "tc1"))
+                        (pi-coding-agent-test--jsonl-entry
+                         "compaction" "k1" "t1" 3 :tokensBefore 4096)
+                        (pi-coding-agent-test--jsonl-entry
+                         "model_change" "mo1" "k1" 4
+                         :provider "anthropic" :modelId "claude")
+                        (pi-coding-agent-test--jsonl-entry
+                         "thinking_level_change" "th1" "mo1" 5
+                         :thinkingLevel "high")
+                        (pi-coding-agent-test--jsonl-entry
+                         "branch_summary" "bs1" "th1" 6 :summary "explored")))))
+    (dolist (id '("a1" "t1" "k1" "mo1" "th1" "bs1"))
+      (should (equal (pi-coding-agent-jsonl-navigation-target session id)
+                     (list :leaf-id id :current-p (equal id "bs1")))))))
+
+(ert-deftest pi-coding-agent-test-jsonl-navigation-target-unknown-nil ()
+  "An id no entry carries reads as nil — no target, no signal."
+  (let ((session (pi-coding-agent-test--jsonl-session-at
+                  (list pi-coding-agent-test--jsonl-header
+                        (pi-coding-agent-test--jsonl-msg
+                         "u1" nil 0 '(:role "user" :content "root"))))))
+    (should-not (pi-coding-agent-jsonl-navigation-target session "deadbeef"))))
+
+(ert-deftest pi-coding-agent-test-jsonl-navigation-target-current-position ()
+  ":current-p compares the RESOLVED positions: a trailing filtered
+leaf (label here) resolves up, so targeting the visible entry it sits
+on is current; a target on another branch is not; a file already
+rewound makes the same user message current again AND still prefills
+(re-edit the same prompt); and nil equals nil when an all-filtered
+chain resolves both sides to nothing."
+  ;; Trailing label child: targeting the entry it resolves to is current.
+  (let ((session (pi-coding-agent-test--jsonl-session-at
+                  (list pi-coding-agent-test--jsonl-header
+                        (pi-coding-agent-test--jsonl-msg
+                         "u1" nil 0 '(:role "user" :content "root"))
+                        (pi-coding-agent-test--jsonl-asst
+                         "a1" "u1" 1 :content "reply" :stopReason "end_turn")
+                        (pi-coding-agent-test--jsonl-entry
+                         "label" "l1" "a1" 2 :targetId "u1" :label "tag")))))
+    (should (equal (pi-coding-agent-jsonl-navigation-target session "a1")
+                   (list :leaf-id "a1" :current-p t))))
+  ;; A target on another branch is not current.
+  (let ((session (pi-coding-agent-test--jsonl-session-at
+                  (list pi-coding-agent-test--jsonl-header
+                        (pi-coding-agent-test--jsonl-msg
+                         "u1" nil 0 '(:role "user" :content "root"))
+                        (pi-coding-agent-test--jsonl-asst
+                         "a1" "u1" 1 :content "active" :stopReason "end_turn")
+                        (pi-coding-agent-test--jsonl-asst
+                         "b1" "u1" 2 :content "abandoned"
+                         :stopReason "end_turn")
+                        (pi-coding-agent-test--jsonl-msg
+                         "u2" "a1" 3 '(:role "user" :content "leaf"))))))
+    (should (equal (pi-coding-agent-jsonl-navigation-target session "b1")
+                   (list :leaf-id "b1" :current-p nil))))
+  ;; Re-edit again: the file already sits on the parent (a previous
+  ;; navigate put u1 last), so the same user message is current AND
+  ;; still carries its prefill.
+  (let ((session (pi-coding-agent-test--jsonl-session-at
+                  (list pi-coding-agent-test--jsonl-header
+                        (pi-coding-agent-test--jsonl-msg
+                         "u2" "u1" 1 '(:role "user" :content "try the other way"))
+                        (pi-coding-agent-test--jsonl-msg
+                         "u1" nil 0 '(:role "user" :content "root"))))))
+    (should (equal (pi-coding-agent-jsonl-navigation-target session "u2")
+                   (list :leaf-id "u1" :prefill "try the other way"
+                         :current-p t))))
+  ;; nil == nil: an all-filtered chain resolves both sides to nil.
+  (let ((session (pi-coding-agent-test--jsonl-session-at
+                  (list pi-coding-agent-test--jsonl-header
+                        (pi-coding-agent-test--jsonl-entry
+                         "label" "l1" nil 0 :targetId "l1" :label "only")))))
+    (should (equal (pi-coding-agent-jsonl-navigation-target session "l1")
+                   (list :leaf-id "l1" :current-p t)))))
+
+(ert-deftest pi-coding-agent-test-jsonl-navigation-lines-chain-to-end ()
+  "navigation-lines reorders for a rewrite: line 0 stays first, the
+leaf's ancestor chain moves to the end (the leaf itself last), and
+every other line keeps its original relative order ahead of it.
+Mid-chain bookkeeping entries (label, session_info) are ordinary
+chain nodes and travel with the chain; a second root and an
+off-branch sibling lead."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-jsonl-navord"))
+         (path (expand-file-name "session.jsonl" dir))
+         (header pi-coding-agent-test--jsonl-header)
+         (lines
+          (list header
+                (pi-coding-agent-test--jsonl-msg
+                 "u1" nil 0 '(:role "user" :content "root"))
+                (pi-coding-agent-test--jsonl-msg
+                 "x1" nil 1 '(:role "user" :content "second root"))
+                (pi-coding-agent-test--jsonl-msg
+                 "b1" "u1" 2 '(:role "user" :content "sibling"))
+                (pi-coding-agent-test--jsonl-entry
+                 "label" "l1" "u1" 3 :targetId "u1" :label "tag")
+                (pi-coding-agent-test--jsonl-entry
+                 "session_info" "s1" "l1" 4 :name "Named")
+                (pi-coding-agent-test--jsonl-msg
+                 "a1" "s1" 5 '(:role "assistant" :content "reply"))
+                (pi-coding-agent-test--jsonl-msg
+                 "u2" "a1" 6 '(:role "user" :content "leaf")))))
+    (pi-coding-agent-test--write-jsonl path lines)
+    ;; Chain from u2: u2 a1 s1 l1 u1 — the non-chain x1 and b1 lead.
+    (should (equal (pi-coding-agent-jsonl-navigation-lines path "u2")
+                   (vconcat
+                    (mapcar #'pi-coding-agent-test--jsonl-line-string
+                            (list (nth 0 lines) (nth 2 lines) (nth 3 lines)
+                                  (nth 1 lines) (nth 4 lines) (nth 5 lines)
+                                  (nth 6 lines) (nth 7 lines))))))))
+
+(ert-deftest pi-coding-agent-test-jsonl-navigation-lines-consecutive-cross-branch-navigation ()
+  "Consecutive cross-branch rewrites leave the newly requested leaf last.
+The first rewrite moves the shared root behind the other branch in
+physical order; the second must still order its chain logically rather
+than finish on that shared root."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory
+               "pi-jsonl-nav-cross-branch"))
+         (path (expand-file-name "session.jsonl" dir))
+         (header pi-coding-agent-test--jsonl-header)
+         (root (pi-coding-agent-test--jsonl-msg
+                "root" nil 0 '(:role "user" :content "root")))
+         (a1 (pi-coding-agent-test--jsonl-asst
+              "a1" "root" 1 :content "branch A reply" :stopReason "end_turn"))
+         (a2 (pi-coding-agent-test--jsonl-msg
+              "a2" "a1" 2 '(:role "user" :content "branch A leaf")))
+         (b1 (pi-coding-agent-test--jsonl-asst
+              "b1" "root" 3 :content "branch B reply" :stopReason "end_turn"))
+         (b2 (pi-coding-agent-test--jsonl-msg
+              "b2" "b1" 4 '(:role "user" :content "branch B leaf")))
+         (fixture (list header root a1 a2 b1 b2)))
+    ;; The valid branched file initially ends at b2.
+    (pi-coding-agent-test--write-jsonl path fixture)
+    (let* ((original
+            (with-temp-buffer
+              (set-buffer-multibyte nil)
+              (insert-file-contents-literally path)
+              (vconcat
+               (butlast
+                (split-string
+                 (buffer-substring-no-properties (point-min) (point-max))
+                 "\n")))))
+           (original-count (length original))
+           (original-multiset (sort (append original nil) #'string<))
+           (expected-second
+            (vector (aref original 0) ; header
+                    (aref original 2) ; non-chain a1
+                    (aref original 3) ; non-chain a2
+                    (aref original 1) ; chain root
+                    (aref original 4) ; chain b1
+                    (aref original 5))) ; requested leaf b2
+           (first (pi-coding-agent-jsonl-navigation-lines path "a2")))
+      ;; Rewrite A preserves every physical line and ends at a2.
+      (should (= (length first) original-count))
+      (should (equal (sort (append first nil) #'string<)
+                     original-multiset))
+      (should (equal (aref first (1- (length first)))
+                     (aref original 3)))
+      ;; Reproduce the atomic writer's bytes: returned lines joined by LF,
+      ;; plus exactly one final LF, then navigate across to branch B.
+      (let ((coding-system-for-write 'no-conversion))
+        (write-region
+         (concat (mapconcat #'identity (append first nil) "\n") "\n")
+         nil path nil 0))
+      (let ((second (pi-coding-agent-jsonl-navigation-lines path "b2")))
+        ;; Rewrite B has the same byte multiset and count, but must now end
+        ;; at b2 rather than the physically later shared root.
+        (should (= (length second) original-count))
+        (should (equal (sort (append second nil) #'string<)
+                       original-multiset))
+        (should (equal (aref second (1- (length second)))
+                       (aref original 5)))
+        (should (equal second expected-second))))))
+
+(ert-deftest pi-coding-agent-test-jsonl-navigation-lines-preserve-malformed-and-blank ()
+  "Malformed and blank lines are non-chain BYTES: kept verbatim in
+the leading partition, in their original relative order.  The result
+lines carry no trailing newline — the caller joins and terminates."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-jsonl-navml"))
+         (path (expand-file-name "torn.jsonl" dir))
+         (header-line (json-encode pi-coding-agent-test--jsonl-header))
+         (u1-line (json-encode
+                   (list :type "message" :id "u1" :parentId nil
+                         :timestamp "2026-03-02T10:00:00.000Z"
+                         :message '(:role "user" :content "root"))))
+         (u2-line (json-encode
+                   (list :type "message" :id "u2" :parentId "u1"
+                         :timestamp "2026-03-02T10:00:01.000Z"
+                         :message '(:role "user" :content "leaf"))))
+         (garbage "{\"type\":\"message\",\"id\":\"torn\",\"paren"))
+    (with-temp-file path
+      (insert header-line "\n"
+              u1-line "\n"
+              garbage "\n"
+              "\n"
+              u2-line "\n"))
+    (should (equal (pi-coding-agent-jsonl-navigation-lines path "u2")
+                   (vector header-line garbage "" u1-line u2-line)))))
+
+(ert-deftest pi-coding-agent-test-jsonl-navigation-lines-nil-cases ()
+  "Missing, empty, and headerless files, and unknown or nil leaf ids,
+all read as nil — there is no reorder to express."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-jsonl-navnil"))
+         (missing (expand-file-name "missing.jsonl" dir))
+         (empty (expand-file-name "empty.jsonl" dir))
+         (headerless (expand-file-name "headerless.jsonl" dir))
+         (valid (expand-file-name "valid.jsonl" dir)))
+    (with-temp-file empty)
+    (with-temp-file headerless
+      (insert "{\"type\":\"message\",\"id\":\"u1\",\"parentId\":null,"
+              "\"timestamp\":\"2026-03-02T10:00:00.000Z\","
+              "\"message\":{\"role\":\"user\",\"content\":\"decoy\"}}\n"))
+    (pi-coding-agent-test--write-jsonl
+     valid
+     (list pi-coding-agent-test--jsonl-header
+           (pi-coding-agent-test--jsonl-msg
+            "u1" nil 0 '(:role "user" :content "root"))))
+    (should-not (pi-coding-agent-jsonl-navigation-lines missing "u1"))
+    (should-not (pi-coding-agent-jsonl-navigation-lines empty "u1"))
+    (should-not (pi-coding-agent-jsonl-navigation-lines headerless "u1"))
+    (should-not (pi-coding-agent-jsonl-navigation-lines valid "deadbeef"))
+    (should-not (pi-coding-agent-jsonl-navigation-lines valid nil))))
+
+(ert-deftest pi-coding-agent-test-jsonl-navigation-lines-identity ()
+  "When the chain already ends the file, the partition is the
+identity: a plain chain with its leaf last, and a chain whose last
+line is a trailing label child of the visible leaf, both come back
+unchanged."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-jsonl-navid"))
+         (plain (expand-file-name "plain.jsonl" dir))
+         (plain-lines
+          (list pi-coding-agent-test--jsonl-header
+                (pi-coding-agent-test--jsonl-msg
+                 "u1" nil 0 '(:role "user" :content "root"))
+                (pi-coding-agent-test--jsonl-asst
+                 "a1" "u1" 1 :content "reply" :stopReason "end_turn")
+                (pi-coding-agent-test--jsonl-msg
+                 "u2" "a1" 2 '(:role "user" :content "leaf")))))
+    (pi-coding-agent-test--write-jsonl plain plain-lines)
+    (should (equal (pi-coding-agent-jsonl-navigation-lines plain "u2")
+                   (vconcat (mapcar #'pi-coding-agent-test--jsonl-line-string
+                                    plain-lines)))))
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-jsonl-navlab"))
+         (labeled (expand-file-name "labeled.jsonl" dir))
+         (labeled-lines
+          (list pi-coding-agent-test--jsonl-header
+                (pi-coding-agent-test--jsonl-msg
+                 "u1" nil 0 '(:role "user" :content "root"))
+                (pi-coding-agent-test--jsonl-msg
+                 "u2" "u1" 1 '(:role "user" :content "leaf"))
+                (pi-coding-agent-test--jsonl-entry
+                 "label" "l1" "u2" 2 :targetId "u1" :label "tag"))))
+    (pi-coding-agent-test--write-jsonl labeled labeled-lines)
+    (should (equal (pi-coding-agent-jsonl-navigation-lines labeled "l1")
+                   (vconcat (mapcar #'pi-coding-agent-test--jsonl-line-string
+                                    labeled-lines))))))
+
 (provide 'pi-coding-agent-jsonl-test)
 ;;; pi-coding-agent-jsonl-test.el ends here

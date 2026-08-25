@@ -1695,9 +1695,10 @@ read) with no linked chat renders its link-error message."
 (ert-deftest pi-coding-agent-test-browse-stub-actions-signal-user-error ()
   "Action seam contracts without a linked chat session.
 The switch seam's Phase 2 contract is the no-session error when no
-chat buffer is linked; navigate stays a `user-error' stub until Phase
-4; labeling went live in Phase 3 and reports Cannot-label instead of
-signaling."
+chat buffer is linked; labeling went live in Phase 3 and reports
+Cannot-label instead of signaling.  Navigate went live in Phase 4 —
+its guard contracts are pinned by the navigate tests below, so only
+the RET routing stays pinned here, a structural binding check."
   (with-temp-buffer
     (pi-coding-agent-session-browser-mode)
     (should (equal (error-message-string
@@ -1705,9 +1706,12 @@ signaling."
                      (pi-coding-agent--browse-switch-session "/test/a.jsonl")
                      :type 'user-error))
                    "No pi session to switch to")))
-  (should-error
-      (pi-coding-agent--browse-navigate "node-1")
-    :type 'user-error)
+  ;; RET still routes the tree browser — mode map and node sections —
+  ;; into the navigate command.
+  (should (eq (lookup-key pi-coding-agent-tree-browser-mode-map (kbd "RET"))
+              'pi-coding-agent-tree-browser-navigate))
+  (should (eq (lookup-key pi-coding-agent-tree-node-section-map (kbd "RET"))
+              'pi-coding-agent-tree-browser-navigate))
   ;; Labeling without a resolvable session file: message, no signal.
   (let ((messages nil))
     (cl-letf (((symbol-function 'message)
@@ -1749,10 +1753,16 @@ crashed or hand-edited session file (rename must re-add the separator)."
       (insert (mapconcat #'identity lines "\n"))
       (unless omit-final-newline (insert "\n")))))
 
-(defun pi-coding-agent-test--file-contents (path)
-  "Return the raw contents of PATH."
+(defun pi-coding-agent-test--file-contents (path &optional literally)
+  "Return PATH's contents.
+When LITERALLY is non-nil, return unibyte file bytes with no coding or
+end-of-line conversion; otherwise return decoded text."
   (with-temp-buffer
-    (insert-file-contents path)
+    (if literally
+        (progn
+          (set-buffer-multibyte nil)
+          (insert-file-contents-literally path))
+      (insert-file-contents path))
     (buffer-string)))
 
 (defun pi-coding-agent-test--make-session-header (id &rest extra)
@@ -2997,6 +3007,502 @@ appended anywhere."
           ;; Nothing was written anywhere in the scratch directory.
           (should-not (directory-files dir nil "\\.jsonl\\'")))
       (kill-buffer chat-buf))))
+
+;;;; Phase 4: Tree Navigation
+
+(defun pi-coding-agent-test--navigable-session-lines ()
+  "Return raw session lines with a branch point for navigation tests.
+u1 (root user) has two assistant children — b1, an abandoned sibling,
+and a1, the active branch — whose user child u2 is the raw leaf.
+Navigating to u2 must rewind the leaf to a1: the header stays first,
+the off-chain b1 and u2 keep their relative order ahead of the root
+chain u1, a1, and a1 becomes the new last line."
+  (list (pi-coding-agent-test--make-session-header "sid-nav")
+        (pi-coding-agent-test--user-line "u1" nil "fix the parser")
+        (pi-coding-agent-test--jsonl-line
+         "message" "b1" "u1"
+         :message '(:role "assistant" :content "abandoned branch"
+                    :stopReason "end_turn"))
+        (pi-coding-agent-test--jsonl-line
+         "message" "a1" "u1"
+         :message '(:role "assistant" :content "checking"
+                    :stopReason "end_turn"))
+        (pi-coding-agent-test--user-line "u2" "a1" "try the other way")))
+
+(defun pi-coding-agent-test--navigate-rewritten-contents
+    (lines &optional separator)
+  "Return expected bytes after navigating LINES to u2.
+LINES start (header, u1, b1, a1, u2); any remaining malformed lines
+are off-chain.  The stable partition is header, b1, u2, malformed…,
+u1, a1.  SEPARATOR defaults to LF and is also appended once at end."
+  (let ((separator (string-as-unibyte (or separator "\n"))))
+    (concat (mapconcat #'string-as-unibyte
+                       (append (list (nth 0 lines) (nth 2 lines)
+                                     (nth 4 lines))
+                               (nthcdr 5 lines)
+                               (list (nth 1 lines) (nth 3 lines)))
+                       separator)
+            separator)))
+
+(defmacro pi-coding-agent-test--with-navigate-fixture
+    (lines path chat-buf input-buf proc messages resume-calls quit-calls
+     ready-calls &rest body)
+  "Run BODY inside a tree browser wired for a `--browse-navigate' call.
+LINES is an expression yielding the raw session lines written to a
+fresh PATH in a temp directory.  CHAT-BUF's state names PATH, its
+process is a live PROC, and its linked INPUT-BUF starts with a stale
+draft.  The tree browser fetches synchronously first, so
+`--tree-browser-loaded-file' is PATH.  message,
+`--resume-selected-session', `--browse-quit-when-settled', the resume
+cwd pre-flight (`--session-file-cwd-or-error', satisfied with the
+session directory), and `--session-transition-ready-p' (which answers
+ready) are spied into MESSAGES, RESUME-CALLS, QUIT-CALLS, and
+READY-CALLS.  BODY runs inside the `cl-letf*', so a nested `cl-letf'
+overrides any spy."
+  (declare (indent 9))
+  (let ((dir (gensym "nav-dir")))
+    `(let* ((,dir (pi-coding-agent-test--make-temp-directory "pi-nav"))
+            (,path (expand-file-name "session.jsonl" ,dir))
+            (,proc (start-process "pi-nav-test" nil "sleep" "30"))
+            (,chat-buf (generate-new-buffer " *test-nav-chat*"))
+            (,input-buf (generate-new-buffer " *test-nav-input*")))
+       (unwind-protect
+           (progn
+             (pi-coding-agent-test--write-session-lines ,path ,lines)
+             (with-current-buffer ,chat-buf
+               (setq pi-coding-agent--state (list :session-file ,path)
+                     pi-coding-agent--process ,proc
+                     pi-coding-agent--input-buffer ,input-buf))
+             (with-current-buffer ,input-buf
+               (insert "stale draft"))
+             (with-temp-buffer
+               (pi-coding-agent-tree-browser-mode)
+               (setq pi-coding-agent--chat-buffer ,chat-buf)
+               (pi-coding-agent-test--sync-timers
+                 (lambda ()
+                   (pi-coding-agent--tree-browser-fetch-and-render)))
+               (let ((,messages nil)
+                     (,resume-calls nil)
+                     (,quit-calls nil)
+                     (,ready-calls nil))
+                 (cl-letf* (((symbol-function 'message)
+                             (lambda (fmt &rest args)
+                               (push (apply #'format fmt args) ,messages)))
+                            ((symbol-function
+                              'pi-coding-agent--resume-selected-session)
+                             (lambda (&rest args) (push args ,resume-calls)))
+                            ((symbol-function
+                              'pi-coding-agent--browse-quit-when-settled)
+                             (lambda (&rest args) (push args ,quit-calls)))
+                            ((symbol-function
+                              'pi-coding-agent--session-file-cwd-or-error)
+                             (lambda (&rest _) ,dir))
+                            ((symbol-function
+                              'pi-coding-agent--session-transition-ready-p)
+                             (lambda (&rest args)
+                               (push args ,ready-calls)
+                               t)))
+                   ,@body))))
+         (delete-process ,proc)
+         (pi-coding-agent-test--kill-live-buffers ,chat-buf ,input-buf)))))
+
+(ert-deftest pi-coding-agent-test-navigate-guards ()
+  "Navigate refuses, in order, before touching anything: no linked
+chat (`user-error'), no resolvable session file, a stale loaded file
+(the chat switched sessions behind the browser), a dead process
+(`user-error'), an active session transition, and a not-ready chat.
+Every refusal leaves the session files byte-identical and the resume
+flow uncalled."
+  ;; No linked chat: user-error before any other guard.
+  (with-temp-buffer
+    (pi-coding-agent-tree-browser-mode)
+    (setq pi-coding-agent--chat-buffer nil)
+    (should (equal (error-message-string
+                    (should-error
+                     (pi-coding-agent--browse-navigate "u2")
+                     :type 'user-error))
+                   "No pi session to navigate")))
+  ;; No session file: message, nothing written.
+  (let* ((chat-buf (generate-new-buffer " *test-nav-nofile-chat*"))
+         (messages nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :messageCount 3)))
+          (pi-coding-agent-test--with-tree-link chat-buf
+            (cl-letf (((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (push (apply #'format fmt args) messages))))
+              (pi-coding-agent--browse-navigate "u2"))
+            (should (member "Pi: Cannot navigate: no session file"
+                            messages))))
+      (kill-buffer chat-buf)))
+  ;; Stale loaded file: the chat moved to another session.
+  (pi-coding-agent-test--with-navigate-fixture
+      (pi-coding-agent-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let* ((other (expand-file-name
+                   "other.jsonl" (file-name-directory path)))
+           (before (pi-coding-agent-test--file-contents path)))
+      (pi-coding-agent-test--write-session-lines
+       other (pi-coding-agent-test--navigable-session-lines))
+      (let ((other-before (pi-coding-agent-test--file-contents other)))
+        (with-current-buffer chat-buf
+          (setq pi-coding-agent--state (list :session-file other)))
+        (pi-coding-agent--browse-navigate "u2")
+        (should (member
+                 "Pi: Session changed since the tree was loaded — refresh with g"
+                 messages))
+        (should (equal (pi-coding-agent-test--file-contents path) before))
+        (should (equal (pi-coding-agent-test--file-contents other)
+                       other-before))
+        (should-not resume-calls))))
+  ;; Dead process: user-error, before the transition guards.
+  (pi-coding-agent-test--with-navigate-fixture
+      (pi-coding-agent-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let ((before (pi-coding-agent-test--file-contents path)))
+      (with-current-buffer chat-buf
+        (setq pi-coding-agent--process nil))
+      (should (equal (error-message-string
+                      (should-error
+                       (pi-coding-agent--browse-navigate "u2")
+                       :type 'user-error))
+                     "Pi process is not running"))
+      (should (equal (pi-coding-agent-test--file-contents path) before))
+      (should-not resume-calls)
+      (should-not ready-calls)))
+  ;; Active transition: message, and the ready guard never runs.
+  (pi-coding-agent-test--with-navigate-fixture
+      (pi-coding-agent-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let ((before (pi-coding-agent-test--file-contents path)))
+      (with-current-buffer chat-buf
+        (setq pi-coding-agent--session-transition-active t))
+      (pi-coding-agent--browse-navigate "u2")
+      (should (member "Pi: Cannot navigate while switching sessions"
+                      messages))
+      (should (equal (pi-coding-agent-test--file-contents path) before))
+      (should-not resume-calls)
+      (should-not ready-calls)))
+  ;; Not ready: the guard reports its own refusal and navigate
+  ;; returns quietly, passing the "navigate" action.
+  (pi-coding-agent-test--with-navigate-fixture
+      (pi-coding-agent-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let ((before (pi-coding-agent-test--file-contents path)))
+      (cl-letf (((symbol-function
+                  'pi-coding-agent--session-transition-ready-p)
+                 (lambda (chat-buf action)
+                   (push (list chat-buf action) ready-calls)
+                   nil)))
+        (pi-coding-agent--browse-navigate "u2"))
+      (should (equal ready-calls (list (list chat-buf "navigate"))))
+      (should (equal (pi-coding-agent-test--file-contents path) before))
+      (should-not resume-calls))))
+
+(ert-deftest pi-coding-agent-test-navigate-old-format ()
+  "A version-1 session file (no header :version, no entry ids) reads
+fine but refuses navigation with the migrate hint — the version guard
+fires before any node lookup.  The file is untouched and no switch is
+scheduled."
+  (let ((old-lines
+         (list (json-encode
+                (list :type "session"
+                      :id "sid-old"
+                      :timestamp pi-coding-agent-test--browse-timestamp
+                      :cwd "/home/fake/a"))
+               (json-encode
+                (list :type "message"
+                      :timestamp pi-coding-agent-test--browse-timestamp
+                      :message '(:role "user" :content "v1 prompt"))))))
+    (pi-coding-agent-test--with-navigate-fixture
+        old-lines path chat-buf input-buf proc messages resume-calls
+        quit-calls ready-calls
+      (let ((before (pi-coding-agent-test--file-contents path)))
+        (pi-coding-agent--browse-navigate "u1")
+        (should (member
+                 "Pi: Session file uses an old format; open it with pi once to migrate, then refresh with g"
+                 messages))
+        (should (equal (pi-coding-agent-test--file-contents path) before))
+        (should-not resume-calls)))))
+
+(ert-deftest pi-coding-agent-test-navigate-unknown-node ()
+  "A node id the session file does not carry refuses with the refresh
+hint; the file is untouched and no switch is scheduled."
+  (pi-coding-agent-test--with-navigate-fixture
+      (pi-coding-agent-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let ((before (pi-coding-agent-test--file-contents path)))
+      (pi-coding-agent--browse-navigate "deadbeef")
+      (should (member "Pi: No such tree node — refresh with g" messages))
+      (should (equal (pi-coding-agent-test--file-contents path) before))
+      (should-not resume-calls))))
+
+(ert-deftest pi-coding-agent-test-navigate-already-at-position ()
+  "Targeting the current position (no prefill to restore) just says
+so: no write, no switch, no settle-wait.  The raw leaf is a trailing
+label child of a1, which resolves up to a1 — the target itself."
+  (pi-coding-agent-test--with-navigate-fixture
+      (list (pi-coding-agent-test--make-session-header "sid-here")
+            (pi-coding-agent-test--user-line "u1" nil "fix the parser")
+            (pi-coding-agent-test--jsonl-line
+             "message" "a1" "u1"
+             :message '(:role "assistant" :content "checking"
+                        :stopReason "end_turn"))
+            (pi-coding-agent-test--jsonl-line
+             "label" "l1" "a1" :targetId "u1" :label "checkpoint"))
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let ((before (pi-coding-agent-test--file-contents path)))
+      (pi-coding-agent--browse-navigate "a1")
+      (should (member "Pi: Already at current position" messages))
+      (should (equal (pi-coding-agent-test--file-contents path) before))
+      (should-not resume-calls)
+      (should-not quit-calls)
+      ;; The stale draft survives: there is nothing to re-edit.
+      (should (equal (with-current-buffer input-buf (buffer-string))
+                     "stale draft")))))
+
+(ert-deftest pi-coding-agent-test-navigate-prefill-only ()
+  "Re-editing a prompt the file already sits on (a previous navigate
+put its parent last) prefills the input buffer and waits out the
+settle — but writes nothing and switches nothing."
+  (pi-coding-agent-test--with-navigate-fixture
+      (list (pi-coding-agent-test--make-session-header "sid-again")
+            (pi-coding-agent-test--user-line "u2" "u1" "try the other way")
+            (pi-coding-agent-test--user-line "u1" nil "fix the parser"))
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let ((before (pi-coding-agent-test--file-contents path)))
+      (pi-coding-agent--browse-navigate "u2")
+      (should (equal (with-current-buffer input-buf (buffer-string))
+                     "try the other way"))
+      (should (member "Pi: Navigated to try the other way" messages))
+      (should (equal quit-calls
+                     (list (list chat-buf (selected-window) path))))
+      (should (equal (pi-coding-agent-test--file-contents path) before))
+      (should-not resume-calls))))
+
+(ert-deftest pi-coding-agent-test-navigate-rewrites-and-switches ()
+  "The full navigate atomically moves the chain last and switches.
+The fresh disk input is adversarial CRLF JSONL with a structurally
+malformed line containing byte FF.  Every original line and byte,
+including every CR, survives the stable partition exactly; a final
+CRLF remains.  The resume flow gets (PROC CHAT-BUF PATH), input is
+prefilled, success is messaged, settle-wait is scheduled, and no temp
+file remains."
+  (pi-coding-agent-test--with-navigate-fixture
+      (pi-coding-agent-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let* ((malformed
+            (concat (string-as-unibyte
+                     "{\"type\":\"message\",\"id\":\"torn\",\"payload\":\"")
+                    (unibyte-string #xff)))
+           (lines (append (pi-coding-agent-test--navigable-session-lines)
+                          (list malformed)))
+           (original (concat (mapconcat #'string-as-unibyte lines
+                                         (string-as-unibyte "\r\n"))
+                             (string-as-unibyte "\r\n")))
+           (expected (pi-coding-agent-test--navigate-rewritten-contents
+                      lines "\r\n")))
+      ;; Replace only the temp fixture, never real session data.  The
+      ;; browser cache is already loaded; navigate must use this fresh
+      ;; on-disk CRLF shape for both target and line-order reads.
+      (let ((coding-system-for-write 'no-conversion))
+        (write-region original nil path nil 0))
+      (pi-coding-agent--browse-navigate "u2")
+      (should (equal (pi-coding-agent-test--file-contents path t) expected))
+      (should (equal resume-calls (list (list proc chat-buf path))))
+      (should (equal quit-calls
+                     (list (list chat-buf (selected-window) path))))
+      (should (equal (with-current-buffer input-buf (buffer-string))
+                     "try the other way"))
+      (should (member "Pi: Navigated to try the other way" messages))
+      (should-not (directory-files (file-name-directory path)
+                                   nil "\\.pi-nav-")))))
+
+(ert-deftest pi-coding-agent-test-navigate-shape ()
+  "The navigated file reads back in the navigated shape: read-file's
+:leafId is the computed leaf (a1), and the projection's active path
+from that leaf holds exactly the expected visible ids — u1 and a1,
+not the off-branch b1 nor the rewound-under u2."
+  (pi-coding-agent-test--with-navigate-fixture
+      (pi-coding-agent-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (pi-coding-agent--browse-navigate "u2")
+    (let* ((session (pi-coding-agent-jsonl-read-file path))
+           (result (pi-coding-agent-jsonl-project-session-file path))
+           (active (pi-coding-agent--active-path-ids
+                    (plist-get result :tree) (plist-get result :leafId))))
+      (should (equal (plist-get session :leafId) "a1"))
+      (should (equal (plist-get result :leafId) "a1"))
+      (should (gethash "u1" active))
+      (should (gethash "a1" active))
+      (should-not (gethash "u2" active))
+      (should-not (gethash "b1" active)))))
+
+(ert-deftest pi-coding-agent-test-navigate-atomic-failure ()
+  "Errors and quits before commit leave the original byte-identical.
+For both write-region and rename-file legs, `unwind-protect' removes
+any .pi-nav- temp, the switch and prefill do not run, errors report a
+navigate failure, and quits propagate.  The quitting write first
+creates a partial temp file, proving cleanup rather than non-creation."
+  (pi-coding-agent-test--with-navigate-fixture
+      (pi-coding-agent-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let ((before (pi-coding-agent-test--file-contents path))
+          (dir (file-name-directory path)))
+      ;; write-region failure: the temp file never lands.
+      (cl-letf (((symbol-function 'write-region)
+                 (lambda (&rest _)
+                   (signal 'file-error '("write failed")))))
+        (pi-coding-agent--browse-navigate "u2"))
+      (should (equal (pi-coding-agent-test--file-contents path) before))
+      (should-not (directory-files dir nil "\\.pi-nav-"))
+      (should-not resume-calls)
+      (should (cl-some (lambda (m) (string-match-p "\\`Pi: Navigate failed: " m))
+                       messages))
+      ;; rename-file failure: the temp file is removed again, never
+      ;; swapped in.
+      (setq messages nil)
+      (cl-letf (((symbol-function 'rename-file)
+                 (lambda (&rest _)
+                   (signal 'file-error '("rename failed")))))
+        (pi-coding-agent--browse-navigate "u2"))
+      (should (equal (pi-coding-agent-test--file-contents path) before))
+      (should-not (directory-files dir nil "\\.pi-nav-"))
+      (should-not resume-calls)
+      (should (cl-some (lambda (m) (string-match-p "\\`Pi: Navigate failed: " m))
+                       messages))
+      ;; A quit after a partial temp write is not an `error', so it
+      ;; propagates; the unwind still removes the file.
+      (let ((real-write (symbol-function 'write-region)))
+        (cl-letf (((symbol-function 'write-region)
+                   (lambda (_start _end filename &rest _)
+                     (funcall real-write "partial" nil filename nil 0)
+                     (signal 'quit nil))))
+          (should (eq (condition-case nil
+                          (progn
+                            (pi-coding-agent--browse-navigate "u2")
+                            'returned)
+                        (quit 'quit))
+                      'quit))))
+      (should (equal (pi-coding-agent-test--file-contents path) before))
+      (should-not (directory-files dir nil "\\.pi-nav-"))
+      (should-not resume-calls)
+      ;; The rename leg also owns a completed temp file when quit
+      ;; arrives; its unwind removes that file and leaves PATH alone.
+      (cl-letf (((symbol-function 'rename-file)
+                 (lambda (&rest _) (signal 'quit nil))))
+        (should (eq (condition-case nil
+                        (progn
+                          (pi-coding-agent--browse-navigate "u2")
+                          'returned)
+                      (quit 'quit))
+                    'quit)))
+      (should (equal (pi-coding-agent-test--file-contents path) before))
+      (should-not (directory-files dir nil "\\.pi-nav-"))
+      (should-not resume-calls)
+      ;; No failed or interrupted attempt touched the input buffer.
+      (should (equal (with-current-buffer input-buf (buffer-string))
+                     "stale draft")))))
+
+(ert-deftest pi-coding-agent-test-navigate-preflight-cwd ()
+  "A resume cwd failure re-signals its `user-error' BEFORE any write:
+the file is untouched, no temp file appears, and no switch runs."
+  (pi-coding-agent-test--with-navigate-fixture
+      (pi-coding-agent-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let ((before (pi-coding-agent-test--file-contents path)))
+      (cl-letf (((symbol-function
+                  'pi-coding-agent--session-file-cwd-or-error)
+                 (lambda (&rest _)
+                   (user-error
+                    "Stored session cwd is not an existing directory"))))
+        (should (equal (error-message-string
+                        (should-error
+                         (pi-coding-agent--browse-navigate "u2")
+                         :type 'user-error))
+                       "Stored session cwd is not an existing directory")))
+      (should (equal (pi-coding-agent-test--file-contents path) before))
+      (should-not (directory-files (file-name-directory path)
+                                   nil "\\.pi-nav-"))
+      (should-not resume-calls))))
+
+(ert-deftest pi-coding-agent-test-navigate-root-user-message ()
+  "Navigating to the root user message has no parent to rewind to:
+the fork hint fires, nothing is written, no switch runs."
+  (pi-coding-agent-test--with-navigate-fixture
+      (pi-coding-agent-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (let ((before (pi-coding-agent-test--file-contents path)))
+      (pi-coding-agent--browse-navigate "u1")
+      (should (member
+               "Pi: Cannot rewind before the first message; fork it from the chat instead"
+               messages))
+      (should (equal (pi-coding-agent-test--file-contents path) before))
+      (should-not resume-calls))))
+
+(ert-deftest pi-coding-agent-test-navigate-preserves-permissions ()
+  "The rewrite carries the original file's modes onto the replacement
+(best effort): a 0600 session is still 0600 after navigating, and the
+full flow ran (a switch was scheduled onto the rewritten file)."
+  (skip-unless (not (zerop (user-uid))))
+  (pi-coding-agent-test--with-navigate-fixture
+      (pi-coding-agent-test--navigable-session-lines)
+      path chat-buf input-buf proc messages resume-calls quit-calls
+      ready-calls
+    (set-file-modes path #o600)
+    (pi-coding-agent--browse-navigate "u2")
+    (should resume-calls)
+    (should (equal (file-modes path) #o600))))
+
+(ert-deftest pi-coding-agent-test-quit-when-settled-tree-window ()
+  "--browse-poll-settled also dismisses TREE browser windows: the
+window check accepts any pi browse buffer via `derived-mode-p', not
+just the session browser (V14)."
+  (let* ((chat-buf (generate-new-buffer " *test-settled-tree-chat*"))
+         (win (selected-window))
+         (orig-buf (window-buffer win))
+         (browser-buf (generate-new-buffer " *test-settled-tree*"))
+         (path "/tmp/target-session.jsonl")
+         (quit-calls nil)
+         (polls 0))
+    (unwind-protect
+        (progn
+          (with-current-buffer browser-buf
+            (pi-coding-agent-tree-browser-mode))
+          (set-window-buffer win browser-buf)
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :session-file path)))
+          ;; Settled onto the target after one busy poll: the window
+          ;; shows a TREE browser and must be quit.
+          (cl-letf (((symbol-function
+                      'pi-coding-agent--session-transition-active-p)
+                     (lambda (&optional _chat-buf)
+                       (setq polls (1+ polls))
+                       (<= polls 1)))
+                    ((symbol-function 'run-at-time)
+                     (lambda (_secs _repeat fn &rest args) (apply fn args)))
+                    ((symbol-function 'quit-window)
+                     (lambda (&rest args) (push args quit-calls))))
+            (pi-coding-agent--browse-quit-when-settled chat-buf win path))
+          (should (>= polls 2))
+          (should (equal quit-calls (list (list nil win)))))
+      (set-window-buffer win orig-buf)
+      (kill-buffer browser-buf)
+      (when (buffer-live-p chat-buf) (kill-buffer chat-buf)))))
 
 (provide 'pi-coding-agent-browse-test)
 ;;; pi-coding-agent-browse-test.el ends here

@@ -41,8 +41,17 @@
 ;; on every read), and `pi-coding-agent--browse-set-label' appends a
 ;; `label' entry the same way — neither needs a live pi process.  The
 ;; tree shows the last PERSISTED turn, so it lags an in-flight turn;
-;; refresh manually with `g'.  Navigation stays a Phase 4 stub via
-;; `pi-coding-agent--browse-navigate'.
+;; refresh manually with `g'.  Phase 4 landed navigation:
+;; `pi-coding-agent--browse-navigate' guards, computes the target
+;; (jsonl navigation-target), atomically rewrites an ordinary local
+;; session file so the target's ancestor chain ends it (write-temp +
+;; rename — the rename is the only step that touches the file),
+;; switches the chat onto the rewritten file via menu's resume flow,
+;; prefills the input
+;; buffer with the target's re-edit text, and dismisses the browser
+;; window once the transition settles.  No auto-reopen after navigate
+;; (refresh with `g'); no fork fallback — rewinding before the first
+;; message points at the chat's fork command instead.
 
 ;;; Code:
 
@@ -59,6 +68,8 @@
                   (proc chat-buf selected-path))
 (declare-function pi-coding-agent--session-transition-ready-p "pi-coding-agent-menu"
                   (chat-buf action))
+(declare-function pi-coding-agent--session-file-cwd-or-error "pi-coding-agent-menu"
+                  (path))
 (declare-function pi-coding-agent--session-list-directory "pi-coding-agent-menu"
                   (&optional chat-buf))
 
@@ -1565,6 +1576,20 @@ Returns the label string or nil."
             (push (aref children i) stack)))))
     result))
 
+(defun pi-coding-agent--tree-find-node (tree node-id)
+  "Find the projected node with :id NODE-ID in TREE; nil when absent.
+Iterative pre-order walk; used by
+`pi-coding-agent--browse-navigate-message' for the success preview."
+  (let ((stack (append tree nil))
+        (found nil))
+    (while (and stack (not found))
+      (let ((node (pop stack)))
+        (if (equal (plist-get node :id) node-id)
+            (setq found node)
+          (setq stack (append (append (plist-get node :children) nil)
+                              stack)))))
+    found))
+
 (defun pi-coding-agent--tree-node-with-label (node label)
   "Return a copy of projected NODE carrying :label LABEL, or no label.
 LABEL nil removes the label pair entirely — the load-time fold treats
@@ -1913,7 +1938,8 @@ killed buffer would signal inside the timer."
       (when (and (pi-coding-agent--browse-session-file-matches-p chat-buf path)
                  (window-live-p win)
                  (with-current-buffer (window-buffer win)
-                   (derived-mode-p 'pi-coding-agent-session-browser-mode)))
+                   (derived-mode-p 'pi-coding-agent-session-browser-mode
+                                   'pi-coding-agent-tree-browser-mode)))
         (quit-window nil win)))))
 
 (defun pi-coding-agent--browse-quit-when-settled (chat-buf win path)
@@ -1922,19 +1948,220 @@ Polls `pi-coding-agent--session-transition-active-p' every 0.05 s with
 a 30 s timeout.  Once settled, WIN is quit ONLY when the chat state's
 :session-file matches PATH — a failed switch already messaged via the
 menu, so a mismatch silently leaves the browser open — and only when
-WIN still shows a session browser: a dead or repurposed window (the
-buffer was killed mid-poll) is left alone so `quit-window' can never
-close whatever replaced it."
+WIN still shows a pi browse buffer (session OR tree browser, via
+`derived-mode-p'): a dead or repurposed window (the buffer was killed
+mid-poll) is left alone so `quit-window' can never close whatever
+replaced it."
   (pi-coding-agent--browse-poll-settled
    chat-buf win path (time-add (current-time) 30)))
 
 (defun pi-coding-agent--browse-navigate (node-id)
-  "Move the live conversation to tree node NODE-ID.
-Phase 0 stub: signals `user-error'.  Phase 4: transition guard,
-re-read file, atomic rewrite (target path last), switch_session,
-reload, prefill."
-  (ignore node-id)                   ; Phase 4: target of the rewrite
-  (user-error "Tree navigation is not implemented yet"))
+  "Move the live conversation onto tree node NODE-ID.
+Guard → rewrite → switch → reload → prefill, mirroring pi's
+navigateTree without a navigate RPC:
+
+ 1. a live linked chat buffer, else `user-error' \"No pi session to
+    navigate\";
+ 2. the loaded-file guard (as `pi-coding-agent--browse-set-label'):
+    a fresh session-file resolution that is nil messages \"Pi: Cannot
+    navigate: no session file\", one that disagrees with
+    `pi-coding-agent--tree-browser-loaded-file' messages \"Pi: Session
+    changed since the tree was loaded — refresh with g\" (the rewrite
+    would have to pick one of two files);
+ 3. a live pi process, else `user-error' \"Pi process is not running\";
+ 4. no in-flight session transition — `--session-transition-ready-p'
+    cannot see one (status stays idle during the latch), and a second
+    RET during a switch would race it;
+ 5. `pi-coding-agent--session-transition-ready-p' with the action
+    \"navigate\" (reports its own refusal);
+ 6. a FRESH `pi-coding-agent-jsonl-read-file' — the browser's cached
+    tree can lag the file — else the unreadable message;
+ 7. a versioned header: version 1 files (no ids) refuse with the
+    migrate hint;
+ 8. `pi-coding-agent-jsonl-navigation-target': unknown node ids refuse
+    with the refresh hint; a nil :leaf-id (the root user message has
+    no parent to rewind to) refuses with the fork hint — the chat's
+    fork command does that job;
+ 9. :current-p is the two-way no-op: without :prefill just message
+    \"Pi: Already at current position\"; with :prefill (re-editing a
+    prompt the file already sits on) prefill, message, and settle —
+    no write, no switch in either case;
+10. the resume cwd pre-flight (`--session-file-cwd-or-error') runs
+    BEFORE any write so its `user-error's surface before the file
+    changes;
+11. the local atomic rewrite (`--browse-rewrite-session-file') — the
+    closing rename is the ONLY call that touches the session file;
+    pre-commit local failure messages and stops byte-identically;
+12. `pi-coding-agent--resume-selected-session' (PROC CHAT-BUF PATH) —
+    a same-path switch is legal, so the switch rides the normal
+    choreography including the transition latch and history reload;
+13. the input prefill runs immediately after the resume RPC is
+    scheduled (the latch blocks sending until the switch settles),
+    against the input buffer captured from the chat BEFORE the RPC;
+14. \"Pi: Navigated to PREVIEW\" from the cached tree
+    (`--tree-find-node', `--tree-node-preview', truncated to 60;
+    \"Pi: Navigated\" without a preview), then
+    `pi-coding-agent--browse-quit-when-settled';
+15. no auto-reopen of the browser (V15) — refresh with `g'.
+
+On ordinary local files this guard/read/rewrite path is synchronous and
+does not yield back to Emacs, so only an independent writer can stale
+the file between checks.  The ready guard idles the linked pi process
+but cannot exclude another pi instance or external writer; such a
+writer between the authoritative line read and rename can lose its
+change.  TRAMP file handlers may yield, and their rename need not be
+atomic.  These residual risks are accepted here rather than inventing
+cross-module writer coordination."
+  (let ((chat-buf pi-coding-agent--chat-buffer))
+    (unless (and chat-buf (buffer-live-p chat-buf))
+      (user-error "No pi session to navigate"))
+    ;; The input buffer is captured BEFORE the RPC: the chat may retarget
+    ;; buffers during the switch (step 12).
+    (let ((input-buf (buffer-local-value 'pi-coding-agent--input-buffer
+                                         chat-buf))
+          (path (pi-coding-agent--tree-browser-chat-session-file)))
+      (cond
+       ((null path)
+        (message "Pi: Cannot navigate: no session file"))
+       ((not (equal pi-coding-agent--tree-browser-loaded-file path))
+        (message "Pi: Session changed since the tree was loaded — refresh with g"))
+       (t
+        (let ((proc (buffer-local-value 'pi-coding-agent--process chat-buf)))
+          (unless (pi-coding-agent--session-live-process-p proc)
+            (user-error "Pi process is not running"))
+          (cond
+           ((pi-coding-agent--session-transition-active-p chat-buf)
+            (message "Pi: Cannot navigate while switching sessions"))
+           ((not (pi-coding-agent--session-transition-ready-p
+                  chat-buf "navigate"))
+            nil)
+           (t
+            (let ((session (pi-coding-agent-jsonl-read-file path)))
+              (cond
+               ((null session)
+                (message
+                 "Pi: Cannot navigate: session file is unreadable or not a pi session file: %s"
+                 path))
+               ((not (plist-get (plist-get session :header) :version))
+                (message
+                 "Pi: Session file uses an old format; open it with pi once to migrate, then refresh with g"))
+               (t
+                (let ((target (pi-coding-agent-jsonl-navigation-target
+                               session node-id)))
+                  (cond
+                   ((null target)
+                    (message "Pi: No such tree node — refresh with g"))
+                   ((null (plist-get target :leaf-id))
+                    (message
+                     "Pi: Cannot rewind before the first message; fork it from the chat instead"))
+                   ((plist-get target :current-p)
+                    (if (not (plist-get target :prefill))
+                        (message "Pi: Already at current position")
+                      (pi-coding-agent--browse-prefill-input
+                       input-buf (plist-get target :prefill))
+                      (pi-coding-agent--browse-navigate-message node-id)
+                      (pi-coding-agent--browse-quit-when-settled
+                       chat-buf (selected-window) path)))
+                   (t
+                    (condition-case err
+                        (pi-coding-agent--session-file-cwd-or-error path)
+                      ;; Re-signal the guard's own wording before any
+                      ;; write happens.
+                      (user-error (signal (car err) (cdr err))))
+                    (let ((lines (pi-coding-agent-jsonl-navigation-lines
+                                  path (plist-get target :leaf-id))))
+                      (if (null lines)
+                          (message
+                           "Pi: Cannot navigate: session file is unreadable or not a pi session file: %s"
+                           path)
+                        (when (pi-coding-agent--browse-rewrite-session-file
+                               path lines)
+                          (pi-coding-agent--resume-selected-session
+                           proc chat-buf path)
+                          (pi-coding-agent--browse-prefill-input
+                           input-buf (plist-get target :prefill))
+                          (pi-coding-agent--browse-navigate-message node-id)
+                          (pi-coding-agent--browse-quit-when-settled
+                           chat-buf (selected-window) path))))))))))))))))))
+
+(defun pi-coding-agent--browse-navigate-message (node-id)
+  "Message the navigate success for NODE-ID from the cached tree.
+The preview comes from `pi-coding-agent--tree-find-node' and
+`pi-coding-agent--tree-node-preview' over the browser's cached tree
+with no refetch (V15), truncated to 60; without a preview the bare
+\"Pi: Navigated\"."
+  (let* ((node (when (vectorp pi-coding-agent--tree-browser-tree)
+                 (pi-coding-agent--tree-find-node
+                  pi-coding-agent--tree-browser-tree node-id)))
+         (preview (if node (pi-coding-agent--tree-node-preview node) "")))
+    (if (and (stringp preview) (not (string-empty-p preview)))
+        (message "Pi: Navigated to %s"
+                 (pi-coding-agent--truncate-string preview 60))
+      (message "Pi: Navigated"))))
+
+(defun pi-coding-agent--browse-rewrite-session-file (path lines)
+  "Atomically replace the session file at PATH with LINES.
+LINES is the `pi-coding-agent-jsonl-navigation-lines' vector; the
+joined bytes gain one final LF.  The ONLY call that touches PATH is
+the closing `rename-file': bytes land without coding or end-of-line
+conversion in a sibling temp file (`.pi-nav-…' in PATH's directory)
+that carries PATH's modes best-effort, then replace PATH.  On ordinary
+local files the sibling is on the same filesystem and rename is the
+atomic commit; pi holds no persistent descriptor on session files, so
+its next append/read opens the replacement.  On TRAMP a handler may
+degrade rename to copy+delete: replacement can be visible in pieces
+and a remote failure cannot promise a byte-identical original.  This
+is accepted because in-place writing is strictly worse.
+
+The rewrite reorders complete raw lines only.  It always adds one final
+LF; CR bytes returned for CRLF lines remain in place, so an all-CRLF
+file with its final delimiter stays all-CRLF.  A file missing its
+trailing newline gains LF (or CRLF when its final raw line ends in CR).
+The ready guard only idles the linked pi process: an independent
+append/change between the
+fresh line read and local rename can still be lost.  `unwind-protect'
+removes the temp on an error or quit before commit.  Thus on ordinary
+local files pre-commit failures leave PATH byte-identical and no temp
+behind; errors report \"Pi: Navigate failed: …\" and return nil, while quits
+propagate after cleanup.  Success returns non-nil."
+  (let* ((contents (concat (mapconcat #'identity (append lines nil) "\n")
+                           "\n"))
+         (tmp (make-temp-name
+               (concat (file-name-directory path) ".pi-nav-")))
+         (swapped nil))
+    (condition-case err
+        (unwind-protect
+            (progn
+              (let ((coding-system-for-write 'no-conversion))
+                ;; VISIT 0: no "Wrote file" message, no lockfile — and
+                ;; the target is TMP, never PATH.  LINES are unibyte raw
+                ;; file lines, so no coding or EOL conversion is allowed.
+                (write-region contents nil tmp nil 0))
+              (ignore-errors
+                (set-file-modes tmp (file-modes path)))
+              (rename-file tmp path t)
+              (setq swapped t))
+          (unless swapped
+            (ignore-errors (delete-file tmp))))
+      (error
+       (message "Pi: Navigate failed: %s" (error-message-string err))
+       nil))))
+
+(defun pi-coding-agent--browse-prefill-input (input-buf text)
+  "Replace INPUT-BUF's draft with TEXT; nil TEXT still erases.
+Erasing unsent input is deliberate (the fork command's precedent):
+the navigate prefill replaces whatever draft was in flight.  Runs
+immediately after the resume RPC is scheduled — the transition latch
+blocks sending until the switch settles, so the text cannot leak into
+the outgoing session.  Failures are non-fatal."
+  (when (buffer-live-p input-buf)
+    (condition-case err
+        (with-current-buffer input-buf
+          (erase-buffer)
+          (when text (insert text)))
+      (error
+       (message "Pi: Failed to prefill prompt - %s"
+                (error-message-string err))))))
 
 (defun pi-coding-agent--browse-set-label (node-id label)
   "Set LABEL (string, or nil to clear) on tree node NODE-ID.

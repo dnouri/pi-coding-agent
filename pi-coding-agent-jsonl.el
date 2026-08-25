@@ -27,12 +27,16 @@
 
 ;; Pure functions over pi session JSONL files: reading entries, building
 ;; the raw nested session tree, projecting that tree to the flat display
-;; dialect the tree browser consumes, formatting tool-call previews, and
-;; discovering session files on disk (sessions root, munged per-cwd
-;; directories, cheap metadata scans).  Ports pi's session-manager
-;; getTree (plus label folding), the RPC tree projection, core
-;; format-tool-call, and config/session-dir path munging.  Depends only
-;; on core; nothing here touches buffers, processes, or state.
+;; dialect the tree browser consumes, formatting tool-call previews,
+;; computing tree-navigation targets and byte-preserving rewritten line
+;; orders (non-chain lines stay in physical order; selected chains use
+;; logical parent order), and discovering session files on disk (sessions
+;; root, munged per-cwd directories, cheap metadata scans).  Ports pi's
+;; session-manager
+;; getTree (plus label folding), the RPC tree projection, navigateTree's
+;; leaf rule, core format-tool-call, and config/session-dir path munging.
+;; Depends only on core; nothing here touches buffers, processes, or
+;; state.
 ;;
 ;; Normalization conventions (JSON in, plists out):
 ;;
@@ -87,6 +91,11 @@
 ;;   the file mtime instead of the newest message timestamp (one stat
 ;;   versus a per-line compare).  Append-only files agree, and the
 ;;   Phase 4 navigation rewrites arguably make mtime more correct.
+;; - `pi-coding-agent-jsonl-navigation-target's :current-p refines pi's
+;;   navigateTree raw-id no-op with the computed leaf rule and visible
+;;   resolution: a self-target that is the literal leaf remains current,
+;;   while a trailing bookkeeping leaf folds up onto the visible entry it
+;;   sits on and a re-edit target compares its parent position.
 ;;
 ;; All tree traversals are iterative (explicit stacks, reversed
 ;; pre-order bottom-up builds); real session trees reach thousands of
@@ -424,12 +433,15 @@ dropped.  Traversal is iterative."
 
 ;;;; Text Extraction and Previews
 
-(defun pi-coding-agent--jsonl-extract-text (content &optional max-len)
+(defun pi-coding-agent--jsonl-extract-text (content &optional max-len separator)
   "Extract preview text from CONTENT, an AgentMessage content value.
 Strings pass through (optionally sliced to MAX-LEN); vectors contribute
 the text of blocks whose :type is \"text\" and whose :text is a string,
-joined with spaces and then sliced; anything else is the empty string.
-MAX-LEN nil means unlimited, MAX-LEN 0 or less means empty."
+joined with SEPARATOR and then sliced; anything else is the empty
+string.  MAX-LEN nil means unlimited, MAX-LEN 0 or less means empty.
+SEPARATOR defaults to a space (the preview dialect); the contentText
+port passes the EMPTY string so block text concatenates unbounded
+and unspaced like pi's editor prefill."
   (let ((slice (lambda (text)
                  (if (and max-len (< max-len (length text)))
                      (substring text 0 max-len)
@@ -444,7 +456,8 @@ MAX-LEN nil means unlimited, MAX-LEN 0 or less means empty."
             (when (and (equal (plist-get block :type) "text")
                        (stringp (plist-get block :text)))
               (push (plist-get block :text) blocks))))
-        (funcall slice (mapconcat #'identity (nreverse blocks) " "))))
+        (funcall slice (mapconcat #'identity (nreverse blocks)
+                                  (or separator " ")))))
      (t ""))))
 
 (defun pi-coding-agent--jsonl-normalize-preview (text)
@@ -851,6 +864,177 @@ reads of a file a live pi appends to concurrently."
                   (plist-get session :entries))))
       (pi-coding-agent-jsonl-project-tree
        (plist-get built :tree) (plist-get built :leafId)))))
+
+;;;; Tree Navigation (Phase 4)
+
+(defun pi-coding-agent--jsonl-resolve-visible (entries id)
+  "Resolve ID to the nearest non-filtered entry id within ENTRIES.
+Walks the parent chain up while the entry at hand is filtered from
+projection (label, session_info, custom) — the flat-entry sibling of
+`pi-coding-agent--jsonl-resolve-projected-leaf-id'.  Iterative with a
+cycle guard; a nil or unknown ID, and a chain that climbs past every
+visible entry, both resolve to nil."
+  (let ((index (make-hash-table :test #'equal)))
+    (dotimes (i (length entries))
+      ;; Duplicate ids (hand-edited files only): later wins, mirroring
+      ;; `pi-coding-agent-jsonl-build-tree' and pi's index build.
+      (puthash (plist-get (aref entries i) :id) (aref entries i) index))
+    (let ((current id)
+          (seen (make-hash-table :test #'equal))
+          (found 'unresolved))
+      (while (eq found 'unresolved)
+        (cond
+         ((or (null current) (gethash current seen)) (setq found nil))
+         (t
+          (puthash current t seen)
+          (let ((entry (gethash current index)))
+            (if (and entry
+                     (pi-coding-agent--jsonl-filtered-entry-p
+                      (plist-get entry :type)))
+                (setq current (pi-coding-agent--jsonl-entry-parent-id entry))
+              (setq found (and entry current)))))))
+      found)))
+
+(defun pi-coding-agent-jsonl-navigation-target (session target-id)
+  "Return the navigation target for TARGET-ID within SESSION.
+SESSION is a `pi-coding-agent-jsonl-read-file' result; return nil when
+TARGET-ID names no entry (a raw id the file does not carry), otherwise
+the plist (:leaf-id ID-OR-NIL :prefill TEXT? :current-p BOOL):
+
+  - :leaf-id is the entry the session file must END on after the
+    navigate rewrite — pi's navigateTree leaf rule: a user message or a
+    custom_message rewinds to its normalized parent id so the message can
+    be re-sent or re-edited (nil when the parent does not exist — the root
+    user message has nothing to rewind to); every other entry type targets
+    itself.
+  - :prefill, present only for those rewind targets with extractable
+    text, is the contentText port of the entry's content: strings pass
+    through, block content joins text blocks with the EMPTY separator,
+    unbounded (the preview dialect's space join and 200-char cap do not
+    apply); image-only or empty content omits the key entirely.
+  - :current-p reports that the file already sits on the computed
+    leaf position: the RESOLVED target position equals the resolved
+    raw leaf (`pi-coding-agent--jsonl-resolve-visible' on both sides,
+    nil equal to nil).  Thus a literal self-target leaf remains pi's
+    raw-id no-op, a trailing bookkeeping leaf folds up onto the entry
+    it sits on, and a rewind target is current when its parent is the
+    current resolved position."
+  (let* ((entries (plist-get session :entries))
+         (index (make-hash-table :test #'equal)))
+    (dotimes (i (length entries))
+      (puthash (plist-get (aref entries i) :id) (aref entries i) index))
+    (when-let* ((entry (and (stringp target-id)
+                            (gethash target-id index))))
+      (let* ((rewind-p (or (equal (plist-get entry :type) "custom_message")
+                           (and (equal (plist-get entry :type) "message")
+                                (equal (plist-get (plist-get entry :message) :role)
+                                       "user"))))
+             (leaf-id (if rewind-p
+                          (pi-coding-agent--jsonl-entry-parent-id entry)
+                        target-id))
+             (text (when rewind-p
+                     (pi-coding-agent--jsonl-extract-text
+                      (if (equal (plist-get entry :type) "custom_message")
+                          (plist-get entry :content)
+                        (plist-get (plist-get entry :message) :content))
+                      nil "")))
+             (raw-leaf (plist-get session :leafId)))
+        (append
+         (list :leaf-id leaf-id)
+         (when (and text (not (string-empty-p text)))
+           (list :prefill text))
+         (list :current-p
+               (equal (pi-coding-agent--jsonl-resolve-visible entries leaf-id)
+                      (pi-coding-agent--jsonl-resolve-visible entries raw-leaf))))))))
+
+(defun pi-coding-agent-jsonl-navigation-lines (path leaf-id)
+  "Return PATH's raw lines reordered so the LEAF-ID chain ends the file.
+The result is a vector of unibyte raw line strings WITHOUT their LF
+delimiters — the caller joins them with LF and adds the final one — or
+nil when PATH is unreadable, empty, or headerless, or LEAF-ID is nil or
+names no entry.  Every other byte is retained: in particular, the CR of
+a CRLF delimiter remains the line's last byte, so joining with LF
+reproduces CRLF exactly.  Line 0 (the session header) always stays line 0;
+lines 1..n-1 are partitioned into the non-chain lines (first, byte-for-byte
+in original relative order), followed by the canonical ancestor-chain
+lines in logical parent order from root/orphan-root through LEAF-ID.  Thus
+LEAF-ID is the file's last line and the next append lands on it.  The
+chain walks parent ids from LEAF-ID and stops at nil, self, unknown, or
+cyclic parents (an unknown parent is a root, matching
+`pi-coding-agent-jsonl-build-tree's roots rule); malformed and blank
+lines are non-chain bytes preserved verbatim in their original relative
+positions.  Duplicate entry ids map to their last line; earlier duplicate
+physical lines remain non-chain."
+  (when leaf-id
+    (condition-case nil
+        (when (file-readable-p path)
+          (with-temp-buffer
+            ;; Keep physical line bytes, including CR in CRLF and any
+            ;; undecodable bytes on malformed lines.  Decode only a copy
+            ;; of each candidate JSON line for parsing.
+            (set-buffer-multibyte nil)
+            (insert-file-contents-literally path)
+            (let* ((contents (buffer-substring-no-properties
+                              (point-min) (point-max)))
+                   (split (split-string contents "\n"))
+                   ;; A final newline splits into one trailing empty line;
+                   ;; drop exactly that one (interior empties stay).
+                   (lines (if (and split (equal (car (last split)) ""))
+                              (butlast split)
+                            split)))
+              (when (and lines
+                         (equal (plist-get
+                                 (pi-coding-agent--parse-json-line
+                                  (decode-coding-string (car lines) 'utf-8))
+                                 :type)
+                                "session"))
+                (let* ((count (length lines))
+                       (parsed (make-vector count nil))
+                       (id-line (make-hash-table :test #'equal)))
+                  (dotimes (i count)
+                    (unless (zerop i)
+                      (let ((data (pi-coding-agent--parse-json-line
+                                   (decode-coding-string (nth i lines)
+                                                         'utf-8))))
+                        (when (consp data)
+                          (aset parsed i data)
+                          (unless (equal (plist-get data :type) "session")
+                            (let ((id (plist-get data :id)))
+                              (when (stringp id)
+                                ;; Later duplicates win, mirroring the
+                                ;; entry index builds.
+                                (puthash id i id-line))))))))
+                  (when (gethash leaf-id id-line)
+                    ;; Walk leaf to parents using canonical line indices.
+                    ;; Each push naturally builds root/orphan-root to leaf,
+                    ;; with the requested leaf remaining last.
+                    (let ((chain-line-p (make-vector count nil))
+                          (chain-lines nil)
+                          (current leaf-id)
+                          (walking t))
+                      (while walking
+                        (let ((line-index (and current
+                                               (gethash current id-line))))
+                          (if (or (null line-index)
+                                  (aref chain-line-p line-index))
+                              (setq walking nil)
+                            (aset chain-line-p line-index t)
+                            (push line-index chain-lines)
+                            (setq current
+                                  (pi-coding-agent--jsonl-entry-parent-id
+                                   (aref parsed line-index))))))
+                      ;; Keep non-chain physical order, then append the
+                      ;; canonical chain in its logical parent order.
+                      (let (front)
+                        (cl-loop for i from 1 below count
+                                 unless (aref chain-line-p i)
+                                 do (push (nth i lines) front))
+                        (vconcat
+                         (list (car lines))
+                         (nreverse front)
+                         (mapcar (lambda (i) (nth i lines))
+                                 chain-lines))))))))))
+      (error nil))))
 
 (provide 'pi-coding-agent-jsonl)
 ;;; pi-coding-agent-jsonl.el ends here
