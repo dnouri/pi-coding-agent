@@ -39,6 +39,25 @@ redisplay, and subprocess event delivery.")
   "Format SECONDS as a human-readable duration with millisecond precision."
   (format "%.3fs" (float seconds)))
 
+;;;; JSON Fixtures
+
+(defvar pi-coding-agent-test--fixture-dir
+  (expand-file-name "test/fixtures/"
+                    (or (and load-file-name
+                             (file-name-directory
+                              (directory-file-name
+                               (file-name-directory load-file-name))))
+                        (locate-dominating-file default-directory "Makefile")
+                        default-directory))
+  "Directory containing JSON test fixtures.")
+
+(defun pi-coding-agent-test--read-json-fixture (filename)
+  "Read JSON fixture FILENAME from test/fixtures/ and return as plist."
+  (let ((path (expand-file-name filename pi-coding-agent-test--fixture-dir)))
+    (with-temp-buffer
+      (insert-file-contents path)
+      (json-parse-string (buffer-string) :object-type 'plist))))
+
 ;;;; Fake-pi Helpers
 
 (defconst pi-coding-agent-test-fake-pi-script

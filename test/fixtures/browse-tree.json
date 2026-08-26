@@ -1,0 +1,118 @@
+{
+  "type": "response",
+  "id": "req_2",
+  "command": "get_tree",
+  "success": true,
+  "data": {
+    "tree": [
+      {
+        "id": "node-1",
+        "parentId": null,
+        "type": "message",
+        "role": "user",
+        "timestamp": "2026-02-23T09:00:00.000Z",
+        "preview": "Let's refactor the database layer",
+        "children": [
+          {
+            "id": "node-2",
+            "parentId": "node-1",
+            "type": "message",
+            "role": "assistant",
+            "timestamp": "2026-02-23T09:01:00.000Z",
+            "preview": "I'll help you refactor the database layer. Let me start by...",
+            "children": [
+              {
+                "id": "node-3",
+                "parentId": "node-2",
+                "type": "tool_result",
+                "toolName": "Read",
+                "preview": "[Read: db/connection.py]",
+                "timestamp": "2026-02-23T09:02:00.000Z",
+                "children": [
+                  {
+                    "id": "node-4",
+                    "parentId": "node-3",
+                    "type": "message",
+                    "role": "user",
+                    "timestamp": "2026-02-23T09:05:00.000Z",
+                    "preview": "Actually, let's try a different approach",
+                    "children": [
+                      {
+                        "id": "node-5",
+                        "parentId": "node-4",
+                        "type": "message",
+                        "role": "assistant",
+                        "timestamp": "2026-02-23T09:06:00.000Z",
+                        "preview": "Sure, let me explore the alternative using SQLAlchemy...",
+                        "children": [
+                          {
+                            "id": "node-6",
+                            "parentId": "node-5",
+                            "type": "tool_result",
+                            "toolName": "Write",
+                            "preview": "[Write: db/pool.py]",
+                            "timestamp": "2026-02-23T09:07:00.000Z",
+                            "children": [
+                              {
+                                "id": "node-7",
+                                "parentId": "node-6",
+                                "type": "message",
+                                "role": "user",
+                                "timestamp": "2026-02-23T09:10:00.000Z",
+                                "preview": "That looks good, now let's add tests",
+                                "label": "checkpoint",
+                                "children": [
+                                  {
+                                    "id": "node-8",
+                                    "parentId": "node-7",
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "timestamp": "2026-02-23T09:11:00.000Z",
+                                    "preview": "I'll write comprehensive tests for the connection pool...",
+                                    "children": []
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "id": "node-9",
+                        "parentId": "node-4",
+                        "type": "message",
+                        "role": "assistant",
+                        "timestamp": "2026-02-23T09:06:30.000Z",
+                        "preview": "Another approach would be to use raw asyncpg...",
+                        "stopReason": "aborted",
+                        "children": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "node-10",
+        "parentId": null,
+        "type": "compaction",
+        "timestamp": "2026-02-23T08:00:00.000Z",
+        "tokensBefore": 50000,
+        "children": [
+          {
+            "id": "node-11",
+            "parentId": "node-10",
+            "type": "branch_summary",
+            "timestamp": "2026-02-23T08:01:00.000Z",
+            "summary": "Earlier conversation about project setup and initial design decisions.",
+            "children": []
+          }
+        ]
+      }
+    ],
+    "leafId": "node-8"
+  }
+}

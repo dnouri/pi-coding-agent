@@ -628,7 +628,7 @@ Closes the category from issue #234: any instance without a usable
   "Chat mode map binds abort, session, context, model, and info chords."
   (dolist (expected '(("C-c C-k" . pi-coding-agent-abort)
                       ("C-c C-n" . pi-coding-agent-new-session)
-                      ("C-c C-r" . pi-coding-agent-resume-session)
+                      ("C-c C-r" . pi-coding-agent-session-browser)
                       ("C-c C-e" . pi-coding-agent-export-html)
                       ("C-c C-c" . pi-coding-agent-compact)
                       ("C-c C-m" . pi-coding-agent-select-model)
@@ -861,7 +861,8 @@ without an input window."
   "Startup header includes key keybindings."
   (let ((header (pi-coding-agent--format-startup-header)))
     (should (string-match-p "C-c C-c" header))
-    (should (string-match-p "send" header))))
+    (should (string-match-p "send" header))
+    (should (string-match-p "C-c C-r   sessions" header))))
 
 (ert-deftest pi-coding-agent-test-startup-header-shows-pi-label ()
   "Startup header includes the product label."

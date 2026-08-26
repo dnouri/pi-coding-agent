@@ -469,23 +469,28 @@ extras.  Return a metrics plist for the generated session."
                      pi-coding-agent--dispatch-response
                      pi-coding-agent--parse-json-line
                      json-parse-string
-                     ;; Session picker and metadata.
+                     ;; Session browser and disk metadata.
+                     pi-coding-agent-session-browser
+                     pi-coding-agent--get-or-create-session-browser
+                     pi-coding-agent--session-browser-fetch-and-render
+                     pi-coding-agent--browse-load-sessions
+                     pi-coding-agent--browse-scan-session-files
+                     pi-coding-agent--browse-session-directories
+                     pi-coding-agent--browse-session-files
+                     pi-coding-agent-jsonl-read-session-info
+                     pi-coding-agent--session-browser-render
+                     pi-coding-agent--session-browser-rerender
+                     pi-coding-agent--session-browser-insert-session
+                     pi-coding-agent-session-browser-switch
+                     pi-coding-agent--browse-switch-session
                      pi-coding-agent--session-list-directory
-                     pi-coding-agent--with-session-list-directory
-                     pi-coding-agent--session-metadata
                      pi-coding-agent--session-file-cwd-or-error
                      pi-coding-agent--update-session-name-from-file
-                     pi-coding-agent--list-session-entries
-                     pi-coding-agent--list-sessions
-                     pi-coding-agent--format-session-choice
-                     pi-coding-agent--format-session-entry-choice
                      directory-files
                      insert-file-contents
                      file-attributes
                      ;; Transition control flow.
                      pi-coding-agent-reload
-                     pi-coding-agent-resume-session
-                     pi-coding-agent--resume-session-from-directory
                      pi-coding-agent--resume-selected-session
                      pi-coding-agent--refresh-session-state
                      pi-coding-agent--load-session-history
@@ -729,7 +734,9 @@ result plist containing correctness and wall-clock metrics."
                         (and (funcall done-p)
                              (= 0 (pi-coding-agent-rr-bench--pending-requests-count
                                    proc)))))
-                    pi-coding-agent-rr-bench-timeout-seconds)))
+                    pi-coding-agent-rr-bench-timeout-seconds))
+          (unless ok
+            (setq error-text (format "Timed out waiting for %s to settle" name))))
       (error (setq error-text (error-message-string err))))
     (when (and pi-coding-agent-rr-bench-display-buffers (not noninteractive))
       (redisplay t))
@@ -747,33 +754,76 @@ result plist containing correctness and wall-clock metrics."
                                   (count-lines (point-min) (point-max)))))
       (setq pi-coding-agent-rr-bench--phase nil))))
 
-(defun pi-coding-agent-rr-bench--target-choice (collection)
-  "Return the synthetic target session display string from COLLECTION."
-  (let ((choices (all-completions "" collection)))
-    (or (seq-find (lambda (choice)
-                    (string-prefix-p "Target long session" choice))
-                  choices)
-        (car choices))))
+(defun pi-coding-agent-rr-bench--open-session-browser (chat)
+  "Open the real async session browser linked to CHAT and return its buffer."
+  (let (dir)
+    (with-current-buffer chat
+      (setq dir (pi-coding-agent--session-directory))
+      (pi-coding-agent-session-browser))
+    (let ((browser
+           (get-buffer (pi-coding-agent--session-browser-buffer-name dir))))
+      (unless (buffer-live-p browser)
+        (error "Session browser did not create a buffer for %s" dir))
+      (unless (eq (buffer-local-value 'pi-coding-agent--chat-buffer browser)
+                  chat)
+        (error "Session browser is not linked to the benchmark chat"))
+      browser)))
+
+(defun pi-coding-agent-rr-bench--wait-for-session-browser (browser)
+  "Wait boundedly for BROWSER to finish loading, or signal."
+  (unless (pi-coding-agent-rr-bench--wait-until
+           (lambda ()
+             (and (buffer-live-p browser)
+                  (with-current-buffer browser
+                    (not pi-coding-agent--session-browser-loading))))
+           pi-coding-agent-rr-bench-timeout-seconds)
+    (error "Timed out waiting for the session browser to load"))
+  (with-current-buffer browser
+    (when pi-coding-agent--session-browser-error
+      (error "Session browser failed: %s"
+             pi-coding-agent--session-browser-error))))
+
+(defun pi-coding-agent-rr-bench--select-session-path (browser path)
+  "Move point in BROWSER to the session section whose value equals PATH."
+  (with-current-buffer browser
+    (let ((pending (oref magit-root-section children))
+          (section nil))
+      (while (and pending (not section))
+        (let ((candidate (pop pending)))
+          (if (and (eq (oref candidate type) 'session)
+                   (equal (oref candidate value) path))
+              (setq section candidate)
+            (setq pending (append (oref candidate children) pending)))))
+      (unless section
+        (error "Session browser did not render target path: %s" path))
+      (goto-char (oref section start))
+      (dolist (window (get-buffer-window-list browser nil t))
+        (set-window-point window (point))))))
 
 (defun pi-coding-agent-rr-bench--run-resume (current-session target-session
                                                             target-count)
-  "Benchmark resume from CURRENT-SESSION to TARGET-SESSION.
+  "Benchmark browser-backed resume from CURRENT-SESSION to TARGET-SESSION.
 TARGET-COUNT is the expected canonical message count after resume."
   (let* ((session (pi-coding-agent-rr-bench--make-session
                    current-session nil current-session))
-         (chat (plist-get session :chat)))
+         (chat (plist-get session :chat))
+         (browser nil))
     (unwind-protect
         (pi-coding-agent-rr-bench--run-operation
          "resume"
          session
          (lambda ()
-           (with-current-buffer chat
-             (cl-letf (((symbol-function 'completing-read)
-                        (lambda (_prompt collection &rest _args)
-                          (pi-coding-agent-rr-bench--target-choice collection))))
-               (pi-coding-agent-resume-session))))
+           (setq browser
+                 (pi-coding-agent-rr-bench--open-session-browser chat))
+           (pi-coding-agent-rr-bench--wait-for-session-browser browser)
+           (pi-coding-agent-rr-bench--select-session-path
+            browser target-session)
+           (with-current-buffer browser
+             (pi-coding-agent-session-browser-switch)))
          (lambda ()
-           (and (= (or (pi-coding-agent-rr-bench--canonical-message-count chat)
+           (and (not (with-current-buffer chat
+                       (pi-coding-agent--session-transition-active-p)))
+                (= (or (pi-coding-agent-rr-bench--canonical-message-count chat)
                        -1)
                    target-count)
                 (equal (pi-coding-agent-rr-bench--state-session-file chat)
@@ -782,6 +832,8 @@ TARGET-COUNT is the expected canonical message count after resume."
                  chat "Session Target long session asks")
                 (not (pi-coding-agent-rr-bench--buffer-contains-p
                       chat "Session Current long session asks")))))
+      (when (buffer-live-p browser)
+        (kill-buffer browser))
       (pi-coding-agent-rr-bench--cleanup-session session))))
 
 (defun pi-coding-agent-rr-bench--run-reload (current-session target-session
@@ -797,7 +849,9 @@ TARGET-COUNT is the expected canonical message count after reload."
          session
          (lambda () (with-current-buffer chat (pi-coding-agent-reload)))
          (lambda ()
-           (and (= (or (pi-coding-agent-rr-bench--canonical-message-count chat)
+           (and (not (with-current-buffer chat
+                       (pi-coding-agent--session-transition-active-p)))
+                (= (or (pi-coding-agent-rr-bench--canonical-message-count chat)
                        -1)
                    target-count)
                 (equal (pi-coding-agent-rr-bench--state-session-file chat)

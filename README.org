@@ -26,7 +26,8 @@
 the agent, talks to models, and executes tools.  This package wraps Pi
 in an ergonomic Emacs interface: a Markdown chat buffer for the
 conversation and a separate prompt buffer where you compose the next
-message.
+message.  Persistent Pi history is available through disk-backed
+session and conversation-tree browsers.
 
 The immediate advantage is that your prompt is no longer trapped in a
 terminal text box.  You can edit it like any other Emacs buffer,
@@ -218,13 +219,29 @@ if both panes are visible, focus moves to the input window.  Use =M-x
 pi-coding-agent-toggle= to hide or show the session windows in the
 current frame.
 
-For multiple sessions in the same directory, use =C-u M-x
-pi-coding-agent= and enter a session name.  Resume (=C-c C-r=) and
-fork (=C-c C-p f=) present a selection menu.  Compact (=C-c C-p c=)
-summarizes older conversation when the context window gets full; Pi
-can also compact automatically when needed.  The header line shows
-context usage and changes face when it crosses the configured warning
-and error thresholds.
+=C-c C-r=, =/resume=, or =M-x pi-coding-agent-session-browser= opens
+the persistent, disk-backed session browser.  Press =RET= to switch to
+the session at point, =/= to search with regexp tokens, =s= to cycle
+threaded/recent/relevance sorting, =t= to toggle current/all-project
+scope, =f= for named sessions only, and =r= to rename.  Press =?= to
+see these commands in a small browser menu.
+
+In the main transient (=C-c C-p=), Session =r= opens =sessions= and
+Context =w= opens the disk-backed conversation =tree=.  In the tree
+browser, =f= cycles no-tools/default/user-only/labeled-only/all
+filters, =/= searches, =RET= moves the live conversation to the
+selected node, and =l= sets or clears a label.  Press =?= for its
+browser menu and =g= to refresh the last persisted state.
+
+For multiple live sessions in the same directory, use =C-u M-x
+pi-coding-agent= and enter a name.  This is an Emacs live-session
+identity used to distinguish buffer pairs; it does not set the
+persisted Pi session name.  Rename the persisted session with =r= in
+the session browser, =C-c C-p N=, or =/name=.  Fork with =C-c C-p f=.
+Compact (=C-c C-p c=) summarizes older conversation when the context
+window gets full; Pi can also compact automatically when needed.  The
+header line shows context usage and changes face when it crosses the
+configured warning and error thresholds.
 
 #+html: <a id="common-keys"></a>
 ** Common keys ⌨️
@@ -236,7 +253,7 @@ and error thresholds.
 | =C-c C-s=        | input   | 🐎 Send steering message while Pi is busy     |
 | =C-c C-k=        | input   | 🪓 Abort current response or compaction       |
 | =C-c C-p=        | input   | 🎛️ Open transient menu                        |
-| =C-c C-r=        | input   | 📼 Resume a previous session                  |
+| =C-c C-r=        | input   | 📼 Browse sessions                            |
 | =M-p= / =M-n=    | input   | 🕰️ Prompt history (=C-↑= / =C-↓= also work)   |
 | =C-r=            | input   | 🕵️ Incremental prompt-history search          |
 | =TAB=            | input   | 🪄 Complete paths, and =/= commands           |
@@ -249,7 +266,7 @@ and error thresholds.
 | =q=              | chat    | 👋 Quit session                               |
 | =C-c C-k=        | chat    | 🪓 Abort current operation                    |
 | =C-c C-n=        | chat    | 🌱 New session                                |
-| =C-c C-r=        | chat    | 📼 Resume a previous session                  |
+| =C-c C-r=        | chat    | 📼 Browse sessions                            |
 | =C-c C-e=        | chat    | 🖨️ Export session to HTML                     |
 | =C-c C-c=        | chat    | 🗜️ Compact conversation context               |
 | =C-c C-m=        | chat    | 🧠 Select model                               |

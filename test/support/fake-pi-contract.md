@@ -1,6 +1,6 @@
 # Fake pi contract for deterministic frontend tests
 
-This note defines the smallest fake-pi surface that is worth building.
+This note defines the supported fake-pi surface used by deterministic tests.
 The fake is a protocol double for the RPC subprocess boundary, not a mock
 of internal Emacs functions.
 
@@ -81,37 +81,36 @@ GUI/integration form when they still prove a real boundary risk:
 - Accept optional trailing `\r` on input lines
 - Flush each output record promptly
 - `prompt` must return an immediate success response before later events
-- Events are id-less; responses use `type: "response"`
+- Ordinary stream events are uncorrelated; `extension_ui_request` carries its
+  dialog id
+- Responses use `type: "response"` and mirror the request `id` when present
 - Unsupported commands should fail loudly with `success: false`
 
-## V1 command surface
+## Supported command surface
 
-Required now because the current frontend and shared contract read it:
+The current fake supports:
 
 - `get_state`
 - `get_commands`
 - `prompt`
 - `abort`
+- `steer`
 - `new_session`
 - `get_fork_messages`
+- `get_entries`
+- `get_tree`
+- `get_messages`
+- `switch_session`
 - `set_session_name`
 - `set_model`
 - `set_thinking_level`
 - `extension_ui_response`
 
-Also required by the shared integration contract:
+`follow_up` is explicitly rejected.  Conversation navigation/mutation RPCs,
+compaction/retry/bash RPCs, session listing, export, and HTML remain out of
+scope.
 
-- `steer`
-
-Still out of scope:
-
-- `follow_up`
-- `get_messages`
-- tree/navigation RPC
-- compaction / retry / bash RPC
-- session listing / export / HTML
-
-## V1 event surface
+## Supported event surface
 
 Required now:
 
@@ -207,27 +206,30 @@ Required fields currently consumed by Emacs rendering:
 
 ### Fork messages
 
-Required shape:
+Required shape and semantics:
 
 - response `data.messages` is a JSON array
-- each entry includes `entryId`
-- `text` is enough for current picker formatting tests
+- each item is exactly `{ "entryId": ENTRY_ID, "text": TEXT }`
+- entries cover every raw user-message record with nonempty text in append
+  order, including users on abandoned branches (matching Pi's fork selector)
+- `entryId` is the raw session entry id; `text` concatenates textual content
+  blocks (or passes through string content)
 
 ### Session naming
 
 Required behavior:
 
-- `set_session_name` succeeds for non-empty names
-- fake writes a real session file on disk
-- file starts with a `session` header line
-- file appends `session_info` entries that Emacs can parse
-
-The fake only needs the minimum JSONL structure that current Emacs session
-metadata parsing reads.
+- `set_session_name` requires a string, collapses CR/LF runs to one space,
+  trims it, and succeeds only when the result is nonempty
+- fake writes a real valid v3 session file on disk
+- naming appends a complete `session_info` entry with `id`, `parentId`,
+  `timestamp`, and `name`
+- latest `session_info` wins; whitespace is trimmed and a blank/null latest name
+  clears `sessionName`
 
 ### Extension UI
 
-Required request methods for v1 test coverage:
+Required request methods for current test coverage:
 
 - `confirm`
 - `input`
@@ -247,20 +249,156 @@ constants in the harness. Fast defaults are good for automated tests, but the
 manual-debugging path should be able to extend or disable those timeouts from
 the CLI so a human can inspect the UI before responding.
 
-## Real session-file minimum
+## Valid v3 session files and inspection RPCs
 
-The fake must create real temporary files, not invented paths. The minimum
-useful on-disk shape is:
+The fake creates real temporary files, not invented paths.  Generated files use
+strict LF-delimited UTF-8 JSONL.  The switch loader also accepts blank lines and
+an optional CR before LF, but every nonblank line must be strict JSON.
 
-- one `session` header line
-- zero or more `message` lines
-- zero or more `session_info` lines
+### Header and entry invariants
 
-That is enough for:
+The first nonblank record is exactly one current-version header with this base
+shape:
 
-- `sessionFile` existence checks
-- session-name persistence checks
-- resume metadata parsing in Emacs
+```json
+{"type":"session","version":3,"id":"SESSION_ID","timestamp":"2026-02-03T04:05:00.000Z","cwd":"/absolute/path"}
+```
+
+`id` is nonempty, `cwd` names an existing absolute process-local path without
+NUL, and `timestamp` is a valid UTC timestamp in the exact
+`YYYY-MM-DDTHH:MM:SS.mmmZ` form.
+
+Every later record is a nonheader entry with the base fields:
+
+```json
+{"type":"session_info","id":"ENTRY_ID","parentId":null,"timestamp":"2026-02-03T04:05:01.000Z","name":"Example"}
+```
+
+Entry ids are nonempty and unique among nonheader entries.  `parentId` must be present
+and is either any string or JSON null.  Parent references need not precede the
+entry or resolve, so crafted branches and orphans are supported.  Entry
+timestamps use the same strict UTC form.  Generated entries form a linear
+chain, use monotonic timestamps, and parent each append to the previous current
+leaf.  The current `leafId` is the id of the physically last nonheader entry,
+including bookkeeping entries; it is JSON null for a header-only session.
+
+Accepted entry types and required payloads are:
+
+- `message`: `message` object with a string `role`
+- `thinking_level_change`: string `thinkingLevel`
+- `model_change`: string `provider` and `modelId`
+- `compaction`: string `summary`, string `firstKeptEntryId`, and finite numeric
+  (non-boolean) `tokensBefore`
+- `branch_summary`: string `summary` and string `fromId`
+- `custom`: string `customType`
+- `custom_message`: string `customType`, boolean `display`, and string-or-array
+  `content`; optional `details` is preserved
+- `label`: string `targetId` and an optional string/null `label`
+- `session_info`: optional string/null `name`
+
+Unknown extra fields are retained.  Unsupported record types, malformed
+required payloads, duplicate ids, invalid timestamps, non-v3 headers, and
+non-UTF-8 or malformed JSONL make a nonempty switch target invalid.  This
+strict switch subset is intentional: Pi 0.84.2 can migrate older versions and
+skips some malformed JSONL records, while the fake keeps deterministic
+transactional failure for test-crafted targets.
+
+### `get_entries`
+
+The request has no payload beyond optional `since: ENTRY_ID`.  Success is:
+
+```json
+{"type":"response","command":"get_entries","success":true,"data":{"entries":[],"leafId":null}}
+```
+
+`entries` preserves physical append order and excludes the header.  With
+`since`, it contains entries strictly after that raw id while `leafId` remains
+the session's current leaf.  `since` must be a string naming an existing entry;
+a wrong type or unknown id returns `success:false` with `error` and no `data`.
+An empty session returns `entries:[]` and `leafId:null`.
+
+### `get_tree`
+
+Success is:
+
+```json
+{"type":"response","command":"get_tree","success":true,"data":{"tree":[],"leafId":null}}
+```
+
+Every raw nonheader entry, including `label`, `session_info`, `custom`, branch
+summary, and compaction bookkeeping, appears once as a node.  Roots are null,
+self-parented, unknown-parent/orphan, or defensive cycle-break nodes.  Roots
+keep append order; each child array is stably sorted by parsed entry timestamp,
+with append order breaking ties.
+
+Labels are folded over all label records in append order.  The latest nonempty
+label for a target adds `label` and `labelTimestamp` to that target's node;
+an omitted, null, or empty latest label clears both fields.  Label records
+remain ordinary tree nodes.  `leafId` is still the raw physical leaf, not a
+projected visible node.
+
+### `get_messages`
+
+Success has this shape:
+
+```json
+{"type":"response","command":"get_messages","success":true,"data":{"messages":[]}}
+```
+
+The fake walks parent ids from the current leaf with cycle protection, reverses
+that chain to active-path order, and excludes abandoned siblings.  It then applies
+the latest active-path compaction: emit that compaction summary first, retain
+the pre-compaction range beginning at `firstKeptEntryId` when present, then
+include entries after the compaction.
+
+Projection semantics are:
+
+- `message` contributes its `message` payload; like Pi 0.84.2, a user,
+  assistant, or tool-result payload with null/missing `content` gets `content:[]`
+- `custom_message` contributes role `custom` with `customType`, `content`,
+  `display`, optional `details`, and the entry timestamp converted to Unix
+  milliseconds
+- a nonempty `branch_summary` contributes role `branchSummary` with `summary`,
+  `fromId`, and millisecond timestamp
+- `compaction` contributes role `compactionSummary` with `summary`,
+  `tokensBefore`, and millisecond timestamp
+- labels, session info, raw `custom`, model changes, and thinking-level changes
+  contribute no message
+
+`get_state.messageCount` is the length of this same projected message array.
+A header-only session returns `messages:[]`.
+
+### `switch_session`
+
+The request must carry a nonempty, NUL-free absolute string `sessionPath`.
+This is the frontend-facing subset: Pi 0.84.2 also resolves relative paths,
+but the Emacs switch choreography always sends an absolute process-local path.
+A successful switch returns:
+
+```json
+{"type":"response","command":"switch_session","success":true,"data":{"cancelled":false}}
+```
+
+An existing nonempty target is fully parsed and validated as v3 before the
+current run is stopped or any in-memory session state changes.  On success the
+fake installs the target's raw entries, current leaf, projected messages, all
+raw fork users, latest name, id, path, and projected message count.  Switching
+to the same path reloads after stopping an active run so an authoritative
+aborted append is not lost.
+
+Invalid targets return `success:false` with `error` and no `data`: this includes
+non-string, relative, empty-string, or NUL paths; directories or non-regular files; and
+nonempty malformed or invalid-v3 files.  Such failures are transactional: the
+current session state and active worker remain unchanged.
+
+A deliberate deterministic initialization rule supports resume edge tests: a
+nonexistent absolute target and an existing zero-byte regular file are
+materialized as a valid header-only v3 session, then selected.  Missing parent
+directories are created.  The result has empty entries/tree/messages, null
+leaf, no session name, and message count zero.  This is not exact Pi 0.84.2
+startup behavior: Pi materializes an existing empty file but leaves a missing
+file absent until later persistence, and runtime setup may append a thinking
+level entry.  The fake's header-only result is the bounded edge-test contract.
 
 ## Backend helper API
 
@@ -277,15 +415,14 @@ The shared helper returns a backend plist with:
 The important design point is visibility: a failing test should say which
 backend and which scenario was running.
 
-## Intentionally out of scope for v1
+## Intentionally out of scope
 
-The fake should not try to model all of pi.
-
-Out of scope until a concrete test needs it:
+The fake should not try to model all of pi.  Out of scope until a concrete test
+needs it:
 
 - full prompt/template/skill expansion fidelity
-- tree browsing / branch summary / navigation RPC
-- compaction and retry flows
+- conversation navigation, branch creation, and mutation RPCs beyond switching
+- compaction command and retry flows (persisted compaction projection is covered)
 - bash RPC command semantics
 - session listing across projects
 - provider/model discovery parity with the real backend

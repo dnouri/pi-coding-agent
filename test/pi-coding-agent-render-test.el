@@ -592,6 +592,37 @@ agent_end + next section's leading newline must not create triple newlines."
       (should (string-match-p "Assistant" text))
       (should (string-match-p "Plain string reply" text)))))
 
+(ert-deftest pi-coding-agent-test-history-renders-branch-summary-between-assistant-groups ()
+  "Branch summaries keep source order and split adjacent assistant groups."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((timestamp-ms 1704067201000)
+           (summary "## Prior branch\n\n**Decision:** preserve source order.")
+           (expected-separator
+            (pi-coding-agent--make-separator
+             "Branch Summary"
+             (pi-coding-agent--ms-to-time timestamp-ms))))
+      (pi-coding-agent--display-history-messages
+       (vector
+        (list :role "assistant" :content "Assistant before."
+              :timestamp 1704067200000)
+        (list :role "branchSummary" :summary summary
+              :timestamp timestamp-ms)
+        (list :role "assistant" :content "Assistant after."
+              :timestamp 1704067202000)))
+      (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
+             (before-pos (string-match "Assistant before\\." text))
+             (branch-pos (string-match (regexp-quote expected-separator) text))
+             (summary-pos (string-match (regexp-quote summary) text))
+             (after-pos (string-match "Assistant after\\." text)))
+        (should branch-pos)
+        (should (= 1 (pi-coding-agent-test--count-matches
+                      (regexp-quote expected-separator) text)))
+        (should (and before-pos summary-pos after-pos))
+        (should (< before-pos branch-pos summary-pos after-pos))
+        (should (= 2 (pi-coding-agent-test--count-matches
+                      "^Assistant\n=+\n" text)))))))
+
 (ert-deftest pi-coding-agent-test-history-replays-assistant-thinking-after-text ()
   "Session history replays assistant thinking blocks after preceding text."
   (let ((pi-coding-agent-thinking-display 'visible))
@@ -682,6 +713,34 @@ agent_end + next section's leading newline must not create triple newlines."
          (current-buffer)))
       (should (= font-lock-count 0))
       (should (= table-decoration-count 1)))))
+
+(ert-deftest pi-coding-agent-test-branch-summary-table-uses-deferred-history-postprocessing ()
+  "Branch-summary tables reach one consolidated, non-eager history pass."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let (decoration-calls)
+      (cl-letf (((symbol-function 'pi-coding-agent--decorate-tables-in-region)
+                 (lambda (start end &optional _width)
+                   (push (list :deferred
+                               pi-coding-agent--defer-history-postprocessing
+                               :text
+                               (buffer-substring-no-properties start end))
+                         decoration-calls))))
+        (pi-coding-agent--display-session-history
+         [(:role "branchSummary"
+           :summary "Branch data\n\n| Item | State |\n|---|---|\n| replay | kept |"
+           :timestamp 1704067201000)]
+         (current-buffer)))
+      (setq decoration-calls (nreverse decoration-calls))
+      (should (= 1 (length decoration-calls)))
+      (let ((call (car decoration-calls)))
+        (should-not (plist-get call :deferred))
+        (should (string-match-p
+                 (regexp-quote "|---|---|")
+                 (plist-get call :text)))
+        (should (string-match-p
+                 (regexp-quote "| replay | kept |")
+                 (plist-get call :text)))))))
 
 (ert-deftest pi-coding-agent-test-display-session-history-raises-gc-threshold ()
   "Session history replay raises and restores `gc-cons-threshold'."
@@ -1371,7 +1430,7 @@ and DISPLAY controls how completed thinking is rendered."
     (should (string-match-p "Key points" (buffer-string)))))
 
 (ert-deftest pi-coding-agent-test-history-tolerates-malformed-content-blocks ()
-  "Malformed history content does not break resume rendering."
+  "Malformed history content and summaries render without signals or garbage."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (let ((messages [(:role "assistant"
@@ -1386,15 +1445,24 @@ and DISPLAY controls how completed thinking is rendered."
                      (:role "compactionSummary"
                       :summary 42
                       :tokensBefore 50000
-                      :timestamp 1704067202000)]))
+                      :timestamp 1704067202000)
+                     (:role "branchSummary"
+                      :summary nil
+                      :timestamp 1704067203000)
+                     (:role "branchSummary"
+                      :summary 84
+                      :timestamp 1704067204000)]))
       (should (condition-case nil
                   (progn
                     (pi-coding-agent--display-history-messages messages)
                     t)
                 (error nil)))
-      (should (string-match-p "99" (buffer-string)))
-      (should (string-match-p "123" (buffer-string)))
-      (should (string-match-p "42" (buffer-string))))))
+      (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+        (should (string-match-p "99" text))
+        (should (string-match-p "123" text))
+        (should (string-match-p "42" text))
+        (should (string-match-p "84" text))
+        (should-not (string-match-p "\\_<nil\\_>\\|#<" text))))))
 
 ;;; Streaming Marker
 
@@ -13593,6 +13661,40 @@ events where the header text hasn't changed."
         (pi-coding-agent--prepare-and-send "/new")))
     (should new-called)
     (should-not prompt-sent)))
+
+(ert-deftest pi-coding-agent-test-input-resume-opens-session-browser-locally ()
+  "/resume from input opens the browser without a prompt or RPC send."
+  (let ((chat-buf (generate-new-buffer " *pi-resume-dispatch-chat*"))
+        (input-buf (generate-new-buffer " *pi-resume-dispatch-input*"))
+        (browser-calls 0)
+        (prompt-calls 0)
+        (rpc-calls 0))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--status 'idle
+                  pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "/resume")
+            (cl-letf (((symbol-function 'pi-coding-agent-session-browser)
+                       (lambda (&rest _)
+                         (setq browser-calls (1+ browser-calls))))
+                      ((symbol-function 'pi-coding-agent--send-prompt)
+                       (lambda (&rest _)
+                         (setq prompt-calls (1+ prompt-calls))))
+                      ((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (&rest _)
+                         (setq rpc-calls (1+ rpc-calls)))))
+              (pi-coding-agent-send)))
+          (should (equal (list browser-calls prompt-calls rpc-calls)
+                         '(1 0 0))))
+      (when (buffer-live-p input-buf)
+        (kill-buffer input-buf))
+      (when (buffer-live-p chat-buf)
+        (kill-buffer chat-buf)))))
 
 (ert-deftest pi-coding-agent-test-prepare-and-send-passes-through-extension ()
   "prepare-and-send sends unknown slash commands to pi via prompt."

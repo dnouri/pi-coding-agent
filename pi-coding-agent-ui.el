@@ -71,10 +71,12 @@
 (declare-function pi-coding-agent-queue-steering "pi-coding-agent-input")
 (declare-function pi-coding-agent-input-mode "pi-coding-agent-input")
 
+;; pi-coding-agent-browse.el (session browser)
+(declare-function pi-coding-agent-session-browser "pi-coding-agent-browse")
+
 ;; pi-coding-agent-menu.el (menu and session commands)
 (declare-function pi-coding-agent-menu "pi-coding-agent-menu")
 (declare-function pi-coding-agent-new-session "pi-coding-agent-menu")
-(declare-function pi-coding-agent-resume-session "pi-coding-agent-menu")
 (declare-function pi-coding-agent-export-html "pi-coding-agent-menu")
 (declare-function pi-coding-agent-compact "pi-coding-agent-menu")
 (declare-function pi-coding-agent-select-model "pi-coding-agent-menu")
@@ -532,7 +534,7 @@ Return nil when PATH is not a string."
     (define-key map (kbd "C-c C-p") #'pi-coding-agent-menu)
     (define-key map (kbd "C-c C-k") #'pi-coding-agent-abort)
     (define-key map (kbd "C-c C-n") #'pi-coding-agent-new-session)
-    (define-key map (kbd "C-c C-r") #'pi-coding-agent-resume-session)
+    (define-key map (kbd "C-c C-r") #'pi-coding-agent-session-browser)
     (define-key map (kbd "C-c C-e") #'pi-coding-agent-export-html)
     (define-key map (kbd "C-c C-c") #'pi-coding-agent-compact)
     (define-key map (kbd "C-c C-m") #'pi-coding-agent-select-model)
@@ -907,7 +909,7 @@ removing the instructional header that would otherwise appear."
     (define-key map (kbd "TAB") #'pi-coding-agent-complete)
     (define-key map (kbd "C-c C-k") #'pi-coding-agent-abort)
     (define-key map (kbd "C-c C-p") #'pi-coding-agent-menu)
-    (define-key map (kbd "C-c C-r") #'pi-coding-agent-resume-session)
+    (define-key map (kbd "C-c C-r") #'pi-coding-agent-session-browser)
     (define-key map (kbd "M-p") #'pi-coding-agent-previous-input)
     (define-key map (kbd "M-n") #'pi-coding-agent-next-input)
     (define-key map (kbd "<C-up>") #'pi-coding-agent-previous-input)
@@ -1468,7 +1470,7 @@ Source is \"prompt\", \"extension\", or \"skill\".")
     ("session" :handler pi-coding-agent-session-stats)
     ("name"    :handler pi-coding-agent-set-session-name :args required)
     ("fork"    :handler pi-coding-agent-fork)
-    ("resume"  :handler pi-coding-agent-resume-session)
+    ("resume"  :handler pi-coding-agent-session-browser)
     ("reload"  :handler pi-coding-agent-reload)
     ("export"  :handler pi-coding-agent-export-html  :args optional)
     ("copy"    :handler pi-coding-agent-copy-last-message)
@@ -1899,22 +1901,6 @@ turn markers as H1 while LLM ATX headings are leveled down to H2+."
 Returns nil if MS is nil."
   (and ms (seconds-to-time (/ ms 1000.0))))
 
-(defun pi-coding-agent--format-relative-time (time)
-  "Format TIME (Emacs time value) as relative time string."
-  (condition-case nil
-      (let* ((now (current-time))
-             (diff (float-time (time-subtract now time)))
-             (minutes (/ diff 60))
-             (hours (/ diff 3600))
-             (days (/ diff 86400)))
-        (cond
-         ((< minutes 1) "just now")
-         ((< minutes 60) (format "%d min ago" (floor minutes)))
-         ((< hours 24) (format "%d hr ago" (floor hours)))
-         ((< days 7) (format "%d days ago" (floor days)))
-         (t (format-time-string "%b %d" time))))
-    (error "Unknown time format")))
-
 (defun pi-coding-agent--format-message-timestamp (time)
   "Format TIME for message headers as YYYY-MM-DD HH:MM."
   (format-time-string "%Y-%m-%d %H:%M" time))
@@ -2177,7 +2163,7 @@ Stores the result in CHAT-BUF and emits a minibuffer notice when available."
      separator "\n"
      "C-c C-c   send prompt\n"
      "C-c C-k   abort\n"
-     "C-c C-r   resume session\n"
+     "C-c C-r   sessions\n"
      "C-c C-p   menu\n")))
 
 (defun pi-coding-agent--display-startup-header ()

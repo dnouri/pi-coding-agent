@@ -306,7 +306,8 @@ Adds TEXT to history, resets history navigation, and clears input."
   "Send the current input buffer contents to pi.
 Clears the input buffer after sending.  Does nothing if buffer is empty.
 If pi is busy (sending, streaming, or compacting), queues a local follow-up.
-The /compact command is handled locally; other slash commands sent to pi."
+All built-in slash commands are handled locally; other slash commands are
+sent to pi."
   (interactive)
   (let* ((text (string-trim (buffer-string)))
          (chat-buf (pi-coding-agent--get-chat-buffer))

@@ -58,6 +58,19 @@
   (should-not (pi-coding-agent--json-false-p nil))
   (should-not (pi-coding-agent--json-false-p t)))
 
+(ert-deftest pi-coding-agent-test-normalize-string-or-null-preserves-nonempty-strings ()
+  "String normalization preserves ordinary and whitespace-only strings."
+  (dolist (value '("ordinary text" " \t\n"))
+    (should (equal (pi-coding-agent--normalize-string-or-null value)
+                   value))))
+
+(ert-deftest pi-coding-agent-test-normalize-string-or-null-rejects-empty-and-nonstrings ()
+  "String normalization maps empty, null, false, and non-strings to nil."
+  (let ((values (list "" nil :null :false :json-false
+                      17 2.5 ["vector"] '(:key "value"))))
+    (should (equal (mapcar #'pi-coding-agent--normalize-string-or-null values)
+                   (make-list (length values) nil)))))
+
 (ert-deftest pi-coding-agent-test-parse-json-unicode ()
   "Unicode content is preserved correctly."
   (let ((result (pi-coding-agent--parse-json-line "{\"msg\":\"Hello 世界 🌍\"}")))
