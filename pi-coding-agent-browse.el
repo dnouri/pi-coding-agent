@@ -1087,7 +1087,7 @@ fallback included."
           ;; idiom as `pi-coding-agent--with-scroll-preservation').
           (dolist (w (get-buffer-window-list buf nil t))
             (set-window-point w (point)))
-          (when-let ((cur (magit-current-section)))
+          (when-let* ((cur (magit-current-section)))
             (magit-section-show cur))
           (force-mode-line-update))))))
 
@@ -1480,7 +1480,7 @@ Labels are rendered separately as right-margin overlays."
                   (magit-insert-section (tree-node node-id)
                     (magit-insert-heading
                       (concat prefix-str line))
-                    (when-let ((label (plist-get node :label)))
+                    (when-let* ((label (plist-get node :label)))
                       ;; 3 = "[" + "]" + 1 char padding
                       (let ((truncated
                              (pi-coding-agent--truncate-string
@@ -1694,7 +1694,7 @@ then the munged project directory; the last works with no session at
 all.  Signals when resolution itself fails."
   (or (and (fboundp 'pi-coding-agent--session-list-directory)
            (pi-coding-agent--session-list-directory))
-      (when-let ((chat-buf pi-coding-agent--chat-buffer))
+      (when-let* ((chat-buf pi-coding-agent--chat-buffer))
         (and (buffer-live-p chat-buf)
              (let ((cwd (pi-coding-agent--chat-session-directory chat-buf)))
                (pi-coding-agent-jsonl-session-dir-for-cwd
@@ -1829,7 +1829,7 @@ A live `pi-coding-agent--chat-buffer' link supplies the normalized
 after process death, so tree fetches and labels keep working with no
 live pi process.  Nil covers both a dead link and a chat whose session
 file does not exist yet (it is created on the first assistant reply)."
-  (when-let ((chat-buf pi-coding-agent--chat-buffer))
+  (when-let* ((chat-buf pi-coding-agent--chat-buffer))
     (when (buffer-live-p chat-buf)
       (with-current-buffer chat-buf
         (when (plistp pi-coding-agent--state)
@@ -2339,7 +2339,7 @@ cycle's final render."
          (buf (pi-coding-agent--get-or-create-session-browser dir)))
     ;; Link to the chat session.  Only the chat buffer is cached here;
     ;; `pi-coding-agent--get-process' resolves the process live.
-    (when-let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+    (when-let* ((chat-buf (pi-coding-agent--get-chat-buffer)))
       (when (buffer-live-p chat-buf)
         (with-current-buffer buf
           (setq pi-coding-agent--chat-buffer chat-buf))))
@@ -2367,7 +2367,7 @@ error forever)."
          (buf (pi-coding-agent--get-or-create-tree-browser dir)))
     ;; Link to the chat session.  Only the chat buffer is cached here;
     ;; the session file is resolved live from its state on every fetch.
-    (when-let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+    (when-let* ((chat-buf (pi-coding-agent--get-chat-buffer)))
       (when (buffer-live-p chat-buf)
         (with-current-buffer buf
           (setq pi-coding-agent--chat-buffer chat-buf))))
