@@ -255,7 +255,8 @@ PAYLOAD is the plist tail (:message, :targetId, ...)."
                "/nonexistent/pi-jsonl/no-such-file.jsonl")))
 
 (ert-deftest pi-coding-agent-test-jsonl-read-file-empty-or-headerless ()
-  "Empty files and files without a session header line read as nil."
+  "Empty files and files whose first nonblank line is not the session
+header read as nil."
   (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-jsonl-bad"))
          (empty (expand-file-name "empty.jsonl" dir))
          (garbage (expand-file-name "garbage.jsonl" dir)))
@@ -315,6 +316,119 @@ PAYLOAD is the plist tail (:message, :targetId, ...)."
     (should data)
     (should (= (length (plist-get data :entries)) 1))
     (should (equal (plist-get data :leafId) "ok1"))))
+
+;;;; The first-nonblank session-header rule
+
+(ert-deftest pi-coding-agent-test-jsonl-session-header-first-nonblank-line-rule ()
+  "THE session header is the first NONBLANK line, uniformly.
+Like pi's reader, which trims leading whitespace before the header
+check, blank leading lines are noise: skipped by the header check,
+never entries, and kept verbatim at the front of a navigation
+rewrite.  A junk first nonblank line — even with a valid header
+right after it — still makes the file a non-session file: read-file,
+read-session-info, and navigation-lines all return nil."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-jsonl-line0"))
+         (blank (expand-file-name "blank-first.jsonl" dir))
+         (junk (expand-file-name "junk-first.jsonl" dir))
+         (header-line (json-encode pi-coding-agent-test--jsonl-header))
+         (u1-line (json-encode '(:type "message" :id "u1" :parentId nil
+                                 :timestamp "2026-03-02T10:00:00.000Z"
+                                 :message (:role "user" :content "root"))))
+         (x1-line (json-encode '(:type "message" :id "x1" :parentId nil
+                                 :timestamp "2026-03-02T10:00:01.000Z"
+                                 :message (:role "user" :content "side"))))
+         (u2-line (json-encode '(:type "message" :id "u2" :parentId "u1"
+                                 :timestamp "2026-03-02T10:00:02.000Z"
+                                 :message (:role "user" :content "leaf")))))
+    ;; A CRLF blank line, a plain blank one, and an indented one lead.
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (insert "\r\n" "\n" "  \n"
+              header-line "\n" u1-line "\n" x1-line "\n" u2-line "\n")
+      (let ((coding-system-for-write 'no-conversion))
+        (write-region (point-min) (point-max) blank nil 0)))
+    ;; read-file: the blanks vanish; entries and leaf read on.
+    (let ((session (pi-coding-agent-jsonl-read-file blank)))
+      (should session)
+      (should (equal (plist-get (plist-get session :header) :cwd)
+                     "/tmp/pi-jsonl-test"))
+      (should (= (length (plist-get session :entries)) 3))
+      (should (equal (plist-get session :leafId) "u2")))
+    ;; read-session-info: same header rule.
+    (let ((info (pi-coding-agent-jsonl-read-session-info blank)))
+      (should info)
+      (should (= (plist-get info :messageCount) 3)))
+    ;; navigation-lines: the blanks and header stay at the front
+    ;; verbatim; the rewrite happens behind them (u2's chain ends the
+    ;; file, x1 leads as non-chain) with the byte multiset intact.
+    (let ((lines (pi-coding-agent-jsonl-navigation-lines blank "u2")))
+      (should lines)
+      (should (= (length lines) 7))
+      (should (equal (aref lines 0) "\r"))
+      (should (equal (aref lines 1) ""))
+      (should (equal (aref lines 2) "  "))
+      (should (equal (aref lines 3) header-line))
+      (should (equal (aref lines 4) x1-line))
+      (should (equal (aref lines 5) u1-line))
+      (should (equal (aref lines 6) u2-line))
+      (should (equal (sort (append lines nil) #'string<)
+                     (sort (list "\r" "" "  " header-line u1-line
+                                 x1-line u2-line)
+                           #'string<))))
+    ;; A junk first nonblank line is fatal even with a header after it.
+    (with-temp-file junk
+      (insert "{not json at all\n" header-line "\n" u1-line "\n"))
+    (should-not (pi-coding-agent-jsonl-read-file junk))
+    (should-not (pi-coding-agent-jsonl-read-session-info junk))
+    ;; The leaf id exists in the would-be entries, so a nil here can
+    ;; only come from the header rule.
+    (should-not (pi-coding-agent-jsonl-navigation-lines junk "u1"))))
+
+(ert-deftest pi-coding-agent-test-jsonl-session-header-bom-tolerated ()
+  "A UTF-8 BOM prefixing the header line is tolerated uniformly:
+read-file and read-session-info decode it away, and navigation-lines
+accepts the header while keeping that line's bytes — BOM included —
+verbatim, so the joined output stays byte-identical modulo line
+reordering."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-jsonl-bom"))
+         (path (expand-file-name "bom.jsonl" dir))
+         (header-line (json-encode pi-coding-agent-test--jsonl-header))
+         (u1-line (json-encode '(:type "message" :id "u1" :parentId nil
+                                 :timestamp "2026-03-02T10:00:00.000Z"
+                                 :message (:role "user" :content "root"))))
+         (u2-line (json-encode '(:type "message" :id "u2" :parentId "u1"
+                                 :timestamp "2026-03-02T10:00:01.000Z"
+                                 :message (:role "user" :content "leaf"))))
+         (bom-header-line (string-to-unibyte
+                           (concat "\xef\xbb\xbf" header-line))))
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (insert 239 187 191)
+      (insert header-line "\n" u1-line "\n" u2-line "\n")
+      (let ((coding-system-for-write 'no-conversion))
+        (write-region (point-min) (point-max) path nil 0)))
+    ;; read-file: insert-file-contents strips the BOM, so the header
+    ;; line is clean and both entries parse.
+    (let ((session (pi-coding-agent-jsonl-read-file path)))
+      (should session)
+      (should (equal (plist-get (plist-get session :header) :cwd)
+                     "/tmp/pi-jsonl-test"))
+      (should (= (length (plist-get session :entries)) 2)))
+    ;; read-session-info: same header rule.
+    (should (equal (plist-get (pi-coding-agent-jsonl-read-session-info path)
+                              :messageCount)
+                   2))
+    ;; navigation-lines: header accepted, its line keeps the BOM
+    ;; bytes, and the reordered multiset matches the original bytes
+    ;; exactly.
+    (let ((lines (pi-coding-agent-jsonl-navigation-lines path "u2")))
+      (should lines)
+      (should (= (length lines) 3))
+      (should (equal (aref lines 0) bom-header-line))
+      (should (equal (aref lines 2) u2-line))
+      (should (equal (sort (append lines nil) #'string<)
+                     (sort (list bom-header-line u1-line u2-line)
+                           #'string<))))))
 
 ;;;; build-tree: label folding, roots, sibling sorting
 
@@ -1092,9 +1206,9 @@ the five-message parse budget).  label and custom entries are ignored."
   "read-session-info degrades on budget misses and malformed files.
 The firstMessage budget full-parses at most 5 message lines: a user
 message inside the budget wins, otherwise the first parsed message of
-any role is the fallback.  Files without a leading session header,
-garbage before the header, empty files, and unreadable files all read
-as nil.  No session_info means no :name key at all."
+any role is the fallback.  Files without a session header as their
+first nonblank line, empty files, and unreadable files all read as
+nil.  No session_info means no :name key at all."
   (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-jsonl-fb"))
          (late-user (expand-file-name "late-user.jsonl" dir))
          (budget (expand-file-name "budget.jsonl" dir))
@@ -1137,7 +1251,8 @@ as nil.  No session_info means no :name key at all."
      (list (pi-coding-agent-test--jsonl-msg
             "x1" nil 0 '(:role "user" :content "orphaned"))))
     (should-not (pi-coding-agent-jsonl-read-session-info no-header))
-    ;; Any non-session line before the header bails out early.
+    ;; Junk as the first nonblank line (a well-formed header follows
+    ;; on the next line): the file is not a session file.
     (with-temp-file garbage
       (insert "{not json at all\n"
               (json-encode pi-coding-agent-test--jsonl-header) "\n"))
@@ -1370,7 +1485,8 @@ chain resolves both sides to nothing."
                    (list :leaf-id "l1" :current-p t)))))
 
 (ert-deftest pi-coding-agent-test-jsonl-navigation-lines-chain-to-end ()
-  "navigation-lines reorders for a rewrite: line 0 stays first, the
+  "navigation-lines reorders for a rewrite: the header line stays
+first, the
 leaf's ancestor chain moves to the end (the leaf itself last), and
 every other line keeps its original relative order ahead of it.
 Mid-chain bookkeeping entries (label, session_info) are ordinary
@@ -1549,6 +1665,54 @@ unchanged."
     (should (equal (pi-coding-agent-jsonl-navigation-lines labeled "l1")
                    (vconcat (mapcar #'pi-coding-agent-test--jsonl-line-string
                                     labeled-lines))))))
+
+(ert-deftest pi-coding-agent-test-jsonl-navigation-lines-large-chain-linear ()
+  "navigation-lines over a 100k-line chain answers correctly and fast.
+Line 0 stays fixed, the off-chain side entries keep their physical
+order ahead of the chain, the requested leaf ends the file, and the
+whole call finishes inside a generous wall-clock budget that the
+quadratic nth-per-access version measured 16s+ against."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-jsonl-navbig"))
+         (path (expand-file-name "big.jsonl" dir))
+         (count 100000)
+         (header-line (json-encode pi-coding-agent-test--jsonl-header))
+         (side1-line (json-encode '(:type "message" :id "side1" :parentId nil
+                                    :timestamp "2026-03-02T10:00:00.000Z"
+                                    :message (:role "user" :content "first side"))))
+         (side2-line (json-encode '(:type "message" :id "side2" :parentId nil
+                                    :timestamp "2026-03-02T10:00:01.000Z"
+                                    :message (:role "user" :content "second side"))))
+         (line-format "{\"type\":\"message\",\"id\":\"n%06d\",\"parentId\":%s}"))
+    ;; Generate the file as raw bytes in a unibyte buffer; formatting
+    ;; 100k minimal entries into a string list is fast enough here.
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (insert header-line "\n" side1-line "\n" side2-line "\n")
+      (dotimes (i count)
+        (insert (format line-format i
+                        (if (zerop i)
+                            "null"
+                          (format "\"n%06d\"" (1- i))))
+                "\n"))
+      (let ((coding-system-for-write 'no-conversion))
+        (write-region (point-min) (point-max) path nil 0)))
+    (let* ((start (float-time))
+           (lines (pi-coding-agent-jsonl-navigation-lines
+                   path (format "n%06d" (1- count))))
+           (elapsed (- (float-time) start)))
+      (should (= (length lines) (+ count 3)))
+      (should (equal (aref lines 0) header-line))
+      ;; Non-chain lines keep their physical relative order.
+      (should (equal (aref lines 1) side1-line))
+      (should (equal (aref lines 2) side2-line))
+      ;; The requested leaf is the file's new last line.
+      (should (equal (aref lines (1- (length lines)))
+                     (format line-format (1- count)
+                             (format "\"n%06d\"" (- count 2)))))
+      ;; Wall-clock tripwire, generous for CI variance: the quadratic
+      ;; version needs 16s+ on this file while the linear one stays
+      ;; well under the budget.  No tighter timing is asserted.
+      (should (< elapsed 10)))))
 
 (provide 'pi-coding-agent-jsonl-test)
 ;;; pi-coding-agent-jsonl-test.el ends here

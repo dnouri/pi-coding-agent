@@ -9,6 +9,7 @@
 
 (require 'ert)
 (require 'json)
+(require 'transient)
 (require 'pi-coding-agent-browse)
 (require 'pi-coding-agent-jsonl)
 (require 'pi-coding-agent-test-common)
@@ -1254,6 +1255,43 @@ the summarize feature (needs navigate_tree RPC)."
     (let ((heading (pi-coding-agent--tree-dispatch-heading)))
       (should (string-match-p "filter:user-only" heading)))))
 
+(ert-deftest pi-coding-agent-test-dispatch-headings-read-shadowed-buffer ()
+  "Both dispatch headings read the invoking browser's buffer-locals on
+transient's real rendering path.
+`transient--insert-group' formats group descriptions inside
+`transient-with-shadowed-buffer' — with the INVOKING buffer current,
+not the transient's own temp buffer — so the headings' buffer-local
+reads are correct there.  This pins that contract the way transient
+exercises it: evaluated with an unrelated buffer current and only the
+shadowed binding pointing at the browser.  A refactor that breaks the
+dependency (e.g. resolving the state from the wrong buffer) fails
+here."
+  ;; Session heading: shadowed to a browser with every toggle set.
+  (with-temp-buffer
+    (pi-coding-agent-session-browser-mode)
+    (setq pi-coding-agent--session-browser-scope "all"
+          pi-coding-agent--session-browser-sort "recent"
+          pi-coding-agent--session-browser-named-only t)
+    (let ((browser-buf (current-buffer)))
+      (with-temp-buffer
+        ;; Stands in for transient's temp buffer: some unrelated
+        ;; buffer is current; only the shadowed binding names the
+        ;; invoking browser.
+        (let ((transient--shadowed-buffer browser-buf))
+          (should (equal (transient-with-shadowed-buffer
+                           (pi-coding-agent--session-dispatch-heading))
+                         "scope:all │ sort:recent │ named-only"))))))
+  ;; Tree heading: same path, distinct filter state.
+  (with-temp-buffer
+    (pi-coding-agent-tree-browser-mode)
+    (setq pi-coding-agent--tree-browser-filter "user-only")
+    (let ((browser-buf (current-buffer)))
+      (with-temp-buffer
+        (let ((transient--shadowed-buffer browser-buf))
+          (should (equal (transient-with-shadowed-buffer
+                           (pi-coding-agent--tree-dispatch-heading))
+                         "filter:user-only")))))))
+
 ;;;; Header-Line Help Hint
 
 (ert-deftest pi-coding-agent-test-session-browser-header-line-help-hint ()
@@ -2029,6 +2067,52 @@ by the fetch token."
         (should (stringp error))
         (should (string-match-p "Cannot list sessions" error))))))
 
+(ert-deftest pi-coding-agent-test-load-sessions-interrupted-by-quit ()
+  "A quit during a scan slice reports an error state, not a stuck
+loading render (session-side analog of
+`pi-coding-agent-test-load-tree-interrupted-by-quit').  C-g against a
+slow scan raises `quit' — not `error' — inside the slice loop; the
+seam must still call back exactly once so the loading state clears
+and the browser names the interruption."
+  (let* ((root (pi-coding-agent-test--make-temp-directory "pi-scan-quit"))
+         (sessions (expand-file-name "sessions" root))
+         (dir (expand-file-name "--home-fake-a--" sessions))
+         (path (expand-file-name "session.jsonl" dir))
+         (calls nil))
+    (make-directory dir t)
+    (pi-coding-agent-test--write-session-lines
+     path (list (pi-coding-agent-test--make-session-header "sid-quit")))
+    (with-temp-buffer
+      (pi-coding-agent-session-browser-mode)
+      ;; The fetch cycle reads the buffer-local scope; "all" sees the
+      ;; munged directory below ("current" would munge the temp root
+      ;; itself, which holds no sessions).
+      (setq pi-coding-agent--session-browser-scope "all")
+      (let ((default-directory root)
+            (process-environment
+             (cons (format "PI_CODING_AGENT_DIR=%s" (directory-file-name root))
+                   process-environment)))
+        (cl-letf (((symbol-function 'pi-coding-agent--session-list-directory)
+                   (lambda (&optional _chat-buf) nil))
+                  ((symbol-function 'pi-coding-agent-jsonl-read-session-info)
+                   (lambda (_path) (signal 'quit nil)))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_secs _repeat fn &rest args) (apply fn args))))
+          ;; The seam reports the interruption exactly once.
+          (pi-coding-agent--browse-load-sessions
+           "all" (lambda (items error) (push (list items error) calls)))
+          (should (eq (length calls) 1))
+          (pcase-let ((`(,items ,error) (car calls)))
+            (should-not items)
+            (should (string-match-p "interrupted" error)))
+          ;; The full fetch cycle clears the loading state and shows
+          ;; the interruption instead of "Loading sessions...".
+          (pi-coding-agent--session-browser-fetch-and-render))
+        (should-not pi-coding-agent--session-browser-loading)
+        (should (string-match-p "interrupted"
+                                pi-coding-agent--session-browser-error))
+        (should (string-match-p "interrupted" (buffer-string)))))))
+
 ;;;; Phase 2: Fetch Relaxation
 
 (ert-deftest pi-coding-agent-test-fetch-without-process ()
@@ -2096,6 +2180,44 @@ receives (PROC CHAT-BUF PATH) verbatim."
                        (lambda (&rest _) (push t resume-calls))))
               ;; Returns quietly: the guard reports the reason itself.
               (pi-coding-agent--browse-switch-session "/tmp/some-session.jsonl")))
+          (should-not resume-calls))
+      (delete-process proc)
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-switch-active-transition-guard ()
+  "An in-flight session transition blocks a second switch before any
+resume attempt.  The transition latch keeps the status idle, so
+`--session-transition-ready-p' cannot see it (same gate navigate
+already has); without the explicit `--session-transition-active-p'
+check, RET on two rows would start two racing switch_session
+transitions."
+  (let* ((chat-buf (generate-new-buffer " *test-switch-active-chat*"))
+         (proc (start-process "pi-switch-active-test" nil "sleep" "30"))
+         (ready-calls nil)
+         (resume-calls nil)
+         (messages nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--process proc
+                  ;; Mid-transition: the latch is set but the status is
+                  ;; still idle, so the ready guard alone would pass.
+                  pi-coding-agent--session-transition-active t))
+          (pi-coding-agent-test--with-browse-link chat-buf
+            (cl-letf (((symbol-function 'pi-coding-agent--session-transition-ready-p)
+                       (lambda (chat-buf action)
+                         (push (list chat-buf action) ready-calls)
+                         t))
+                      ((symbol-function 'pi-coding-agent--resume-selected-session)
+                       (lambda (&rest _) (push t resume-calls)))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (push (apply #'format fmt args) messages))))
+              (pi-coding-agent--browse-switch-session "/tmp/some-session.jsonl")))
+          (should (member "Pi: Cannot switch while switching sessions"
+                          messages))
+          ;; The active gate fires before the ready guard runs at all.
+          (should-not ready-calls)
           (should-not resume-calls))
       (delete-process proc)
       (kill-buffer chat-buf))))

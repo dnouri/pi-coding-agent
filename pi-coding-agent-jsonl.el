@@ -126,42 +126,71 @@ their children are promoted to the nearest visible ancestor."
 
 ;;;; Reading Session Files
 
+(defun pi-coding-agent--jsonl-parse-session-header (line)
+  "Return LINE parsed as the session header plist, or nil.
+LINE is the decoded text of a candidate session file's first nonblank
+line; this is the one shared rule deciding whether a file is a pi
+session file at all: the line must parse as a JSON object whose
+top-level \"type\" is \"session\".  Whitespace-only lines before it and
+a leading UTF-8 BOM are the callers' business — pi's reader trims
+both away before its header check: insert-file-contents strips the
+BOM while decoding, and
+`pi-coding-agent-jsonl-navigation-lines' strips a copy for this
+check only."
+  (let ((data (pi-coding-agent--parse-json-line line)))
+    (when (and (consp data)
+               (equal (plist-get data :type) "session"))
+      data)))
+
 (defun pi-coding-agent-jsonl-read-file (path)
   "Read the session file at PATH.
 Return a plist with :path, :header, :entries, :leafId, and :name, or
-nil when PATH is missing, empty, or has no parseable \"session\" header
-line.
-:entries is a vector of every successfully parsed non-header line in
-file order; :leafId is the :id of the last entry, whatever its type,
-mirroring pi's index build; :name is the latest session_info name,
-trimmed, nil when absent or blank, mirroring pi's session readers.
-Malformed and blank lines are skipped silently."
+nil when PATH is missing, empty, or its first nonblank line is not
+the session header (`pi-coding-agent--jsonl-parse-session-header's
+rule).  Like pi's reader, whitespace-only leading lines are trimmed
+noise — skipped for the header check, never entries — and a UTF-8
+BOM is tolerated, stripped by decoding.
+:entries is a vector of every successfully parsed line after the
+header in file order, later \"session\" lines excepted; :leafId is the
+:id of the last entry, whatever its type, mirroring pi's index build;
+:name is the latest session_info name, trimmed, nil when absent or
+blank, mirroring pi's session readers.  Malformed and blank lines are
+skipped silently."
   (when (file-readable-p path)
     (with-temp-buffer
       (insert-file-contents path)
       (goto-char (point-min))
-      (let ((header nil)
+      ;; Pi reads session files as content.trim().split("\n"): skip
+      ;; whitespace-only leading lines (CR included — a CRLF-decoded
+      ;; blank is "\r") for the header check.  They never become
+      ;; entries.
+      (while (and (not (eobp))
+                 (looking-at-p "[ \t\r]*$"))
+        (forward-line 1))
+      (let ((header (pi-coding-agent--jsonl-parse-session-header
+                     (buffer-substring-no-properties
+                      (point) (line-end-position))))
             (entries nil)
             (name nil))
-        (while (not (eobp))
-          (let ((data (pi-coding-agent--parse-json-line
-                       (buffer-substring-no-properties
-                        (point) (line-end-position)))))
-            (when (consp data)
-              (let ((type (plist-get data :type)))
-                (if (equal type "session")
-                    (unless header (setq header data))
-                  (push data entries)
-                  (when (equal type "session_info")
-                    (let ((raw (pi-coding-agent--normalize-string-or-null
-                                (plist-get data :name))))
-                      (setq name
-                            (when raw
-                              (let ((trimmed (string-trim raw)))
-                                (unless (string-empty-p trimmed)
-                                  trimmed))))))))))
-          (forward-line 1))
         (when header
+          (forward-line 1)
+          (while (not (eobp))
+            (let ((data (pi-coding-agent--parse-json-line
+                         (buffer-substring-no-properties
+                          (point) (line-end-position)))))
+              (when (consp data)
+                (let ((type (plist-get data :type)))
+                  (unless (equal type "session")
+                    (push data entries)
+                    (when (equal type "session_info")
+                      (let ((raw (pi-coding-agent--normalize-string-or-null
+                                  (plist-get data :name))))
+                        (setq name
+                              (when raw
+                                (let ((trimmed (string-trim raw)))
+                                  (unless (string-empty-p trimmed)
+                                    trimmed))))))))))
+            (forward-line 1))
           (let* ((vector (vconcat (nreverse entries)))
                  (count (length vector)))
             (list :path path
@@ -228,26 +257,28 @@ carries no trailing slash; Windows drives munge like \"C:\\x\" to
   "Scan the current buffer for session metadata.
 PATH and MTIME feed the :path and :modified keys; see
 `pi-coding-agent-jsonl-read-session-info' for the full contract.
-Return the session plist, or nil when no header line was found."
+Return the session plist, or nil when the first nonblank line is not
+the session header (`pi-coding-agent--jsonl-parse-session-header's
+rule)."
   (goto-char (point-min))
-  (let ((header nil)
+  ;; Same trim rule as `pi-coding-agent-jsonl-read-file': skip
+  ;; whitespace-only leading lines (CR included) for the header check;
+  ;; they are never entries.
+  (while (and (not (eobp))
+              (looking-at-p "[ \t\r]*$"))
+    (forward-line 1))
+  (let ((header (pi-coding-agent--jsonl-parse-session-header
+                 (buffer-substring-no-properties
+                  (point) (line-end-position))))
         (name nil)
         (message-count 0)
         (first-message nil)
         (fallback-message nil)
         (parsed-messages 0))
-    (catch 'invalid
+    (when header
+      (forward-line 1)
       (while (not (eobp))
         (cond
-         ((and (null header)
-               (pi-coding-agent--jsonl-line-type-p "session"))
-          (setq header (pi-coding-agent--jsonl-parse-current-line)))
-         ((null header)
-          ;; Leading blank lines are tolerable noise; any other
-          ;; non-session line before the header means this is not a
-          ;; session file.
-          (unless (looking-at-p "[ \t]*\\'")
-            (throw 'invalid nil)))
          ((pi-coding-agent--jsonl-line-type-p "message")
           (setq message-count (1+ message-count))
           (when (and (null first-message) (< parsed-messages 5))
@@ -272,11 +303,10 @@ Return the session plist, or nil when no header line was found."
                     (when raw
                       (let ((trimmed (string-trim raw)))
                         (unless (string-empty-p trimmed) trimmed)))))))
-         ;; Later headers, blanks, label/custom/unknown lines: skip
-         ;; without parsing.
+         ;; Later session lines, blanks, label/custom/unknown lines:
+         ;; skip without parsing.
          (t nil))
-        (forward-line 1)))
-    (when header
+        (forward-line 1))
       (let ((id (pi-coding-agent--normalize-string-or-null
                  (plist-get header :id)))
             (cwd (pi-coding-agent--normalize-string-or-null
@@ -304,9 +334,9 @@ Return the session plist, or nil when no header line was found."
   "Read session metadata for the file at PATH, without building trees.
 Return a plist in the browse session dialect — (:path :id :cwd :name?
 :parentSessionPath? :created? :modified :messageCount :firstMessage?)
-— or nil when PATH is unreadable, empty, lacks a leading \"session\"
-header line, carries a non-session line before the header, or cannot
-be read at all.  Key parity with the session browser is the contract.
+— or nil when PATH is unreadable, empty, lacks a \"session\" header as
+its first nonblank line, or cannot be read at all.  Key parity with
+the session browser is the contract.
 
 This is the canonical shared session metadata scanner.  The scan is
 regex-first: lines route by their top-level type prefix and only headers,
@@ -853,8 +883,9 @@ nearest visible entry.  Traversal is iterative."
 Composition of `pi-coding-agent-jsonl-read-file',
 `pi-coding-agent-jsonl-build-tree', and
 `pi-coding-agent-jsonl-project-tree': return the (:tree :leafId)
-projection, or nil when PATH is missing, empty, or headerless — there
-is no tree to render, never an error.  The composition exists so the
+projection, or nil when PATH is missing, empty, or its first nonblank
+line is not the session header — there is no tree to render, never an
+error.  The composition exists so the
 tree browser's disk-based fetch cannot mix stages from different
 reads of a file a live pi appends to concurrently."
   (when-let* ((session (pi-coding-agent-jsonl-read-file path)))
@@ -949,18 +980,26 @@ the plist (:leaf-id ID-OR-NIL :prefill TEXT? :current-p BOOL):
   "Return PATH's raw lines reordered so the LEAF-ID chain ends the file.
 The result is a vector of unibyte raw line strings WITHOUT their LF
 delimiters — the caller joins them with LF and adds the final one — or
-nil when PATH is unreadable, empty, or headerless, or LEAF-ID is nil or
-names no entry.  Every other byte is retained: in particular, the CR of
+nil when PATH is unreadable, empty, or its first nonblank line is
+not the session header (`pi-coding-agent--jsonl-parse-session-header's
+rule), or LEAF-ID is nil or names no entry.  Like pi's reader,
+whitespace-only leading lines are trimmed noise before the header,
+and a UTF-8 BOM prefixing the header line is tolerated for that check
+alone: the check decodes a copy with the three bytes stripped while
+the returned raw lines stay verbatim.
+Every other byte is retained: in particular, the CR of
 a CRLF delimiter remains the line's last byte, so joining with LF
-reproduces CRLF exactly.  Line 0 (the session header) always stays line 0;
-lines 1..n-1 are partitioned into the non-chain lines (first, byte-for-byte
+reproduces CRLF exactly.  The header line and any blank lines before
+it stay at the front, byte-for-byte; the lines after the header are
+partitioned into the non-chain lines (first, byte-for-byte
 in original relative order), followed by the canonical ancestor-chain
 lines in logical parent order from root/orphan-root through LEAF-ID.  Thus
 LEAF-ID is the file's last line and the next append lands on it.  The
 chain walks parent ids from LEAF-ID and stops at nil, self, unknown, or
 cyclic parents (an unknown parent is a root, matching
 `pi-coding-agent-jsonl-build-tree's roots rule); malformed and blank
-lines are non-chain bytes preserved verbatim in their original relative
+lines after the header are non-chain bytes preserved verbatim in their
+original relative
 positions.  Duplicate entry ids map to their last line; earlier duplicate
 physical lines remain non-chain."
   (when leaf-id
@@ -976,23 +1015,49 @@ physical lines remain non-chain."
                               (point-min) (point-max)))
                    (split (split-string contents "\n"))
                    ;; A final newline splits into one trailing empty line;
-                   ;; drop exactly that one (interior empties stay).
-                   (lines (if (and split (equal (car (last split)) ""))
-                              (butlast split)
-                            split)))
-              (when (and lines
-                         (equal (plist-get
-                                 (pi-coding-agent--parse-json-line
-                                  (decode-coding-string (car lines) 'utf-8))
-                                 :type)
-                                "session"))
-                (let* ((count (length lines))
-                       (parsed (make-vector count nil))
+                   ;; drop exactly that one (interior empties stay).  The
+                   ;; lines become a vector: every access below is
+                   ;; positional, and aref is O(1) where nth was O(n).
+                   (lines (vconcat (if (and split (equal (car (last split)) ""))
+                                       (butlast split)
+                                     split)))
+                   (count (length lines))
+                   ;; Pi reads session files as content.trim().split("\n"):
+                   ;; the header is the first NONBLANK line, and a blank
+                   ;; on raw bytes is a run of space, tab, or CR.
+                   ;; HEADER-INDEX is that line's index, nil when no
+                   ;; line is nonblank.
+                   (header-index
+                    (let ((i 0) (found nil))
+                      (while (and (null found) (< i count))
+                        (if (string-match-p "\\`[ \t\r]*\\'"
+                                            (aref lines i))
+                            (setq i (1+ i))
+                          (setq found i)))
+                      found)))
+              (when (and header-index
+                         (pi-coding-agent--jsonl-parse-session-header
+                          (decode-coding-string
+                           ;; A UTF-8 BOM may prefix the header line;
+                           ;; strip the three bytes from this inspection
+                           ;; copy only — the vector keeps the raw line.
+                           (if (and (> (length (aref lines header-index)) 2)
+                                    (string-prefix-p
+                                     "\xef\xbb\xbf"
+                                     (aref lines header-index)))
+                               (substring (aref lines header-index) 3)
+                             (aref lines header-index))
+                           'utf-8)))
+                (let* ((parsed (make-vector count nil))
                        (id-line (make-hash-table :test #'equal)))
+                  ;; Lines up to and including the header are never
+                  ;; entries: the leading blanks by pi's trim rule, the
+                  ;; header by definition.  Everything after parses as
+                  ;; usual.
                   (dotimes (i count)
-                    (unless (zerop i)
+                    (when (> i header-index)
                       (let ((data (pi-coding-agent--parse-json-line
-                                   (decode-coding-string (nth i lines)
+                                   (decode-coding-string (aref lines i)
                                                          'utf-8))))
                         (when (consp data)
                           (aset parsed i data)
@@ -1023,15 +1088,24 @@ physical lines remain non-chain."
                                    (aref parsed line-index))))))
                       ;; Keep non-chain physical order, then append the
                       ;; canonical chain in its logical parent order.
+                      ;; The leading blanks and the header line itself
+                      ;; stay at the front verbatim — pi's append
+                      ;; semantics only care that the leaf chain ends
+                      ;; the file, and neither is ever a chain or
+                      ;; non-chain line (the id map holds only lines
+                      ;; after the header).
                       (let (front)
-                        (cl-loop for i from 1 below count
+                        (cl-loop for i from (1+ header-index) below count
                                  unless (aref chain-line-p i)
-                                 do (push (nth i lines) front))
-                        (vconcat
-                         (list (car lines))
-                         (nreverse front)
-                         (mapcar (lambda (i) (nth i lines))
-                                 chain-lines))))))))))
+                                 do (push (aref lines i) front))
+                        (let (head)
+                          (dotimes (i (1+ header-index))
+                            (push (aref lines i) head))
+                          (vconcat
+                           (nreverse head)
+                           (nreverse front)
+                           (mapcar (lambda (i) (aref lines i))
+                                   chain-lines)))))))))))
       (error nil))))
 
 (provide 'pi-coding-agent-jsonl)

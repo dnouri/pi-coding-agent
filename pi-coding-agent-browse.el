@@ -595,7 +595,10 @@ against the buffer's current one.")
   "Return heading string for the session browser dispatch transient.
 Shows current scope, sort mode, and named-only state — the same state
 `pi-coding-agent--session-browser-header-line' formats for the
-header-line."
+header-line.  Transient evaluates group descriptions in the invoking
+browser buffer (`transient-with-shadowed-buffer' inside
+`transient--insert-group'), so these buffer-local reads see the
+browser's state on the real rendering path."
   (mapconcat #'identity
              (append (list (format "scope:%s"
                                    pi-coding-agent--session-browser-scope)
@@ -1230,7 +1233,11 @@ labeling a session the chat has since left.")
   "Return heading string for the tree browser dispatch transient.
 Shows current filter mode.
 Sibling of `pi-coding-agent--tree-browser-header-line' — both
-format the same state variables for different contexts."
+format the same state variables for different contexts.  Transient
+evaluates group descriptions in the invoking browser buffer (see
+`transient-with-shadowed-buffer' inside `transient--insert-group'),
+so this buffer-local read sees the browser's state on the real
+rendering path."
   (format "filter:%s" pi-coding-agent--tree-browser-filter))
 
 (transient-define-prefix pi-coding-agent-tree-browser-dispatch ()
@@ -1737,19 +1744,48 @@ scan before any slice runs and the callback is uniformly asynchronous.
 A slice is dropped when BUF died or a newer fetch bumped the fetch
 TOKEN, and a dropped scan never calls CALLBACK.  ITEMS accumulates the
 session plists (already in the browse dialect: the scan is an identity
-mapping over `pi-coding-agent-jsonl-read-session-info' output)."
+mapping over `pi-coding-agent-jsonl-read-session-info' output).
+
+The exactly-once contract also holds when a slice is interrupted: the
+slice loop runs inside a `condition-case' with explicit `quit' and
+`error' handlers, so a `quit' during a slice (C-g against a slow
+scan) or an `error' abandons the scan and reports through CALLBACK
+once with the failure string — `quit' is not an `error', so without
+its own handler the callback would never run and the browser would
+sit on its loading state forever (same contract as the deferred read
+in `pi-coding-agent--browse-load-tree')."
   (if (and (buffer-live-p buf)
            (eq token (buffer-local-value
                       'pi-coding-agent--session-browser-fetch-token buf)))
-      (let ((deadline (+ (float-time) 0.025)))
-        (while (and files (< (float-time) deadline))
-          (let ((info (pi-coding-agent-jsonl-read-session-info (car files))))
-            (when info (push info items)))
-          (setq files (cdr files)))
-        (if files
-            (run-at-time 0 nil #'pi-coding-agent--browse-scan-session-files
-                         buf token files items callback)
-          (funcall callback (nreverse items) nil)))
+      (let ((deadline (+ (float-time) 0.025))
+            (failure nil)
+            (finished nil))
+        ;; CALLBACK is invoked only below, OUTSIDE the condition-case:
+        ;; a signaling callback must not re-enter a handler and report
+        ;; twice.
+        (condition-case err
+            (progn
+              (while (and files (< (float-time) deadline))
+                (let ((info (pi-coding-agent-jsonl-read-session-info
+                             (car files))))
+                  (when info (push info items)))
+                (setq files (cdr files)))
+              (if files
+                  (run-at-time 0 nil #'pi-coding-agent--browse-scan-session-files
+                               buf token files items callback)
+                (setq finished t)))
+          (quit
+           (setq failure "Session scan was interrupted"))
+          (error
+           (setq failure (format "Session scan failed: %s"
+                                 (error-message-string err)))))
+        (cond (failure
+               ;; Same one-shot report a failed fetch uses: nil items
+               ;; plus the error string (see
+               ;; `pi-coding-agent--browse-load-sessions').
+               (funcall callback nil failure))
+              (finished
+               (funcall callback (nreverse items) nil))))
     ;; Stale or orphaned fetch: drop silently.
     nil))
 
@@ -1891,12 +1927,31 @@ symlink-aware fallback."
                            (expand-file-name path))
                     (file-equal-p current path)))))))
 
+(defun pi-coding-agent--browse-transition-refused-p (chat-buf action)
+  "Return non-nil when CHAT-BUF must refuse to start ACTION now.
+One gate for both halves of the transition guard, shared by
+`pi-coding-agent--browse-switch-session' and
+`pi-coding-agent--browse-navigate': an ACTIVE session transition
+refuses with \"Pi: Cannot ACTION while switching sessions\" — the
+status stays idle during the transition latch, so
+`pi-coding-agent--session-transition-ready-p' cannot see it, and a
+second concurrent switch or navigate would race the first — and
+otherwise the ready guard runs with ACTION (reporting its own refusal
+when it returns nil)."
+  (if (pi-coding-agent--session-transition-active-p chat-buf)
+      (progn
+        (message "Pi: Cannot %s while switching sessions" action)
+        t)
+    (not (pi-coding-agent--session-transition-ready-p chat-buf action))))
+
 (defun pi-coding-agent--browse-switch-session (path)
   "Switch the linked chat session to session file PATH.
 Guards, in order: a live linked chat buffer (else `user-error'), a live
-pi process (else `user-error'), and
-`pi-coding-agent--session-transition-ready-p' (which reports its own
-refusal and returns quietly).  Delegation is
+pi process (else `user-error'), and no session transition in flight —
+`pi-coding-agent--browse-transition-refused-p' gates both an active
+transition, which keeps the status idle (without the explicit check a
+second RET would race the first switch), and the ready guard, which
+reports its own refusal and returns quietly.  Delegation is
 `pi-coding-agent--resume-selected-session' (PROC CHAT-BUF PATH); its
 synchronous `user-error's (bad cwd, duplicate open) surface in the
 browser.  Afterwards `pi-coding-agent--browse-quit-when-settled' waits
@@ -1911,7 +1966,7 @@ browser per project directory."
     (let ((proc (buffer-local-value 'pi-coding-agent--process chat-buf)))
       (unless (pi-coding-agent--session-live-process-p proc)
         (user-error "Pi process is not running"))
-      (when (pi-coding-agent--session-transition-ready-p chat-buf "switch")
+      (unless (pi-coding-agent--browse-transition-refused-p chat-buf "switch")
         (pi-coding-agent--resume-selected-session proc chat-buf path)
         (pi-coding-agent--browse-quit-when-settled
          chat-buf (selected-window) path)))))
@@ -1962,11 +2017,12 @@ navigateTree without a navigate RPC:
     changed since the tree was loaded — refresh with g\" (the rewrite
     would have to pick one of two files);
  3. a live pi process, else `user-error' \"Pi process is not running\";
- 4. no in-flight session transition — `--session-transition-ready-p'
-    cannot see one (status stays idle during the latch), and a second
-    RET during a switch would race it;
+ 4. no in-flight session transition (the first half of
+    `pi-coding-agent--browse-transition-refused-p') —
+    `--session-transition-ready-p' cannot see one (status stays idle
+    during the latch), and a second RET during a switch would race it;
  5. `pi-coding-agent--session-transition-ready-p' with the action
-    \"navigate\" (reports its own refusal);
+    \"navigate\" (the second half; reports its own refusal);
  6. a FRESH `pi-coding-agent-jsonl-read-file' — the browser's cached
     tree can lag the file — else the unreadable message;
  7. a versioned header: version 1 files (no ids) refuse with the
@@ -2023,10 +2079,7 @@ cross-module writer coordination."
           (unless (pi-coding-agent--session-live-process-p proc)
             (user-error "Pi process is not running"))
           (cond
-           ((pi-coding-agent--session-transition-active-p chat-buf)
-            (message "Pi: Cannot navigate while switching sessions"))
-           ((not (pi-coding-agent--session-transition-ready-p
-                  chat-buf "navigate"))
+           ((pi-coding-agent--browse-transition-refused-p chat-buf "navigate")
             nil)
            (t
             (let ((session (pi-coding-agent-jsonl-read-file path)))
