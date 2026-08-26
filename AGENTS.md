@@ -50,7 +50,7 @@ module, direct `setq` is fine.
 | `pi-coding-agent.el` | Entry point, autoloads, `--setup-session` |
 | `pi-coding-agent-core.el` | JSON parsing, line buffering, RPC request correlation, and process protocol |
 | `pi-coding-agent-ui.el` | Shared session/buffer state, accessors, faces, customization, chat/input modes and keymaps, header/activity UI, and local slash-command dispatch; requires core and grammars, not jsonl |
-| `pi-coding-agent-render.el` | Streaming and history rendering for user, assistant, branch-summary, and compaction messages; tool output, fontification, diffs, and deferred history table postprocessing |
+| `pi-coding-agent-render.el` | Streaming and history rendering for user, assistant, branch-summary, and compaction messages; tool output, deferred completed-tool cooling outside the hot tail, fontification, diffs, and deferred history table postprocessing |
 | `pi-coding-agent-table.el` | Display-only pipe table decoration, wrapping, overlay management, and resize refresh over UI visible-text/scroll seams |
 | `pi-coding-agent-input.el` | Input history/isearch, send/abort, file/path/slash completion, queuing, and local `/resume` dispatch to the session browser |
 | `pi-coding-agent-menu.el` | Transient menu; guarded new/reload/resume transitions; canonical jsonl cwd/name metadata; model, thinking, command, export, and stats actions; `r` sessions and `w` tree entries |
@@ -95,9 +95,9 @@ module, direct `setq` is fine.
 | `bench/pi-coding-agent-reload-resume-bench.el` | Synthetic reload/resume harness; the resume lane opens the real async disk-backed session browser, selects the target magit section, switches through browser RET behavior, and checks rebuilt history |
 | `bench/fake-pi-reload-resume.py` | Fake JSON-over-stdio backend for reload/resume benchmark state, switch, history, commands, and content-free traffic evidence |
 | `bench/run-reload-resume-bench.sh` | Reload/resume benchmark runner; GUI uses `xvfb-run`, `--batch` for headless lane |
-| `bench/pi-coding-agent-tool-update-bench.el` | Synthetic tool-update storm benchmark harness |
-| `bench/fake-pi-tool-update-storm.py` | Fake JSON-over-stdio pi backend emitting a tool-update storm |
-| `bench/run-tool-update-bench.sh` | Tool-update storm benchmark runner; GUI uses `xvfb-run`, `--batch` for headless lane |
+| `bench/pi-coding-agent-tool-update-bench.el` | Synthetic tool-update storm and deferred agent_end cooling benchmark harness |
+| `bench/fake-pi-tool-update-storm.py` | Fake JSON-over-stdio pi backend emitting tool-update storm and cooling scenarios |
+| `bench/run-tool-update-bench.sh` | Tool-update/cooling benchmark runner; GUI uses `xvfb-run`, `--batch` for headless lane |
 | `bench/fixtures/tables.md` | Sample pipe tables used by the table benchmark |
 | `test/support/fake_pi.py` | Deterministic JSONL RPC subprocess double with scenario-driven events, valid v3 persistence, inspection RPCs, and transactional session switching |
 | `test/support/fake-pi-contract.md` | Maintainer-facing wire, scenario/event/tool, v3 record, projection, and switch contract for `fake_pi.py` |
@@ -166,6 +166,9 @@ make bench-reload-resume-smoke     # cheap synthetic correctness smoke
 make bench-tool-update             # tool-update storm GUI lane via xvfb (primary)
 make bench-tool-update-batch       # tool-update storm batch lane (secondary)
 make bench-tool-update-smoke       # cheap synthetic correctness smoke
+make bench-agent-end-cooling       # deferred agent_end cooling GUI lane (primary)
+make bench-agent-end-cooling-batch # deferred cooling batch lane (secondary)
+make bench-agent-end-cooling-smoke # cheap deferred cooling correctness smoke
 ```
 
 The GUI lanes are the primary measurements; batch lanes are quick sanity
@@ -173,9 +176,18 @@ checks and CI artifact generators.  Reload/resume benchmarks use synthetic
 JSONL fixtures only and fail on correctness errors, not timing thresholds.
 Tool-update storm benchmarks replay a deterministic synthetic
 `tool_execution_update` storm against a fake pi and likewise fail only on
-correctness errors.  Table fixtures live in `bench/fixtures/tables.md`.
-Reload/resume artifacts are written under `tmp/reload-resume-bench/` and
-tool-update artifacts under `tmp/tool-update-bench/` by default.
+correctness errors.  The deferred agent_end scenario reuses that harness and
+fake backend to cross a 90-overlay cohort at the final real process-filter
+event, then observes production one-shot cooling timers and routed scroll
+heartbeats without enforcing timing thresholds.  Its runner deliberately uses
+`-Q`: slice/root timings are structural diagnostics, zero root calls is valid,
+and these results must not be cited as evidence that md-ts root cost was
+reduced.  Exact normal-init GUI replay is the performance-fidelity evidence.
+Table fixtures live in `bench/fixtures/tables.md`.  Reload/resume artifacts are
+written under `tmp/reload-resume-bench/`, tool-update artifacts under
+`tmp/tool-update-bench/`, and dedicated cooling target artifacts under
+`tmp/agent-end-cooling-bench/{gui,batch,smoke}/` by default, so those public
+lanes do not overwrite one another.
 
 ## Linting
 

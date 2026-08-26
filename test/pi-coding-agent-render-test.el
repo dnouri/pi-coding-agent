@@ -2871,6 +2871,16 @@ Call inside `with-temp-buffer' after `pi-coding-agent-chat-mode'."
   (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-tool-block))
               (overlays-in (point-min) (point-max))))
 
+(defun pi-coding-agent-test--drain-tool-cooling ()
+  "Run all deferred tool-cooling slices deterministically in this buffer."
+  (cl-letf (((symbol-function 'input-pending-p)
+             (lambda (&rest _) nil)))
+    (while pi-coding-agent--tool-cooling-queue
+      (when (timerp pi-coding-agent--tool-cooling-timer)
+        (cancel-timer pi-coding-agent--tool-cooling-timer))
+      (pi-coding-agent--run-tool-cooling-slice
+       (current-buffer) pi-coding-agent--tool-cooling-generation))))
+
 (defun pi-coding-agent-test--render-completed-tool-turn
     (tool-call-id tool-name args content &optional details)
   "Render one completed assistant turn with a single tool result.
@@ -2879,7 +2889,9 @@ TOOL-NAME and ARGS are passed through the normal tool execution path.
 CONTENT is the tool result content list, and DETAILS is optional result
 metadata such as an edit diff.
 Synthetic turns also reset `pi-coding-agent--assistant-header-shown' so
-repeated helper calls model new prompts rather than retry attempts."
+repeated helper calls model new prompts rather than retry attempts.  Deferred
+cooling is drained explicitly so existing cold-render semantic tests observe a
+settled event loop without wall-clock timing."
   (setq pi-coding-agent--assistant-header-shown nil)
   (pi-coding-agent--handle-display-event '(:type "agent_start"))
   (pi-coding-agent--handle-display-event
@@ -2893,7 +2905,700 @@ repeated helper calls model new prompts rather than retry attempts."
          :toolName tool-name
          :result (list :content content :details details)
          :isError nil))
-  (pi-coding-agent--handle-display-event '(:type "agent_end")))
+  (pi-coding-agent--handle-display-event '(:type "agent_end"))
+  (pi-coding-agent-test--drain-tool-cooling))
+
+(defmacro pi-coding-agent-test--with-recorded-cooling-timers
+    (jobs &rest body)
+  "Run BODY with cooling timer requests appended to JOBS.
+Each recorded job carries the requested delay, callback, arguments, returned
+fake timer, and the cooling timer owner observed while `run-at-time' ran.
+Unrelated timer requests pass through to the real `run-at-time'."
+  (declare (indent 1) (debug (symbolp body)))
+  (let ((original (make-symbol "original-run-at-time")))
+    `(let ((,jobs nil)
+           (,original (symbol-function 'run-at-time)))
+       (cl-letf (((symbol-function 'run-at-time)
+                  (lambda (delay repeat function &rest args)
+                    (if (eq function
+                            'pi-coding-agent--run-tool-cooling-slice)
+                        (let ((timer (timer-create)))
+                          (setq ,jobs
+                                (nconc ,jobs
+                                       (list
+                                        (list :delay delay
+                                              :repeat repeat
+                                              :function function
+                                              :args args
+                                              :timer timer
+                                              :owner
+                                              pi-coding-agent--tool-cooling-timer))))
+                          timer)
+                      (apply ,original delay repeat function args)))))
+         ,@body))))
+
+(defun pi-coding-agent-test--invoke-recorded-cooling-timer (job)
+  "Invoke recorded cooling timer JOB synchronously."
+  (apply (plist-get job :function) (plist-get job :args)))
+
+(defun pi-coding-agent-test--render-completed-read-block (tool-call-id)
+  "Render and return a completed read overlay for TOOL-CALL-ID."
+  (let* ((path (format "/tmp/%s.py" tool-call-id))
+         (args (list :path path))
+         (block (pi-coding-agent--display-tool-start
+                 "read" args tool-call-id)))
+    (pi-coding-agent--display-tool-end
+     "read" args
+     (list (list :type "text" :text (format "result %s" tool-call-id)))
+     nil nil block)
+    (pi-coding-agent--tool-block-overlay block)))
+
+(defun pi-coding-agent-test--render-headed-completed-read-block (tool-call-id)
+  "Render and return a headed completed read overlay for TOOL-CALL-ID."
+  (setq pi-coding-agent--assistant-header-shown nil)
+  (pi-coding-agent--display-agent-start)
+  (pi-coding-agent-test--render-completed-read-block tool-call-id))
+
+(defun pi-coding-agent-test--render-long-cooling-read-block
+    (tool-call-id &optional expanded)
+  "Render a long completed read block for TOOL-CALL-ID.
+When EXPANDED is non-nil, expand its preview before returning the overlay."
+  (let* ((pi-coding-agent-tool-preview-lines 3)
+         (path (format "/tmp/%s.py" tool-call-id))
+         (args (list :path path))
+         (content
+          (mapconcat (lambda (index)
+                       (format "read body line %02d" index))
+                     (number-sequence 1 20) "\n"))
+         (block (pi-coding-agent--display-tool-start
+                 "read" args tool-call-id)))
+    (pi-coding-agent--display-tool-end
+     "read" args (list (list :type "text" :text content))
+     nil nil block)
+    (let ((overlay (pi-coding-agent--tool-block-overlay block)))
+      (when expanded
+        (let ((button (pi-coding-agent--find-toggle-button-in-region
+                       (overlay-start overlay) (overlay-end overlay))))
+          (should button)
+          (pi-coding-agent--toggle-tool-output button)))
+      overlay)))
+
+(defun pi-coding-agent-test--render-collapsed-cooling-bash-block (tool-call-id)
+  "Render a collapsed completed bash block for TOOL-CALL-ID."
+  (let* ((pi-coding-agent-bash-preview-lines 3)
+         (args '(:command "produce output"))
+         (content
+          (mapconcat (lambda (index)
+                       (format "bash body line %02d" index))
+                     (number-sequence 1 12) "\n"))
+         (block (pi-coding-agent--display-tool-start
+                 "bash" args tool-call-id)))
+    (pi-coding-agent--display-tool-end
+     "bash" args (list (list :type "text" :text content))
+     nil nil block)
+    (pi-coding-agent--tool-block-overlay block)))
+
+(defun pi-coding-agent-test--window-point-text-p (window text)
+  "Return non-nil when WINDOW point begins with TEXT."
+  (with-current-buffer (window-buffer window)
+    (save-excursion
+      (goto-char (window-point window))
+      (looking-at-p (regexp-quote text)))))
+
+(ert-deftest pi-coding-agent-test-deferred-tool-cooling-agent-end-schedules-cohort ()
+  "agent_end queues the cold cohort without synchronously rewriting it."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 1)
+          cooled)
+      (pi-coding-agent-test--with-recorded-cooling-timers jobs
+        (let ((older
+               (pi-coding-agent-test--render-headed-completed-read-block "old"))
+              (newer
+               (pi-coding-agent-test--render-headed-completed-read-block "new")))
+          (cl-letf (((symbol-function 'pi-coding-agent--cool-tool-overlay)
+                     (lambda (overlay)
+                       (push overlay cooled))))
+            (pi-coding-agent--handle-display-event '(:type "agent_end")))
+          (should-not cooled)
+          (should (overlay-buffer older))
+          (should (overlay-buffer newer))
+          (should (equal pi-coding-agent--tool-cooling-queue (list older)))
+          (should (eq pi-coding-agent--tool-cooling-timer
+                      (plist-get (car jobs) :timer)))
+          (should (= 1 (length jobs)))
+          (should (> (plist-get (car jobs) :delay) 0))
+          (should-not (plist-get (car jobs) :repeat))
+          (should-not (plist-get (car jobs) :owner)))))))
+
+(ert-deftest pi-coding-agent-test-deferred-tool-cooling-position-map-boundaries ()
+  "Cooling position mapping is continuous at replacement boundaries."
+  ;; Shrinking [10, 20) to [10, 15).
+  (should (= 9 (pi-coding-agent--map-tool-cooling-position 9 10 20 15)))
+  (should (= 10 (pi-coding-agent--map-tool-cooling-position 10 10 20 15)))
+  (should (= 12 (pi-coding-agent--map-tool-cooling-position 12 10 20 15)))
+  (should (= 15 (pi-coding-agent--map-tool-cooling-position 19 10 20 15)))
+  (should (= 15 (pi-coding-agent--map-tool-cooling-position 20 10 20 15)))
+  (should (= 20 (pi-coding-agent--map-tool-cooling-position 25 10 20 15)))
+  ;; Expanding preserves inside offsets and shifts the old end and suffix.
+  (should (= 19 (pi-coding-agent--map-tool-cooling-position 19 10 20 25)))
+  (should (= 25 (pi-coding-agent--map-tool-cooling-position 20 10 20 25)))
+  (should (= 30 (pi-coding-agent--map-tool-cooling-position 25 10 20 25))))
+
+(ert-deftest pi-coding-agent-test-deferred-tool-cooling-view-after-body-stays-logical ()
+  "One slice keeps selected and other windows on sentinels after the body."
+  (let ((buffer (generate-new-buffer " *pi-cooling-view-after*"))
+        (pi-coding-agent-quit-without-confirmation t))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (pi-coding-agent-chat-mode)
+            (pi-coding-agent-test--render-long-cooling-read-block
+             "view-after" t)
+            (let ((inhibit-read-only t))
+              (goto-char (point-max))
+              (dotimes (index 10)
+                (insert (format "before A filler %02d\n" index)))
+              (insert "VIEW-A-START context\n")
+              (dotimes (index 3)
+                (insert (format "inside A filler %02d\n" index)))
+              (insert "VIEW-A-POINT sentinel\n")
+              (dotimes (index 10)
+                (insert (format "between filler %02d\n" index)))
+              (insert "VIEW-B-START context\n")
+              (dotimes (index 3)
+                (insert (format "inside B filler %02d\n" index)))
+              (insert "VIEW-B-POINT sentinel\n")
+              (dotimes (index 60)
+                (insert (format "tail filler %02d\n" index)))))
+          (pi-coding-agent-test--with-recorded-cooling-timers jobs
+            (with-current-buffer buffer
+              (let ((pi-coding-agent-hot-tail-turn-count 0))
+                (pi-coding-agent--handle-display-event '(:type "agent_end"))))
+            (should (= 1 (length jobs)))
+            (save-window-excursion
+              (delete-other-windows)
+              (switch-to-buffer buffer)
+              (let* ((selected (selected-window))
+                     (other (split-window-right))
+                     start-a point-a start-b point-b old-point-a)
+                (set-window-buffer other buffer)
+                (with-current-buffer buffer
+                  (save-excursion
+                    (goto-char (point-min))
+                    (search-forward "VIEW-A-START context")
+                    (setq start-a (line-beginning-position))
+                    (search-forward "VIEW-A-POINT sentinel")
+                    (setq point-a (match-beginning 0))
+                    (search-forward "VIEW-B-START context")
+                    (setq start-b (line-beginning-position))
+                    (search-forward "VIEW-B-POINT sentinel")
+                    (setq point-b (match-beginning 0))))
+                (select-window selected)
+                (goto-char point-a)
+                (set-window-start selected start-a t)
+                (set-window-point other point-b)
+                (set-window-start other start-b t)
+                (setq old-point-a (window-point selected))
+                (cl-letf (((symbol-function 'input-pending-p)
+                           (lambda (&rest _) nil)))
+                  (pi-coding-agent-test--invoke-recorded-cooling-timer
+                   (pop jobs)))
+                (should-not jobs)
+                (should (equal "VIEW-A-START context"
+                               (pi-coding-agent-test--window-start-line
+                                selected)))
+                (should (pi-coding-agent-test--window-point-text-p
+                         selected "VIEW-A-POINT sentinel"))
+                (should (equal "VIEW-B-START context"
+                               (pi-coding-agent-test--window-start-line other)))
+                (should (pi-coding-agent-test--window-point-text-p
+                         other "VIEW-B-POINT sentinel"))
+                (should (/= old-point-a (window-point selected)))
+                (with-current-buffer buffer
+                  (should (= (point) (window-point selected)))
+                  (should (looking-at-p "VIEW-A-POINT sentinel")))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest pi-coding-agent-test-deferred-tool-cooling-view-inside-body-maps-and-clamps ()
+  "One slice maps an inside start relatively and clamps an inside point."
+  (let ((buffer (generate-new-buffer " *pi-cooling-view-inside*"))
+        (pi-coding-agent-quit-without-confirmation t))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (pi-coding-agent-chat-mode)
+            (let* ((overlay
+                    (pi-coding-agent-test--render-collapsed-cooling-bash-block
+                     "view-inside"))
+                   (button (pi-coding-agent--find-toggle-button-in-region
+                            (overlay-start overlay) (overlay-end overlay))))
+              (should button)
+              (pi-coding-agent--toggle-tool-output button))
+            (let ((inhibit-read-only t))
+              (goto-char (point-max))
+              (dotimes (index 60)
+                (insert (format "after body filler %02d\n" index)))))
+          (pi-coding-agent-test--with-recorded-cooling-timers jobs
+            (with-current-buffer buffer
+              (let ((pi-coding-agent-hot-tail-turn-count 0))
+                (pi-coding-agent--handle-display-event '(:type "agent_end"))))
+            (save-window-excursion
+              (delete-other-windows)
+              (switch-to-buffer buffer)
+              (let* ((window (selected-window))
+                     (overlay
+                      (car (pi-coding-agent-test--all-tool-overlays)))
+                     (body-start
+                      (marker-position
+                       (overlay-get overlay 'pi-coding-agent-header-end)))
+                     (old-body-end (overlay-end overlay))
+                     (old-point (1- old-body-end))
+                     start-inside start-offset point-offset)
+                (goto-char body-start)
+                (search-forward "bash body line 02")
+                (setq start-inside (match-beginning 0)
+                      start-offset (- start-inside body-start)
+                      point-offset (- old-point body-start))
+                (goto-char old-point)
+                (set-window-start window start-inside t)
+                (cl-letf (((symbol-function 'input-pending-p)
+                           (lambda (&rest _) nil)))
+                  (pi-coding-agent-test--invoke-recorded-cooling-timer
+                   (pop jobs)))
+                (let* ((new-body-end
+                        (next-single-property-change
+                         body-start 'pi-coding-agent-cold-tool-block
+                         nil (point-max)))
+                       (new-body-length (- new-body-end body-start))
+                       (expected-start
+                        (+ body-start (min start-offset new-body-length)))
+                       (expected-point
+                        (+ body-start (min point-offset new-body-length))))
+                  (should (= expected-point new-body-end))
+                  (should (= expected-start (window-start window)))
+                  (should (= expected-point (window-point window)))
+                  (should (= expected-point (point)))
+                  (goto-char expected-start)
+                  (should (looking-at-p "bash body line 02")))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest pi-coding-agent-test-deferred-tool-cooling-view-tail-keeps-following ()
+  "A tail-following window remains pinned to point-max after one slice."
+  (let ((buffer (generate-new-buffer " *pi-cooling-view-tail*"))
+        (pi-coding-agent-quit-without-confirmation t))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (pi-coding-agent-chat-mode)
+            (pi-coding-agent-test--render-long-cooling-read-block
+             "view-tail" t)
+            (let ((inhibit-read-only t))
+              (goto-char (point-max))
+              (dotimes (index 80)
+                (insert (format "tail context %02d\n" index)))))
+          (pi-coding-agent-test--with-recorded-cooling-timers jobs
+            (with-current-buffer buffer
+              (let ((pi-coding-agent-hot-tail-turn-count 0))
+                (pi-coding-agent--handle-display-event '(:type "agent_end"))))
+            (save-window-excursion
+              (delete-other-windows)
+              (switch-to-buffer buffer)
+              (let ((window (selected-window))
+                    (old-point-max (point-max)))
+                (goto-char (point-max))
+                (recenter -1)
+                (should (pi-coding-agent--window-following-p window))
+                (cl-letf (((symbol-function 'input-pending-p)
+                           (lambda (&rest _) nil)))
+                  (pi-coding-agent-test--invoke-recorded-cooling-timer
+                   (pop jobs)))
+                (should (< (point-max) old-point-max))
+                (should (= (window-point window) (point-max)))
+                (should (= (point) (point-max)))
+                (should (pi-coding-agent-test--window-shows-tail-p window))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest pi-coding-agent-test-deferred-tool-cooling-worker-does-one-and-rearms ()
+  "Each cooling slice rewrites one queued overlay and rearms if needed."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 0)
+          mutations)
+      (dotimes (index 3)
+        (pi-coding-agent-test--render-completed-read-block
+         (format "call-%d" index)))
+      (pi-coding-agent-test--with-recorded-cooling-timers jobs
+        (pi-coding-agent--handle-display-event '(:type "agent_end"))
+        (should (= 3 (length pi-coding-agent--tool-cooling-queue)))
+        (let ((original (symbol-function 'pi-coding-agent--cool-tool-overlay)))
+          (cl-letf (((symbol-function 'input-pending-p)
+                     (lambda (&rest _) nil))
+                    ((symbol-function 'pi-coding-agent--cool-tool-overlay)
+                     (lambda (overlay)
+                       (push (cons overlay pi-coding-agent--tool-cooling-timer)
+                             mutations)
+                       (funcall original overlay))))
+            (dotimes (index 3)
+              (should (= 1 (length jobs)))
+              (let ((before (length (pi-coding-agent-test--all-tool-overlays)))
+                    (job (pop jobs)))
+                (should (eq pi-coding-agent--tool-cooling-timer
+                            (plist-get job :timer)))
+                (should-not (plist-get job :owner))
+                (pi-coding-agent-test--invoke-recorded-cooling-timer job)
+                (should (= (1- before)
+                           (length (pi-coding-agent-test--all-tool-overlays))))
+                (if (< index 2)
+                    (progn
+                      (should (= 1 (length jobs)))
+                      (should pi-coding-agent--tool-cooling-timer))
+                  (should-not jobs)
+                  (should-not pi-coding-agent--tool-cooling-queue)
+                  (should-not pi-coding-agent--tool-cooling-timer))))))
+        (should (= 3 (length mutations)))
+        (should (cl-every (lambda (entry) (null (cdr entry))) mutations))))))
+
+(ert-deftest pi-coding-agent-test-deferred-tool-cooling-input-yields-without-progress ()
+  "Pending input leaves the cooling queue untouched and rearms one timer."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 0)
+          (cool-calls 0))
+      (dotimes (index 2)
+        (pi-coding-agent-test--render-completed-read-block
+         (format "call-%d" index)))
+      (pi-coding-agent-test--with-recorded-cooling-timers jobs
+        (pi-coding-agent--handle-display-event '(:type "agent_end"))
+        (let ((queue-before (copy-sequence pi-coding-agent--tool-cooling-queue))
+              (text-before (buffer-string))
+              (timer-before pi-coding-agent--tool-cooling-timer)
+              (job (pop jobs)))
+          (cl-letf (((symbol-function 'input-pending-p)
+                     (lambda (&rest _) t))
+                    ((symbol-function 'pi-coding-agent--cool-tool-overlay)
+                     (lambda (&rest _)
+                       (setq cool-calls (1+ cool-calls)))))
+            (pi-coding-agent-test--invoke-recorded-cooling-timer job))
+          (should (= 0 cool-calls))
+          (should (equal queue-before pi-coding-agent--tool-cooling-queue))
+          (should (equal text-before (buffer-string)))
+          (should (= 1 (length jobs)))
+          (should pi-coding-agent--tool-cooling-timer)
+          (should-not (eq timer-before pi-coding-agent--tool-cooling-timer))
+          (should-not (plist-get (car jobs) :owner))
+          (pi-coding-agent--cancel-tool-cooling))))))
+
+(ert-deftest pi-coding-agent-test-deferred-tool-cooling-revalidates-each-candidate ()
+  "Cooling skips candidates that became unsafe before their timer slice."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 0)
+          mutations)
+      (dotimes (index 6)
+        (pi-coding-agent-test--render-completed-read-block
+         (format "call-%d" index)))
+      (pi-coding-agent-test--with-recorded-cooling-timers jobs
+        (pi-coding-agent--handle-display-event '(:type "agent_end"))
+        (let* ((candidates (copy-sequence pi-coding-agent--tool-cooling-queue))
+               (inside (nth 0 candidates))
+               (pending (nth 1 candidates))
+               (live (nth 2 candidates))
+               (incomplete (nth 3 candidates))
+               (deleted (nth 4 candidates))
+               (eligible (nth 5 candidates))
+               (original (symbol-function 'pi-coding-agent--cool-tool-overlay)))
+          (should (= 6 (length candidates)))
+          (cl-labels
+              ((run-next
+                ()
+                (should (= 1 (length jobs)))
+                (pi-coding-agent-test--invoke-recorded-cooling-timer
+                 (pop jobs))))
+            (cl-letf (((symbol-function 'input-pending-p)
+                       (lambda (&rest _) nil))
+                      ((symbol-function 'pi-coding-agent--cool-tool-overlay)
+                       (lambda (overlay)
+                         (push overlay mutations)
+                         (funcall original overlay))))
+              ;; The boundary moved behind this queued overlay.
+              (move-marker pi-coding-agent--hot-tail-start
+                           (overlay-start inside) (current-buffer))
+              (run-next)
+              (should (overlay-buffer inside))
+              ;; The compatibility/current slot reclaimed this overlay.
+              (setq pi-coding-agent--pending-tool-overlay pending)
+              (run-next)
+              (setq pi-coding-agent--pending-tool-overlay nil)
+              (should (overlay-buffer pending))
+              ;; A keyed execution reclaimed this finalized block.
+              (let* ((record (overlay-get live
+                                          'pi-coding-agent-tool-block-record))
+                     (tool-call-id
+                      (pi-coding-agent--tool-block-tool-call-id record)))
+                (puthash tool-call-id record pi-coding-agent--live-tool-blocks)
+                (run-next)
+                (remhash tool-call-id pi-coding-agent--live-tool-blocks))
+              (should (overlay-buffer live))
+              ;; Completion metadata disappeared before this slice.
+              (overlay-put incomplete 'pi-coding-agent-header-end nil)
+              (run-next)
+              (should (overlay-buffer incomplete))
+              ;; A history rewrite may already have deleted a queued overlay.
+              (delete-overlay deleted)
+              (run-next)
+              ;; One still-valid candidate is rewritten normally.
+              (run-next)
+              (should-not (overlay-buffer eligible))
+              (should (equal mutations (list eligible)))
+              (should-not jobs)
+              (should-not pi-coding-agent--tool-cooling-queue)
+              (should-not pi-coding-agent--tool-cooling-timer))))))))
+
+(ert-deftest pi-coding-agent-test-deferred-tool-cooling-cancel-invalidates-clear-and-history ()
+  "Clear and history rebuild make already-recorded cooling callbacks stale."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 0)
+          (cool-calls 0))
+      (pi-coding-agent-test--with-recorded-cooling-timers jobs
+        (dotimes (index 2)
+          (pi-coding-agent-test--render-completed-read-block
+           (format "clear-%d" index)))
+        (pi-coding-agent--handle-display-event '(:type "agent_end"))
+        (let ((job (pop jobs))
+              (generation pi-coding-agent--tool-cooling-generation))
+          (pi-coding-agent--clear-render-artifacts)
+          (should (> pi-coding-agent--tool-cooling-generation generation))
+          (cl-letf (((symbol-function 'pi-coding-agent--cool-tool-overlay)
+                     (lambda (&rest _)
+                       (setq cool-calls (1+ cool-calls)))))
+            (pi-coding-agent-test--invoke-recorded-cooling-timer job))
+          (should (= 0 cool-calls))
+          (should-not pi-coding-agent--tool-cooling-queue)
+          (should-not pi-coding-agent--tool-cooling-timer))
+        (dotimes (index 2)
+          (pi-coding-agent-test--render-completed-read-block
+           (format "history-%d" index)))
+        (pi-coding-agent--update-hot-tail-boundary)
+        (pi-coding-agent--queue-tool-cooling-outside-hot-tail)
+        (let ((job (pop jobs))
+              (generation pi-coding-agent--tool-cooling-generation))
+          (pi-coding-agent--display-session-history
+           [(:role "assistant" :content [(:type "text" :text "replacement")])]
+           (current-buffer))
+          (let ((history-text (buffer-string)))
+            (should (> pi-coding-agent--tool-cooling-generation generation))
+            (cl-letf (((symbol-function 'pi-coding-agent--cool-tool-overlay)
+                       (lambda (&rest _)
+                         (setq cool-calls (1+ cool-calls)))))
+              (pi-coding-agent-test--invoke-recorded-cooling-timer job))
+            (should (equal history-text (buffer-string))))
+          (should (= 0 cool-calls))
+          (should-not jobs)
+          (should-not pi-coding-agent--tool-cooling-queue)
+          (should-not pi-coding-agent--tool-cooling-timer))))))
+
+(ert-deftest pi-coding-agent-test-deferred-tool-cooling-cancel-invalidates-buffer-kill ()
+  "Killing a chat cancels cooling and makes its recorded callback harmless."
+  (let ((buffer (generate-new-buffer "*pi-coding-agent-test-cooling-kill*"))
+        (pi-coding-agent-quit-without-confirmation t)
+        cancelled
+        cool-calls)
+    (unwind-protect
+        (pi-coding-agent-test--with-recorded-cooling-timers jobs
+          (with-current-buffer buffer
+            (pi-coding-agent-chat-mode)
+            (let ((pi-coding-agent-hot-tail-turn-count 0))
+              (pi-coding-agent-test--render-completed-read-block "kill")
+              (pi-coding-agent--handle-display-event '(:type "agent_end")))
+            (let ((job (car jobs))
+                  (timer pi-coding-agent--tool-cooling-timer))
+              (cl-letf (((symbol-function 'cancel-timer)
+                         (lambda (owned-timer)
+                           (push owned-timer cancelled)))
+                        ((symbol-function 'pi-coding-agent--cool-tool-overlay)
+                         (lambda (&rest _)
+                           (setq cool-calls (1+ (or cool-calls 0))))))
+                (kill-buffer buffer)
+                (should (memq timer cancelled))
+                (pi-coding-agent-test--invoke-recorded-cooling-timer job))
+              (should-not cool-calls))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest pi-coding-agent-test-deferred-tool-cooling-error-fails-closed ()
+  "A cooling error clears ownership, warns, and does not retry itself."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 0)
+          warning)
+      (dotimes (index 2)
+        (pi-coding-agent-test--render-completed-read-block
+         (format "call-%d" index)))
+      (pi-coding-agent-test--with-recorded-cooling-timers jobs
+        (pi-coding-agent--handle-display-event '(:type "agent_end"))
+        (let ((generation pi-coding-agent--tool-cooling-generation)
+              (job (pop jobs)))
+          (cl-letf (((symbol-function 'input-pending-p)
+                     (lambda (&rest _) nil))
+                    ((symbol-function 'pi-coding-agent--cool-tool-overlay)
+                     (lambda (&rest _)
+                       (error "synthetic cooling failure")))
+                    ((symbol-function 'display-warning)
+                     (lambda (&rest args)
+                       (setq warning args))))
+            (pi-coding-agent-test--invoke-recorded-cooling-timer job))
+          (should (> pi-coding-agent--tool-cooling-generation generation))
+          (should-not pi-coding-agent--tool-cooling-queue)
+          (should-not pi-coding-agent--tool-cooling-timer)
+          (should-not jobs)
+          (should (string-match-p
+                   "synthetic cooling failure"
+                   (format "%s" (nth 1 warning)))))
+        ;; A later explicit enqueue can own a fresh generation normally.
+        (pi-coding-agent--queue-tool-cooling-outside-hot-tail)
+        (should (= 2 (length pi-coding-agent--tool-cooling-queue)))
+        (should (= 1 (length jobs)))
+        (should pi-coding-agent--tool-cooling-timer)
+        (pi-coding-agent--cancel-tool-cooling)))))
+
+(ert-deftest pi-coding-agent-test-deferred-tool-cooling-quit-cancels-and-resignals ()
+  "A quit invalidates cooling without warning or retry, then propagates."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 0)
+          caught warning)
+      (dotimes (index 2)
+        (pi-coding-agent-test--render-completed-read-block
+         (format "quit-%d" index)))
+      (pi-coding-agent-test--with-recorded-cooling-timers jobs
+        (pi-coding-agent--handle-display-event '(:type "agent_end"))
+        (let ((generation pi-coding-agent--tool-cooling-generation)
+              (job (pop jobs)))
+          (cl-letf (((symbol-function 'input-pending-p)
+                     (lambda (&rest _) nil))
+                    ((symbol-function 'pi-coding-agent--cool-tool-overlay)
+                     (lambda (&rest _)
+                       (signal 'quit '(synthetic-cooling-quit))))
+                    ((symbol-function 'display-warning)
+                     (lambda (&rest args)
+                       (setq warning args))))
+            (condition-case error-data
+                (pi-coding-agent-test--invoke-recorded-cooling-timer job)
+              (quit
+               (setq caught error-data))))
+          (should (equal caught '(quit synthetic-cooling-quit)))
+          (should (> pi-coding-agent--tool-cooling-generation generation))
+          (should-not pi-coding-agent--tool-cooling-queue)
+          (should-not pi-coding-agent--tool-cooling-timer)
+          (should-not jobs)
+          (should-not warning))))))
+
+(ert-deftest pi-coding-agent-test-deferred-tool-cooling-stale-a-leaves-b-owned ()
+  "A cancelled generation callback cannot clear or mutate generation B."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 0)
+          mutations)
+      (pi-coding-agent-test--render-completed-read-block "generation")
+      (pi-coding-agent-test--with-recorded-cooling-timers jobs
+        (pi-coding-agent--handle-display-event '(:type "agent_end"))
+        (let ((stale-job (pop jobs)))
+          (pi-coding-agent--cancel-tool-cooling)
+          (pi-coding-agent--queue-tool-cooling-outside-hot-tail)
+          (let ((generation-b pi-coding-agent--tool-cooling-generation)
+                (queue-b (copy-sequence pi-coding-agent--tool-cooling-queue))
+                (timer-b pi-coding-agent--tool-cooling-timer)
+                (job-b (car jobs)))
+            (cl-letf (((symbol-function 'pi-coding-agent--cool-tool-overlay)
+                       (lambda (overlay)
+                         (push overlay mutations))))
+              (pi-coding-agent-test--invoke-recorded-cooling-timer stale-job))
+            (should (= generation-b pi-coding-agent--tool-cooling-generation))
+            (should (equal queue-b pi-coding-agent--tool-cooling-queue))
+            (should (eq timer-b pi-coding-agent--tool-cooling-timer))
+            (should-not mutations)
+            (should (eq job-b (pop jobs)))
+            (cl-letf (((symbol-function 'input-pending-p)
+                       (lambda (&rest _) nil)))
+              (pi-coding-agent-test--invoke-recorded-cooling-timer job-b))
+            (should-not jobs)
+            (should-not pi-coding-agent--tool-cooling-queue)
+            (should-not pi-coding-agent--tool-cooling-timer)))))))
+
+(ert-deftest pi-coding-agent-test-deferred-tool-cooling-uses-latest-expanded-state ()
+  "A queued collapsed block cools from its live expanded state at execution."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 0))
+      (let ((overlay
+             (pi-coding-agent-test--render-long-cooling-read-block
+              "latest-state" nil)))
+        (should-not (string-match-p "read body line 20" (buffer-string)))
+        (pi-coding-agent-test--with-recorded-cooling-timers jobs
+          (pi-coding-agent--handle-display-event '(:type "agent_end"))
+          (let ((button (pi-coding-agent--find-toggle-button-in-region
+                         (overlay-start overlay) (overlay-end overlay))))
+            (should button)
+            (pi-coding-agent--toggle-tool-output button))
+          (should (string-match-p "read body line 20" (buffer-string)))
+          (cl-letf (((symbol-function 'input-pending-p)
+                     (lambda (&rest _) nil)))
+            (pi-coding-agent-test--invoke-recorded-cooling-timer (pop jobs)))
+          (should (string-match-p "read body line 20" (buffer-string)))
+          (should-not (string-match-p "more lines" (buffer-string)))
+          (should-not (pi-coding-agent-test--all-tool-overlays))
+          (goto-char (point-min))
+          (search-forward "read body line 20")
+          (should (get-text-property
+                   (1- (point)) 'pi-coding-agent-cold-tool-block)))))))
+
+(ert-deftest pi-coding-agent-test-deferred-tool-cooling-second-enqueue-deduplicates ()
+  "A merged second enqueue drains once each from newest to oldest."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 0))
+      (dotimes (index 2)
+        (pi-coding-agent-test--render-completed-read-block
+         (format "call-%d" index)))
+      (pi-coding-agent-test--with-recorded-cooling-timers jobs
+        (pi-coding-agent--handle-display-event '(:type "agent_end"))
+        (let ((timer pi-coding-agent--tool-cooling-timer))
+          (pi-coding-agent--handle-display-event '(:type "agent_end"))
+          (should (eq timer pi-coding-agent--tool-cooling-timer))
+          (should (= 2 (length pi-coding-agent--tool-cooling-queue)))
+          (should (= 2 (length (delete-dups
+                                (copy-sequence
+                                 pi-coding-agent--tool-cooling-queue)))))
+          (should (= 1 (length jobs)))
+          (pi-coding-agent-test--render-completed-read-block "call-new")
+          (pi-coding-agent--handle-display-event '(:type "agent_end"))
+          (should (eq timer pi-coding-agent--tool-cooling-timer))
+          (should (= 3 (length pi-coding-agent--tool-cooling-queue)))
+          (should (= 3 (length (delete-dups
+                                (copy-sequence
+                                 pi-coding-agent--tool-cooling-queue)))))
+          (should (= 1 (length jobs)))
+          (let ((expected (copy-sequence pi-coding-agent--tool-cooling-queue))
+                cooled
+                (original (symbol-function 'pi-coding-agent--cool-tool-overlay)))
+            (cl-letf (((symbol-function 'input-pending-p)
+                       (lambda (&rest _) nil))
+                      ((symbol-function 'pi-coding-agent--cool-tool-overlay)
+                       (lambda (overlay)
+                         (setq cooled (append cooled (list overlay)))
+                         (funcall original overlay))))
+              (while jobs
+                (pi-coding-agent-test--invoke-recorded-cooling-timer
+                 (pop jobs))))
+            (should (equal expected cooled))
+            (should-not pi-coding-agent--tool-cooling-queue)
+            (should-not pi-coding-agent--tool-cooling-timer)
+            (should-not (pi-coding-agent-test--all-tool-overlays))))))))
 
 (ert-deftest pi-coding-agent-test-cooled-file-target-preserves-local-authority-and-line-map ()
   "Cooling keeps a local tool path authoritative and maps only content lines."
@@ -3545,6 +4250,7 @@ With hot-tail-turn-count 1, only the most recent headed turn stays hot."
          :result (:content ((:type "text" :text "def two():\n    return 2")))
          :isError nil))
       (pi-coding-agent--handle-display-event '(:type "agent_end"))
+      (pi-coding-agent-test--drain-tool-cooling)
       ;; Old turn cooled
       (should (string-match-p
                (regexp-quote
