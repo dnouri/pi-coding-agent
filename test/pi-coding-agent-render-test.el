@@ -2881,6 +2881,21 @@ Call inside `with-temp-buffer' after `pi-coding-agent-chat-mode'."
       (pi-coding-agent--run-tool-cooling-slice
        (current-buffer) pi-coding-agent--tool-cooling-generation))))
 
+(defun pi-coding-agent-test--drain-tool-cooling-via-real-timers ()
+  "Deliver real cooling timers until the current buffer's queue empties.
+Each wait lasts long enough for one more one-shot slice; `sit-for' runs
+pending timers in batch and interactive Emacs alike.  Input is forced idle
+so every slice makes progress, and the loop is bounded so a broken rearm
+fails the caller instead of hanging the suite.  Return non-nil when the
+queue drained before the deadline."
+  (cl-letf (((symbol-function 'input-pending-p)
+             (lambda (&rest _) nil)))
+    (let ((deadline (+ (float-time) 3)))
+      (while (and pi-coding-agent--tool-cooling-queue
+                  (< (float-time) deadline))
+        (sit-for 0.05))
+      (not pi-coding-agent--tool-cooling-queue))))
+
 (defun pi-coding-agent-test--render-completed-tool-turn
     (tool-call-id tool-name args content &optional details)
   "Render one completed assistant turn with a single tool result.
@@ -3599,6 +3614,90 @@ When EXPANDED is non-nil, expand its preview before returning the overlay."
             (should-not pi-coding-agent--tool-cooling-queue)
             (should-not pi-coding-agent--tool-cooling-timer)
             (should-not (pi-coding-agent-test--all-tool-overlays))))))))
+
+(ert-deftest pi-coding-agent-test-deferred-tool-cooling-real-timers-drain-cohort ()
+  "Real one-shot timer delivery cools the queued cohort and keeps the newest turn hot."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 1))
+      (let ((oldest
+             (pi-coding-agent-test--render-headed-completed-read-block "drain-old-1"))
+            (middle
+             (pi-coding-agent-test--render-headed-completed-read-block "drain-old-2"))
+            (third
+             (pi-coding-agent-test--render-headed-completed-read-block "drain-old-3"))
+            (newest
+             (pi-coding-agent-test--render-headed-completed-read-block "drain-new")))
+        (pi-coding-agent--handle-display-event '(:type "agent_end"))
+        (should (equal pi-coding-agent--tool-cooling-queue
+                       (list third middle oldest)))
+        (should pi-coding-agent--tool-cooling-timer)
+        (should (pi-coding-agent-test--drain-tool-cooling-via-real-timers))
+        (should-not pi-coding-agent--tool-cooling-queue)
+        (should-not pi-coding-agent--tool-cooling-timer)
+        (dolist (cooled (list oldest middle third))
+          (should-not (overlay-buffer cooled)))
+        (should (overlay-buffer newest))
+        (should (equal (pi-coding-agent-test--all-tool-overlays) (list newest)))
+        (goto-char (point-min))
+        (dolist (id '("drain-old-1" "drain-old-2" "drain-old-3"))
+          (search-forward (format "result %s" id))
+          (should (get-text-property
+                   (1- (point)) 'pi-coding-agent-cold-tool-block)))
+        (search-forward "result drain-new")
+        (should-not (get-text-property
+                     (1- (point)) 'pi-coding-agent-cold-tool-block))))))
+
+(ert-deftest pi-coding-agent-test-deferred-tool-cooling-nil-boundary-drain-keeps-block-hot ()
+  "Real timer slices skip cooling once the hot tail covers the whole buffer."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 1))
+      (let ((older
+             (pi-coding-agent-test--render-headed-completed-read-block "cover-old"))
+            (newest
+             (pi-coding-agent-test--render-headed-completed-read-block "cover-new")))
+        (pi-coding-agent--handle-display-event '(:type "agent_end"))
+        (should (equal pi-coding-agent--tool-cooling-queue (list older)))
+        (should pi-coding-agent--tool-cooling-timer)
+        (set-marker pi-coding-agent--hot-tail-start (point-min))
+        (should (pi-coding-agent-test--drain-tool-cooling-via-real-timers))
+        (should-not pi-coding-agent--tool-cooling-queue)
+        (should-not pi-coding-agent--tool-cooling-timer)
+        (let ((live (pi-coding-agent-test--all-tool-overlays)))
+          (should (memq older live))
+          (should (memq newest live)))
+        (goto-char (point-min))
+        (search-forward "result cover-old")
+        (should-not (get-text-property
+                     (1- (point)) 'pi-coding-agent-cold-tool-block))))))
+
+(ert-deftest pi-coding-agent-test-deferred-tool-cooling-real-timer-error-fails-closed ()
+  "A cooling error surfacing from real timer delivery fails closed with one warning."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-hot-tail-turn-count 1)
+          warning)
+      (dotimes (index 3)
+        (pi-coding-agent-test--render-headed-completed-read-block
+         (format "fail-%d" index)))
+      (pi-coding-agent--handle-display-event '(:type "agent_end"))
+      (should pi-coding-agent--tool-cooling-queue)
+      (should pi-coding-agent--tool-cooling-timer)
+      (let ((generation pi-coding-agent--tool-cooling-generation))
+        (cl-letf (((symbol-function 'pi-coding-agent--cool-tool-overlay)
+                   (lambda (&rest _)
+                     (error "synthetic real-timer cooling failure")))
+                  ((symbol-function 'display-warning)
+                   (lambda (&rest args)
+                     (setq warning args))))
+          (should (pi-coding-agent-test--drain-tool-cooling-via-real-timers)))
+        (should (> pi-coding-agent--tool-cooling-generation generation))
+        (should-not pi-coding-agent--tool-cooling-queue)
+        (should-not pi-coding-agent--tool-cooling-timer)
+        (should (string-match-p
+                 "synthetic real-timer cooling failure"
+                 (format "%s" (nth 1 warning))))))))
 
 (ert-deftest pi-coding-agent-test-cooled-file-target-preserves-local-authority-and-line-map ()
   "Cooling keeps a local tool path authoritative and maps only content lines."
