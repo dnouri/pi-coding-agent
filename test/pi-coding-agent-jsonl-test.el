@@ -958,7 +958,7 @@ hit this; the expansion guard keeps building total."
                                 stack))))
         (should (= count 2502))))))
 
-;;;; Session Discovery (Phase 2)
+;;;; Session Discovery
 
 (ert-deftest pi-coding-agent-test-jsonl-session-dir-for-cwd ()
   "session-dir-for-cwd munges a cwd into pi's --…-- directory name.
@@ -1028,8 +1028,8 @@ are ignored."
 Key parity with the session browser is the contract: :path :id :cwd
 :name (latest session_info wins, trimmed) :parentSessionPath :created
 (header timestamp) :modified (mtime as UTC ISO-8601) :messageCount
-(regex count, toolResult included) :firstMessage (first user text,
-unbounded).  label and custom entries are ignored."
+(regex count, toolResult included) :firstMessage (first user text within
+the five-message parse budget).  label and custom entries are ignored."
   (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-jsonl-info"))
          (path (expand-file-name "session.jsonl" dir))
          (mtime (encode-time 45 31 14 2 3 2026)))
@@ -1067,6 +1067,26 @@ unbounded).  label and custom entries are ignored."
                                     "%Y-%m-%dT%H:%M:%SZ" mtime t)
                          :messageCount 3
                          :firstMessage "hello world")))))
+
+(ert-deftest pi-coding-agent-test-jsonl-read-session-info-keeps-name-before-malformed-tail ()
+  "A malformed session_info tail does not clear the latest parseable name."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-jsonl-name-tail"))
+         (path (expand-file-name "session.jsonl" dir)))
+    (unwind-protect
+        (progn
+          (pi-coding-agent-test--write-jsonl
+           path
+           (list pi-coding-agent-test--jsonl-header
+                 (pi-coding-agent-test--jsonl-entry
+                  "session_info" "s1" nil 0 :name "Keep me")))
+          (with-temp-buffer
+            (insert "{\"type\":\"session_info\",\"id\":\"torn\"\n")
+            (write-region (point-min) (point-max) path t 'silent))
+          (should (equal (plist-get
+                          (pi-coding-agent-jsonl-read-session-info path)
+                          :name)
+                         "Keep me")))
+      (delete-directory dir t))))
 
 (ert-deftest pi-coding-agent-test-jsonl-read-session-info-fallbacks ()
   "read-session-info degrades on budget misses and malformed files.
@@ -1173,7 +1193,7 @@ through `date-to-time' and orders lexicographically like time."
       (should (string< mod-a mod-b))
       (should (string> mod-b mod-a)))))
 
-;;;; Navigation (Phase 4)
+;;;; Navigation
 
 (defun pi-coding-agent-test--jsonl-line-string (line)
   "Return the raw JSON string `--write-jsonl' writes for LINE."

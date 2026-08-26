@@ -57,7 +57,7 @@
 ;;     C-c C-s        Queue steering (interrupts after current tool; busy only)
 ;;     C-c C-k        Abort current operation
 ;;     C-c C-p        Open menu
-;;     C-c C-r        Resume session
+;;     C-c C-r        Browse sessions
 ;;     M-p / M-n      History navigation
 ;;     C-r            Incremental history search (like readline)
 ;;     TAB            Path/file completion
@@ -72,7 +72,7 @@
 ;;                    plain path, or local Markdown label)
 ;;     C-c C-k        Abort current operation
 ;;     C-c C-n        New session
-;;     C-c C-r        Resume session
+;;     C-c C-r        Browse sessions
 ;;     C-c C-e        Export HTML
 ;;     C-c C-c        Compact context
 ;;     C-c C-m        Select model
@@ -89,7 +89,10 @@
 ;;
 ;; Press C-c C-p for the full transient menu with model selection,
 ;; thinking level, completed-thinking controls, session management,
-;; and custom commands.
+;; and custom commands.  Its Session r entry opens the disk-backed
+;; session browser, and Context w opens the conversation-tree browser;
+;; press ? in either browser to discover switching/navigation, search,
+;; filters, renaming, and labels.
 ;;
 ;; See README.org for more documentation.
 

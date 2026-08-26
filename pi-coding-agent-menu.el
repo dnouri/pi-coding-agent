@@ -31,7 +31,6 @@
 ;; Key entry points:
 ;;   `pi-coding-agent-menu'            Transient menu (C-c C-p)
 ;;   `pi-coding-agent-new-session'     Start fresh session
-;;   `pi-coding-agent-resume-session'  Resume previous session
 ;;   `pi-coding-agent-reload'          Restart pi process
 ;;   `pi-coding-agent-select-model'    Choose model interactively
 ;;   `pi-coding-agent-select-thinking' Choose thinking level interactively
@@ -42,8 +41,12 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'pi-coding-agent-jsonl)
 (require 'pi-coding-agent-render)
 (require 'transient)
+
+(declare-function pi-coding-agent-session-browser "pi-coding-agent-browse")
+(declare-function pi-coding-agent-tree-browser "pi-coding-agent-browse")
 
 (defconst pi-coding-agent--minimum-transient-version "0.9.0"
   "Minimum supported transient version.")
@@ -240,123 +243,6 @@ directory."
             (pi-coding-agent--route-preserving-file-name-directory
              emacs-session-file)))))))
 
-(defun pi-coding-agent--with-session-list-directory (proc chat-buf callback)
-  "Call CALLBACK with the session list directory for CHAT-BUF.
-When cached state has no session file, fetch fresh state from PROC first."
-  (if-let* ((session-dir (pi-coding-agent--session-list-directory chat-buf)))
-      (funcall callback session-dir)
-    (pi-coding-agent--rpc-async proc '(:type "get_state")
-      (lambda (response)
-        (when (and (eq (plist-get response :success) t)
-                   (buffer-live-p chat-buf))
-          (pi-coding-agent--apply-state-response chat-buf response))
-        (when (buffer-live-p chat-buf)
-          (funcall callback
-                   (pi-coding-agent--session-list-directory chat-buf)))))))
-
-(defconst pi-coding-agent--session-line-type-re
-  "[ \t]*{[ \t]*\"type\"[ \t]*:[ \t]*\"%s\""
-  "Format string matching a JSONL line whose top-level type appears first.")
-
-(defun pi-coding-agent--session-line-type-p (type)
-  "Return non-nil when the current line has top-level session TYPE.
-Pi writes session JSONL with `type' as the first key.  Matching that cheap
-prefix lets resume count ordinary message lines without parsing their full
-payloads."
-  (looking-at-p (format pi-coding-agent--session-line-type-re
-                        (regexp-quote type))))
-
-(defconst pi-coding-agent--session-metadata-fallback-max-line-length 8192
-  "Maximum line length parsed when the cheap session type prefix misses.")
-
-(defun pi-coding-agent--session-current-line-data ()
-  "Parse the current JSONL line as a plist."
-  (json-parse-string (buffer-substring-no-properties
-                      (point) (line-end-position))
-                     :object-type 'plist))
-
-(defun pi-coding-agent--session-small-current-line-data ()
-  "Parse the current line when it is small enough for metadata fallback."
-  (let ((end (line-end-position)))
-    (when (and (<= (- end (point))
-                   pi-coding-agent--session-metadata-fallback-max-line-length)
-               (save-excursion
-                 (skip-chars-forward " \t" end)
-                 (< (point) end)))
-      (pi-coding-agent--session-current-line-data))))
-
-(defun pi-coding-agent--session-first-message-text (data)
-  "Return first visible message text from parsed session DATA, or nil."
-  (let* ((message (plist-get data :message))
-         (content (plist-get message :content)))
-    (cond
-     ((stringp content)
-      (unless (string-empty-p content) content))
-     ((and (vectorp content) (> (length content) 0))
-      (plist-get (aref content 0) :text)))))
-
-(defun pi-coding-agent--session-metadata (path)
-  "Extract metadata from session file PATH.
-Returns plist with :modified-time, :first-message, :message-count,
-:session-name, and :cwd, or nil on error.  Session name comes from the
-most recent session_info entry if present."
-  (condition-case nil
-      (let* ((attrs (file-attributes path))
-             (modified-time (file-attribute-modification-time attrs)))
-        (with-temp-buffer
-          (insert-file-contents path)
-          (let ((first-message nil)
-                (message-count 0)
-                (session-name nil)
-                (session-cwd nil)
-                (has-session-header nil))
-            (cl-labels
-                ((apply-entry
-                  (data &optional message-counted)
-                  (pcase (plist-get data :type)
-                    ("message"
-                     (unless message-counted
-                       (setq message-count (1+ message-count)))
-                     (unless first-message
-                       (setq first-message
-                             (pi-coding-agent--session-first-message-text
-                              data))))
-                    ("session"
-                     (setq has-session-header t
-                           session-cwd
-                           (pi-coding-agent--normalize-string-or-null
-                            (plist-get data :cwd))))
-                    ("session_info"
-                     (setq session-name
-                           (pi-coding-agent--normalize-string-or-null
-                            (plist-get data :name)))))))
-              (goto-char (point-min))
-              ;; Count ordinary message lines by their cheap prefix.  Only parse
-              ;; session headers, session_info lines, and the first message whose
-              ;; text is needed for the resume picker.
-              (while (not (eobp))
-                (cond
-                 ((pi-coding-agent--session-line-type-p "message")
-                  (setq message-count (1+ message-count))
-                  (unless first-message
-                    (apply-entry (pi-coding-agent--session-current-line-data)
-                                 t)))
-                 ((or (pi-coding-agent--session-line-type-p "session")
-                      (pi-coding-agent--session-line-type-p "session_info"))
-                  (apply-entry (pi-coding-agent--session-current-line-data)))
-                 (t
-                  (when-let* ((data (pi-coding-agent--session-small-current-line-data)))
-                    (apply-entry data))))
-                (forward-line 1)))
-            ;; Only return metadata if we found a valid session header.
-            (when has-session-header
-              (list :modified-time modified-time
-                    :first-message first-message
-                    :message-count message-count
-                    :session-name session-name
-                    :cwd session-cwd)))))
-    (error nil)))
-
 (defun pi-coding-agent--session-file-cwd-or-error (path)
   "Return the recorded cwd from session file PATH, or signal `user-error'.
 The returned directory is an Emacs path with a trailing slash.  For remote
@@ -366,10 +252,11 @@ a non-empty absolute cwd that names an existing directory."
   (let ((session-file (pi-coding-agent--route-preserving-expand-file-name path)))
     (unless (file-readable-p session-file)
       (user-error "Session file is not readable: %s" session-file))
-    (let ((metadata (pi-coding-agent--session-metadata session-file)))
-      (unless metadata
+    (let ((session-info
+           (pi-coding-agent-jsonl-read-session-info session-file)))
+      (unless session-info
         (user-error "Not a pi session file: %s" session-file))
-      (let ((cwd (plist-get metadata :cwd)))
+      (let ((cwd (plist-get session-info :cwd)))
         (unless (and (stringp cwd) (not (string-empty-p cwd)))
           (user-error "Session file has no usable cwd: %s" session-file))
         (when (file-remote-p cwd)
@@ -392,83 +279,10 @@ a non-empty absolute cwd that names an existing directory."
 Call this from the chat buffer after switching or loading a session.
 Return the parsed metadata, or nil when SESSION-FILE was not a pi session."
   (when session-file
-    (let ((metadata (pi-coding-agent--session-metadata session-file)))
-      (setq pi-coding-agent--session-name (plist-get metadata :session-name))
-      metadata)))
-
-(defun pi-coding-agent--session-entry (path)
-  "Return a resume-list entry for session file PATH, or nil.
-The entry carries PATH and its parsed metadata so the resume picker does not
-read the same JSONL file again while formatting completion choices."
-  (when-let* ((metadata (pi-coding-agent--session-metadata path)))
-    (list :path path :metadata metadata)))
-
-(defun pi-coding-agent--list-session-entries (session-dir)
-  "List valid session entries in SESSION-DIR.
-Entries are sorted by modification time with most recently used first."
-  (when (and session-dir (file-directory-p session-dir))
-    (let ((entries (delq nil
-                         (mapcar #'pi-coding-agent--session-entry
-                                 (directory-files session-dir t
-                                                  "\\.jsonl\\'")))))
-      (sort entries
-            (lambda (a b)
-              (time-less-p (plist-get (plist-get b :metadata) :modified-time)
-                           (plist-get (plist-get a :metadata) :modified-time)))))))
-
-(defun pi-coding-agent--list-sessions (session-dir)
-  "List valid session files in SESSION-DIR.
-Returns absolute paths to JSONL pi sessions, sorted by modification time with
-most recently used first."
-  (mapcar (lambda (entry) (plist-get entry :path))
-          (pi-coding-agent--list-session-entries session-dir)))
-
-(defun pi-coding-agent--format-session-choice (path &optional metadata)
-  "Format session PATH for display in selector.
-Returns (display-string . path) for `completing-read', or nil when PATH is not
-a valid pi session.  Prefers session name over first message when available.
-Optional METADATA reuses data already collected by the session-list step."
-  (when-let* ((metadata (or metadata (pi-coding-agent--session-metadata path))))
-    (let* ((modified-time (plist-get metadata :modified-time))
-           (session-name (plist-get metadata :session-name))
-           (first-msg (plist-get metadata :first-message))
-           (msg-count (plist-get metadata :message-count))
-           (relative-time (pi-coding-agent--format-relative-time modified-time))
-           (label (cond
-                   (session-name (pi-coding-agent--truncate-string session-name 50))
-                   (first-msg (pi-coding-agent--truncate-string first-msg 50))
-                   (t nil)))
-           (display (if label
-                        (format "%s · %s (%d msgs)"
-                                label relative-time msg-count)
-                      (format "[empty session] · %s" relative-time))))
-      (cons display path))))
-
-(defun pi-coding-agent--format-session-entry-choice (entry)
-  "Format resume-list ENTRY for display in the session selector."
-  (pi-coding-agent--format-session-choice
-   (plist-get entry :path)
-   (plist-get entry :metadata)))
-
-(defun pi-coding-agent--uniquify-session-choices (choices)
-  "Return CHOICES with duplicate display strings made unique.
-CHOICES is a list of (DISPLAY . PATH) pairs.  Entries whose DISPLAY occurs
-once are returned unchanged.  Entries whose DISPLAY collides get their session
-file base name appended."
-  (let ((counts (make-hash-table :test 'equal)))
-    (dolist (choice choices)
-      (puthash (car choice) (1+ (gethash (car choice) counts 0)) counts))
-    (mapcar
-     (lambda (choice)
-       (let ((display (car choice))
-             (path (cdr choice)))
-         (if (> (gethash display counts 0) 1)
-             (cons (format "%s · %s"
-                           display
-                           (file-name-base (directory-file-name path)))
-                   path)
-           choice)))
-     choices)))
+    (let ((session-info
+           (pi-coding-agent-jsonl-read-session-info session-file)))
+      (setq pi-coding-agent--session-name (plist-get session-info :name))
+      session-info)))
 
 (defun pi-coding-agent--reset-session-state ()
   "Reset all session-specific state for a new session.
@@ -803,54 +617,11 @@ buffer from session history."
                  (with-current-buffer chat-buf
                    (pi-coding-agent--finish-session-transition generation)))))))))))
 
-(defun pi-coding-agent--resume-session-from-directory (proc chat-buf session-dir)
-  "Prompt for a session from SESSION-DIR, then resume it using PROC.
-CHAT-BUF is rebuilt from the selected session history."
-  (let ((entries (pi-coding-agent--list-session-entries session-dir)))
-    (if (null entries)
-        (message "Pi: No previous sessions found")
-      (let* ((choices
-              (pi-coding-agent--uniquify-session-choices
-               (delq nil
-                     (mapcar #'pi-coding-agent--format-session-entry-choice
-                             entries))))
-             (choice-strings (mapcar #'car choices)))
-        (if (null choices)
-            (message "Pi: No previous sessions found")
-          (let* ((choice (completing-read
-                          "Resume session: "
-                          (lambda (string pred action)
-                            (if (eq action 'metadata)
-                                '(metadata (display-sort-function . identity))
-                              (complete-with-action action choice-strings
-                                                    string pred)))
-                          nil t))
-                 (selected-path (cdr (assoc choice choices))))
-            (when selected-path
-              (pi-coding-agent--resume-selected-session
-               proc chat-buf selected-path))))))))
-
-(defun pi-coding-agent-resume-session ()
-  "Resume a previous pi session stored beside the current session file."
-  (interactive)
-  (when-let* ((proc (pi-coding-agent--get-process))
-              (chat-buf (pi-coding-agent--get-chat-buffer)))
-    (when (pi-coding-agent--session-transition-ready-p chat-buf "resume")
-      (pi-coding-agent--with-session-list-directory
-       proc chat-buf
-       (lambda (session-dir)
-         (cond
-          ((not session-dir)
-           (message "Pi: Session file not available"))
-          ((pi-coding-agent--session-transition-ready-p chat-buf "resume")
-           (pi-coding-agent--resume-session-from-directory
-            proc chat-buf session-dir))))))))
-
 ;;;; Model and Thinking
 
 (defun pi-coding-agent-set-session-name (name)
   "Set the session NAME for the current session.
-The name is displayed in the resume picker and header-line."
+The name is displayed in the session browser and header-line."
   (interactive
    (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
      (list (read-string "Session name: "
@@ -1486,14 +1257,15 @@ Uses commands from pi's `get_commands' RPC."
    :class transient-row]
   [["Session"
     ("n" "new" pi-coding-agent-new-session)
-    ("r" "resume" pi-coding-agent-resume-session)
+    ("r" "sessions" pi-coding-agent-session-browser)
     ("R" "reload" pi-coding-agent-reload)
     ("N" "name" pi-coding-agent-set-session-name)
     ("e" "export" pi-coding-agent-export-html)
     ("Q" "quit" pi-coding-agent-quit)]
    ["Context"
     ("c" "compact" pi-coding-agent-compact)
-    ("f" "fork" pi-coding-agent-fork)]
+    ("f" "fork" pi-coding-agent-fork)
+    ("w" "tree" pi-coding-agent-tree-browser)]
    ["Actions"
     ("RET" "send" pi-coding-agent-send)
     ("s" "steer" pi-coding-agent-queue-steering)

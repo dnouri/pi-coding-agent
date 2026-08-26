@@ -38,7 +38,10 @@ prompt behaviors:
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
+import math
+import re
 import sys
 import tempfile
 import threading
@@ -47,7 +50,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable, Iterator
-from typing import Any, BinaryIO, Literal
+from typing import Any, BinaryIO, Literal, cast
 
 JsonDict = dict[str, Any]
 DialogMethod = Literal["confirm", "input", "select", "editor"]
@@ -198,7 +201,7 @@ def iter_jsonl_commands(stream: BinaryIO) -> Iterator[JsonDict]:
     record: without a final LF, the trailing bytes are ignored.
     """
     buffer = b""
-    while chunk := stream.read1(4096):
+    while chunk := cast(Any, stream).read1(4096):
         buffer += chunk
         while True:
             newline_index = buffer.find(b"\n")
@@ -224,13 +227,15 @@ def load_scenario(path: Path, name: str) -> Scenario:
     commands = []
     for item in data.get("commands", []):
         si = item.get("sourceInfo", {})
-        commands.append(SlashCommand(
-            name=item["name"],
-            source=item["source"],
-            description=item.get("description"),
-            path=si.get("path"),
-            location=si.get("scope"),
-        ))
+        commands.append(
+            SlashCommand(
+                name=item["name"],
+                source=item["source"],
+                description=item.get("description"),
+                path=si.get("path"),
+                location=si.get("scope"),
+            )
+        )
     prompt_data = data["prompt"]
     prompt_type = prompt_data["type"]
     if prompt_type == "text_stream":
@@ -303,6 +308,7 @@ class FakePiHarness:
         self.extension_timeout_ms = extension_timeout_ms
         self.split_responses = split_responses
         self._write_lock = threading.Lock()
+        self._session_lock = threading.RLock()
         self._abort_requested = threading.Event()
         self._extension_waiter = threading.Event()
         self._extension_response: JsonDict | None = None
@@ -310,6 +316,11 @@ class FakePiHarness:
         self._pending_steer_message: str | None = None
         self._run_thread: threading.Thread | None = None
         self._message_serial = 0
+        self._last_entry_timestamp_ms = 0
+        self._session_header: JsonDict = {}
+        self._session_entries: list[JsonDict] = []
+        self._entry_by_id: dict[str, JsonDict] = {}
+        self._leaf_id: str | None = None
         self._session_root_dir = tempfile.TemporaryDirectory(
             prefix="fake-pi-", dir=session_dir
         )
@@ -342,11 +353,15 @@ class FakePiHarness:
         command_type = command["type"]
         match command_type:
             case "get_state":
-                self._respond(command, data=self.state.to_rpc())
+                with self._session_lock:
+                    data = self.state.to_rpc()
+                self._respond(command, data=data)
             case "get_commands":
                 self._respond(
                     command,
-                    data={"commands": [item.to_rpc() for item in self.scenario.commands]},
+                    data={
+                        "commands": [item.to_rpc() for item in self.scenario.commands]
+                    },
                 )
             case "prompt":
                 self._handle_prompt(command)
@@ -358,7 +373,17 @@ class FakePiHarness:
             case "new_session":
                 self._handle_new_session(command)
             case "get_fork_messages":
-                self._respond(command, data={"messages": self.user_messages})
+                with self._session_lock:
+                    messages = list(self.user_messages)
+                self._respond(command, data={"messages": messages})
+            case "get_entries":
+                self._handle_get_entries(command)
+            case "get_tree":
+                self._handle_get_tree(command)
+            case "get_messages":
+                self._handle_get_messages(command)
+            case "switch_session":
+                self._handle_switch_session(command)
             case "set_session_name":
                 self._handle_set_session_name(command)
             case "set_model":
@@ -369,7 +394,9 @@ class FakePiHarness:
             case "extension_ui_response":
                 self._handle_extension_ui_response(command)
             case "follow_up":
-                self._fail(command, "follow_up is intentionally out of scope for this fake")
+                self._fail(
+                    command, "follow_up is intentionally out of scope for this fake"
+                )
             case _:
                 self._fail(command, f"Unsupported fake-pi command: {command_type}")
 
@@ -385,7 +412,9 @@ class FakePiHarness:
                 self._respond(command)
                 self._start_run(
                     name=f"fake-pi-text-stream-{self.scenario.name}",
-                    target=lambda: self._run_text_prompt(message, behavior),
+                    target=lambda: self._run_text_prompt(
+                        message, cast(TextStreamPrompt, behavior)
+                    ),
                 )
             case ExtensionDialogPrompt() as behavior:
                 if message != behavior.command_name:
@@ -397,7 +426,9 @@ class FakePiHarness:
                 self._respond(command)
                 self._start_run(
                     name=f"fake-pi-dialog-{self.scenario.name}",
-                    target=lambda: self._run_extension_dialog(message, behavior),
+                    target=lambda: self._run_extension_dialog(
+                        message, cast(ExtensionDialogPrompt, behavior)
+                    ),
                 )
             case CustomMessagePrompt() as behavior:
                 if message != behavior.command_name:
@@ -432,23 +463,85 @@ class FakePiHarness:
         """Reset the fake to a fresh session."""
         self._stop_active_run()
         self._reset_session_file()
-        self.state.is_streaming = False
-        self.state.session_name = None
-        self.state.message_count = 0
-        self.state.pending_message_count = 0
-        self.user_messages = []
         self._abort_requested.clear()
+        self._respond(command, data={"cancelled": False})
+
+    def _handle_get_entries(self, command: JsonDict) -> None:
+        """Return raw session entries in append order, optionally after a cursor."""
+        with self._session_lock:
+            entries = list(self._session_entries)
+            leaf_id = self._leaf_id
+        if "since" in command:
+            since = command["since"]
+            if not isinstance(since, str):
+                self._fail(command, "get_entries since must be a string entry id")
+                return
+            try:
+                since_index = next(
+                    index for index, entry in enumerate(entries) if entry["id"] == since
+                )
+            except StopIteration:
+                self._fail(command, f"Entry not found: {since}")
+                return
+            entries = entries[since_index + 1 :]
+        self._respond(command, data={"entries": entries, "leafId": leaf_id})
+
+    def _handle_get_tree(self, command: JsonDict) -> None:
+        """Return the complete raw session tree and current leaf."""
+        with self._session_lock:
+            tree = self._build_session_tree(self._session_entries)
+            leaf_id = self._leaf_id
+        self._respond(command, data={"tree": tree, "leafId": leaf_id})
+
+    def _handle_get_messages(self, command: JsonDict) -> None:
+        """Return the active, compaction-aware projected message history."""
+        with self._session_lock:
+            messages = self._project_session_messages(self._leaf_id, self._entry_by_id)
+        self._respond(command, data={"messages": messages})
+
+    def _handle_switch_session(self, command: JsonDict) -> None:
+        """Validate and transactionally switch to an explicit v3 session file."""
+        try:
+            path, snapshot, initialization = self._prepare_session_switch(
+                command.get("sessionPath")
+            )
+            if initialization is not None:
+                self._materialize_empty_session(path, snapshot, initialization)
+        except Exception as exc:
+            self._fail(command, f"Cannot switch session: {exc}")
+            return
+
+        # Validation (and any required target initialization) must finish before
+        # interrupting the current run.  A failed switch therefore leaves the
+        # live session, including its worker, untouched.
+        with self._session_lock:
+            same_path = Path(self.state.session_file) == path
+        self._stop_active_run()
+
+        # Stopping a run can append an authoritative aborted message.  Reload a
+        # same-path target so switching to the current file never installs a
+        # stale pre-abort snapshot.  If an external writer races us, the already
+        # validated snapshot remains the safe transaction value.
+        if same_path:
+            try:
+                snapshot = self._load_session_snapshot(path)
+            except Exception:
+                pass
+
+        self._apply_session_snapshot(snapshot)
         self._respond(command, data={"cancelled": False})
 
     def _handle_set_session_name(self, command: JsonDict) -> None:
         """Persist a session name to the real session file."""
-        name = str(command.get("name", "")).strip()
+        if not isinstance(raw_name := command.get("name"), str):
+            self._fail(command, "Session name must be a string")
+            return
+        name = re.sub(r"[\r\n]+", " ", raw_name).strip()
         if not name:
             self._fail(command, "Session name must be non-empty")
             return
-        self.state.session_name = name
-        self._append_session_line(
-            {"type": "session_info", "id": self._entry_id("session-info"), "name": name}
+        self._append_session_entry(
+            {"type": "session_info", "name": name}, prefix="session-info"
         )
         self._respond(command)
 
@@ -471,7 +564,6 @@ class FakePiHarness:
 
     def _run_text_prompt(self, message: str, behavior: TextStreamPrompt) -> None:
         """Run a streamed-text prompt scenario."""
-        self.state.is_streaming = True
         emitted_messages: list[JsonDict] = []
         current_message = message
         self._write_json({"type": "agent_start"})
@@ -481,7 +573,8 @@ class FakePiHarness:
                 behavior=behavior,
                 assistant_text_template=(
                     behavior.assistant_text
-                    if current_message == message or behavior.steer_assistant_text is None
+                    if current_message == message
+                    or behavior.steer_assistant_text is None
                     else behavior.steer_assistant_text
                 ),
             )
@@ -547,13 +640,14 @@ class FakePiHarness:
         behavior: ExtensionDialogPrompt,
     ) -> None:
         """Run an extension dialog scenario until it resolves or times out."""
-        self.state.is_streaming = True
         self._persist_user_message(self._build_user_message(command_text))
         self._write_json({"type": "agent_start"})
         request_id = f"ext-{uuid.uuid4().hex[:8]}"
         request = self._build_extension_request(request_id, behavior)
         self._write_json(request)
-        response = self._wait_for_extension_response(request_id, self._dialog_timeout_ms(behavior))
+        response = self._wait_for_extension_response(
+            request_id, self._dialog_timeout_ms(behavior)
+        )
         result_key = self._dialog_result_key(behavior.method, response)
         message_text = behavior.response_messages.get(
             result_key,
@@ -583,7 +677,6 @@ class FakePiHarness:
 
     def _run_tool_prompt(self, message: str, behavior: ToolStreamPrompt) -> None:
         """Run a prompt that emits tool-call and tool-execution events."""
-        self.state.is_streaming = True
         self._write_json({"type": "agent_start"})
         user_message = self._build_user_message(message)
         self._persist_user_message(user_message)
@@ -604,6 +697,10 @@ class FakePiHarness:
         tool_assistant_message: JsonDict = {
             "role": "assistant",
             "content": [tool_call],
+            "api": self.state.model["api"],
+            "provider": self.state.model["provider"],
+            "model": self.state.model["id"],
+            "usage": self._zero_usage(),
             "timestamp": now_ms(),
             "stopReason": "toolUse",
         }
@@ -667,7 +764,9 @@ class FakePiHarness:
                     "toolCallId": tool_call_id,
                     "toolName": behavior.tool_name,
                     "args": behavior.tool_args,
-                    "partialResult": self._tool_result_payload(behavior.partial_result_text),
+                    "partialResult": self._tool_result_payload(
+                        behavior.partial_result_text
+                    ),
                 }
             )
         if not self._sleep_ms(behavior.delay_ms, abortable=True):
@@ -801,8 +900,7 @@ class FakePiHarness:
             return
         self._abort_requested.set()
         self._extension_waiter.set()
-        if thread.is_alive():
-            thread.join(timeout=5)
+        thread.join()
         if self._run_thread is thread:
             self._run_thread = None
         self.state.is_streaming = False
@@ -811,6 +909,7 @@ class FakePiHarness:
 
     def _start_run(self, *, name: str, target: Callable[[], None]) -> None:
         """Start a daemon worker for prompt playback."""
+
         def runner() -> None:
             try:
                 target()
@@ -819,6 +918,7 @@ class FakePiHarness:
                     self._run_thread = None
 
         thread = threading.Thread(target=runner, name=name, daemon=True)
+        self.state.is_streaming = True
         self._run_thread = thread
         thread.start()
 
@@ -909,6 +1009,10 @@ class FakePiHarness:
         return {
             "role": "assistant",
             "content": [{"type": "text", "text": text}],
+            "api": self.state.model["api"],
+            "provider": self.state.model["provider"],
+            "model": self.state.model["id"],
+            "usage": self._zero_usage(),
             "timestamp": now_ms(),
             "stopReason": "stop",
         }
@@ -918,6 +1022,10 @@ class FakePiHarness:
         return {
             "role": "assistant",
             "content": [{"type": "text", "text": text}],
+            "api": self.state.model["api"],
+            "provider": self.state.model["provider"],
+            "model": self.state.model["id"],
+            "usage": self._zero_usage(),
             "timestamp": now_ms(),
             "stopReason": "aborted",
             "errorMessage": "Request was aborted",
@@ -927,62 +1035,566 @@ class FakePiHarness:
         """Return a displayable custom message payload."""
         return {
             "role": "custom",
+            "customType": "fake-pi-test",
             "display": True,
             "content": text,
             "timestamp": now_ms(),
         }
 
     def _persist_user_message(self, message: JsonDict) -> None:
-        """Append a user message to the real session file and fork list."""
-        entry_id = self._entry_id("user")
-        text = message["content"][0]["text"]
-        self.user_messages.append({"entryId": entry_id, "text": text})
-        self._append_session_line({"type": "message", "entryId": entry_id, "message": message})
-        self.state.message_count += 1
+        """Append a user message as a valid v3 session entry."""
+        self._append_session_entry(
+            {"type": "message", "message": message}, prefix="user"
+        )
 
     def _persist_assistant_message(self, message: JsonDict) -> None:
-        """Append an assistant message to the real session file."""
-        self._append_session_line(
-            {"type": "message", "entryId": self._entry_id("assistant"), "message": message}
+        """Append an assistant message as a valid v3 session entry."""
+        self._append_session_entry(
+            {"type": "message", "message": message}, prefix="assistant"
         )
-        self.state.message_count += 1
 
     def _persist_custom_message(self, message: JsonDict) -> None:
-        """Append a custom message to the real session file."""
-        self._append_session_line(
-            {"type": "message", "entryId": self._entry_id("custom"), "message": message}
-        )
-        self.state.message_count += 1
+        """Append an extension display message as Pi's raw custom-message entry."""
+        payload: JsonDict = {
+            "type": "custom_message",
+            "customType": message["customType"],
+            "content": message["content"],
+            "display": message["display"],
+        }
+        if "details" in message:
+            payload["details"] = message["details"]
+        self._append_session_entry(payload, prefix="custom")
 
     def _persist_tool_result_message(self, message: JsonDict) -> None:
-        """Append a tool-result message to the real session file."""
-        self._append_session_line(
-            {
-                "type": "message",
-                "entryId": self._entry_id("tool-result"),
-                "message": message,
-            }
+        """Append a tool-result message as a valid v3 session entry."""
+        self._append_session_entry(
+            {"type": "message", "message": message}, prefix="tool-result"
         )
-        self.state.message_count += 1
+
+    @staticmethod
+    def _iso_timestamp(timestamp_ms: int) -> str:
+        """Return a UTC ISO timestamp with Pi's millisecond precision."""
+        return (
+            datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
+
+    @staticmethod
+    def _timestamp_ms(timestamp: Any) -> int:
+        """Validate a Pi ISO timestamp and convert it to Unix milliseconds."""
+        if not isinstance(timestamp, str) or not re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", timestamp
+        ):
+            raise ValueError(f"Invalid session timestamp: {timestamp!r}")
+        try:
+            parsed = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError as exc:
+            raise ValueError(f"Invalid session timestamp: {timestamp!r}") from exc
+        return int(parsed.timestamp()) * 1000 + parsed.microsecond // 1000
+
+    def _new_session_header(self, session_id: str, *, cwd: str) -> JsonDict:
+        """Build a complete current-version session header."""
+        return {
+            "type": "session",
+            "version": 3,
+            "id": session_id,
+            "timestamp": self._iso_timestamp(now_ms()),
+            "cwd": cwd,
+        }
+
+    @staticmethod
+    def _strict_json_loads(line: str) -> Any:
+        """Parse one strict JSON value, rejecting JavaScript numeric constants."""
+
+        def reject_constant(value: str) -> None:
+            raise ValueError(f"Invalid JSON constant: {value}")
+
+        return json.loads(line, parse_constant=reject_constant)
+
+    def _read_session_records(self, path: Path) -> tuple[JsonDict, list[JsonDict]]:
+        """Strictly parse and validate one nonempty v3 JSONL session file."""
+        raw = path.read_bytes()
+        if not raw:
+            raise ValueError(f"Session file is empty: {path}")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"Session file is not UTF-8: {path}") from exc
+
+        records: list[Any] = []
+        for line_number, line in enumerate(text.split("\n"), start=1):
+            if line.endswith("\r"):
+                line = line[:-1]
+            if not line.strip():
+                continue
+            try:
+                records.append(self._strict_json_loads(line))
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise ValueError(
+                    f"Malformed JSONL at {path}:{line_number}: {exc}"
+                ) from exc
+        if not records:
+            raise ValueError(f"Session file has no JSON records: {path}")
+        return self._validate_v3_records(records, path)
+
+    def _validate_v3_records(
+        self, records: list[Any], path: Path
+    ) -> tuple[JsonDict, list[JsonDict]]:
+        """Validate the v3 header and structural contract of every entry."""
+        header = records[0]
+        if not isinstance(header, dict) or header.get("type") != "session":
+            raise ValueError(f"Session header is missing or malformed: {path}")
+        if type(header.get("version")) is not int or header["version"] != 3:
+            raise ValueError(
+                f"Unsupported session version {header.get('version')!r}; expected 3"
+            )
+        if not isinstance(header.get("id"), str) or not header["id"]:
+            raise ValueError("Session header id must be a nonempty string")
+        self._timestamp_ms(header.get("timestamp"))
+        cwd = header.get("cwd")
+        if (
+            not isinstance(cwd, str)
+            or not cwd
+            or "\x00" in cwd
+            or not Path(cwd).is_absolute()
+            or not Path(cwd).exists()
+        ):
+            raise ValueError("Session header cwd must name an existing path")
+
+        entries: list[JsonDict] = []
+        seen_ids: set[str] = set()
+        for index, raw_entry in enumerate(records[1:], start=2):
+            if not isinstance(raw_entry, dict):
+                raise ValueError(f"Session entry {index} is not an object")
+            self._validate_v3_entry(raw_entry, index)
+            entry_id = raw_entry["id"]
+            if entry_id in seen_ids:
+                raise ValueError(f"Duplicate session entry id: {entry_id}")
+            seen_ids.add(entry_id)
+            entries.append(raw_entry)
+        return header, entries
+
+    def _validate_v3_entry(self, entry: JsonDict, index: int) -> None:
+        """Validate one raw v3 nonheader entry without constraining its tree."""
+        entry_type = entry.get("type")
+        allowed_types = {
+            "message",
+            "thinking_level_change",
+            "model_change",
+            "compaction",
+            "branch_summary",
+            "custom",
+            "custom_message",
+            "label",
+            "session_info",
+        }
+        if not isinstance(entry_type, str) or entry_type not in allowed_types:
+            raise ValueError(
+                f"Unsupported session entry type at record {index}: {entry_type!r}"
+            )
+        entry_id = entry.get("id")
+        if not isinstance(entry_id, str) or not entry_id:
+            raise ValueError(f"Session entry {index} has an invalid id")
+        if "parentId" not in entry or not (
+            entry["parentId"] is None or isinstance(entry["parentId"], str)
+        ):
+            raise ValueError(f"Session entry {entry_id} has an invalid parentId")
+        self._timestamp_ms(entry.get("timestamp"))
+
+        if entry_type == "message":
+            message = entry.get("message")
+            if not isinstance(message, dict) or not isinstance(
+                message.get("role"), str
+            ):
+                raise ValueError(f"Message entry {entry_id} has an invalid message")
+        elif entry_type == "thinking_level_change":
+            if not isinstance(entry.get("thinkingLevel"), str):
+                raise ValueError(f"Thinking-level entry {entry_id} is malformed")
+        elif entry_type == "model_change":
+            if not isinstance(entry.get("provider"), str) or not isinstance(
+                entry.get("modelId"), str
+            ):
+                raise ValueError(f"Model-change entry {entry_id} is malformed")
+        elif entry_type == "compaction":
+            tokens_before = entry.get("tokensBefore")
+            if (
+                not isinstance(entry.get("summary"), str)
+                or not isinstance(entry.get("firstKeptEntryId"), str)
+                or isinstance(tokens_before, bool)
+                or not isinstance(tokens_before, (int, float))
+                or not math.isfinite(tokens_before)
+            ):
+                raise ValueError(f"Compaction entry {entry_id} is malformed")
+        elif entry_type == "branch_summary":
+            if not isinstance(entry.get("summary"), str) or not isinstance(
+                entry.get("fromId"), str
+            ):
+                raise ValueError(f"Branch-summary entry {entry_id} is malformed")
+        elif entry_type in {"custom", "custom_message"}:
+            if not isinstance(entry.get("customType"), str):
+                raise ValueError(f"Custom entry {entry_id} has no customType")
+            if entry_type == "custom_message" and (
+                not isinstance(entry.get("display"), bool)
+                or not isinstance(entry.get("content"), (str, list))
+            ):
+                raise ValueError(f"Custom-message entry {entry_id} is malformed")
+        elif entry_type == "label":
+            label = entry.get("label")
+            if not isinstance(entry.get("targetId"), str) or not (
+                label is None or isinstance(label, str)
+            ):
+                raise ValueError(f"Label entry {entry_id} is malformed")
+        elif entry_type == "session_info":
+            name = entry.get("name")
+            if not (name is None or isinstance(name, str)):
+                raise ValueError(f"Session-info entry {entry_id} is malformed")
+
+    def _load_session_snapshot(self, path: Path) -> JsonDict:
+        """Parse PATH and return a fully projected transaction snapshot."""
+        header, entries = self._read_session_records(path)
+        return self._build_session_snapshot(path, header, entries)
+
+    def _build_session_snapshot(
+        self, path: Path, header: JsonDict, entries: list[JsonDict]
+    ) -> JsonDict:
+        """Build all mutable/public session projections from one raw entry list."""
+        entry_by_id = {entry["id"]: entry for entry in entries}
+        leaf_id = entries[-1]["id"] if entries else None
+        message_count = len(self._project_session_messages(leaf_id, entry_by_id))
+
+        session_name: str | None = None
+        for entry in entries:
+            if entry["type"] == "session_info":
+                raw_name = entry.get("name")
+                session_name = (
+                    raw_name.strip() or None if isinstance(raw_name, str) else None
+                )
+
+        fork_messages: list[dict[str, str]] = []
+        for entry in entries:
+            if entry["type"] != "message":
+                continue
+            message = entry["message"]
+            if message.get("role") != "user":
+                continue
+            text = self._message_content_text(message)
+            if text:
+                fork_messages.append({"entryId": entry["id"], "text": text})
+
+        timestamp_values = [self._timestamp_ms(header["timestamp"])]
+        timestamp_values.extend(
+            self._timestamp_ms(entry["timestamp"]) for entry in entries
+        )
+        return {
+            "path": path,
+            "header": header,
+            "entries": entries,
+            "entryById": entry_by_id,
+            "leafId": leaf_id,
+            "messageCount": message_count,
+            "sessionName": session_name,
+            "forkMessages": fork_messages,
+            "lastTimestampMs": max(timestamp_values),
+        }
+
+    @staticmethod
+    def _message_content_text(message: JsonDict) -> str:
+        """Extract concatenated text content for the public fork-message list."""
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+        pieces: list[str] = []
+        for block in content:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+            ):
+                pieces.append(block["text"])
+        return "".join(pieces)
+
+    def _active_session_path(
+        self,
+        leaf_id: str | None,
+        entry_by_id: dict[str, JsonDict],
+    ) -> list[JsonDict]:
+        """Return the active parent path iteratively, stopping safely at cycles."""
+        if leaf_id is None:
+            return []
+        current = entry_by_id.get(leaf_id)
+        reverse_path: list[JsonDict] = []
+        seen: set[str] = set()
+        while current is not None and current["id"] not in seen:
+            seen.add(current["id"])
+            reverse_path.append(current)
+            parent_id = current["parentId"]
+            current = entry_by_id.get(parent_id) if isinstance(parent_id, str) else None
+        reverse_path.reverse()
+        return reverse_path
+
+    def _project_session_messages(
+        self,
+        leaf_id: str | None,
+        entry_by_id: dict[str, JsonDict],
+    ) -> list[JsonDict]:
+        """Project the active path with Pi's latest-compaction retained range."""
+        path = self._active_session_path(leaf_id, entry_by_id)
+        compaction_index: int | None = None
+        for index, entry in enumerate(path):
+            if entry["type"] == "compaction":
+                compaction_index = index
+
+        context_entries = path
+        if compaction_index is not None:
+            compaction = path[compaction_index]
+            context_entries = [compaction]
+            found_first_kept = False
+            for entry in path[:compaction_index]:
+                if entry["id"] == compaction["firstKeptEntryId"]:
+                    found_first_kept = True
+                if found_first_kept:
+                    context_entries.append(entry)
+            context_entries.extend(path[compaction_index + 1 :])
+
+        messages: list[JsonDict] = []
+        for entry in context_entries:
+            entry_type = entry["type"]
+            if entry_type == "message":
+                message = entry["message"]
+                role = message["role"]
+                if message.get("content") is None and role in (
+                    "user",
+                    "assistant",
+                    "toolResult",
+                ):
+                    message = {**message, "content": []}
+                messages.append(message)
+            elif entry_type == "custom_message":
+                custom_message: JsonDict = {
+                    "role": "custom",
+                    "customType": entry["customType"],
+                    "content": entry["content"],
+                    "display": entry["display"],
+                    "timestamp": self._timestamp_ms(entry["timestamp"]),
+                }
+                if "details" in entry:
+                    custom_message["details"] = entry["details"]
+                messages.append(custom_message)
+            elif entry_type == "branch_summary" and entry["summary"]:
+                messages.append(
+                    {
+                        "role": "branchSummary",
+                        "summary": entry["summary"],
+                        "fromId": entry["fromId"],
+                        "timestamp": self._timestamp_ms(entry["timestamp"]),
+                    }
+                )
+            elif entry_type == "compaction":
+                messages.append(
+                    {
+                        "role": "compactionSummary",
+                        "summary": entry["summary"],
+                        "tokensBefore": entry["tokensBefore"],
+                        "timestamp": self._timestamp_ms(entry["timestamp"]),
+                    }
+                )
+        return messages
+
+    def _build_session_tree(self, entries: list[JsonDict]) -> list[JsonDict]:
+        """Build the raw labeled forest iteratively with stable child ordering."""
+        effective_labels: dict[str, tuple[str, str]] = {}
+        for entry in entries:
+            if entry["type"] != "label":
+                continue
+            target_id = entry["targetId"]
+            label = entry.get("label")
+            if isinstance(label, str) and label:
+                effective_labels[target_id] = (label, entry["timestamp"])
+            else:
+                effective_labels.pop(target_id, None)
+
+        nodes: dict[str, JsonDict] = {}
+        order: dict[str, int] = {}
+        for index, entry in enumerate(entries):
+            node: JsonDict = {"entry": entry, "children": []}
+            resolved_label = effective_labels.get(entry["id"])
+            if resolved_label is not None:
+                node["label"], node["labelTimestamp"] = resolved_label
+            nodes[entry["id"]] = node
+            order[entry["id"]] = index
+
+        # A valid Pi tree is acyclic, but hand-authored files can contain a
+        # parent cycle.  Break one edge per cycle at its earliest appended node
+        # so every raw entry remains serializable exactly once.
+        parent_by_id = {entry["id"]: entry["parentId"] for entry in entries}
+        processed: set[str] = set()
+        cycle_roots: set[str] = set()
+        for entry in entries:
+            start_id = entry["id"]
+            if start_id in processed:
+                continue
+            trail: list[str] = []
+            positions: dict[str, int] = {}
+            current_id: str | None = start_id
+            while (
+                current_id is not None
+                and current_id in nodes
+                and current_id not in processed
+            ):
+                if current_id in positions:
+                    cycle = trail[positions[current_id] :]
+                    cycle_roots.add(min(cycle, key=order.__getitem__))
+                    break
+                positions[current_id] = len(trail)
+                trail.append(current_id)
+                parent_id = parent_by_id[current_id]
+                if (
+                    parent_id is None
+                    or parent_id == current_id
+                    or parent_id not in nodes
+                ):
+                    break
+                current_id = parent_id
+            processed.update(trail)
+
+        roots: list[JsonDict] = []
+        for entry in entries:
+            entry_id = entry["id"]
+            parent_id = entry["parentId"]
+            node = nodes[entry_id]
+            if (
+                parent_id is None
+                or parent_id == entry_id
+                or parent_id not in nodes
+                or entry_id in cycle_roots
+            ):
+                roots.append(node)
+            else:
+                nodes[parent_id]["children"].append(node)
+
+        pending = list(roots)
+        while pending:
+            node = pending.pop()
+            children = node["children"]
+            children.sort(
+                key=lambda child: self._timestamp_ms(child["entry"]["timestamp"])
+            )
+            pending.extend(children)
+        return roots
+
+    def _prepare_session_switch(
+        self, raw_path: Any
+    ) -> tuple[Path, JsonDict, str | None]:
+        """Validate a switch target and prepare its side-effect-free snapshot."""
+        if not isinstance(raw_path, str):
+            raise ValueError("sessionPath must be a string")
+        if not raw_path or "\x00" in raw_path:
+            raise ValueError("sessionPath must be a nonempty path without NUL bytes")
+        path = Path(raw_path)
+        if not path.is_absolute():
+            raise ValueError("sessionPath must be absolute")
+        path = path.resolve(strict=False)
+
+        if path.exists():
+            if path.is_dir():
+                raise ValueError(f"Session path is a directory: {path}")
+            if not path.is_file():
+                raise ValueError(f"Session path is not a regular file: {path}")
+            if path.stat().st_size == 0:
+                header = self._new_session_header(
+                    f"fake-{uuid.uuid4().hex[:8]}", cwd=str(Path.cwd().resolve())
+                )
+                snapshot = self._build_session_snapshot(path, header, [])
+                return path, snapshot, "empty"
+            return path, self._load_session_snapshot(path), None
+
+        header = self._new_session_header(
+            f"fake-{uuid.uuid4().hex[:8]}", cwd=str(Path.cwd().resolve())
+        )
+        snapshot = self._build_session_snapshot(path, header, [])
+        return path, snapshot, "missing"
+
+    def _materialize_empty_session(
+        self, path: Path, snapshot: JsonDict, initialization: str
+    ) -> None:
+        """Write a prepared empty header without clobbering a raced target."""
+        content = (self._encode_json(snapshot["header"]) + "\n").encode("utf-8")
+        if initialization == "missing":
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("xb") as handle:
+                handle.write(content)
+            return
+        if initialization != "empty":
+            raise AssertionError(f"Unknown session initialization: {initialization}")
+        with path.open("r+b") as handle:
+            if handle.read(1):
+                raise ValueError(f"Session file changed while switching: {path}")
+            handle.seek(0)
+            handle.write(content)
+            handle.truncate()
+
+    def _apply_session_snapshot(self, snapshot: JsonDict) -> None:
+        """Atomically install one prepared raw/projection snapshot."""
+        with self._session_lock:
+            self._session_header = snapshot["header"]
+            self._session_entries = snapshot["entries"]
+            self._entry_by_id = snapshot["entryById"]
+            self._leaf_id = snapshot["leafId"]
+            self._last_entry_timestamp_ms = snapshot["lastTimestampMs"]
+            self.user_messages = snapshot["forkMessages"]
+            self.state.session_file = str(snapshot["path"])
+            self.state.session_id = snapshot["header"]["id"]
+            self.state.session_name = snapshot["sessionName"]
+            self.state.message_count = snapshot["messageCount"]
+            self.state.pending_message_count = 0
+
+    def _append_session_entry(self, payload: JsonDict, *, prefix: str) -> str:
+        """Persist one complete v3 entry, advance the leaf, and refresh projections."""
+        with self._session_lock:
+            entry_id = self._entry_id(prefix)
+            timestamp_ms = max(now_ms(), self._last_entry_timestamp_ms + 1)
+            entry: JsonDict = {
+                "type": payload["type"],
+                "id": entry_id,
+                "parentId": self._leaf_id,
+                "timestamp": self._iso_timestamp(timestamp_ms),
+            }
+            entry.update(
+                {key: value for key, value in payload.items() if key != "type"}
+            )
+            entries = [*self._session_entries, entry]
+            snapshot = self._build_session_snapshot(
+                Path(self.state.session_file), self._session_header, entries
+            )
+            with Path(self.state.session_file).open(
+                "a", encoding="utf-8", newline="\n"
+            ) as handle:
+                handle.write(self._encode_json(entry) + "\n")
+            self._apply_session_snapshot(snapshot)
+            return entry_id
 
     def _reset_session_file(self) -> None:
-        """Create a fresh real session file with a session header."""
+        """Create and install a fresh valid empty v3 session file."""
         self._message_serial = 0
-        self.state.session_id = f"fake-{uuid.uuid4().hex[:8]}"
-        self.state.session_file = str(self._session_root / f"{self.state.session_id}.jsonl")
-        Path(self.state.session_file).write_text("", encoding="utf-8")
-        self._append_session_line({"type": "session", "id": self.state.session_id})
-
-    def _append_session_line(self, payload: JsonDict) -> None:
-        """Append ``payload`` as one JSONL line to the current session file."""
-        session_path = Path(self.state.session_file)
-        with session_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        session_id = f"fake-{uuid.uuid4().hex[:8]}"
+        path = self._session_root / f"{session_id}.jsonl"
+        header = self._new_session_header(session_id, cwd=str(Path.cwd().resolve()))
+        snapshot = self._build_session_snapshot(path, header, [])
+        path.write_bytes((self._encode_json(header) + "\n").encode("utf-8"))
+        self._apply_session_snapshot(snapshot)
 
     def _entry_id(self, prefix: str) -> str:
-        """Return a deterministic-ish entry ID for session records."""
-        self._message_serial += 1
-        return f"{prefix}-{self._message_serial}"
+        """Return a deterministic entry ID that does not collide after switches."""
+        while True:
+            self._message_serial += 1
+            candidate = f"{prefix}-{self._message_serial}"
+            if candidate not in self._entry_by_id:
+                return candidate
 
     def _respond(self, command: JsonDict, *, data: JsonDict | None = None) -> None:
         """Emit a successful RPC response for ``command``."""
@@ -995,7 +1607,9 @@ class FakePiHarness:
             response["id"] = command["id"]
         if data is not None:
             response["data"] = data
-        self._write_json(response, split_at=self.split_responses.get(str(command["type"])))
+        self._write_json(
+            response, split_at=self.split_responses.get(str(command["type"]))
+        )
 
     def _fail(self, command: JsonDict, error: str) -> None:
         """Emit a failed RPC response for ``command``."""
@@ -1009,9 +1623,53 @@ class FakePiHarness:
             response["id"] = command["id"]
         self._write_json(response)
 
+    @staticmethod
+    def _encode_json(value: Any) -> str:
+        """Encode JSON iteratively so deep session trees cannot overflow Python."""
+        output: list[str] = []
+        stack: list[tuple[str, Any]] = [("value", value)]
+        while stack:
+            kind, current = stack.pop()
+            if kind == "raw":
+                output.append(current)
+                continue
+            if isinstance(current, dict):
+                items = list(current.items())
+                stack.append(("raw", "}"))
+                for index in range(len(items) - 1, -1, -1):
+                    key, item = items[index]
+                    if not isinstance(key, str):
+                        raise TypeError(f"JSON object key is not a string: {key!r}")
+                    stack.append(("value", item))
+                    stack.append(("raw", ":"))
+                    stack.append(
+                        ("raw", json.dumps(key, ensure_ascii=False, allow_nan=False))
+                    )
+                    if index > 0:
+                        stack.append(("raw", ","))
+                stack.append(("raw", "{"))
+                continue
+            if isinstance(current, (list, tuple)):
+                stack.append(("raw", "]"))
+                for index in range(len(current) - 1, -1, -1):
+                    stack.append(("value", current[index]))
+                    if index > 0:
+                        stack.append(("raw", ","))
+                stack.append(("raw", "["))
+                continue
+            output.append(
+                json.dumps(
+                    current,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+            )
+        return "".join(output)
+
     def _write_json(self, payload: JsonDict, *, split_at: int | None = None) -> None:
         """Write one JSONL record to stdout and flush promptly."""
-        line = json.dumps(payload, separators=(",", ":"), ensure_ascii=False) + "\n"
+        line = self._encode_json(payload) + "\n"
         self._log("out", payload)
         with self._write_lock:
             if split_at is not None and 0 < split_at < len(line):
@@ -1030,10 +1688,7 @@ class FakePiHarness:
             return
         with self.log_file.open("a", encoding="utf-8") as handle:
             handle.write(
-                json.dumps(
-                    {"direction": direction, "payload": payload}, ensure_ascii=False
-                )
-                + "\n"
+                self._encode_json({"direction": direction, "payload": payload}) + "\n"
             )
 
     @staticmethod

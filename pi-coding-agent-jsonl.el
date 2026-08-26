@@ -31,9 +31,9 @@
 ;; computing tree-navigation targets and byte-preserving rewritten line
 ;; orders (non-chain lines stay in physical order; selected chains use
 ;; logical parent order), and discovering session files on disk (sessions
-;; root, munged per-cwd directories, cheap metadata scans).  Ports pi's
-;; session-manager
-;; getTree (plus label folding), the RPC tree projection, navigateTree's
+;; root, munged per-cwd directories, canonical shared metadata scans).
+;; This ports pi's session-manager getTree (plus label folding), the RPC tree
+;; projection, navigateTree's
 ;; leaf rule, core format-tool-call, and config/session-dir path munging.
 ;; Depends only on core; nothing here touches buffers, processes, or
 ;; state.
@@ -44,7 +44,8 @@
 ;;   treated exactly like an absent value: nullable fields go through
 ;;   `pi-coding-agent--jsonl-entry-parent-id' or core's
 ;;   `pi-coding-agent--normalize-string-or-null', and this module never
-;;   emits :null itself.
+;;   emits :null itself.  Empty strings in nullable metadata likewise
+;;   normalize as absent.
 ;; - JSON arrays are vectors, never lists.
 ;; - Numbers pass through with their zero-ness intact: presence checks
 ;;   use `numberp' (never truthiness), so an offset of 0 or a limit of 0
@@ -90,7 +91,7 @@
 ;; - `pi-coding-agent-jsonl-read-session-info' reports :modified from
 ;;   the file mtime instead of the newest message timestamp (one stat
 ;;   versus a per-line compare).  Append-only files agree, and the
-;;   Phase 4 navigation rewrites arguably make mtime more correct.
+;;   Navigation rewrites arguably make mtime more correct.
 ;; - `pi-coding-agent-jsonl-navigation-target's :current-p refines pi's
 ;;   navigateTree raw-id no-op with the computed leaf rule and visible
 ;;   resolution: a self-target that is the literal leaf remains current,
@@ -176,9 +177,8 @@ Malformed and blank lines are skipped silently."
   "[ \t]*{[ \t]*\"type\"[ \t]*:[ \t]*\"%s\""
   "Format string matching a JSONL line whose top-level type appears first.
 Pi writes session JSONL with `type' as the first key, so matching that
-cheap prefix routes lines without parsing their full payloads.  Local
-sibling of menu.el's regexp; kept separate so this module depends only
-on core (the duplication is consolidated in Phase 5).")
+cheap prefix lets the canonical shared metadata scanner route lines
+without parsing their full payloads.")
 
 (defun pi-coding-agent--jsonl-line-type-p (type)
   "Return non-nil when the current line has top-level session TYPE."
@@ -264,15 +264,14 @@ Return the session plist, or nil when no header line was found."
                    ((null fallback-message)
                     (setq fallback-message text))))))))
          ((pi-coding-agent--jsonl-line-type-p "session_info")
-          (let* ((data (pi-coding-agent--jsonl-parse-current-line))
-                 (raw (when (consp data)
-                        (pi-coding-agent--normalize-string-or-null
-                         (plist-get data :name)))))
-            ;; Latest-wins replay; absent or blank names clear the key.
-            (setq name
-                  (when raw
-                    (let ((trimmed (string-trim raw)))
-                      (unless (string-empty-p trimmed) trimmed))))))
+          (when-let* ((data (pi-coding-agent--jsonl-parse-current-line)))
+            (let ((raw (pi-coding-agent--normalize-string-or-null
+                        (plist-get data :name))))
+              ;; Latest parseable entry wins; absent or blank names clear.
+              (setq name
+                    (when raw
+                      (let ((trimmed (string-trim raw)))
+                        (unless (string-empty-p trimmed) trimmed)))))))
          ;; Later headers, blanks, label/custom/unknown lines: skip
          ;; without parsing.
          (t nil))
@@ -309,11 +308,10 @@ Return a plist in the browse session dialect — (:path :id :cwd :name?
 header line, carries a non-session line before the header, or cannot
 be read at all.  Key parity with the session browser is the contract.
 
-The scan is regex-first, mirroring menu.el's
-`pi-coding-agent--session-metadata' (duplication is deliberate until
-Phase 5): lines route by their top-level type prefix and only
-headers, session_info lines, and the first few message lines are
-full-parsed.  :messageCount counts message lines by regex alone
+This is the canonical shared session metadata scanner.  The scan is
+regex-first: lines route by their top-level type prefix and only headers,
+session_info lines, and the first few message lines are full-parsed.
+:messageCount counts message lines by regex alone
 \(toolResult included).  :firstMessage full-parses at most 5 message
 lines while unset: a user message with extractable text wins,
 otherwise the first parsed message of any role is the fallback.
@@ -865,7 +863,7 @@ reads of a file a live pi appends to concurrently."
       (pi-coding-agent-jsonl-project-tree
        (plist-get built :tree) (plist-get built :leafId)))))
 
-;;;; Tree Navigation (Phase 4)
+;;;; Tree Navigation
 
 (defun pi-coding-agent--jsonl-resolve-visible (entries id)
   "Resolve ID to the nearest non-filtered entry id within ENTRIES.

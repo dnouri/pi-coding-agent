@@ -4989,7 +4989,7 @@ The result is detached metadata containing physical, projected-label, and
 destination extents.  Label ancestry decides nested ownership explicitly:
 hyperlinks own nested image alt text, while standalone images own nested label
 constructs.  Unsupported shortcut references do not own ordinary bracketed
-text, preserving Phase 1's strict wrapper behavior.  However, a shortcut link
+text, preserving the strict wrapper behavior.  However, a shortcut link
 or non-reference shortcut image immediately followed by an opening parenthesis
 is malformed inline recovery and owns its balanced, escape-aware tail.  Full
 and collapsed references always own and suppress fallback."
@@ -5863,6 +5863,16 @@ TIMESTAMP is optional time when compaction occurred."
     (with-current-buffer (pi-coding-agent--get-chat-buffer)
       (pi-coding-agent--decorate-tables-unless-deferred start (point-max)))))
 
+(defun pi-coding-agent--display-branch-summary (summary &optional timestamp)
+  "Display a branch SUMMARY block in the chat buffer.
+TIMESTAMP is the optional time when the branch summary was created."
+  (let ((start (with-current-buffer (pi-coding-agent--get-chat-buffer) (point-max))))
+    (pi-coding-agent--append-to-chat
+     (concat "\n" (pi-coding-agent--make-separator "Branch Summary" timestamp) "\n"
+             (pi-coding-agent--render-safe-string summary) "\n"))
+    (with-current-buffer (pi-coding-agent--get-chat-buffer)
+      (pi-coding-agent--decorate-tables-unless-deferred start (point-max)))))
+
 (defun pi-coding-agent--handle-compaction-success (tokens-before summary &optional timestamp)
   "Handle successful compaction: display result and notify user.
 TOKENS-BEFORE is the pre-compaction token count.
@@ -6322,6 +6332,11 @@ Tool calls are rendered with headers, output, overlays, and toggles."
                   (timestamp (pi-coding-agent--ms-to-time (plist-get message :timestamp))))
              (pi-coding-agent--display-compaction-result tokens-before summary timestamp))
            (setq prev-role "compactionSummary"))
+          ("branchSummary"
+           (let* ((summary (plist-get message :summary))
+                  (timestamp (pi-coding-agent--ms-to-time (plist-get message :timestamp))))
+             (pi-coding-agent--display-branch-summary summary timestamp))
+           (setq prev-role "branchSummary"))
           ("toolResult"
            nil))))))
 

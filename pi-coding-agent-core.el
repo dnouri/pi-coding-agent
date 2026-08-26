@@ -771,10 +771,12 @@ JSON true (t) stays t, and either supported false sentinel becomes nil."
   (if (pi-coding-agent--json-false-p value) nil value))
 
 (defun pi-coding-agent--normalize-string-or-null (value)
-  "Return VALUE if it's a string, nil otherwise.
-Use when reading JSON fields that may be null or string.
-JSON null (:null) and non-strings become nil."
-  (and (stringp value) value))
+  "Return VALUE when it is a nonempty string, nil otherwise.
+Whitespace-only strings are nonempty and remain unchanged.  Empty strings,
+JSON null values, and other non-strings become nil."
+  (and (stringp value)
+       (not (string-empty-p value))
+       value))
 
 (defun pi-coding-agent--compaction-result-from-event (event)
   "Return EVENT's successful compaction result, or nil when absent."

@@ -1243,7 +1243,7 @@ BINDING-SPEC is (DIR CHAT-NAME INPUT-NAME PROC).  DIR is evaluated once."
                     ((symbol-function 'pi-coding-agent--update-session-name-from-file)
                      (lambda (_session-file)
                        (setq update-calls (1+ update-calls))
-                       '(:session-name "Cached name")))
+                       '(:name "Cached name")))
                     ((symbol-function 'force-mode-line-update) #'ignore))
             (pi-coding-agent--refresh-session-state proc chat-buf session-file))
           (should (= update-calls 1)))
@@ -1503,6 +1503,24 @@ Pi v0.51.3+ renamed SlashCommandSource from \"template\" to \"prompt\"."
   "Return non-nil if KEY is bound in current transient suffixes."
   (cl-find-if (lambda (obj) (equal (oref obj key) key))
               transient--suffixes))
+
+(ert-deftest pi-coding-agent-test-transient-opens-session-and-tree-browsers ()
+  "The main menu exposes the session and tree browser actions."
+  (transient-setup 'pi-coding-agent-menu)
+  (let ((sessions-suffix
+         (pi-coding-agent-test--suffix-key-bound-p "r"))
+        (tree-suffix
+         (pi-coding-agent-test--suffix-key-bound-p "w")))
+    (should sessions-suffix)
+    (should (equal (transient-format-description sessions-suffix)
+                   "sessions"))
+    (should (eq (oref sessions-suffix command)
+                'pi-coding-agent-session-browser))
+    (should tree-suffix)
+    (should (equal (transient-format-description tree-suffix)
+                   "tree"))
+    (should (eq (oref tree-suffix command)
+                'pi-coding-agent-tree-browser))))
 
 (ert-deftest pi-coding-agent-test-submenus-open-with-no-commands ()
   "All submenus open without error when no commands are loaded."
@@ -1787,6 +1805,33 @@ replaced by the resumed or forked history."
                            (overlay-get ov 'pi-coding-agent-tool-block))
                          (overlays-in (point-min) (point-max))))))
 
+(ert-deftest pi-coding-agent-test-update-session-name-from-file-uses-jsonl-name ()
+  "Session-name refresh uses canonical JSONL metadata and clears absent names."
+  (let* ((session-file "/tmp/pi-coding-agent-session-name.jsonl")
+         (named-info (list :path session-file :name "Canonical name"))
+         (unnamed-info (list :path session-file :cwd "/tmp"))
+         (responses (list named-info unnamed-info))
+         (scanner-paths nil))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (setq pi-coding-agent--session-name "Stale name")
+      (cl-letf (((symbol-function 'pi-coding-agent-jsonl-read-session-info)
+                 (lambda (path)
+                   (push path scanner-paths)
+                   (prog1 (car responses)
+                     (setq responses (cdr responses))))))
+        (should (equal (pi-coding-agent--update-session-name-from-file
+                        session-file)
+                       named-info))
+        (should (equal pi-coding-agent--session-name "Canonical name"))
+        (should (equal (pi-coding-agent--update-session-name-from-file
+                        session-file)
+                       unnamed-info))
+        (should-not pi-coding-agent--session-name)
+        (should-not responses)
+        (should (equal (nreverse scanner-paths)
+                       (list session-file session-file)))))))
+
 (ert-deftest pi-coding-agent-test-session-file-cwd-or-error-returns-expanded-directory ()
   "Session-file cwd validator returns an expanded directory name."
   (let* ((project-dir (pi-coding-agent-test--make-temp-directory
@@ -1806,20 +1851,26 @@ replaced by the resumed or forked history."
 (ert-deftest pi-coding-agent-test-session-file-cwd-or-error-anchors-remote-cwd ()
   "Remote session header cwd is returned as a TRAMP directory."
   (let ((session-file "/ssh:pi-host:/home/pi/.pi/sessions/session.jsonl")
-        (checked-dir nil))
+        (checked-dir nil)
+        (scanner-called nil))
     (cl-letf (((symbol-function 'file-readable-p)
                (lambda (path)
                  (equal path session-file)))
-              ((symbol-function 'pi-coding-agent--session-metadata)
+              ((symbol-function 'pi-coding-agent-jsonl-read-session-info)
                (lambda (path)
+                 (setq scanner-called t)
                  (should (equal path session-file))
                  '(:cwd "/home/pi/project")))
+              ((symbol-function 'file-attributes)
+               (lambda (&rest _)
+                 (error "Unexpected direct metadata scan")))
               ((symbol-function 'file-directory-p)
                (lambda (path)
                  (setq checked-dir path)
                  (equal path "/ssh:pi-host:/home/pi/project/"))))
       (should (equal (pi-coding-agent--session-file-cwd-or-error session-file)
                      "/ssh:pi-host:/home/pi/project/"))
+      (should scanner-called)
       (should (equal checked-dir "/ssh:pi-host:/home/pi/project/")))))
 
 (ert-deftest pi-coding-agent-test-session-file-cwd-or-error-preserves-multi-hop-cwd ()
@@ -1827,54 +1878,72 @@ replaced by the resumed or forked history."
   (let ((session-file
          "/ssh:bastion|sudo:root@pi-host:/home/pi/.pi/sessions/session.jsonl")
         (expected-dir "/ssh:bastion|sudo:root@pi-host:/home/pi/project/")
-        (checked-dir nil))
+        (checked-dir nil)
+        (scanner-called nil))
     (cl-letf (((symbol-function 'file-readable-p)
                (lambda (path) (equal path session-file)))
-              ((symbol-function 'pi-coding-agent--session-metadata)
+              ((symbol-function 'pi-coding-agent-jsonl-read-session-info)
                (lambda (path)
+                 (setq scanner-called t)
                  (should (equal path session-file))
                  '(:cwd "/home/pi/project")))
+              ((symbol-function 'file-attributes)
+               (lambda (&rest _)
+                 (error "Unexpected direct metadata scan")))
               ((symbol-function 'file-directory-p)
                (lambda (path)
                  (setq checked-dir path)
                  (equal path expected-dir))))
       (should (equal (pi-coding-agent--session-file-cwd-or-error session-file)
                      expected-dir))
+      (should scanner-called)
       (should (equal checked-dir expected-dir)))))
 
 (ert-deftest pi-coding-agent-test-session-file-cwd-or-error-rejects-remote-cwd ()
   "Session header cwd must be process-local before remote anchoring."
-  (let ((session-file "/ssh:pi-host:/home/pi/.pi/sessions/session.jsonl"))
+  (let ((session-file "/ssh:pi-host:/home/pi/.pi/sessions/session.jsonl")
+        (scanner-called nil))
     (cl-letf (((symbol-function 'file-readable-p)
                (lambda (path)
                  (equal path session-file)))
-              ((symbol-function 'pi-coding-agent--session-metadata)
+              ((symbol-function 'pi-coding-agent-jsonl-read-session-info)
                (lambda (path)
+                 (setq scanner-called t)
                  (should (equal path session-file))
                  '(:cwd "/ssh:pi-host:/home/pi/project")))
+              ((symbol-function 'file-attributes)
+               (lambda (&rest _)
+                 (error "Unexpected direct metadata scan")))
               ((symbol-function 'file-directory-p)
                (lambda (_path)
                  (ert-fail "Remote cwd should be rejected before directory check"))))
       (should-error (pi-coding-agent--session-file-cwd-or-error session-file)
-                    :type 'user-error))))
+                    :type 'user-error)
+      (should scanner-called))))
 
 (ert-deftest pi-coding-agent-test-session-file-cwd-or-error-rejects-home-cwd ()
   "Session header cwd must not depend on home expansion."
   (let ((session-file "/ssh:pi-host:/home/pi/.pi/sessions/session.jsonl"))
     (dolist (cwd '("~" "~/project" "~root/project"))
-      (cl-letf (((symbol-function 'file-readable-p)
-                 (lambda (path)
-                   (equal path session-file)))
-                ((symbol-function 'pi-coding-agent--session-metadata)
-                 (lambda (path)
-                   (should (equal path session-file))
-                   (list :cwd cwd)))
-                ((symbol-function 'file-directory-p)
-                 (lambda (_path)
-                   (ert-fail "Home cwd should be rejected before directory check"))))
-        (ert-info ((format "cwd: %s" cwd))
-          (should-error (pi-coding-agent--session-file-cwd-or-error session-file)
-                        :type 'user-error))))))
+      (let ((scanner-called nil))
+        (cl-letf (((symbol-function 'file-readable-p)
+                   (lambda (path)
+                     (equal path session-file)))
+                  ((symbol-function 'pi-coding-agent-jsonl-read-session-info)
+                   (lambda (path)
+                     (setq scanner-called t)
+                     (should (equal path session-file))
+                     (list :cwd cwd)))
+                  ((symbol-function 'file-attributes)
+                   (lambda (&rest _)
+                     (error "Unexpected direct metadata scan")))
+                  ((symbol-function 'file-directory-p)
+                   (lambda (_path)
+                     (ert-fail "Home cwd should be rejected before directory check"))))
+          (ert-info ((format "cwd: %s" cwd))
+            (should-error (pi-coding-agent--session-file-cwd-or-error session-file)
+                          :type 'user-error)
+            (should scanner-called)))))))
 
 (ert-deftest pi-coding-agent-test-session-file-cwd-or-error-rejects-unreadable-file ()
   "Session-file cwd validator rejects unreadable files."
@@ -1999,138 +2068,6 @@ replaced by the resumed or forked history."
           '(:session-file "sessions/current.jsonl"))
     (should (equal (pi-coding-agent--session-list-directory (current-buffer))
                    "/ssh:bastion|sudo:root@pi-host:/home/pi/project/sessions/"))))
-
-(ert-deftest pi-coding-agent-test-list-sessions-sorted-by-mtime ()
-  "Session files are sorted by modification time, most recent first."
-  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
-                       "pi-coding-agent-sessions-"))
-         (old-file (expand-file-name "2024-01-01_10-00-00.jsonl" session-dir))
-         (new-file (expand-file-name "2024-01-01_09-00-00.jsonl" session-dir)))
-    (unwind-protect
-        (progn
-          (let* ((now (current-time))
-                 (old-time (time-subtract now (seconds-to-time 10)))
-                 (new-time (time-subtract now (seconds-to-time 5))))
-            (pi-coding-agent-test--write-session-file old-file "old")
-            (set-file-times old-file old-time)
-            (pi-coding-agent-test--write-session-file new-file "new")
-            (set-file-times new-file new-time))
-          (let ((sessions (pi-coding-agent--list-sessions session-dir)))
-            (should (equal (length sessions) 2))
-            (should (string-suffix-p "09-00-00.jsonl" (car sessions)))))
-      (delete-directory session-dir t))))
-
-(ert-deftest pi-coding-agent-test-list-sessions-filters-invalid-jsonl-files ()
-  "Session listing ignores JSONL files that are not pi sessions."
-  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
-                       "pi-coding-agent-sessions-"))
-         (session-file (expand-file-name "session.jsonl" session-dir))
-         (other-file (expand-file-name "other.jsonl" session-dir)))
-    (unwind-protect
-        (progn
-          (pi-coding-agent-test--write-session-file session-file "hello")
-          (with-temp-file other-file (insert "{}\n"))
-          (should (equal (pi-coding-agent--list-sessions session-dir)
-                         (list session-file))))
-      (delete-directory session-dir t))))
-
-(ert-deftest pi-coding-agent-test-session-line-type-stays-on-current-line ()
-  "Session type prefix matching allows horizontal whitespace, not newlines."
-  (with-temp-buffer
-    (insert " \t{ \t\"type\" \t: \t\"message\"}\n")
-    (insert "\n{\"type\":\"message\"}\n")
-    (goto-char (point-min))
-    (should (pi-coding-agent--session-line-type-p "message"))
-    (forward-line 1)
-    (should-not (pi-coding-agent--session-line-type-p "message"))
-    (forward-line 1)
-    (should (pi-coding-agent--session-line-type-p "message"))))
-
-(ert-deftest pi-coding-agent-test-session-metadata-ignores-blank-lines ()
-  "Blank JSONL lines should not be counted as the following record."
-  (let ((temp-file (make-temp-file "pi-coding-agent-test-session" nil
-                                   ".jsonl")))
-    (unwind-protect
-        (progn
-          (with-temp-file temp-file
-            (insert (json-encode '(:type "session" :id "test")) "\n")
-            (insert (json-encode
-                     '(:type "message"
-                       :message (:role "user"
-                                 :content [(:type "text" :text "Hello")])))
-                    "\n")
-            (insert "\n")
-            (insert (json-encode
-                     '(:type "message"
-                       :message (:role "assistant"
-                                 :content [(:type "text" :text "Hi")])))
-                    "\n"))
-          (let ((metadata (pi-coding-agent--session-metadata temp-file)))
-            (should metadata)
-            (should (equal (plist-get metadata :first-message) "Hello"))
-            (should (equal (plist-get metadata :message-count) 2))))
-      (delete-file temp-file))))
-
-(ert-deftest pi-coding-agent-test-resume-session-choice-selects-path ()
-  "The resume selector maps formatted choices back to session paths."
-  (let* ((first-entry '(:path "/tmp/first.jsonl"
-                        :metadata (:session-name "First")))
-         (second-entry '(:path "/tmp/second.jsonl"
-                         :metadata (:session-name "Second")))
-         (selected-path nil))
-    (cl-letf (((symbol-function 'pi-coding-agent--list-session-entries)
-               (lambda (_session-dir) (list first-entry second-entry)))
-              ((symbol-function 'pi-coding-agent--format-session-entry-choice)
-               (lambda (entry)
-                 (when (equal (plist-get entry :path) "/tmp/second.jsonl")
-                   (cons "Second" (plist-get entry :path)))))
-              ((symbol-function 'completing-read)
-               (lambda (&rest _) "Second"))
-              ((symbol-function 'pi-coding-agent--resume-selected-session)
-               (lambda (_proc _chat-buf path)
-                 (setq selected-path path))))
-      (pi-coding-agent--resume-session-from-directory
-       'mock-proc (current-buffer) "/tmp/sessions")
-      (should (equal selected-path "/tmp/second.jsonl")))))
-
-(ert-deftest pi-coding-agent-test-session-choices-append-basename-on-collision ()
-  "Duplicate resume display strings get a path suffix; unique ones do not."
-  (let* ((first "/tmp/sessions/first.jsonl")
-         (second "/tmp/sessions/second.jsonl")
-         (unique "/tmp/sessions/unique.jsonl")
-         (choices `(("Duplicate" . ,first)
-                    ("Unique" . ,unique)
-                    ("Duplicate" . ,second))))
-    (should (equal (pi-coding-agent--uniquify-session-choices choices)
-                   `(("Duplicate · first" . ,first)
-                     ("Unique" . ,unique)
-                     ("Duplicate · second" . ,second))))))
-
-(ert-deftest pi-coding-agent-test-resume-session-duplicate-choice-selects-second-path ()
-  "Duplicate resume labels are disambiguated before path lookup."
-  (let* ((first-path "/tmp/sessions/first.jsonl")
-         (second-path "/tmp/sessions/second.jsonl")
-         (first-entry (list :path first-path))
-         (second-entry (list :path second-path))
-         (offered-choices nil)
-         (selected-path nil))
-    (cl-letf (((symbol-function 'pi-coding-agent--list-session-entries)
-               (lambda (_session-dir) (list first-entry second-entry)))
-              ((symbol-function 'pi-coding-agent--format-session-entry-choice)
-               (lambda (entry)
-                 (cons "Duplicate" (plist-get entry :path))))
-              ((symbol-function 'completing-read)
-               (lambda (_prompt collection &rest _args)
-                 (setq offered-choices (funcall collection "" nil t))
-                 "Duplicate · second"))
-              ((symbol-function 'pi-coding-agent--resume-selected-session)
-               (lambda (_proc _chat-buf path)
-                 (setq selected-path path))))
-      (pi-coding-agent--resume-session-from-directory
-       'mock-proc (current-buffer) "/tmp/sessions")
-      (should (equal offered-choices
-                     '("Duplicate · first" "Duplicate · second")))
-      (should (equal selected-path second-path)))))
 
 (ert-deftest pi-coding-agent-test-resume-selected-session-sends-process-local-remote-path ()
   "Resuming a remote Emacs session file sends process-local sessionPath."
@@ -2313,23 +2250,20 @@ replaced by the resumed or forked history."
       (delete-directory old-dir t)
       (delete-directory new-dir t))))
 
-(ert-deftest pi-coding-agent-test-resume-session-from-input-switches-session-and-rebuilds-history ()
-  "Resuming from the input buffer refreshes the linked chat and session state."
+(ert-deftest pi-coding-agent-test-resume-selected-session-switches-session-and-rebuilds-history ()
+  "Resuming a selected session refreshes chat history and session state."
   (let* ((dir (pi-coding-agent-test--make-temp-directory
                "pi-coding-agent-test-resume-happy-"))
          (session-dir (pi-coding-agent-test--make-temp-directory
                        "pi-coding-agent-test-current-sessions-"))
-         (current-session (expand-file-name "current.jsonl" session-dir))
          (target-session (expand-file-name "target.jsonl" session-dir))
          (resumed-session (expand-file-name "resumed.jsonl" session-dir))
          (shown-message nil)
-         (listed-dir nil)
+         (name-scan-path nil)
          (rpc-calls nil))
     (unwind-protect
         (pi-coding-agent-test-with-mock-session dir
           (let* ((chat-buf (get-buffer (pi-coding-agent-test--chat-buffer-name dir)))
-                 (input-buf (get-buffer
-                             (pi-coding-agent-test--input-buffer-name dir)))
                  (messages [(:role "assistant"
                              :content [(:type "text" :text "Resumed history")]
                              :timestamp 1704067200000)]))
@@ -2337,31 +2271,19 @@ replaced by the resumed or forked history."
              target-session "Resume target" (directory-file-name dir))
             (pi-coding-agent-test--seed-stale-session-rebuild-state
              chat-buf "STALE RESUME CONTENT")
-            (with-current-buffer chat-buf
-              (setq pi-coding-agent--state
-                    (plist-put pi-coding-agent--state :session-file
-                               current-session)))
-            (cl-letf (((symbol-function 'pi-coding-agent--list-session-entries)
-                       (lambda (session-dir)
-                         (setq listed-dir session-dir)
-                         (list (list :path target-session
-                                     :metadata (list :modified-time (current-time)
-                                                     :first-message "Resume target"
-                                                     :message-count 1)))))
-                      ((symbol-function 'pi-coding-agent--format-session-entry-choice)
-                       (lambda (_entry)
-                         (cons "Resume target" target-session)))
-                      ((symbol-function 'completing-read)
-                       (lambda (&rest _) "Resume target"))
-                      ((symbol-function 'pi-coding-agent--rpc-async)
+            (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
                        (lambda (_proc cmd cb)
                          (push (plist-get cmd :type) rpc-calls)
                          (pcase (plist-get cmd :type)
                            ("switch_session"
+                            (with-current-buffer chat-buf
+                              (should (pi-coding-agent--session-transition-active-p)))
                             (should (equal (plist-get cmd :sessionPath)
                                            target-session))
                             (funcall cb '(:success t :data (:cancelled :false))))
                            ("get_state"
+                            (with-current-buffer chat-buf
+                              (should (pi-coding-agent--session-transition-active-p)))
                             (funcall cb `(:success t
                                           :data (:model (:name "resumed-model")
                                                  :thinkingLevel "medium"
@@ -2372,6 +2294,8 @@ replaced by the resumed or forked history."
                                                  :messageCount 1
                                                  :pendingMessageCount 0))))
                            ("get_messages"
+                            (with-current-buffer chat-buf
+                              (should (pi-coding-agent--session-transition-active-p)))
                             (funcall cb (list :success t
                                               :data (list :messages messages))))
                            ("get_commands"
@@ -2381,22 +2305,27 @@ replaced by the resumed or forked history."
                              (format "Unexpected RPC during resume test: %S"
                                      cmd))))))
                       ((symbol-function 'pi-coding-agent--update-session-name-from-file)
-                       #'ignore)
+                       (lambda (path)
+                         (setq name-scan-path path
+                               pi-coding-agent--session-name "Resume target")
+                         '(:name "Resume target")))
                       ((symbol-function 'pi-coding-agent--refresh-header) #'ignore)
                       ((symbol-function 'message)
                        (lambda (fmt &rest args)
                          (setq shown-message (apply #'format fmt args)))))
-              (with-current-buffer input-buf
-                (pi-coding-agent-resume-session)))
+              (pi-coding-agent--resume-selected-session
+               'mock-proc chat-buf target-session))
             (with-current-buffer chat-buf
               (should (equal (plist-get pi-coding-agent--state :session-id)
                              "resumed-session-id"))
               (should (equal (plist-get pi-coding-agent--state :session-file)
                              resumed-session))
-              (should (string-match-p "Resumed history" (buffer-string))))
+              (should (equal pi-coding-agent--session-name "Resume target"))
+              (should (string-match-p "Resumed history" (buffer-string)))
+              (should-not (pi-coding-agent--session-transition-active-p)))
             (pi-coding-agent-test--assert-clean-session-rebuild
              chat-buf messages "STALE RESUME CONTENT")
-            (should (equal listed-dir session-dir))
+            (should (equal name-scan-path target-session))
             (should (equal (nreverse rpc-calls)
                            '("switch_session" "get_state" "get_messages"
                              "get_commands")))
@@ -2621,148 +2550,6 @@ replaced by the resumed or forked history."
               (pi-coding-agent-send))
             (should (equal sent-text "Forked prompt"))))
       (pi-coding-agent-test--kill-live-buffers input-buf chat-buf))))
-
-(ert-deftest pi-coding-agent-test-resume-session-skips-while-streaming ()
-  "Resume refuses to switch sessions while the current chat is busy."
-  (let* ((dir (pi-coding-agent-test--make-temp-directory
-               "pi-coding-agent-test-resume-streaming-"))
-         (shown-message nil)
-         (listed-sessions nil))
-    (unwind-protect
-        (pi-coding-agent-test-with-mock-session dir
-          (let ((chat-buf (get-buffer
-                           (pi-coding-agent-test--chat-buffer-name dir))))
-            (with-current-buffer chat-buf
-              (setq pi-coding-agent--status 'streaming))
-            (cl-letf (((symbol-function 'pi-coding-agent--get-process)
-                       (lambda () 'mock-proc))
-                      ((symbol-function 'pi-coding-agent--list-session-entries)
-                       (lambda (_dir)
-                         (setq listed-sessions t)
-                         (list (list :path "session.jsonl"))))
-                      ((symbol-function 'message)
-                       (lambda (fmt &rest args)
-                         (setq shown-message (apply #'format fmt args)))))
-              (with-current-buffer chat-buf
-                (pi-coding-agent-resume-session)))))
-      (delete-directory dir t))
-    (should-not listed-sessions)
-    (should (equal shown-message
-                   "Pi: Cannot resume while streaming"))))
-
-(ert-deftest pi-coding-agent-test-resume-session-skips-while-followup-drain-pending ()
-  "Resume refuses while a local follow-up drain is pending."
-  (let* ((dir (pi-coding-agent-test--make-temp-directory
-               "pi-coding-agent-test-resume-drain-pending-"))
-         (shown-message nil)
-         (listed-sessions nil))
-    (unwind-protect
-        (pi-coding-agent-test-with-mock-session dir
-          (let ((chat-buf (get-buffer
-                           (pi-coding-agent-test--chat-buffer-name dir))))
-            (with-current-buffer chat-buf
-              (setq pi-coding-agent--status 'idle
-                    pi-coding-agent--followup-drain-timer 'fake-drain-timer))
-            (cl-letf (((symbol-function 'pi-coding-agent--get-process)
-                       (lambda () 'mock-proc))
-                      ((symbol-function 'pi-coding-agent--list-session-entries)
-                       (lambda (_dir)
-                         (setq listed-sessions t)
-                         (list (list :path "session.jsonl"))))
-                      ((symbol-function 'message)
-                       (lambda (fmt &rest args)
-                         (setq shown-message (apply #'format fmt args)))))
-              (with-current-buffer chat-buf
-                (pi-coding-agent-resume-session)))))
-      (delete-directory dir t))
-    (should-not listed-sessions)
-    (should (equal shown-message
-                   "Pi: Cannot resume while Pi is busy"))))
-
-(ert-deftest pi-coding-agent-test-resume-session-fetches-missing-session-file ()
-  "Resume asks pi for state before listing sessions when the cache is empty."
-  (let* ((dir (pi-coding-agent-test--make-temp-directory
-               "pi-coding-agent-test-resume-no-state-"))
-         (session-dir (pi-coding-agent-test--make-temp-directory
-                       "pi-coding-agent-test-session-files-"))
-         (session-file (expand-file-name "current.jsonl" session-dir))
-         (shown-message nil)
-         (listed-dir nil)
-         (rpc-calls nil))
-    (unwind-protect
-        (pi-coding-agent-test-with-mock-session dir
-          (let ((chat-buf (get-buffer
-                           (pi-coding-agent-test--chat-buffer-name dir))))
-            (with-current-buffer chat-buf
-              (setq pi-coding-agent--status 'idle
-                    pi-coding-agent--state nil))
-            (cl-letf (((symbol-function 'pi-coding-agent--get-process)
-                       (lambda () 'mock-proc))
-                      ((symbol-function 'pi-coding-agent--rpc-async)
-                       (lambda (_proc cmd cb)
-                         (push (plist-get cmd :type) rpc-calls)
-                         (should (equal (plist-get cmd :type) "get_state"))
-                         (funcall cb `(:success t
-                                       :data (:model (:name "model")
-                                              :thinkingLevel "medium"
-                                              :isStreaming :json-false
-                                              :isCompacting :json-false
-                                              :sessionId "session-id"
-                                              :sessionFile ,session-file
-                                              :messageCount 0
-                                              :pendingMessageCount 0)))))
-                      ((symbol-function 'pi-coding-agent--list-session-entries)
-                       (lambda (session-dir)
-                         (setq listed-dir session-dir)
-                         nil))
-                      ((symbol-function 'message)
-                       (lambda (fmt &rest args)
-                         (setq shown-message (apply #'format fmt args)))))
-              (with-current-buffer chat-buf
-                (pi-coding-agent-resume-session)))))
-      (delete-directory dir t)
-      (delete-directory session-dir t))
-    (should (equal listed-dir session-dir))
-    (should (equal (nreverse rpc-calls) '("get_state")))
-    (should (equal shown-message "Pi: No previous sessions found"))))
-
-(ert-deftest pi-coding-agent-test-resume-session-reports-missing-session-file ()
-  "Resume stops clearly when pi state has no session file."
-  (let* ((dir (pi-coding-agent-test--make-temp-directory
-               "pi-coding-agent-test-resume-no-file-"))
-         (shown-message nil)
-         (listed-sessions nil))
-    (unwind-protect
-        (pi-coding-agent-test-with-mock-session dir
-          (let ((chat-buf (get-buffer
-                           (pi-coding-agent-test--chat-buffer-name dir))))
-            (with-current-buffer chat-buf
-              (setq pi-coding-agent--status 'idle
-                    pi-coding-agent--state nil))
-            (cl-letf (((symbol-function 'pi-coding-agent--get-process)
-                       (lambda () 'mock-proc))
-                      ((symbol-function 'pi-coding-agent--rpc-async)
-                       (lambda (_proc _cmd cb)
-                         (funcall cb '(:success t
-                                       :data (:model (:name "model")
-                                              :thinkingLevel "medium"
-                                              :isStreaming :json-false
-                                              :isCompacting :json-false
-                                              :sessionId "session-id"
-                                              :messageCount 0
-                                              :pendingMessageCount 0)))))
-                      ((symbol-function 'pi-coding-agent--list-session-entries)
-                       (lambda (_session-dir)
-                         (setq listed-sessions t)
-                         nil))
-                      ((symbol-function 'message)
-                       (lambda (fmt &rest args)
-                         (setq shown-message (apply #'format fmt args)))))
-              (with-current-buffer chat-buf
-                (pi-coding-agent-resume-session)))))
-      (delete-directory dir t))
-    (should-not listed-sessions)
-    (should (equal shown-message "Pi: Session file not available"))))
 
 (ert-deftest pi-coding-agent-test-fork-waits-for-local-user-echo ()
   "Fork refuses to switch sessions while a local prompt is awaiting echo."

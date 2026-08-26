@@ -6,37 +6,38 @@ Communicates with the pi CLI via JSON-over-stdio (RPC).
 
 ## Module Architecture
 
-Ten source modules with a strict dependency chain (no cycles), plus
-an optional Evil integration module:
+Ten production source modules form a dependency DAG (no cycles), plus
+an optional Evil integration module.  Direct internal `require` edges are:
 
 ```
-pi-coding-agent.el              ← entry point, autoloads
-  ├── pi-coding-agent-menu.el   ← transient menu, session management
-  ├── pi-coding-agent-input.el  ← input buffer, history, completion
-  ├── pi-coding-agent-browse.el ← session/tree browsers (magit-section UI)
-  │     └── pi-coding-agent-jsonl.el ← session scan (read-session-info),
-  │           sessions-root/session-dir munging, session_info/label
-  │           append writes, tree projection (project-session-file)
-  └── pi-coding-agent-render.el ← chat rendering, tool output
-        ├── pi-coding-agent-table.el  ← display-only table decoration
-        └── pi-coding-agent-ui.el ← shared state, faces, modes
-              ├── pi-coding-agent-core.el ← JSON/RPC protocol
-              ├── pi-coding-agent-grammars.el ← tree-sitter grammar recipes
-              └── pi-coding-agent-jsonl.el ← JSONL reading, raw tree building,
-                    display projection, tool-call formatting
-                    (requires core only; pure functions)
+pi-coding-agent.el -> menu, input, browse
+menu.el           -> jsonl, render
+input.el          -> render
+browse.el         -> core, jsonl, ui
+render.el         -> table, ui
+table.el          -> ui
+ui.el             -> core, grammars
+jsonl.el          -> core
+core.el           -> (none)
+grammars.el       -> (none)
+
+optional evil.el  -> ui, input, menu
 ```
+
+In particular, `menu -> jsonl` is direct, both browsers use `jsonl` and
+`ui`, and `ui` does **not** depend on `jsonl`.  Menu and UI only declare
+browser entry points; they do not require `browse`.  Browse similarly
+declares the menu transition functions it calls.  The top-level load order
+makes those commands available without introducing a cycle.
 
 External package dependency:
 
 - `md-ts-mode` ← tree-sitter markdown major mode used by chat buffers
   (loading `pi-coding-agent` must not globally claim unrelated Markdown files)
 
-`menu.el` and `input.el` are siblings — neither requires the other.
-They communicate through shared variables in `ui.el` (e.g., `--commands`).
-
-`table.el` and `ui.el` are siblings under `render.el`.  `table.el`
-depends on `ui.el` for visible-text extraction and scroll preservation.
+`menu.el` and `input.el` are siblings — neither requires the other.  Shared
+session state lives in `ui.el`.  `table.el` requires `ui.el` for visible-text
+extraction and scroll preservation, while `render.el` requires both.
 
 Cross-module state mutations use accessor functions defined in `ui.el`
 (e.g., `--set-process`, `--set-aborted`, `--push-followup`).  Within a
@@ -47,29 +48,30 @@ module, direct `setq` is fine.
 | File | Purpose |
 |------|---------|
 | `pi-coding-agent.el` | Entry point, autoloads, `--setup-session` |
-| `pi-coding-agent-core.el` | JSON parsing, line buffering, RPC protocol |
-| `pi-coding-agent-ui.el` | Shared state, faces, customization, modes, display primitives, header-line |
-| `pi-coding-agent-render.el` | Streaming chat rendering, tool output, fontification, diffs |
-| `pi-coding-agent-table.el` | Display-only pipe table decoration, wrapping, overlay management |
-| `pi-coding-agent-input.el` | Input history, isearch, send/abort, file/path/slash completion, queuing |
-| `pi-coding-agent-menu.el` | Transient menu, session management, model selection, commands |
-| `pi-coding-agent-browse.el` | Session and tree browsers (magit-section UI); presentation layer over `pi-coding-agent--browse-*' data seams — session side live (time-sliced disk scan via jsonl, guarded switch through menu's resume flow, rename via set_session_name or session_info append); tree side live (disk read of the linked chat's session file via jsonl projection, labels via out-of-band label append, no process needed); navigation live in Phase 4 (guards → jsonl navigation-target → ordinary-local atomic write-temp+rename rewrite where rename is the only step touching the session file → menu resume switch → input prefill → quit-when-settled, incl. tree windows via derived-mode-p; TRAMP non-atomicity and independent-writer races remain accepted/documented) |
+| `pi-coding-agent-core.el` | JSON parsing, line buffering, RPC request correlation, and process protocol |
+| `pi-coding-agent-ui.el` | Shared session/buffer state, accessors, faces, customization, chat/input modes and keymaps, header/activity UI, and local slash-command dispatch; requires core and grammars, not jsonl |
+| `pi-coding-agent-render.el` | Streaming and history rendering for user, assistant, branch-summary, and compaction messages; tool output, fontification, diffs, and deferred history table postprocessing |
+| `pi-coding-agent-table.el` | Display-only pipe table decoration, wrapping, overlay management, and resize refresh over UI visible-text/scroll seams |
+| `pi-coding-agent-input.el` | Input history/isearch, send/abort, file/path/slash completion, queuing, and local `/resume` dispatch to the session browser |
+| `pi-coding-agent-menu.el` | Transient menu; guarded new/reload/resume transitions; canonical jsonl cwd/name metadata; model, thinking, command, export, and stats actions; `r` sessions and `w` tree entries |
+| `pi-coding-agent-browse.el` | Persistent magit-section session/tree browsers: time-sliced disk session discovery, filters/search/sort/scope, guarded switching and rename; disk tree projection, filters/search, labels, and guarded navigation through an atomic local rewrite plus the menu resume flow. Browsing and labels need no live process; switching/navigation do. TRAMP non-atomicity and independent-writer races are documented constraints |
 | `pi-coding-agent-grammars.el` | Tree-sitter grammar recipes, install prompts, `M-x pi-coding-agent-install-grammars` |
-| `pi-coding-agent-jsonl.el` | JSONL session reading, raw session-tree building (pi getTree shape), RPC-style display projection, tool-call preview formatting, session discovery (sessions-root, cwd-munged session dirs, regex-first metadata scans), whole-file read→build→project composition (`project-session-file`, the tree browser's disk seam), tree navigation (`navigation-target`: pi navigateTree leaf/prefill/current rules; `navigation-lines`: byte-preserving raw-line reorder with non-chain physical order retained and the canonical ancestor chain last in logical parent order); pure functions depending only on core (browse.el consumes the session-discovery, tree-projection, and navigation halves) |
+| `pi-coding-agent-jsonl.el` | Pure core-only JSONL APIs: whole-file reading, canonical regex-first session metadata, sessions-root/cwd directory mapping, raw tree building and display projection, tool-call previews, and byte-preserving navigation target/line calculations. Production browsers consume these disk APIs rather than `get_tree`/`get_entries` RPCs |
 | `pi-coding-agent-evil.el` | Optional Evil keybindings; auto-loaded by `pi-coding-agent--maybe-load-evil-integration` when a session is set up while Evil is present. Leaf module: requires `ui`, `input`, and `menu` directly (never the top-level feature, to avoid a recursive require during auto-load). Must byte-compile and load without Evil installed |
 
 ## Test Files
 
 | File | Covers |
 |------|--------|
-| `test/pi-coding-agent-core-test.el` | Core/RPC protocol |
-| `test/pi-coding-agent-ui-test.el` | Buffer naming, modes, session dir, startup header, grammar install |
-| `test/pi-coding-agent-render-test.el` | Response display, tools, diffs |
+| `test/pi-coding-agent-core-test.el` | Core/RPC protocol, framing, request lifecycle, and JSON normalization |
+| `test/pi-coding-agent-ui-test.el` | Buffer naming/modes, session directories, direct browser key bindings, startup header, slash dispatch, and grammar install |
+| `test/pi-coding-agent-render-test.el` | Streaming/history response display, branch summaries, tools, tables, file actions, fontification, and diffs |
 | `test/pi-coding-agent-table-test.el` | Table decoration, overlays, streaming, resize |
-| `test/pi-coding-agent-input-test.el` | History, send/abort, queuing, completion |
-| `test/pi-coding-agent-menu-test.el` | Session management, transient menu, reconnect |
-| `test/pi-coding-agent-browse-test.el` | Session/tree browser helpers, rendering, point restoration; Phase 2 disk scan, chunked loading, switch guards, rename dispatch; Phase 3 tree fetch/labels; Phase 4 navigate (guards, old-format/unknown-node refusals, already-at-position/prefill-only two-ways, atomic rewrite with byte-identical failure paths, cwd pre-flight, root fork hint, permission carry-over, shape check, quit-when-settled over tree windows) |
-| `test/pi-coding-agent-jsonl-test.el` | JSONL reader, raw tree builder, projection adapter, format-tool-call, session discovery (sessions-root, dir munging, read-session-info); golden fixtures (browse-session.jsonl, browse-raw.json, browse-projected.json); Phase 4 navigation-target (user/custom rewind, self-leaf, current-position refinement) and navigation-lines (logical chain-to-end order across consecutive branch rewrites, malformed/blank byte preservation, nil cases, identity) |
+| `test/pi-coding-agent-input-test.el` | History, send/abort, queuing, completion, and local `/resume` browser routing |
+| `test/pi-coding-agent-menu-test.el` | Session transitions and cwd guards, canonical jsonl name metadata, transient browser entries, model/command actions, and reconnect |
+| `test/pi-coding-agent-browse-test.el` | Session/tree helpers, magit rendering and point restoration; asynchronous disk scans, cancellation/error states, search/filter/sort/scope, switch guards and rename; disk tree loading, labels, and navigation guards/targets, atomic rewrite failures, prefill, and settle/quit behavior |
+| `test/pi-coding-agent-jsonl-test.el` | JSONL reading, canonical session metadata, raw tree/projection and golden fixtures, tool-call formatting, session discovery, navigation targets, and byte-preserving line reordering across branches/malformed input |
+| `test/pi-coding-agent-fake-pi-test.el` | Black-box fake subprocess contract: strict framing/events, valid v3 persistence, entry/tree/message RPC projections, transactional switching, and full resume/history choreography |
 | `test/pi-coding-agent-build-test.el` | Batch helper scripts for dependency and grammar installation |
 | `test/pi-coding-agent-test.el` | Entry point / cross-module integration |
 | `test/pi-coding-agent-test-common.el` | Shared fixtures: mock-session macro, toolcall helpers, fake-pi launch helpers |
@@ -90,13 +92,15 @@ module, direct `setq` is fine.
 | `Makefile` | Build, test, lint targets |
 | `bench/pi-coding-agent-bench.el` | Table rendering benchmark harness (xvfb GUI or batch) |
 | `bench/run-bench.sh` | Table benchmark runner script; `--batch` for headless lane |
-| `bench/pi-coding-agent-reload-resume-bench.el` | Synthetic reload/resume benchmark harness |
-| `bench/fake-pi-reload-resume.py` | Fake JSON-over-stdio pi backend for reload/resume benchmarks |
+| `bench/pi-coding-agent-reload-resume-bench.el` | Synthetic reload/resume harness; the resume lane opens the real async disk-backed session browser, selects the target magit section, switches through browser RET behavior, and checks rebuilt history |
+| `bench/fake-pi-reload-resume.py` | Fake JSON-over-stdio backend for reload/resume benchmark state, switch, history, commands, and content-free traffic evidence |
 | `bench/run-reload-resume-bench.sh` | Reload/resume benchmark runner; GUI uses `xvfb-run`, `--batch` for headless lane |
 | `bench/pi-coding-agent-tool-update-bench.el` | Synthetic tool-update storm benchmark harness |
 | `bench/fake-pi-tool-update-storm.py` | Fake JSON-over-stdio pi backend emitting a tool-update storm |
 | `bench/run-tool-update-bench.sh` | Tool-update storm benchmark runner; GUI uses `xvfb-run`, `--batch` for headless lane |
 | `bench/fixtures/tables.md` | Sample pipe tables used by the table benchmark |
+| `test/support/fake_pi.py` | Deterministic JSONL RPC subprocess double with scenario-driven events, valid v3 persistence, inspection RPCs, and transactional session switching |
+| `test/support/fake-pi-contract.md` | Maintainer-facing wire, scenario/event/tool, v3 record, projection, and switch contract for `fake_pi.py` |
 | `scripts/check.sh` | Pre-commit hook: byte-compile + lint + tests |
 | `scripts/pi-coding-agent-build.el` | Shared batch helpers for dependency and grammar installation |
 | `scripts/install-deps.el` | Batch script: install required Emacs package dependencies |

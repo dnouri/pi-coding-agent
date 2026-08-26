@@ -31,27 +31,25 @@
 ;;   - Session Browser: find, filter, switch sessions (like TUI /resume)
 ;;   - Tree Browser: navigate conversation tree, label nodes (like TUI /tree)
 ;;
-;; Presentation is final; the data layer is phased.  Phase 2 landed the
-;; session side: `pi-coding-agent--browse-load-sessions' scans real
-;; session files from disk (time-sliced), switching routes through
-;; menu.el's guarded resume flow, and rename works for any session via
-;; an out-of-band session_info append.  Phase 3 landed the tree side's
-;; data layer: `pi-coding-agent--browse-load-tree' reads the linked
-;; chat's session file from disk (labels appended out-of-band fold back
-;; on every read), and `pi-coding-agent--browse-set-label' appends a
-;; `label' entry the same way — neither needs a live pi process.  The
-;; tree shows the last PERSISTED turn, so it lags an in-flight turn;
-;; refresh manually with `g'.  Phase 4 landed navigation:
-;; `pi-coding-agent--browse-navigate' guards, computes the target
-;; (jsonl navigation-target), atomically rewrites an ordinary local
+;; Session data comes from time-sliced scans of JSONL files on disk,
+;; and conversation trees are projected from the linked chat's JSONL
+;; session file.  Browsing does not need a live pi process, but the tree
+;; shows the last persisted turn, so it can lag an in-flight turn;
+;; refresh manually with `g'.  Tree labels are appended out-of-band and
+;; fold back into every disk read.
+;;
+;; Session switching uses menu.el's guarded resume flow.  Renaming the
+;; linked current session asks pi to append session_info; renaming any
+;; other session appends session_info out-of-band.  Tree navigation
+;; guards the linked session, process, and loaded file; computes the
+;; target from fresh JSONL data; atomically rewrites an ordinary local
 ;; session file so the target's ancestor chain ends it (write-temp +
-;; rename — the rename is the only step that touches the file),
-;; switches the chat onto the rewritten file via menu's resume flow,
-;; prefills the input
-;; buffer with the target's re-edit text, and dismisses the browser
-;; window once the transition settles.  No auto-reopen after navigate
-;; (refresh with `g'); no fork fallback — rewinding before the first
-;; message points at the chat's fork command instead.
+;; rename — the rename is the only step that touches the file); resumes
+;; the rewritten file through menu; prefills the input buffer with the
+;; target's re-edit text; and dismisses the browser window once the
+;; transition settles.  Navigation does not auto-reopen the browser
+;; (refresh with `g'); rewinding before the first message points at the
+;; chat's fork command instead.
 
 ;;; Code:
 
@@ -993,7 +991,7 @@ appended."
 (defun pi-coding-agent-session-browser-rename ()
   "Rename the session at point.
 Prompt once; empty or whitespace-only input cancels with a message
-\(names cannot be cleared in Phase 2, matching the TUI).  Dispatch on
+\(names cannot be cleared, matching the TUI).  Dispatch on
 current-vs-other session (see
 `pi-coding-agent--browse-session-file-matches-p'):
   - Current session: `pi-coding-agent-set-session-name' RPC, then
@@ -1094,8 +1092,7 @@ fallback included."
 
 (defun pi-coding-agent--session-browser-fetch-and-render ()
   "Fetch sessions and re-render the session browser.
-Phase 2 relaxation: sessions are read from disk, so no live pi process
-is required (the tree browser keeps its process guard until Phase 3).
+Sessions are read from disk, so no live pi process is required.
 
 The point anchor is captured before the loading-state render — that
 render destroys the session sections, so without carrying the anchor
@@ -1679,16 +1676,17 @@ overflow the Lisp stack."
             (setq frames (cdr frames)))
           result)))))
 
-;;;; Data Layer Seams (session side live; tree side stubbed)
+;;;; Disk-Backed Data Layer Seams
 
 (defun pi-coding-agent--browse-current-session-directory ()
   "Return the session directory for the \"current\" scope, or nil.
-Resolution order: the menu-supplied session list directory (from the
-linked chat buffer's state), then the munged stable session directory
-of the linked chat buffer — rooted on that directory's own host when
-remote — then the munged project directory; the last works with no
-session at all.  Signals when resolution itself fails."
-  (or (pi-coding-agent--session-list-directory)
+Resolution order: the optional menu-supplied session list directory
+when menu.el is loaded, then the munged stable session directory of the
+linked chat buffer — rooted on that directory's own host when remote —
+then the munged project directory; the last works with no session at
+all.  Signals when resolution itself fails."
+  (or (and (fboundp 'pi-coding-agent--session-list-directory)
+           (pi-coding-agent--session-list-directory))
       (when-let ((chat-buf pi-coding-agent--chat-buffer))
         (and (buffer-live-p chat-buf)
              (let ((cwd (pi-coding-agent--chat-session-directory chat-buf)))
@@ -1789,14 +1787,12 @@ sessions: …\"."
 
 (defun pi-coding-agent--tree-browser-chat-session-file ()
   "Return the linked chat buffer's current session file, or nil.
-A live `pi-coding-agent--chat-buffer' link whose state plist carries a
-normalized :session-file — the same key Phase 2's rename guard
-already trusts (populated at startup via get_state
---apply-state-response, TRAMP-prefixed for Emacs).  The file
-persists after process death, so tree fetches and labels keep working
-with no live pi process.  Nil covers both a dead link and a chat
-whose session file does not exist yet (it is created on the first
-assistant reply)."
+A live `pi-coding-agent--chat-buffer' link supplies the normalized
+:session-file from its state plist (populated at startup via get_state
+--apply-state-response and TRAMP-prefixed for Emacs).  The file persists
+after process death, so tree fetches and labels keep working with no
+live pi process.  Nil covers both a dead link and a chat whose session
+file does not exist yet (it is created on the first assistant reply)."
   (when-let ((chat-buf pi-coding-agent--chat-buffer))
     (when (buffer-live-p chat-buf)
       (with-current-buffer chat-buf
@@ -1809,17 +1805,14 @@ assistant reply)."
 TREE is a vector of projected root nodes in the browse node dialect,
 LEAF-ID the projected leaf entry id, and MESSAGE an error string or
 nil on success — the same shape as the session side's (ITEMS ERROR)
-callback.  SEAM CHANGE (Phase 3): the callback used to receive
-\\(TREE LEAF-ID\\) with every failure folded into nils; it now takes a
-third MESSAGE argument so callers can render precise error states
-instead of a generic \"no tree\".
+callback.  The third MESSAGE argument lets callers render precise
+error states instead of a generic \"no tree\".
 
 The tree comes from the linked chat's session file on DISK —
-`pi-coding-agent-jsonl-project-session-file' — never an RPC get_tree:
-labels appended out-of-band fold back on every disk read (under RPC
-they would vanish on each refresh until a heavy rebind), Phase 4
-navigation rewrites this same file, and no process is needed — the
-state :session-file key persists after process death.  The tree shows
+`pi-coding-agent-jsonl-project-session-file' — never an RPC get_tree.
+Labels appended out-of-band fold back on every disk read, navigation
+rewrites this same file, and no process is needed — the state
+:session-file key persists after process death.  The tree shows
 the last PERSISTED turn, so it lags an in-flight turn; refresh
 manually with \\[pi-coding-agent-browse-refresh].
 
@@ -2002,7 +1995,7 @@ navigateTree without a navigate RPC:
     (`--tree-find-node', `--tree-node-preview', truncated to 60;
     \"Pi: Navigated\" without a preview), then
     `pi-coding-agent--browse-quit-when-settled';
-15. no auto-reopen of the browser (V15) — refresh with `g'.
+15. no auto-reopen of the browser — refresh with `g'.
 
 On ordinary local files this guard/read/rewrite path is synchronous and
 does not yield back to Emacs, so only an independent writer can stale
@@ -2088,7 +2081,7 @@ cross-module writer coordination."
   "Message the navigate success for NODE-ID from the cached tree.
 The preview comes from `pi-coding-agent--tree-find-node' and
 `pi-coding-agent--tree-node-preview' over the browser's cached tree
-with no refetch (V15), truncated to 60; without a preview the bare
+with no refetch, truncated to 60; without a preview the bare
 \"Pi: Navigated\"."
   (let* ((node (when (vectorp pi-coding-agent--tree-browser-tree)
                  (pi-coding-agent--tree-find-node
@@ -2211,14 +2204,13 @@ longer reflects."
 
 (defun pi-coding-agent--tree-browser-fetch-and-render ()
   "Fetch tree and re-render the tree browser.
-Phase 3: the tree is read from the linked chat's session file on disk,
-so no live pi process is required — the Phase 0 no-process guard is
-gone.  The seam callback reports (TREE LEAF-ID MESSAGE): a non-nil
-MESSAGE renders as an error state with a zero visible count; on
-success `pi-coding-agent--tree-browser-loaded-file' records the file
-the FETCH read (resolved here, before the deferred read, so a chat
-session switch mid-read leaves the labeler's stale guard comparing
-against the tree actually displayed), and nil on error states.
+The tree is read from the linked chat's session file on disk, so no
+live pi process is required.  The callback reports (TREE LEAF-ID
+MESSAGE): a non-nil MESSAGE renders as an error state with a zero
+visible count.  On success, `pi-coding-agent--tree-browser-loaded-file'
+records the file resolved before the deferred read, so a chat session
+switch mid-read leaves the label and navigation guards comparing
+against the tree actually displayed; it is nil on error states.
 
 The point anchor is captured before the loading-state render — that
 render destroys the node sections, so without carrying the anchor
@@ -2273,7 +2265,7 @@ cycle's final render."
 ;;;; Tree Browser Refresh Integration
 
 (defun pi-coding-agent-browse-refresh ()
-  "Refresh the current browse buffer from the server."
+  "Refresh the current browse buffer from disk."
   (interactive)
   (cond
    ((derived-mode-p 'pi-coding-agent-session-browser-mode)

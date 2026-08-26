@@ -1782,6 +1782,30 @@ end-of-line conversion; otherwise return decoded text."
 
 ;;;; Phase 2: Disk Scan and Chunked Loading
 
+(ert-deftest pi-coding-agent-test-browse-current-session-directory-without-menu ()
+  "Fall back to the munged current-project directory without menu.el."
+  (let ((saved-function
+         (symbol-function 'pi-coding-agent--session-list-directory))
+        (sandbox (make-temp-file "pi-browse-current-" t)))
+    (unwind-protect
+        (let ((agent-root (expand-file-name "agent" sandbox))
+              (project (expand-file-name "project" sandbox)))
+          (make-directory agent-root)
+          (make-directory project)
+          (fmakunbound 'pi-coding-agent--session-list-directory)
+          (let ((default-directory (file-name-as-directory project))
+                (pi-coding-agent--chat-buffer nil)
+                (process-environment (copy-sequence process-environment)))
+            (setenv "PI_CODING_AGENT_DIR" agent-root)
+            (should
+             (equal
+              (pi-coding-agent--browse-current-session-directory)
+              (pi-coding-agent-jsonl-session-dir-for-cwd
+               default-directory)))))
+      (fset 'pi-coding-agent--session-list-directory saved-function)
+      (when (file-directory-p sandbox)
+        (delete-directory sandbox t)))))
+
 (ert-deftest pi-coding-agent-test-scan-discovers-tree ()
   "--browse-load-sessions scans the sessions tree from disk.
 scope=all finds every munged --…-- directory under the sessions root,
