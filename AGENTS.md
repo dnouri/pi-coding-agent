@@ -182,12 +182,14 @@ event, then observes production one-shot cooling timers and routed scroll
 heartbeats without enforcing timing thresholds.  Its runner deliberately uses
 `-Q`: slice/root timings are structural diagnostics, zero root calls is valid,
 and these results must not be cited as evidence that md-ts root cost was
-reduced.  Exact normal-init GUI replay is the performance-fidelity evidence.
+reduced.
 Table fixtures live in `bench/fixtures/tables.md`.  Reload/resume artifacts are
 written under `tmp/reload-resume-bench/`, tool-update artifacts under
-`tmp/tool-update-bench/`, and dedicated cooling target artifacts under
-`tmp/agent-end-cooling-bench/{gui,batch,smoke}/` by default, so those public
-lanes do not overwrite one another.
+`tmp/tool-update-bench/`, and agent-end-cooling artifacts under
+`tmp/agent-end-cooling-bench/{gui,batch}/` by default (the runner picks that
+directory per scenario and lane when no `--out-dir` is given; the dedicated
+smoke target writes `smoke/`), so those public lanes do not overwrite one
+another.
 
 ## Linting
 

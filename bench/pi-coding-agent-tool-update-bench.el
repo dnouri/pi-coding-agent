@@ -16,10 +16,10 @@
 ;; counts via advice on `pi-coding-agent--tool-block-replace-body' and
 ;; `pi-coding-agent--display-tool-end' (the environment-independent
 ;; coalescing metric).  The agent-end-cooling scenario reuses the same fake
-;; process and runner to queue a 90-overlay cohort at final agent_end, observe
-;; real one-shot cooling callbacks, and route scroll heartbeats through unread
-;; command events.  All content is synthetic; no private session files are
-;; read.
+;; process and runner to queue the `PI_TU_BENCH_FILL_*'-sized tool cohort at
+;; final agent_end, observe real one-shot cooling callbacks, and route scroll
+;; heartbeats through unread command events.  All content is synthetic; no
+;; private session files are read.
 ;;
 ;; Run with:
 ;;
@@ -40,9 +40,8 @@
 ;;
 ;; The runner deliberately uses `-Q'.  Cooling slice/root timings in this lane
 ;; are structural diagnostics, and zero tree-root calls is a valid result.
-;; They must not be cited as evidence that md-ts root cost was reduced.  An
-;; exact normal-init GUI replay is the performance-fidelity evidence for that
-;; claim; this benchmark proves deferred scheduling and final correctness.
+;; They must not be cited as evidence that md-ts root cost was reduced; this
+;; benchmark proves deferred scheduling and final correctness only.
 
 ;;; Code:
 
@@ -368,12 +367,6 @@ how expensive each render is on the host.")
               lines))
       (nreverse lines))))
 
-(defun pi-coding-agent-tu-bench--semantic-hash ()
-  "Return SHA-256 of the current cooling semantic sentinel projection."
-  (secure-hash 'sha256
-               (string-join
-                (pi-coding-agent-tu-bench--semantic-lines) "\n")))
-
 (defun pi-coding-agent-tu-bench--expected-semantic-lines ()
   "Return exact semantic sentinel lines expected from the cooling fixture."
   (append
@@ -434,88 +427,100 @@ how expensive each render is on the host.")
         (setq pi-coding-agent-tu-bench--agent-end-filter row)))
     value))
 
+(defun pi-coding-agent-tu-bench--time-display-event (orig event type)
+  "Call the real display-event handler ORIG with EVENT, timed as TYPE.
+Append (TYPE . elapsed-ms) to the event log and return a plist with
+:VALUE, :END, and :ELAPSED-MS.  Observation only: the production
+handler runs unmodified, with no delays or state overrides."
+  (let* ((start (float-time))
+         (value (funcall orig event))
+         (end (float-time)))
+    (push (cons type (* 1000.0 (- end start)))
+          pi-coding-agent-tu-bench--event-log)
+    (list :value value :end end :elapsedMs (* 1000.0 (- end start)))))
+
+(defun pi-coding-agent-tu-bench--cooling-state-counts ()
+  "Return the shared deferred-cooling state counts for the current buffer.
+The agent_end boundary observation (before and after the real handler)
+and the settled final state both read these fields through this one
+helper, so the two views cannot drift apart.  Pure observation."
+  (list :hotTailBoundary
+        (and (markerp pi-coding-agent--hot-tail-start)
+             (marker-position pi-coding-agent--hot-tail-start))
+        :queueLength (length pi-coding-agent--tool-cooling-queue)
+        :timer (and pi-coding-agent--tool-cooling-timer t)
+        :coldTools (length (pi-coding-agent-tu-bench--cold-tool-metadata))
+        :toolOverlays (length (pi-coding-agent-tu-bench--tool-overlays))
+        :liveRegistry
+        (if (hash-table-p pi-coding-agent--live-tool-blocks)
+            (hash-table-count pi-coding-agent--live-tool-blocks)
+          0)
+        :currentOverlays
+        (pi-coding-agent-tu-bench--overlay-count-for-id
+         pi-coding-agent-tu-bench-cooling-live-id)))
+
+(defun pi-coding-agent-tu-bench--semantic-summary ()
+  "Return (LINE-COUNT . SHA-256) of the current semantic projection."
+  (let ((lines (pi-coding-agent-tu-bench--semantic-lines)))
+    (cons (length lines)
+          (secure-hash 'sha256 (string-join lines "\n")))))
+
 (defun pi-coding-agent-tu-bench--around-handle-event (orig event)
   "Around advice recording handling time for display EVENT.
 Calls ORIG with EVENT and appends to the benchmark event log."
   (let ((type (or (plist-get event :type) "unknown")))
     (if (and (equal type "agent_end")
              (pi-coding-agent-tu-bench--cooling-scenario-p))
-        (let* ((boundary-before
-                (and (markerp pi-coding-agent--hot-tail-start)
-                     (marker-position pi-coding-agent--hot-tail-start)))
-               (queue-before (length pi-coding-agent--tool-cooling-queue))
-               (timer-before (and pi-coding-agent--tool-cooling-timer t))
-               (cold-before
-                (length (pi-coding-agent-tu-bench--cold-tool-metadata)))
-               (overlays-before
-                (length (pi-coding-agent-tu-bench--tool-overlays)))
+        (let* ((before (pi-coding-agent-tu-bench--cooling-state-counts))
                (collapsed-before
                 (pi-coding-agent-tu-bench--collapsed-tool-count))
-               (live-before
-                (if (hash-table-p pi-coding-agent--live-tool-blocks)
-                    (hash-table-count pi-coding-agent--live-tool-blocks)
-                  0))
-               (current-before
-                (pi-coding-agent-tu-bench--overlay-count-for-id
-                 pi-coding-agent-tu-bench-cooling-live-id))
                (gc-before gcs-done)
                (gc-time-before gc-elapsed)
-               (start (float-time))
-               (pi-coding-agent-tu-bench--tree-root-phase "agent_end")
-               (pi-coding-agent-tu-bench--tree-root-count 0)
-               (pi-coding-agent-tu-bench--tree-root-ms 0.0)
-               (pi-coding-agent-tu-bench--tree-root-max-ms 0.0)
-               value end elapsed tree-row)
-          (setq value (funcall orig event)
-                end (float-time)
-                elapsed (* 1000.0 (- end start))
-                tree-row (pi-coding-agent-tu-bench--tree-root-row))
-          (push (cons type elapsed) pi-coding-agent-tu-bench--event-log)
-          (setq pi-coding-agent-tu-bench--agent-end-time end
-                pi-coding-agent-tu-bench--drain-start-time end
-                pi-coding-agent-tu-bench--agent-end-observation
-                (list
-                 :wallMs elapsed
-                 :filterId pi-coding-agent-tu-bench--current-filter-id
-                 :boundaryBefore boundary-before
-                 :boundaryAfter
-                 (and (markerp pi-coding-agent--hot-tail-start)
-                      (marker-position pi-coding-agent--hot-tail-start))
-                 :queueBefore queue-before
-                 :queueAfter (length pi-coding-agent--tool-cooling-queue)
-                 :timerBefore timer-before
-                 :timerAfter (and pi-coding-agent--tool-cooling-timer t)
-                 :coldBefore cold-before
-                 :coldAfter
-                 (length (pi-coding-agent-tu-bench--cold-tool-metadata))
-                 :toolOverlaysBefore overlays-before
-                 :toolOverlaysAfter
-                 (length (pi-coding-agent-tu-bench--tool-overlays))
-                 :collapsedToolOverlaysBefore collapsed-before
-                 :liveRegistryBefore live-before
-                 :liveRegistryAfter
-                 (if (hash-table-p pi-coding-agent--live-tool-blocks)
-                     (hash-table-count pi-coding-agent--live-tool-blocks)
-                   0)
-                 :currentOverlayBefore current-before
-                 :currentOverlayAfter
-                 (pi-coding-agent-tu-bench--overlay-count-for-id
-                  pi-coding-agent-tu-bench-cooling-live-id)
-                 :semanticLinesAfter
-                 (length (pi-coding-agent-tu-bench--semantic-lines))
-                 :semanticHashAfter
-                 (pi-coding-agent-tu-bench--semantic-hash)
-                 :gcs (- gcs-done gc-before)
-                 :gcMs (* 1000.0 (- gc-elapsed gc-time-before))
-                 :treeRoots tree-row))
-          value)
-      (let ((start (float-time)))
-        (prog1 (funcall orig event)
-          (let ((end (float-time)))
-            (push (cons type (* 1000.0 (- end start)))
-                  pi-coding-agent-tu-bench--event-log)
-            (when (equal type "agent_end")
-              (setq pi-coding-agent-tu-bench--agent-end-time end))))))))
+               timed tree-row)
+          (let ((pi-coding-agent-tu-bench--tree-root-phase "agent_end")
+                (pi-coding-agent-tu-bench--tree-root-count 0)
+                (pi-coding-agent-tu-bench--tree-root-ms 0.0)
+                (pi-coding-agent-tu-bench--tree-root-max-ms 0.0))
+            (setq timed (pi-coding-agent-tu-bench--time-display-event
+                         orig event type)
+                  tree-row (pi-coding-agent-tu-bench--tree-root-row)))
+          (let* ((after (pi-coding-agent-tu-bench--cooling-state-counts))
+                 (semantic (pi-coding-agent-tu-bench--semantic-summary)))
+            (setq pi-coding-agent-tu-bench--agent-end-time
+                  (plist-get timed :end)
+                  pi-coding-agent-tu-bench--drain-start-time
+                  (plist-get timed :end)
+                  pi-coding-agent-tu-bench--agent-end-observation
+                  (list
+                   :wallMs (plist-get timed :elapsedMs)
+                   :filterId pi-coding-agent-tu-bench--current-filter-id
+                   :boundaryBefore (plist-get before :hotTailBoundary)
+                   :boundaryAfter (plist-get after :hotTailBoundary)
+                   :queueBefore (plist-get before :queueLength)
+                   :queueAfter (plist-get after :queueLength)
+                   :timerBefore (plist-get before :timer)
+                   :timerAfter (plist-get after :timer)
+                   :coldBefore (plist-get before :coldTools)
+                   :coldAfter (plist-get after :coldTools)
+                   :toolOverlaysBefore (plist-get before :toolOverlays)
+                   :toolOverlaysAfter (plist-get after :toolOverlays)
+                   :collapsedToolOverlaysBefore collapsed-before
+                   :liveRegistryBefore (plist-get before :liveRegistry)
+                   :liveRegistryAfter (plist-get after :liveRegistry)
+                   :currentOverlayBefore (plist-get before :currentOverlays)
+                   :currentOverlayAfter (plist-get after :currentOverlays)
+                   :semanticLinesAfter (car semantic)
+                   :semanticHashAfter (cdr semantic)
+                   :gcs (- gcs-done gc-before)
+                   :gcMs (* 1000.0 (- gc-elapsed gc-time-before))
+                   :treeRoots tree-row))
+            (plist-get timed :value)))
+      (let ((timed (pi-coding-agent-tu-bench--time-display-event
+                    orig event type)))
+        (when (equal type "agent_end")
+          (setq pi-coding-agent-tu-bench--agent-end-time
+                (plist-get timed :end)))
+        (plist-get timed :value)))))
 
 (defun pi-coding-agent-tu-bench--around-cooling-slice
     (orig buffer generation)
@@ -1225,7 +1230,9 @@ Each row is a plist with :type :count :totalMs :meanMs and :maxMs."
   (if (not (buffer-live-p chat-buf))
       (list :bufferLive :json-false :parser parser-state)
     (with-current-buffer chat-buf
-      (let* ((metadata (pi-coding-agent-tu-bench--cold-tool-metadata))
+      (let* ((counts (pi-coding-agent-tu-bench--cooling-state-counts))
+             (semantic (pi-coding-agent-tu-bench--semantic-summary))
+             (metadata (pi-coding-agent-tu-bench--cold-tool-metadata))
              (tool-overlays (pi-coding-agent-tu-bench--tool-overlays))
              (current
               (seq-find
@@ -1234,20 +1241,16 @@ Each row is a plist with :type :count :totalMs :meanMs and :maxMs."
                          overlay)
                         pi-coding-agent-tu-bench-cooling-live-id))
                tool-overlays))
-             (boundary
-              (and (markerp pi-coding-agent--hot-tail-start)
-                   (marker-position pi-coding-agent--hot-tail-start)))
-             (semantic-lines
-              (pi-coding-agent-tu-bench--semantic-lines))
+             (boundary (plist-get counts :hotTailBoundary))
              (window (get-buffer-window chat-buf t)))
         (list
          :bufferLive t
-         :coldTools (length metadata)
+         :coldTools (plist-get counts :coldTools)
          :coldToolNames
          (pi-coding-agent-tu-bench--tool-name-counts metadata)
          :pathBearingColdTools
          (cl-count-if (lambda (entry) (plist-get entry :path)) metadata)
-         :toolOverlays (length tool-overlays)
+         :toolOverlays (plist-get counts :toolOverlays)
          :toolOverlayIds
          (vconcat
           (sort (delq nil
@@ -1280,19 +1283,16 @@ Each row is a plist with :type :count :totalMs :meanMs and :maxMs."
           (lambda (overlay)
             (overlay-get overlay 'pi-coding-agent-table-display))
           (overlays-in (point-min) (point-max)))
-         :liveToolRegistry
-         (if (hash-table-p pi-coding-agent--live-tool-blocks)
-             (hash-table-count pi-coding-agent--live-tool-blocks)
-           0)
+         :liveToolRegistry (plist-get counts :liveRegistry)
          :pendingToolOverlay
          (pi-coding-agent-tu-bench--json-bool
           pi-coding-agent--pending-tool-overlay)
-         :queueLength (length pi-coding-agent--tool-cooling-queue)
+         :queueLength (plist-get counts :queueLength)
          :timerOwned
          (pi-coding-agent-tu-bench--json-bool
-          pi-coding-agent--tool-cooling-timer)
-         :semanticLineCount (length semantic-lines)
-         :semanticHash (pi-coding-agent-tu-bench--semantic-hash)
+          (plist-get counts :timer))
+         :semanticLineCount (car semantic)
+         :semanticHash (cdr semantic)
          :expectedSemanticHash
          (pi-coding-agent-tu-bench--expected-semantic-hash)
          :window (pi-coding-agent-tu-bench--capture-window-state)
@@ -2188,7 +2188,7 @@ the storm scenarios retain their existing prompt-to-agent_end settle path."
       (insert "Timing guidance is diagnostic only: `<100 ms` target, `>250 ms` concern, `>1 s` severe.  No timing threshold fails the run.\n\n")
       (when cooling
         (insert "## Measurement-fidelity caveat\n\n")
-        (insert "This runner uses `-Q`.  Slice and tree-root timings are structural diagnostics, and zero root calls is valid.  Do not cite this benchmark as evidence that md-ts root cost was reduced; an exact normal-init GUI replay is the performance-fidelity evidence.\n\n")
+        (insert "This runner uses `-Q`.  Slice and tree-root timings are structural diagnostics, and zero root calls is valid.  Do not cite this benchmark as evidence that md-ts root cost was reduced; it proves deferred scheduling and final correctness only.\n\n")
         (let* ((agent-end pi-coding-agent-tu-bench--agent-end-observation)
                (filter pi-coding-agent-tu-bench--agent-end-filter)
                (drain (plist-get metrics :drain))

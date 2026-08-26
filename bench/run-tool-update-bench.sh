@@ -10,6 +10,10 @@
 #   ./bench/run-tool-update-bench.sh --scenarios storm,smoke # comma-separated scenarios
 #   ./bench/run-tool-update-bench.sh --out-dir tmp/tu-bench  # write artifacts elsewhere
 #
+# Default out-dir: tmp/tool-update-bench, or tmp/agent-end-cooling-bench/<lane>
+# (gui|batch) when every selected scenario starts with agent-end-cooling;
+# relative --out-dir paths anchor at the project root.
+#
 # The primary lane uses xvfb-run for GUI Emacs: the measured cost is buffer
 # mutation plus redisplay/fontification, which batch mode cannot reproduce.
 # Batch numbers are a faster secondary lane and CI artifact generator.
@@ -22,11 +26,11 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 BATCH=0
 REPS=3
-OUT_DIR="$PROJECT_DIR/tmp/tool-update-bench"
+OUT_DIR=""
 SCENARIOS=()
 
 usage() {
-    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+    awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"
 }
 
 require_arg() {
@@ -75,9 +79,25 @@ if [[ ${#SCENARIOS[@]} -eq 0 ]]; then
     SCENARIOS=(storm)
 fi
 
+if [[ -z "$OUT_DIR" ]]; then
+    all_cooling=1
+    for scenario in "${SCENARIOS[@]}"; do
+        if [[ "$scenario" != agent-end-cooling* ]]; then
+            all_cooling=0
+            break
+        fi
+    done
+    if [[ "$all_cooling" = 1 ]]; then
+        if [[ "$BATCH" = "1" ]]; then lane="batch"; else lane="gui"; fi
+        OUT_DIR="$PROJECT_DIR/tmp/agent-end-cooling-bench/$lane"
+    else
+        OUT_DIR="$PROJECT_DIR/tmp/tool-update-bench"
+    fi
+fi
+
 case "$OUT_DIR" in
     /*) ;;
-    *) OUT_DIR="$PWD/$OUT_DIR" ;;
+    *) OUT_DIR="$PROJECT_DIR/$OUT_DIR" ;;
 esac
 while [[ "$OUT_DIR" != "/" && "$OUT_DIR" == */ ]]; do
     OUT_DIR="${OUT_DIR%/}"
@@ -398,8 +418,11 @@ if cooling_rows:
             print(f"{scenario:<24} no successful runs")
             summary_lines.append(f"| {scenario} | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | 0/{len(subset_all)} |")
             continue
-        median = lambda key: statistics.median(float(row[key]) for row in subset)
-        maximum = lambda key: max(float(row[key]) for row in subset)
+        def median(key: str) -> float:
+            return statistics.median(float(row[key]) for row in subset)
+
+        def maximum(key: str) -> float:
+            return max(float(row[key]) for row in subset)
         callbacks = int(maximum("drainCallbacks"))
         gcs = int(maximum("drainGcs"))
         cold = int(maximum("coldTools"))
