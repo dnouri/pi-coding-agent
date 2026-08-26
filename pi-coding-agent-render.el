@@ -3333,10 +3333,8 @@ Live tool blocks that are still executing are excluded."
        (overlay-get overlay 'pi-coding-agent-header-end)))
 
 (defun pi-coding-agent--completed-tool-overlay-before-p (overlay boundary)
-  "Return non-nil when tool OVERLAY is completed and before BOUNDARY.
-OVERLAY must still belong to the current buffer."
+  "Return non-nil when tool OVERLAY is completed and before BOUNDARY."
   (and (pi-coding-agent--completed-tool-overlay-p overlay)
-       (eq (overlay-buffer overlay) (current-buffer))
        (< (overlay-start overlay) boundary)))
 
 (defun pi-coding-agent--tool-overlays-in-reverse-order (overlays)
@@ -3514,14 +3512,11 @@ from leaving a retry loop or wedged timer slot."
   "Arm one deferred tool-cooling slice when work lacks an owner."
   (when (and pi-coding-agent--tool-cooling-queue
              (not pi-coding-agent--tool-cooling-timer))
-    (condition-case error-data
-        (setq pi-coding-agent--tool-cooling-timer
-              (run-at-time pi-coding-agent--tool-cooling-delay nil
-                           #'pi-coding-agent--run-tool-cooling-slice
-                           (current-buffer)
-                           pi-coding-agent--tool-cooling-generation))
-      (error
-       (pi-coding-agent--fail-tool-cooling error-data)))))
+    (setq pi-coding-agent--tool-cooling-timer
+          (run-at-time pi-coding-agent--tool-cooling-delay nil
+                       #'pi-coding-agent--run-tool-cooling-slice
+                       (current-buffer)
+                       pi-coding-agent--tool-cooling-generation))))
 
 (defun pi-coding-agent--queue-tool-cooling-outside-hot-tail ()
   "Merge the current outside-hot-tail cohort into deferred cooling.
@@ -3550,12 +3545,16 @@ new body end.  Positions at or after OLD-END shift by the actual length delta."
    ((< position old-end)
     (+ old-start
        (min (- position old-start)
-            (max 0 (- new-end old-start)))))
+            (- new-end old-start))))
    (t
     (+ position (- new-end old-end)))))
 
 (defun pi-coding-agent--capture-tool-cooling-view ()
-  "Capture buffer point and visible-window positions before tool cooling."
+  "Capture buffer point and visible-window positions before tool cooling.
+Unlike `pi-coding-agent--with-scroll-preservation', which restores unmapped
+`window-point' and is valid for append-only inserts, cooling rewrites
+mid-buffer ranges, so positions and window starts must be mapped through
+the replacement."
   (list
    :point (point)
    :windows
@@ -3641,6 +3640,8 @@ Timer ownership is cleared before input checks, mutation, or rearming."
                      overlay)))
                 (pi-coding-agent--schedule-tool-cooling)))
           (quit
+           ;; C-g is user intent: pending cooling is discarded silently and
+           ;; the quit resignals; errors, by contrast, fail loudly below.
            (pi-coding-agent--cancel-tool-cooling)
            (signal (car error-data) (cdr error-data)))
           (error

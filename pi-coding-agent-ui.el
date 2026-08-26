@@ -1834,7 +1834,9 @@ larger window when the selected one cannot be split."
 (defmacro pi-coding-agent--with-scroll-preservation (&rest body)
   "Execute BODY preserving scroll for windows not following output.
 Windows at buffer end will scroll to show new content.
-Windows where user scrolled up stay in place."
+Windows where user scrolled up stay in place.
+Valid for append-only inserts; for mid-buffer rewrites like tool cooling, see
+`pi-coding-agent--capture-tool-cooling-view' in pi-coding-agent-render.el."
   (declare (indent 0) (debug t))
   `(let* ((windows (get-buffer-window-list (current-buffer) nil t))
           (following (cl-remove-if-not #'pi-coding-agent--window-following-p windows))
