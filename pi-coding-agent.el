@@ -6,7 +6,7 @@
 ;; Maintainer: Daniel Nouri <daniel.nouri@gmail.com>
 ;; URL: https://github.com/dnouri/pi-coding-agent
 ;; Keywords: ai llm ai-pair-programming tools
-;; Version: 2.8.0
+;; Version: 2.9.0
 ;; Package-Requires: ((emacs "29.1") (transient "0.9.0") (magit-section "4.0.0") (md-ts-mode "0.3.0") (markdown-table-wrap "0.2.0"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
