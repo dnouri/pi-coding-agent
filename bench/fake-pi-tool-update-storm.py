@@ -41,8 +41,11 @@ by default to keep benchmark wall time practical).
 
 Configuration comes from ``PI_TU_BENCH_*`` environment variables, with CLI
 flags taking precedence; ``--size smoke`` selects a tiny fast preset before
-other overrides apply.  The Emacs harness reads the same environment to
-derive expected event counts, so a runner must export matching values.
+other overrides apply.  The ``agent-end-cooling`` scenarios reuse the fill
+controls to build a completed-tool cohort, then emit a boundary user message,
+a hot-tail table, one still-live tool, and ``agent_end``.  The Emacs harness
+reads the same environment to derive expected event counts, so a runner must
+export matching values.
 
 The optional ``--log-file`` records command names, event counts, and
 configuration only; it never records message content.
@@ -289,6 +292,55 @@ def fill_tool_call(block_index: int, tool: str, output_lines: int) -> tuple[Json
     )
 
 
+def cooling_fill_tool_call(
+    block_index: int, tool: str, output_lines: int
+) -> tuple[JsonDict, str]:
+    """Return a realistic long-or-short cooling fixture tool result."""
+    tool_call_id = f"call-cooling-{block_index:04d}"
+    sentinel = f"COOLING-SEMANTIC {tool_call_id}"
+    # Keep a deterministic minority short while the rest exercise collapsed
+    # previews.  Edit results are short by construction; every ninth other
+    # result is short as well.
+    lines = 2 if tool == "edit" or block_index % 9 == 0 else output_lines
+    body = "\n".join(
+        [sentinel]
+        + [
+            f"cooling fixture {tool} block {block_index:04d} line {line:02d}: "
+            "deterministic representative output"
+            for line in range(1, max(1, lines))
+        ]
+    )
+    if tool == "bash":
+        return (
+            {"command": f"benchmark-scan --cohort {block_index:04d}"},
+            body,
+        )
+    if tool == "read":
+        return (
+            {
+                "path": f"synthetic/cooling/src/file-{block_index:04d}.py",
+                "offset": block_index + 1,
+            },
+            body,
+        )
+    if tool == "write":
+        return (
+            {
+                "path": f"synthetic/cooling/out/file-{block_index:04d}.txt",
+                "content": body,
+            },
+            f"Wrote cooling fixture {block_index:04d}",
+        )
+    return (
+        {
+            "path": f"synthetic/cooling/src/file-{block_index:04d}.py",
+            "oldText": f"old cooling text {block_index:04d}",
+            "newText": f"new cooling text {block_index:04d}",
+        },
+        body,
+    )
+
+
 def fill_plan(config: JsonDict) -> list[str]:
     """Return fill tool names interleaved round-robin for realism."""
     remaining = {
@@ -306,10 +358,21 @@ def fill_plan(config: JsonDict) -> list[str]:
     return plan
 
 
-def emit_fill_block(block_index: int, tool: str, output_lines: int) -> list[JsonDict]:
+def emit_fill_block(
+    block_index: int, tool: str, output_lines: int, *, cooling: bool = False
+) -> list[JsonDict]:
     """Emit one completed fill tool exchange and return its messages."""
-    tool_call_id = f"call-fill-{block_index:04d}"
-    arguments, result_text = fill_tool_call(block_index, tool, output_lines)
+    tool_call_id = (
+        f"call-cooling-{block_index:04d}"
+        if cooling
+        else f"call-fill-{block_index:04d}"
+    )
+    if cooling:
+        arguments, result_text = cooling_fill_tool_call(
+            block_index, tool, output_lines
+        )
+    else:
+        arguments, result_text = fill_tool_call(block_index, tool, output_lines)
     thinking = fill_thinking(block_index)
     thinking_block = {"type": "thinking", "thinking": thinking}
     tool_call = {
@@ -441,6 +504,115 @@ def final_result_text(tool_id: str, tool_index: int, turns: int) -> str:
         f"STORM-FINAL-RESULT {tool_id}\n"
         f"Subagent finished after {turns} synthetic turns.\n"
         f"Summary: investigated synthetic area {tool_index}; all checks passed."
+    )
+
+
+def run_agent_end_cooling_scenario(
+    config: JsonDict, log_file: Path | None
+) -> None:
+    """Emit a completed cohort and cross its hot-tail boundary at agent_end."""
+    emitted = {
+        "tool_execution_start": 0,
+        "tool_execution_update": 0,
+        "tool_execution_end": 0,
+    }
+    messages: list[JsonDict] = []
+
+    write_json({"type": "agent_start"})
+    for block_index, tool in enumerate(fill_plan(config)):
+        messages.extend(
+            emit_fill_block(
+                block_index,
+                tool,
+                int(config["fill_output_lines"]),
+                cooling=True,
+            )
+        )
+        emitted["tool_execution_start"] += 1
+        emitted["tool_execution_end"] += 1
+
+    # This real user-message event resets the Assistant heading.  The final
+    # Assistant heading is therefore the one-turn hot tail when agent_end
+    # advances the production boundary.
+    boundary_text = (
+        "COOLING-WINDOW-SENTINEL keep this logical scroll anchor stable "
+        "while older tool bodies cool."
+    )
+    boundary_message: JsonDict = {
+        "role": "user",
+        "content": [{"type": "text", "text": boundary_text}],
+        "timestamp": TIMESTAMP_BASE_MS + 200_000,
+    }
+    write_json({"type": "message_start", "message": boundary_message})
+    write_json({"type": "message_end", "message": boundary_message})
+    messages.append(boundary_message)
+
+    hot_text = (
+        "The current tool and this adjacent table belong to the hot tail.\n\n"
+        "| marker | state | deterministic note |\n"
+        "|---|---|---|\n"
+        "| COOLING-SEMANTIC-HOT-TABLE | hot | remains decorated and outside "
+        "the completed cooling cohort |\n"
+    )
+    live_call: JsonDict = {
+        "type": "toolCall",
+        "id": "call-cooling-live",
+        "name": "bash",
+        "arguments": {
+            "command": "cooling-live --sentinel COOLING-SEMANTIC-LIVE"
+        },
+    }
+    assistant_message: JsonDict = {
+        "role": "assistant",
+        "content": [{"type": "text", "text": hot_text}, live_call],
+        "timestamp": TIMESTAMP_BASE_MS + 200_001,
+        "stopReason": "toolUse",
+    }
+    assistant_start = {
+        **assistant_message,
+        "content": [],
+        "stopReason": "pending",
+    }
+    write_json({"type": "message_start", "message": assistant_start})
+    write_message_update(
+        {"type": "text_delta", "contentIndex": 0, "delta": hot_text}
+    )
+    write_message_update({"type": "text_end", "contentIndex": 0})
+    write_message_update({"type": "toolcall_start", "contentIndex": 1})
+    write_message_update(
+        {
+            "type": "toolcall_delta",
+            "contentIndex": 1,
+            "delta": json.dumps(
+                live_call["arguments"], separators=(",", ":")
+            ),
+        }
+    )
+    write_message_update(
+        {"type": "toolcall_end", "contentIndex": 1, "toolCall": live_call}
+    )
+    write_json({"type": "message_end", "message": assistant_message})
+    messages.append(assistant_message)
+
+    write_json(
+        {
+            "type": "tool_execution_start",
+            "toolCallId": live_call["id"],
+            "toolName": live_call["name"],
+            "args": live_call["arguments"],
+        }
+    )
+    emitted["tool_execution_start"] += 1
+
+    # Deliberately omit tool_execution_end.  Production agent_end finalization
+    # makes this block completed, but its position remains inside the new hot
+    # tail and must not enter the cooling queue.
+    write_json(
+        {"type": "agent_end", "messages": messages, "willRetry": False}
+    )
+    log_line(
+        log_file,
+        {"event": "agent-end-cooling-complete", "emitted": emitted},
     )
 
 
@@ -619,6 +791,7 @@ def resolve_config(args: argparse.Namespace) -> JsonDict:
     size = args.size or os_environ_get("PI_TU_BENCH_SIZE") or "full"
     defaults = dict(SMOKE_DEFAULTS if size == "smoke" else FULL_DEFAULTS)
     config: JsonDict = {
+        "scenario": os_environ_get("PI_TU_BENCH_SCENARIO") or "storm",
         "fill_bash": env_int("PI_TU_BENCH_FILL_BASH", int(defaults["fill_bash"])),
         "fill_read": env_int("PI_TU_BENCH_FILL_READ", int(defaults["fill_read"])),
         "fill_write": env_int("PI_TU_BENCH_FILL_WRITE", int(defaults["fill_write"])),
@@ -683,8 +856,13 @@ def main(argv: list[str] | None = None) -> int:
             respond(command, data={"text": ""})
         elif command_type == "prompt":
             respond(command)
+            target = (
+                run_agent_end_cooling_scenario
+                if str(config["scenario"]).startswith("agent-end-cooling")
+                else run_scenario
+            )
             storm_thread = threading.Thread(
-                target=run_scenario, args=(config, log_file), daemon=True
+                target=target, args=(config, log_file), daemon=True
             )
             storm_thread.start()
         elif command_type in ("abort", "steer", "set_thinking_level"):

@@ -1098,6 +1098,7 @@ which asks upfront before any buffers are touched."
   (when (derived-mode-p 'pi-coding-agent-chat-mode)
     (pi-coding-agent--cancel-followup-drain-timer)
     (pi-coding-agent--cancel-tool-update-flush)
+    (pi-coding-agent--cancel-tool-cooling)
     (pi-coding-agent--invalidate-prompt-start-wait)
     (pi-coding-agent--set-activity-phase "idle" 'teardown t)
     (dolist (proc (delete-dups (delq nil (list pi-coding-agent--process
@@ -1349,7 +1350,7 @@ Updates buffer-local state and renders display updates."
       (plist-get pi-coding-agent--state :messages))
      (pi-coding-agent--display-agent-end)
      (pi-coding-agent--update-hot-tail-boundary)
-     (pi-coding-agent--cool-completed-tool-blocks-outside-hot-tail))
+     (pi-coding-agent--queue-tool-cooling-outside-hot-tail))
     ("auto_retry_start"
      (pi-coding-agent--cancel-followup-drain-timer)
      (pi-coding-agent--display-retry-start event))
@@ -1448,8 +1449,10 @@ This removes completed/pending tool overlays, diff overlays, and lightweight
 cold-tool metadata before buffer reset or history rebuild, then clears keyed
 live-tool state, cached execution args, pending coalesced tool updates, and
 the compatibility pending overlay slot so buffer and render state stay
-consistent.  Tree-sitter overlays are left alone."
+consistent.  Pending deferred cooling is invalidated first.  Tree-sitter
+overlays are left alone."
   (pi-coding-agent--cancel-tool-update-flush)
+  (pi-coding-agent--cancel-tool-cooling)
   (remove-overlays (point-min) (point-max) 'pi-coding-agent-tool-block t)
   (remove-overlays (point-min) (point-max) 'pi-coding-agent-diff-overlay t)
   (let ((inhibit-read-only t))
@@ -3279,9 +3282,29 @@ command falls back to `outline-cycle' for turn folding."
 ;;
 ;; Completed tool blocks outside the hot tail (older than the most
 ;; recent `pi-coding-agent-hot-tail-turn-count' headed turns) are
-;; cooled into plain text.  The cold form keeps the header, visible
-;; preview, and lightweight authoritative target metadata, but drops
-;; overlays, buttons, full-content payloads, and syntax-tagged rendering.
+;; cooled into plain text.  Live agent-end handling queues one block per
+;; timer turn; history replay keeps synchronous cooling after invalidating
+;; stale queued work.  The cold form keeps the header, visible preview, and
+;; lightweight authoritative target metadata, but drops overlays, buttons,
+;; full-content payloads, and syntax-tagged rendering.
+
+(defconst pi-coding-agent--tool-cooling-delay 0.05
+  "Seconds between deferred rewrites of completed tool blocks.
+A small nonzero delay gives input and redisplay a chance to run between
+expensive Markdown-changing rewrites.  Internal constant, not a user option.")
+
+(defvar-local pi-coding-agent--tool-cooling-queue nil
+  "Completed tool overlays awaiting deferred cold-history rewrites.
+Candidates are ordered from the end of the buffer backward and are
+revalidated immediately before each rewrite.")
+
+(defvar-local pi-coding-agent--tool-cooling-timer nil
+  "The one owned one-shot timer for deferred tool cooling, or nil.")
+
+(defvar-local pi-coding-agent--tool-cooling-generation 0
+  "Generation owning the current deferred tool-cooling queue.
+Cancellation increments this value so already-dispatched callbacks cannot
+act on rebuilt history or a newer queue.")
 
 (defun pi-coding-agent--ensure-cold-tool-property-nonsticky ()
   "Keep cold tool authority from spreading across insertion boundaries."
@@ -3308,6 +3331,36 @@ Live tool blocks that are still executing are excluded."
        (not (eq overlay pi-coding-agent--pending-tool-overlay))
        (not (pi-coding-agent--tool-overlay-live-p overlay))
        (overlay-get overlay 'pi-coding-agent-header-end)))
+
+(defun pi-coding-agent--completed-tool-overlay-before-p (overlay boundary)
+  "Return non-nil when tool OVERLAY is completed and before BOUNDARY."
+  (and (pi-coding-agent--completed-tool-overlay-p overlay)
+       (< (overlay-start overlay) boundary)))
+
+(defun pi-coding-agent--tool-overlays-in-reverse-order (overlays)
+  "Return a copy of tool OVERLAYS ordered from buffer end backward."
+  (sort (copy-sequence overlays)
+        (lambda (a b)
+          (> (overlay-start a) (overlay-start b)))))
+
+(defun pi-coding-agent--tool-cooling-boundary ()
+  "Return the current usable hot-tail boundary, or nil.
+A boundary at `point-min' leaves the whole buffer hot."
+  (when (and (markerp pi-coding-agent--hot-tail-start)
+             (eq (marker-buffer pi-coding-agent--hot-tail-start)
+                 (current-buffer))
+             (> (marker-position pi-coding-agent--hot-tail-start) (point-min)))
+    (marker-position pi-coding-agent--hot-tail-start)))
+
+(defun pi-coding-agent--completed-tool-overlays-outside-hot-tail ()
+  "Return completed tool overlays before the current hot-tail boundary.
+The result is ordered from the end of the buffer backward."
+  (when-let* ((boundary (pi-coding-agent--tool-cooling-boundary)))
+    (pi-coding-agent--tool-overlays-in-reverse-order
+     (seq-filter
+      (lambda (overlay)
+        (pi-coding-agent--completed-tool-overlay-before-p overlay boundary))
+      (overlays-in (point-min) boundary)))))
 
 (defun pi-coding-agent--tool-overlay-visible-body (overlay)
   "Return the currently visible body text for completed tool OVERLAY.
@@ -3416,30 +3469,183 @@ diff annotations."
   "Cool the given completed tool OVERLAYS.
 Blocks are processed from the end of the buffer backward so region
 rewrites do not disturb remaining candidates."
-  (let* ((candidates (seq-filter #'pi-coding-agent--completed-tool-overlay-p
-                                 overlays))
-         (sorted (sort (copy-sequence candidates)
-                       (lambda (a b)
-                         (> (overlay-start a) (overlay-start b))))))
+  (let ((sorted
+         (pi-coding-agent--tool-overlays-in-reverse-order
+          (seq-filter #'pi-coding-agent--completed-tool-overlay-p overlays))))
     (pi-coding-agent--with-scroll-preservation
       (save-excursion
         (dolist (overlay sorted)
           (pi-coding-agent--cool-tool-overlay overlay))))))
 
 (defun pi-coding-agent--cool-completed-tool-blocks-outside-hot-tail ()
-  "Cool completed tool blocks that fall before the hot-tail boundary.
-Uses the same `pi-coding-agent--hot-tail-start' marker that tables
-use for resize scope, so there is one unified hot-tail concept."
-  (when (and (markerp pi-coding-agent--hot-tail-start)
-             (> (marker-position pi-coding-agent--hot-tail-start) (point-min)))
-    (let* ((boundary (marker-position pi-coding-agent--hot-tail-start))
-           (cold-overlays
-            (seq-filter (lambda (ov)
-                          (and (pi-coding-agent--completed-tool-overlay-p ov)
-                               (< (overlay-start ov) boundary)))
-                        (overlays-in (point-min) boundary))))
-      (when cold-overlays
-        (pi-coding-agent--cool-completed-tool-blocks cold-overlays)))))
+  "Synchronously cool completed tool blocks before the hot-tail boundary.
+Uses the same `pi-coding-agent--hot-tail-start' marker that tables use for
+resize scope.  History replay uses this synchronous path after cancelling
+stale deferred work; live agent_end handling uses the deferred queue."
+  (when-let* ((cold-overlays
+              (pi-coding-agent--completed-tool-overlays-outside-hot-tail)))
+    (pi-coding-agent--cool-completed-tool-blocks cold-overlays)))
+
+(defun pi-coding-agent--cancel-tool-cooling ()
+  "Cancel and invalidate deferred completed-tool cooling.
+The operation is idempotent with respect to owned work.  Its generation
+always advances so a callback already dispatched by Emacs becomes stale."
+  (when (timerp pi-coding-agent--tool-cooling-timer)
+    (cancel-timer pi-coding-agent--tool-cooling-timer))
+  (setq pi-coding-agent--tool-cooling-timer nil
+        pi-coding-agent--tool-cooling-queue nil
+        pi-coding-agent--tool-cooling-generation
+        (1+ pi-coding-agent--tool-cooling-generation)))
+
+(defun pi-coding-agent--fail-tool-cooling (error-data)
+  "Fail closed after deferred cooling ERROR-DATA.
+Owned work is invalidated before reporting the failure, preventing an error
+from leaving a retry loop or wedged timer slot."
+  (pi-coding-agent--cancel-tool-cooling)
+  (display-warning
+   'pi-coding-agent
+   (format "Deferred tool block cooling failed: %s"
+           (error-message-string error-data))
+   :error))
+
+(defun pi-coding-agent--schedule-tool-cooling ()
+  "Arm one deferred tool-cooling slice when work lacks an owner."
+  (when (and pi-coding-agent--tool-cooling-queue
+             (not pi-coding-agent--tool-cooling-timer))
+    (setq pi-coding-agent--tool-cooling-timer
+          (run-at-time pi-coding-agent--tool-cooling-delay nil
+                       #'pi-coding-agent--run-tool-cooling-slice
+                       (current-buffer)
+                       pi-coding-agent--tool-cooling-generation))))
+
+(defun pi-coding-agent--queue-tool-cooling-outside-hot-tail ()
+  "Merge the current outside-hot-tail cohort into deferred cooling.
+Existing candidates are deduplicated and retain one buffer-local timer owner.
+Newly eligible overlays take their normal reverse-buffer order; stale queued
+entries remain at the end for execution-time revalidation."
+  (let ((candidates
+         (pi-coding-agent--completed-tool-overlays-outside-hot-tail))
+        merged)
+    (dolist (overlay (append candidates pi-coding-agent--tool-cooling-queue))
+      (unless (memq overlay merged)
+        (push overlay merged)))
+    (setq pi-coding-agent--tool-cooling-queue (nreverse merged))
+    (pi-coding-agent--schedule-tool-cooling)))
+
+(defun pi-coding-agent--map-tool-cooling-position
+    (position old-start old-end new-end)
+  "Map POSITION through one tool-body replacement.
+OLD-START and OLD-END delimit the old half-open body range; NEW-END is the
+new body end and the body start is unchanged.  Positions before the body stay
+fixed.  Positions in the old body retain their relative offset, clamped to the
+new body end.  Positions at or after OLD-END shift by the actual length delta."
+  (cond
+   ((< position old-start)
+    position)
+   ((< position old-end)
+    (+ old-start
+       (min (- position old-start)
+            (- new-end old-start))))
+   (t
+    (+ position (- new-end old-end)))))
+
+(defun pi-coding-agent--capture-tool-cooling-view ()
+  "Capture buffer point and visible-window positions before tool cooling.
+Unlike `pi-coding-agent--with-scroll-preservation', which restores unmapped
+`window-point' and is valid for append-only inserts, cooling rewrites
+mid-buffer ranges, so positions and window starts must be mapped through
+the replacement."
+  (list
+   :point (point)
+   :windows
+   (mapcar
+    (lambda (window)
+      (list :window window
+            :following (pi-coding-agent--window-following-p window)
+            :start (window-start window)
+            :point (window-point window)))
+    (get-buffer-window-list (current-buffer) nil t))))
+
+(defun pi-coding-agent--restore-tool-cooling-view
+    (view old-start old-end new-end)
+  "Restore cooling VIEW through the body replacement bounds.
+OLD-START and OLD-END are the old body bounds and NEW-END is its new end.
+Every live window still showing the current buffer gets mapped start and point;
+a window that was following the tail instead gets point at the new buffer end.
+The buffer's own point is mapped too."
+  (let ((map-position
+         (lambda (position)
+           (pi-coding-agent--map-tool-cooling-position
+            position old-start old-end new-end))))
+    ;; Restore buffer point first.  A selected chat window restored below then
+    ;; establishes the same mapped point, or point-max when it was following.
+    (goto-char (funcall map-position (plist-get view :point)))
+    (dolist (window-state (plist-get view :windows))
+      (let ((window (plist-get window-state :window)))
+        (when (and (window-live-p window)
+                   (eq (window-buffer window) (current-buffer)))
+          (set-window-start
+           window
+           (funcall map-position (plist-get window-state :start))
+           t)
+          (set-window-point
+           window
+           (if (plist-get window-state :following)
+               (point-max)
+             (funcall map-position
+                      (plist-get window-state :point)))))))))
+
+(defun pi-coding-agent--cool-tool-overlay-preserving-view (overlay)
+  "Cool completed tool OVERLAY while mapping visible view positions.
+The header stays in place, so only the replaced body bounds participate in the
+mapping.  Return the result of `pi-coding-agent--cool-tool-overlay'."
+  (let* ((header-end-marker
+          (overlay-get overlay 'pi-coding-agent-header-end))
+         (old-start (and (markerp header-end-marker)
+                         (marker-position header-end-marker)))
+         (old-end (overlay-end overlay)))
+    (if (not (and old-start old-end (<= old-start old-end)))
+        (pi-coding-agent--cool-tool-overlay overlay)
+      (let ((view (pi-coding-agent--capture-tool-cooling-view))
+            ;; The primitive deletes at OLD-START, then inserts there.  This
+            ;; rear-advancing marker stays at the deletion boundary and moves
+            ;; across exactly the newly inserted body.
+            (new-end-marker (copy-marker old-start t)))
+        (unwind-protect
+            (when (pi-coding-agent--cool-tool-overlay overlay)
+              (pi-coding-agent--restore-tool-cooling-view
+               view old-start old-end (marker-position new-end-marker))
+              t)
+          (set-marker new-end-marker nil))))))
+
+(defun pi-coding-agent--run-tool-cooling-slice (buffer generation)
+  "Cool at most one queued tool overlay in BUFFER for GENERATION.
+This is the ordinary one-shot timer callback.  Current input wins without
+queue progress.  Otherwise one candidate is removed, revalidated as completed,
+current-buffer-owned, and still outside the live hot-tail boundary, then passed
+to the unchanged cold rewrite primitive with cooling-specific view mapping.
+Timer ownership is cleared before input checks, mutation, or rearming."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (= generation pi-coding-agent--tool-cooling-generation)
+        (setq pi-coding-agent--tool-cooling-timer nil)
+        (condition-case error-data
+            (if (input-pending-p)
+                (pi-coding-agent--schedule-tool-cooling)
+              (when-let* ((overlay (pop pi-coding-agent--tool-cooling-queue)))
+                (when-let* ((boundary (pi-coding-agent--tool-cooling-boundary)))
+                  (when (pi-coding-agent--completed-tool-overlay-before-p
+                         overlay boundary)
+                    (pi-coding-agent--cool-tool-overlay-preserving-view
+                     overlay)))
+                (pi-coding-agent--schedule-tool-cooling)))
+          (quit
+           ;; C-g is user intent: pending cooling is discarded silently and
+           ;; the quit resignals; errors, by contrast, fail loudly below.
+           (pi-coding-agent--cancel-tool-cooling)
+           (signal (car error-data) (cdr error-data)))
+          (error
+           (pi-coding-agent--fail-tool-cooling error-data)))))))
 
 ;;;; File Navigation
 

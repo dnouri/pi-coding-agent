@@ -6,8 +6,13 @@
 #   ./bench/run-tool-update-bench.sh --batch                 # batch mode (secondary lane)
 #   ./bench/run-tool-update-bench.sh -c 3                    # 3 repetitions per scenario
 #   ./bench/run-tool-update-bench.sh --scenario smoke -c 1   # cheap correctness smoke
+#   ./bench/run-tool-update-bench.sh --scenario agent-end-cooling -c 1
 #   ./bench/run-tool-update-bench.sh --scenarios storm,smoke # comma-separated scenarios
 #   ./bench/run-tool-update-bench.sh --out-dir tmp/tu-bench  # write artifacts elsewhere
+#
+# Default out-dir: tmp/tool-update-bench, or tmp/agent-end-cooling-bench/<lane>
+# (gui|batch) when every selected scenario starts with agent-end-cooling;
+# relative --out-dir paths anchor at the project root.
 #
 # The primary lane uses xvfb-run for GUI Emacs: the measured cost is buffer
 # mutation plus redisplay/fontification, which batch mode cannot reproduce.
@@ -21,11 +26,11 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 BATCH=0
 REPS=3
-OUT_DIR="$PROJECT_DIR/tmp/tool-update-bench"
+OUT_DIR=""
 SCENARIOS=()
 
 usage() {
-    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+    awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"
 }
 
 require_arg() {
@@ -74,9 +79,25 @@ if [[ ${#SCENARIOS[@]} -eq 0 ]]; then
     SCENARIOS=(storm)
 fi
 
+if [[ -z "$OUT_DIR" ]]; then
+    all_cooling=1
+    for scenario in "${SCENARIOS[@]}"; do
+        if [[ "$scenario" != agent-end-cooling* ]]; then
+            all_cooling=0
+            break
+        fi
+    done
+    if [[ "$all_cooling" = 1 ]]; then
+        if [[ "$BATCH" = "1" ]]; then lane="batch"; else lane="gui"; fi
+        OUT_DIR="$PROJECT_DIR/tmp/agent-end-cooling-bench/$lane"
+    else
+        OUT_DIR="$PROJECT_DIR/tmp/tool-update-bench"
+    fi
+fi
+
 case "$OUT_DIR" in
     /*) ;;
-    *) OUT_DIR="$PWD/$OUT_DIR" ;;
+    *) OUT_DIR="$PROJECT_DIR/$OUT_DIR" ;;
 esac
 while [[ "$OUT_DIR" != "/" && "$OUT_DIR" == */ ]]; do
     OUT_DIR="${OUT_DIR%/}"
@@ -130,6 +151,38 @@ PI_TU_BENCH_SEED=20240817
 PI_TU_BENCH_TIMEOUT_SECONDS=240
 EOF
             ;;
+        agent-end-cooling-smoke)
+            cat <<'EOF'
+PI_TU_BENCH_FILL_BASH=6
+PI_TU_BENCH_FILL_READ=2
+PI_TU_BENCH_FILL_WRITE=1
+PI_TU_BENCH_FILL_EDIT=1
+PI_TU_BENCH_FILL_OUTPUT_LINES=12
+PI_TU_BENCH_UPDATES=0
+PI_TU_BENCH_PARALLEL_TOOLS=0
+PI_TU_BENCH_GAP_SCALE=0.0
+PI_TU_BENCH_SEED=20240817
+PI_TU_BENCH_HOT_TAIL_TURNS=1
+PI_TU_BENCH_COMMAND_INTERVAL_MS=100
+PI_TU_BENCH_TIMEOUT_SECONDS=30
+EOF
+            ;;
+        agent-end-cooling)
+            cat <<'EOF'
+PI_TU_BENCH_FILL_BASH=72
+PI_TU_BENCH_FILL_READ=10
+PI_TU_BENCH_FILL_WRITE=4
+PI_TU_BENCH_FILL_EDIT=4
+PI_TU_BENCH_FILL_OUTPUT_LINES=18
+PI_TU_BENCH_UPDATES=0
+PI_TU_BENCH_PARALLEL_TOOLS=0
+PI_TU_BENCH_GAP_SCALE=0.0
+PI_TU_BENCH_SEED=20240817
+PI_TU_BENCH_HOT_TAIL_TURNS=1
+PI_TU_BENCH_COMMAND_INTERVAL_MS=100
+PI_TU_BENCH_TIMEOUT_SECONDS=90
+EOF
+            ;;
         *) echo "Unknown scenario: $1" >&2; exit 1 ;;
     esac
 }
@@ -138,16 +191,17 @@ for scenario in "${SCENARIOS[@]}"; do
     scenario_env "$scenario" >/dev/null
 done
 
+export PI_TU_BENCH_PROJECT_DIR="$PROJECT_DIR"
 EMACS_INIT=(
     -Q -L "$PROJECT_DIR"
-    --eval "(setq inhibit-startup-screen t)"
-    --eval "(require 'package)"
-    --eval "(package-initialize)"
-    --eval "(setq load-path (cons (expand-file-name \"$PROJECT_DIR\") load-path))"
+    --eval '(setq inhibit-startup-screen t)'
+    --eval '(require (quote package))'
+    --eval '(package-initialize)'
+    --eval '(let ((project (getenv "PI_TU_BENCH_PROJECT_DIR"))) (unless project (error "PI_TU_BENCH_PROJECT_DIR is unset")) (setq load-path (cons (expand-file-name project) load-path)))'
     -l "$SCRIPT_DIR/pi-coding-agent-tool-update-bench.el"
 )
 
-printf '=== pi-coding-agent Tool-Update Storm Benchmarks ===\n'
+printf '=== pi-coding-agent Tool-Update Benchmarks ===\n'
 printf 'Project: %s\n' "$PROJECT_DIR"
 if [[ "$BATCH" = "1" ]]; then
     MODE="batch"
@@ -194,7 +248,7 @@ for scenario in "${SCENARIOS[@]}"; do
         else
             if ! xvfb-run -a env GDK_BACKEND=x11 PATH="$PATH" \
                 emacs --geometry 120x40 "${EMACS_INIT[@]}" \
-                --eval "(let ((standard-output #'external-debugging-output)) (kill-emacs (if (pi-coding-agent-tu-bench-run) 0 1)))" \
+                --eval '(let ((standard-output (function external-debugging-output))) (kill-emacs (pi-coding-agent-tu-bench--exit-status (pi-coding-agent-tu-bench-run))))' \
                 </dev/null > "$run_dir/stdout.log" 2> "$run_dir/stderr.log"; then
                 cat "$run_dir/stdout.log"
                 cat "$run_dir/stderr.log" >&2
@@ -220,11 +274,26 @@ reps = sys.argv[3]
 scenarios_arg = sys.argv[4]
 rows: list[dict[str, Any]] = []
 
+
+def as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 for result_path in sorted(out.glob("*/iter-*/result.json")):
     with result_path.open(encoding="utf-8") as handle:
         result = json.load(handle)
-    probe = result.get("probe", {})
-    renders = result.get("renders", {})
+    probe = as_dict(result.get("probe"))
+    renders = as_dict(result.get("renders"))
+    cooling = as_dict(result.get("cooling"))
+    drain = as_dict(cooling.get("drain"))
+    final = as_dict(cooling.get("final"))
+    command_stats = as_dict(as_dict(cooling.get("commands")).get("stats"))
+    slices_value = cooling.get("slices")
+    slices = slices_value if isinstance(slices_value, list) else []
+    agent_end = as_dict(result.get("agentEnd"))
+    agent_end_filter = as_dict(
+        as_dict(result.get("processFilters")).get("agentEnd")
+    )
     update_stats = next(
         (row for row in result.get("eventStats", [])
          if row.get("type") == "tool_execution_update"),
@@ -235,19 +304,36 @@ for result_path in sorted(out.glob("*/iter-*/result.json")):
         for check in result.get("checks", [])
         if check.get("ok") is not True
     ]
+    derived_ok = result.get("settled") is True and not failed_checks
+    if result.get("ok") is not derived_ok:
+        failed_checks.append("result-ok-verdict-mismatch")
     rows.append({
         "scenario": result.get("scenario"),
         "iteration": result.get("iteration"),
-        "ok": result.get("ok") is True and not failed_checks,
-        "wallMs": result.get("wallMs"),
-        "updateMeanMs": update_stats.get("meanMs"),
-        "updateMaxMs": update_stats.get("maxMs"),
-        "replaceBodyCalls": renders.get("replaceBody", {}).get("total"),
-        "displayToolEndCalls": renders.get("displayToolEnd", {}).get("total"),
-        "probeP95Ms": probe.get("p95Ms"),
-        "probeMaxMs": probe.get("maxMs"),
-        "probeOver100Ms": probe.get("over100Ms"),
-        "probeOver250Ms": probe.get("over250Ms"),
+        "ok": result.get("ok") is True and derived_ok and not failed_checks,
+        "settled": result.get("settled") is True,
+        "coolingScenario": str(result.get("scenario", "")).startswith("agent-end-cooling"),
+        "wallMs": result.get("wallMs") or 0,
+        "agentEndMs": agent_end.get("wallMs") or 0,
+        "agentEndFilterMs": agent_end_filter.get("wallMs") or 0,
+        "drainWallMs": drain.get("wallMs") or 0,
+        "drainActiveMs": drain.get("activeMs") or 0,
+        "drainCallbacks": drain.get("callbacks") or 0,
+        "sliceMaxMs": max((float(row.get("wallMs") or 0) for row in slices), default=0),
+        "drainGcs": drain.get("gcs") or 0,
+        "updateMeanMs": update_stats.get("meanMs") or 0,
+        "updateMaxMs": update_stats.get("maxMs") or 0,
+        "replaceBodyCalls": renders.get("replaceBody", {}).get("total") or 0,
+        "displayToolEndCalls": renders.get("displayToolEnd", {}).get("total") or 0,
+        "probeP95Ms": probe.get("p95Ms") or 0,
+        "probeMaxMs": probe.get("maxMs") or 0,
+        "probeOver100Ms": probe.get("over100Ms") or 0,
+        "probeOver250Ms": probe.get("over250Ms") or 0,
+        "commandLatenessP95Ms": command_stats.get("latenessP95Ms") or 0,
+        "commandLatenessMaxMs": command_stats.get("latenessMaxMs") or 0,
+        "commandDurationMaxMs": command_stats.get("durationMaxMs") or 0,
+        "coldTools": final.get("coldTools") or 0,
+        "hotToolOverlays": final.get("toolOverlays") or 0,
         "bufferBytes": result.get("bufferBytes"),
         "overlays": result.get("overlays"),
         "seconds": result.get("seconds"),
@@ -264,48 +350,98 @@ if rows:
         writer.writerows(rows)
 
 summary_lines: list[str] = []
-summary_lines.append("# pi-coding-agent tool-update storm benchmark summary")
+summary_lines.append("# pi-coding-agent tool-update benchmark summary")
 summary_lines.append("")
 summary_lines.append("Synthetic deterministic workload only; no private session content is used.")
 summary_lines.append("")
 summary_lines.append(f"- Mode: `{mode}`")
 summary_lines.append(f"- Repetitions per scenario: `{reps}`")
 summary_lines.append(f"- Scenarios: `{scenarios_arg}`")
-summary_lines.append("- Timing thresholds: `none` (correctness failures still fail the run)")
-summary_lines.append("")
-summary_lines.append("| scenario | wall ms (median) | update mean ms | update max ms | replace-body calls | tool-end renders | probe p95 ms | probe max ms | >100 ms late | >250 ms late | successful runs |")
-summary_lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+summary_lines.append(
+    "- Timing policy: diagnostics only (`<100 ms` target, `>250 ms` concern, "
+    "`>1 s` severe); correctness failures alone fail the run"
+)
 
 print("\nsummary")
-print("scenario    wall-med  upd-mean  upd-max  replace-body  tool-end  probe-p95  probe-max  >100ms  >250ms  ok")
-print("--------    --------  --------  -------  ------------  --------  ---------  ---------  ------  ------  --")
-
 failed = [row for row in rows if not row["ok"]]
-for scenario in sorted({str(row["scenario"]) for row in rows}):
-    subset_all = [row for row in rows if str(row["scenario"]) == scenario]
-    subset = [row for row in subset_all if row["ok"]]
-    if not subset:
-        print(f"{scenario:<11} no successful runs")
-        summary_lines.append(f"| {scenario} | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | 0/{len(subset_all)} |")
-        continue
-    walls = sorted(float(row["wallMs"]) for row in subset)
-    upd_mean = statistics.median(float(row["updateMeanMs"]) for row in subset)
-    upd_max = max(float(row["updateMaxMs"]) for row in subset)
-    replace_body = max(int(row["replaceBodyCalls"]) for row in subset)
-    tool_end = max(int(row["displayToolEndCalls"]) for row in subset)
-    p95 = statistics.median(float(row["probeP95Ms"]) for row in subset)
-    pmax = max(float(row["probeMaxMs"]) for row in subset)
-    over100 = max(int(row["probeOver100Ms"]) for row in subset)
-    over250 = max(int(row["probeOver250Ms"]) for row in subset)
-    ok_count = f"{len(subset)}/{len(subset_all)}"
-    print(
-        f"{scenario:<11} {walls[len(walls)//2]:8.0f}  {upd_mean:8.2f}  {upd_max:7.1f}  "
-        f"{replace_body:12d}  {tool_end:8d}  {p95:9.1f}  {pmax:9.1f}  {over100:6d}  {over250:6d}  {ok_count}"
-    )
-    summary_lines.append(
-        f"| {scenario} | {statistics.median(walls):.0f} | {upd_mean:.2f} | {upd_max:.1f} | "
-        f"{replace_body} | {tool_end} | {p95:.1f} | {pmax:.1f} | {over100} | {over250} | {ok_count} |"
-    )
+storm_rows = [row for row in rows if not row["coolingScenario"]]
+cooling_rows = [row for row in rows if row["coolingScenario"]]
+
+if storm_rows:
+    summary_lines.append("")
+    summary_lines.append("## Tool-update storm")
+    summary_lines.append("")
+    summary_lines.append("| scenario | wall ms (median) | update mean ms | update max ms | replace-body calls | tool-end renders | probe p95 ms | probe max ms | >100 ms late | >250 ms late | successful runs |")
+    summary_lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    print("\ntool-update storm")
+    print("scenario    wall-med  upd-mean  upd-max  replace-body  tool-end  probe-p95  probe-max  >100ms  >250ms  ok")
+    print("--------    --------  --------  -------  ------------  --------  ---------  ---------  ------  ------  --")
+    for scenario in sorted({str(row["scenario"]) for row in storm_rows}):
+        subset_all = [row for row in storm_rows if str(row["scenario"]) == scenario]
+        subset = [row for row in subset_all if row["ok"]]
+        if not subset:
+            print(f"{scenario:<11} no successful runs")
+            summary_lines.append(f"| {scenario} | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | 0/{len(subset_all)} |")
+            continue
+        walls = [float(row["wallMs"]) for row in subset]
+        upd_mean = statistics.median(float(row["updateMeanMs"]) for row in subset)
+        upd_max = max(float(row["updateMaxMs"]) for row in subset)
+        replace_body = max(int(row["replaceBodyCalls"]) for row in subset)
+        tool_end = max(int(row["displayToolEndCalls"]) for row in subset)
+        p95 = statistics.median(float(row["probeP95Ms"]) for row in subset)
+        pmax = max(float(row["probeMaxMs"]) for row in subset)
+        over100 = max(int(row["probeOver100Ms"]) for row in subset)
+        over250 = max(int(row["probeOver250Ms"]) for row in subset)
+        ok_count = f"{len(subset)}/{len(subset_all)}"
+        print(
+            f"{scenario:<11} {statistics.median(walls):8.0f}  {upd_mean:8.2f}  {upd_max:7.1f}  "
+            f"{replace_body:12d}  {tool_end:8d}  {p95:9.1f}  {pmax:9.1f}  {over100:6d}  {over250:6d}  {ok_count}"
+        )
+        summary_lines.append(
+            f"| {scenario} | {statistics.median(walls):.0f} | {upd_mean:.2f} | {upd_max:.1f} | "
+            f"{replace_body} | {tool_end} | {p95:.1f} | {pmax:.1f} | {over100} | {over250} | {ok_count} |"
+        )
+
+if cooling_rows:
+    summary_lines.append("")
+    summary_lines.append("## Deferred agent_end cooling")
+    summary_lines.append("")
+    summary_lines.append("| scenario | agent_end ms | enclosing filter ms | drain wall ms | drain active ms | callbacks | max slice ms | probe p95/max ms | command late p95/max ms | command max ms | GC | cold/hot | successful runs |")
+    summary_lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    print("\ndeferred agent_end cooling")
+    print("scenario                  end-ms  filter-ms  drain-ms  active-ms  callbacks  slice-max  probe-p95/max  cmd-late-p95/max  cmd-max  GC  cold/hot  ok")
+    print("------------------------  ------  ---------  --------  ---------  ---------  ---------  -------------  ----------------  -------  --  --------  --")
+    for scenario in sorted({str(row["scenario"]) for row in cooling_rows}):
+        subset_all = [row for row in cooling_rows if str(row["scenario"]) == scenario]
+        subset = [row for row in subset_all if row["ok"]]
+        if not subset:
+            print(f"{scenario:<24} no successful runs")
+            summary_lines.append(f"| {scenario} | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | 0/{len(subset_all)} |")
+            continue
+        def median(key: str) -> float:
+            return statistics.median(float(row[key]) for row in subset)
+
+        def maximum(key: str) -> float:
+            return max(float(row[key]) for row in subset)
+        callbacks = int(maximum("drainCallbacks"))
+        gcs = int(maximum("drainGcs"))
+        cold = int(maximum("coldTools"))
+        hot = int(maximum("hotToolOverlays"))
+        ok_count = f"{len(subset)}/{len(subset_all)}"
+        print(
+            f"{scenario:<24} {median('agentEndMs'):7.2f}  {median('agentEndFilterMs'):9.2f}  "
+            f"{median('drainWallMs'):8.1f}  {median('drainActiveMs'):9.1f}  {callbacks:9d}  "
+            f"{maximum('sliceMaxMs'):9.2f}  {median('probeP95Ms'):5.1f}/{maximum('probeMaxMs'):5.1f}  "
+            f"{median('commandLatenessP95Ms'):7.2f}/{maximum('commandLatenessMaxMs'):7.2f}  "
+            f"{maximum('commandDurationMaxMs'):7.2f}  {gcs:2d}  {cold}/{hot}  {ok_count}"
+        )
+        summary_lines.append(
+            f"| {scenario} | {median('agentEndMs'):.2f} | {median('agentEndFilterMs'):.2f} | "
+            f"{median('drainWallMs'):.1f} | {median('drainActiveMs'):.1f} | {callbacks} | "
+            f"{maximum('sliceMaxMs'):.2f} | {median('probeP95Ms'):.1f}/{maximum('probeMaxMs'):.1f} | "
+            f"{median('commandLatenessP95Ms'):.2f}/{maximum('commandLatenessMaxMs'):.2f} | "
+            f"{maximum('commandDurationMaxMs'):.2f} | {gcs} | {cold}/{hot} | {ok_count} |"
+        )
 
 summary_lines.append("")
 summary_lines.append("## Artifacts")
@@ -314,6 +450,9 @@ summary_lines.append(f"- CSV: `{csv_path}`")
 summary_lines.append("- Per-run reports: `SCENARIO/iter-NN/report.md`")
 summary_lines.append("- Per-run JSON: `SCENARIO/iter-NN/result.json`")
 summary_lines.append("- Per-run timing TSV: `SCENARIO/iter-NN/times.tsv`")
+if cooling_rows:
+    summary_lines.append("- Per-callback cooling TSV: `SCENARIO/iter-NN/cooling-slices.tsv`")
+    summary_lines.append("- Per-command heartbeat TSV: `SCENARIO/iter-NN/commands.tsv`")
 
 if failed:
     summary_lines.append("")
