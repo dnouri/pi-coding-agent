@@ -736,24 +736,6 @@ preflight before the agent turn has started.")
   "Current state of the pi session (buffer-local in chat buffer).
 A plist with keys like :model, :thinking-level, :messages, etc.")
 
-(defvar-local pi-coding-agent--state-timestamp nil
-  "Time when state was last updated (buffer-local in chat buffer).")
-
-(defconst pi-coding-agent--state-verify-interval 30
-  "Seconds between state verification checks.")
-
-(defun pi-coding-agent--state-needs-verification-p ()
-  "Return t if state should be verified with get_state.
-Verification is needed when:
-- State and timestamp exist
-- Session status is `idle'
-- Timestamp is older than `pi-coding-agent--state-verify-interval' seconds."
-  (and pi-coding-agent--state
-       pi-coding-agent--state-timestamp
-       (eq pi-coding-agent--status 'idle)
-       (> (- (float-time) pi-coding-agent--state-timestamp)
-          pi-coding-agent--state-verify-interval)))
-
 (defun pi-coding-agent--json-false-p (value)
   "Return t if VALUE represents JSON false.
 `json-parse-string' yields `:false', while older helpers and tests may still
@@ -810,16 +792,14 @@ Handles agent lifecycle, message events, compaction, and error/retry events."
       ("agent_start"
        (setq pi-coding-agent--status 'streaming)
        (plist-put pi-coding-agent--state :is-retrying nil)
-       (plist-put pi-coding-agent--state :last-error nil)
-       (setq pi-coding-agent--state-timestamp (float-time)))
+       (plist-put pi-coding-agent--state :last-error nil))
       ("agent_end"
        (setq pi-coding-agent--status
              (if (pi-coding-agent--normalize-boolean (plist-get event :willRetry))
                  'sending
                'idle))
        (plist-put pi-coding-agent--state :is-retrying nil)
-       (plist-put pi-coding-agent--state :messages (plist-get event :messages))
-       (setq pi-coding-agent--state-timestamp (float-time)))
+       (plist-put pi-coding-agent--state :messages (plist-get event :messages)))
       ("message_start"
        (plist-put pi-coding-agent--state :current-message (plist-get event :message)))
       ("message_end"
@@ -834,8 +814,7 @@ Handles agent lifecycle, message events, compaction, and error/retry events."
        (setq pi-coding-agent--pre-compaction-status
              (unless (eq pi-coding-agent--status 'compacting)
                pi-coding-agent--status))
-       (setq pi-coding-agent--status 'compacting)
-       (setq pi-coding-agent--state-timestamp (float-time)))
+       (setq pi-coding-agent--status 'compacting))
       ("compaction_end"
        (setq pi-coding-agent--status
              (cond
@@ -845,8 +824,7 @@ Handles agent lifecycle, message events, compaction, and error/retry events."
                'sending)
               (t
                'idle)))
-       (setq pi-coding-agent--pre-compaction-status nil)
-       (setq pi-coding-agent--state-timestamp (float-time)))
+       (setq pi-coding-agent--pre-compaction-status nil))
       ("auto_retry_start"
        (setq pi-coding-agent--status 'sending)
        (plist-put pi-coding-agent--state :is-retrying t)
@@ -899,24 +877,18 @@ Only processes successful responses for state-modifying commands."
           (data (plist-get response :data)))
       (pcase command
         ("set_model"
-         (plist-put pi-coding-agent--state :model data)
-         (setq pi-coding-agent--state-timestamp (float-time)))
+         (plist-put pi-coding-agent--state :model data))
         ("cycle_model"
          (when data
            (plist-put pi-coding-agent--state :model (plist-get data :model))
-           (plist-put pi-coding-agent--state :thinking-level (plist-get data :thinkingLevel))
-           (setq pi-coding-agent--state-timestamp (float-time))))
+           (plist-put pi-coding-agent--state :thinking-level (plist-get data :thinkingLevel))))
         ("cycle_thinking_level"
          (when data
-           (plist-put pi-coding-agent--state :thinking-level (plist-get data :level))
-           (setq pi-coding-agent--state-timestamp (float-time))))
-        ("set_thinking_level"
-         (setq pi-coding-agent--state-timestamp (float-time)))
+           (plist-put pi-coding-agent--state :thinking-level (plist-get data :level))))
         ("get_state"
          (let ((new-state (pi-coding-agent--extract-state-from-response response)))
            (setq pi-coding-agent--status (plist-get new-state :status)
-                 pi-coding-agent--state new-state
-                 pi-coding-agent--state-timestamp (float-time))))))))
+                 pi-coding-agent--state new-state)))))))
 
 (defun pi-coding-agent--extract-state-from-response (response &optional anchor)
   "Extract state plist from a get_state RESPONSE.

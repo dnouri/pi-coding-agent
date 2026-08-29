@@ -929,41 +929,6 @@ Display is handled by the display handler, not by state updates."
        :error "Model not found"))
     (should (equal (plist-get (plist-get pi-coding-agent--state :model) :id) "original"))))
 
-(ert-deftest pi-coding-agent-test-state-needs-verify-when-stale ()
-  "State needs verification when timestamp is old."
-  (let ((pi-coding-agent--status 'idle)
-        (pi-coding-agent--state (list :model "test"))
-        (pi-coding-agent--state-timestamp (- (float-time) 60)))  ;; 60 seconds ago
-    (should (pi-coding-agent--state-needs-verification-p))))
-
-(ert-deftest pi-coding-agent-test-state-no-verify-when-fresh ()
-  "State does not need verification when recently updated."
-  (let ((pi-coding-agent--status 'idle)
-        (pi-coding-agent--state (list :model "test"))
-        (pi-coding-agent--state-timestamp (float-time)))  ;; Now
-    (should (not (pi-coding-agent--state-needs-verification-p)))))
-
-(ert-deftest pi-coding-agent-test-state-no-verify-during-streaming ()
-  "State does not need verification while streaming."
-  (let ((pi-coding-agent--status 'streaming)
-        (pi-coding-agent--state (list :model "test"))
-        (pi-coding-agent--state-timestamp (- (float-time) 60)))  ;; Old, but streaming
-    (should (not (pi-coding-agent--state-needs-verification-p)))))
-
-(ert-deftest pi-coding-agent-test-state-no-verify-while-sending ()
-  "State does not need verification while waiting for agent_start."
-  (let ((pi-coding-agent--status 'sending)
-        (pi-coding-agent--state (list :model "test"))
-        (pi-coding-agent--state-timestamp (- (float-time) 60)))
-    (should (not (pi-coding-agent--state-needs-verification-p)))))
-
-(ert-deftest pi-coding-agent-test-state-no-verify-when-no-timestamp ()
-  "State does not need verification when not initialized."
-  (let ((pi-coding-agent--status 'idle)
-        (pi-coding-agent--state nil)
-        (pi-coding-agent--state-timestamp nil))
-    (should (not (pi-coding-agent--state-needs-verification-p)))))
-
 (ert-deftest pi-coding-agent-test-event-dispatch-updates-state ()
   "Events update buffer-local state via handler."
   (let ((pi-coding-agent--status 'idle)

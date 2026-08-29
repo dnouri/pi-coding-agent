@@ -1012,6 +1012,7 @@ Include optional STDERR in a text fence and optional DETAIL before it."
             (assoc-delete-all key pi-coding-agent--extension-status)))
     (force-mode-line-update t)))
 
+;; Pi RPC currently suppresses this method; retain client protocol support.
 (defun pi-coding-agent--extension-ui-set-working-message (event)
   "Handle setWorkingMessage method from EVENT."
   (let ((msg (plist-get event :message)))
@@ -1163,7 +1164,6 @@ which asks upfront before any buffers are touched."
   (when (eq pi-coding-agent--process process)
     (let ((error-msg (or (plist-get response :error) "Process exited")))
       (setq pi-coding-agent--status 'idle)
-      (setq pi-coding-agent--state-timestamp (float-time))
       (setq pi-coding-agent--state
             (plist-put pi-coding-agent--state :last-error error-msg))
       (unwind-protect
