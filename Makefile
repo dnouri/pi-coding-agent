@@ -12,8 +12,9 @@ PI_PACKAGE ?= @earendil-works/pi-coding-agent
 PI_BIN ?= .cache/pi/node_modules/.bin/pi
 PI_BIN_DIR = $(abspath $(dir $(PI_BIN)))
 
-# Test selector: run a subset of tests by ERT pattern
-# Example: make test SELECTOR=fontify-buffer-tail
+# Test selector: exported unchanged and interpreted by ERT as an Emacs regexp
+# Examples: make test SELECTOR=toolcall-delta
+#           make test SELECTOR='abort\|followup'  # one regexp backslash
 SELECTOR ?=
 
 # Verbose output for tests (show full ERT output, including passed lines)
