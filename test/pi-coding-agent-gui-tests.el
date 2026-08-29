@@ -451,6 +451,34 @@ logical block and should not start following later streamed output."
             (should (> (cdr size) 0))))
       (kill-buffer buffer))))
 
+(ert-deftest pi-coding-agent-gui-test-read-svg-has-real-display-property ()
+  "A complete standalone SVG returned by read renders graphically."
+  (unless (and (display-images-p) (image-type-available-p 'svg))
+    (ert-skip "This Emacs display cannot render SVG images"))
+  (let ((buffer (get-buffer-create "*pi-gui-svg-preview*"))
+        (source
+         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"2\" height=\"1\"><rect width=\"2\" height=\"1\" fill=\"#369\"/></svg>"))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buffer)
+          (pi-coding-agent-chat-mode)
+          (pi-coding-agent--display-tool-end
+           "read" '(:path "/missing/returned.svg")
+           (list (list :type "text" :text source)) nil nil)
+          (redisplay)
+          (let* ((position
+                  (text-property-any (point-min) (point-max)
+                                     'pi-coding-agent-image-preview t))
+                 (display (and position
+                               (get-text-property position 'display)))
+                 (size (and display (image-size display t))))
+            (should position)
+            (should (eq 'image (car-safe display)))
+            (should (consp size))
+            (should (> (car size) 0))
+            (should (> (cdr size) 0))))
+      (kill-buffer buffer))))
+
 (ert-deftest pi-coding-agent-gui-test-content-tool-output-shown ()
   "Test that fake-backed tool output appears in chat and in the tool block."
   (pi-coding-agent-gui-test-with-fresh-session

@@ -1311,7 +1311,11 @@ Updates buffer-local state and renders display updates."
      (pi-coding-agent--set-activity-phase "thinking")
      (let* ((tool-call-id (plist-get event :toolCallId))
             (result (plist-get event :result))
-            (block (pi-coding-agent--tool-block-get tool-call-id))
+            ;; A keyed miss must not finalize an unrelated legacy block.
+            (block (or (pi-coding-agent--tool-block-get tool-call-id)
+                       (and (pi-coding-agent--tool-call-id-p tool-call-id)
+                            (pi-coding-agent--display-tool-start
+                             (plist-get event :toolName) nil tool-call-id))))
             ;; Retrieve cached args since tool_execution_end doesn't include args
             (args (when (and tool-call-id pi-coding-agent--tool-args-cache)
                     (prog1 (gethash tool-call-id pi-coding-agent--tool-args-cache)
@@ -1817,22 +1821,52 @@ path/error metadata for `pi-coding-agent-visit-file'."
     ((or "image/jpeg" "image/jpg") 'jpeg)
     ("image/png" 'png)
     ("image/gif" 'gif)
-    ("image/webp" 'webp)))
+    ("image/webp" 'webp)
+    ("image/svg+xml" 'svg)))
+
+(defun pi-coding-agent--image-preview-window ()
+  "Return the window whose frame and dimensions govern image previews."
+  (or (pi-coding-agent--chat-display-window)
+      (selected-window)))
+
+(defun pi-coding-agent--image-display-capable-p ()
+  "Return non-nil when the image preview window is graphical."
+  (display-images-p
+   (window-frame (pi-coding-agent--image-preview-window))))
 
 (defun pi-coding-agent--image-preview-pixel-limits ()
   "Return window-relative image preview size properties."
-  (let ((window (or (pi-coding-agent--chat-display-window)
-                    (selected-window))))
-    (list :max-width
-          (max 1 (truncate (* 0.9 (window-pixel-width window))))
+  (let* ((window (pi-coding-agent--image-preview-window))
+         (window-width
+          (max 1 (truncate (* 0.9 (window-pixel-width window)))))
+         (configured-width
+          (if (natnump pi-coding-agent-image-preview-max-width)
+              (max 1 pi-coding-agent-image-preview-max-width)
+            window-width)))
+    (list :max-width (min window-width configured-width)
           :max-height
           (max 1 (truncate (* 0.5 (window-pixel-height window)))))))
+
+(defconst pi-coding-agent--image-previews-per-tool-limit 8
+  "Maximum tool-result image blocks rendered for one tool invocation.")
+
+(defun pi-coding-agent--image-preview-byte-limit ()
+  "Return the nonnegative source-byte limit for one image preview."
+  (if (natnump pi-coding-agent-image-preview-max-bytes)
+      pi-coding-agent-image-preview-max-bytes
+    (* 10 1024 1024)))
+
+(defun pi-coding-agent--image-preview-safe-field (value &optional fallback)
+  "Return VALUE as control-safe placeholder text, or FALLBACK when nil."
+  (pi-coding-agent--escape-control-chars-for-display
+   (pi-coding-agent--render-safe-string value fallback)))
 
 (defun pi-coding-agent--image-preview-string (fallback &optional image)
   "Return FALLBACK marked as an image preview, displaying IMAGE when non-nil."
   (apply #'propertize fallback
          (append
           (list 'face 'pi-coding-agent-tool-header
+                'fontified t
                 'pi-coding-agent-no-fontify t
                 'pi-coding-agent-image-preview t
                 'rear-nonsticky t
@@ -1841,14 +1875,28 @@ path/error metadata for `pi-coding-agent-visit-file'."
 
 (defun pi-coding-agent--image-preview-label (mime-type description)
   "Return an image placeholder for MIME-TYPE and DESCRIPTION."
-  (format "[Image: %s, %s]" (or mime-type "unknown") description))
+  (format "Image: %s, %s"
+          (pi-coding-agent--image-preview-safe-field mime-type "unknown")
+          description))
+
+(defun pi-coding-agent--image-too-large-description (limit)
+  "Return a placeholder description for an image exceeding LIMIT bytes."
+  (format "too large (limit %s)"
+          (file-size-human-readable limit 'iec " " "B")))
+
+(defun pi-coding-agent--image-data-matches-type-p (data type)
+  "Return non-nil when Emacs recognizes DATA as the expected image TYPE."
+  (eq type (condition-case nil
+               (image-type-from-data data)
+             (error nil))))
 
 (defun pi-coding-agent--render-tool-image-preview (block)
   "Return a rendered preview string for tool-result image BLOCK."
   (let* ((mime-type (or (plist-get block :mimeType)
                         (plist-get block :mime-type)))
          (data (plist-get block :data))
-         (type (pi-coding-agent--image-type-for-mime mime-type)))
+         (type (pi-coding-agent--image-type-for-mime mime-type))
+         (limit (pi-coding-agent--image-preview-byte-limit)))
     (cond
      ((or (null data) (and (stringp data) (string-empty-p data)))
       (pi-coding-agent--image-preview-string
@@ -1856,20 +1904,32 @@ path/error metadata for `pi-coding-agent-visit-file'."
      ((not (stringp data))
       (pi-coding-agent--image-preview-string
        (pi-coding-agent--image-preview-label mime-type "decode error")))
+     ((> (string-bytes data) (* 2 limit))
+      (pi-coding-agent--image-preview-string
+       (pi-coding-agent--image-preview-label
+        mime-type (pi-coding-agent--image-too-large-description limit))))
      (t
       (condition-case nil
           (let* ((raw (base64-decode-string data))
-                 (size (file-size-human-readable
-                        (length raw) 'iec " " "B")))
+                 (raw-bytes (length raw))
+                 (size (file-size-human-readable raw-bytes 'iec " " "B")))
             (cond
              ((string-empty-p raw)
               (pi-coding-agent--image-preview-string
                (pi-coding-agent--image-preview-label mime-type "empty data")))
+             ((> raw-bytes limit)
+              (pi-coding-agent--image-preview-string
+               (pi-coding-agent--image-preview-label
+                mime-type (pi-coding-agent--image-too-large-description limit))))
              ((not type)
               (pi-coding-agent--image-preview-string
                (pi-coding-agent--image-preview-label
                 mime-type (format "%s, unsupported type" size))))
-             ((not (display-images-p))
+             ((not (pi-coding-agent--image-data-matches-type-p raw type))
+              (pi-coding-agent--image-preview-string
+               (pi-coding-agent--image-preview-label
+                mime-type (format "%s, invalid data" size))))
+             ((not (pi-coding-agent--image-display-capable-p))
               (pi-coding-agent--image-preview-string
                (pi-coding-agent--image-preview-label mime-type size)))
              ((not (image-type-available-p type))
@@ -1896,11 +1956,88 @@ path/error metadata for `pi-coding-agent-visit-file'."
           (pi-coding-agent--image-preview-label mime-type "decode error"))))))))
 
 (defun pi-coding-agent--tool-result-image-previews (content-blocks)
-  "Render image previews from normalized tool result CONTENT-BLOCKS."
-  (mapcar #'pi-coding-agent--render-tool-image-preview
+  "Render a bounded number of images from tool result CONTENT-BLOCKS."
+  (let* ((blocks
           (seq-filter
            (lambda (block) (equal (plist-get block :type) "image"))
-           content-blocks)))
+           content-blocks))
+         (limit (max 0 pi-coding-agent--image-previews-per-tool-limit))
+         (shown (seq-take blocks limit))
+         (omitted (- (length blocks) (length shown))))
+    (append
+     (mapcar #'pi-coding-agent--render-tool-image-preview shown)
+     (when (> omitted 0)
+       (list
+        (pi-coding-agent--image-preview-string
+         (format "Image: %d additional preview%s omitted"
+                 omitted (if (= omitted 1) "" "s"))))))))
+
+(defun pi-coding-agent--svg-fragment-links-only-p (source)
+  "Return non-nil when every href in SVG SOURCE is a local fragment."
+  (let ((case-fold-search t)
+        (without-local-links source)
+        (local-link-re
+         "\\_<\\(?:[[:alnum:]_.-]+:\\)?href[[:space:]]*=[[:space:]]*\\([\"']\\)#[^\"']*\\1"))
+    (setq without-local-links
+          (replace-regexp-in-string local-link-re "" without-local-links))
+    (not (string-match-p
+          "\\_<\\(?:[[:alnum:]_.-]+:\\)?href[[:space:]]*="
+          without-local-links))))
+
+(defun pi-coding-agent--standalone-svg-p (source)
+  "Return non-nil for a complete SVG SOURCE without obvious resources."
+  (let ((case-fold-search t))
+    (and (eq 'svg (condition-case nil
+                      (image-type-from-data source)
+                    (error nil)))
+         (or (string-match-p "</svg[[:space:]]*>[[:space:]]*\\'" source)
+             (string-match-p "<svg\\_>[^>]*?/>[[:space:]]*\\'" source))
+         (not (string-match-p
+               "\\(?:<[[:space:]]*\\(?:script\\|foreignobject\\|image\\|feimage\\)\\_>\\|url[[:space:]]*(\\|@import\\|<!doctype\\|<!entity\\)"
+               source))
+         (pi-coding-agent--svg-fragment-links-only-p source))))
+
+(defun pi-coding-agent--read-svg-preview
+    (tool-name args raw-output details is-error)
+  "Render a complete standalone SVG returned as READ's RAW-OUTPUT.
+TOOL-NAME, ARGS, DETAILS, and IS-ERROR describe the completed result."
+  (when (and (equal tool-name "read")
+             (not is-error)
+             (not (pi-coding-agent--tool-arg-get args :offset))
+             (not (pi-coding-agent--tool-arg-get args :limit))
+             (let ((truncation
+                    (pi-coding-agent--tool-arg-get details :truncation)))
+               (or (null truncation)
+                   (pi-coding-agent--json-null-p truncation)))
+             (stringp raw-output)
+             (pi-coding-agent--standalone-svg-p raw-output))
+    (let* ((bytes (string-bytes raw-output))
+           (limit (pi-coding-agent--image-preview-byte-limit))
+           (size (file-size-human-readable bytes 'iec " " "B"))
+           (fallback (pi-coding-agent--image-preview-label
+                      "image/svg+xml" size)))
+      (cond
+       ((> bytes limit)
+        (pi-coding-agent--image-preview-string
+         (pi-coding-agent--image-preview-label
+          "image/svg+xml" (pi-coding-agent--image-too-large-description limit))))
+       ((not (pi-coding-agent--image-display-capable-p))
+        (pi-coding-agent--image-preview-string fallback))
+       ((not (image-type-available-p 'svg))
+        (pi-coding-agent--image-preview-string
+         (pi-coding-agent--image-preview-label
+          "image/svg+xml" (format "%s, unavailable" size))))
+       (t
+        (condition-case nil
+            (let ((image
+                   (apply #'create-image raw-output 'svg t
+                          (append (pi-coding-agent--image-preview-pixel-limits)
+                                  '(:base-uri "data:" :scale 1)))))
+              (pi-coding-agent--image-preview-string fallback image))
+          (error
+           (pi-coding-agent--image-preview-string
+            (pi-coding-agent--image-preview-label
+             "image/svg+xml" (format "%s, display error" size))))))))))
 
 (defun pi-coding-agent--insert-image-previews (previews)
   "Insert rendered image PREVIEWS at point, one per line."
@@ -3047,8 +3184,14 @@ if none exists, render the result at point without a live overlay."
                                   (pi-coding-agent--render-safe-string
                                    (plist-get c :text)))
                                 text-blocks "\n"))
-         (image-previews
+         (content-image-previews
           (pi-coding-agent--tool-result-image-previews content-blocks))
+         (svg-preview
+          (and (null content-image-previews)
+               (pi-coding-agent--read-svg-preview
+                tool-name args raw-output details is-error)))
+         (image-previews
+          (if svg-preview (list svg-preview) content-image-previews))
          ;; Determine language for syntax highlighting
          (lang (pi-coding-agent--path-to-language
                 (pi-coding-agent--tool-path-string
