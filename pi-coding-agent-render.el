@@ -45,6 +45,7 @@
 (require 'pi-coding-agent-table)
 (require 'cl-lib)
 (require 'ansi-color)
+(require 'image)
 
 ;; Forward references for functions in other modules
 (declare-function pi-coding-agent-compact "pi-coding-agent-menu" (&optional custom-instructions))
@@ -1479,7 +1480,8 @@ overlays are left alone."
   path-error
   offset
   line-map
-  last-tail)
+  last-tail
+  image-previews)
 
 (cl-defstruct (pi-coding-agent--toolcall-stream
                (:conc-name pi-coding-agent--tool-stream-)
@@ -1802,6 +1804,113 @@ path/error metadata for `pi-coding-agent-visit-file'."
     (setf (pi-coding-agent--tool-block-last-tail block) last-tail)
     (pi-coding-agent--tool-block-refresh-overlay block))
   block)
+
+(defun pi-coding-agent--tool-block-set-image-previews (block previews)
+  "Store rendered image PREVIEWS on BLOCK for toggling and cooling."
+  (when block
+    (setf (pi-coding-agent--tool-block-image-previews block) previews))
+  block)
+
+(defun pi-coding-agent--image-type-for-mime (mime-type)
+  "Return the Emacs image type for MIME-TYPE, or nil when unsupported."
+  (pcase mime-type
+    ((or "image/jpeg" "image/jpg") 'jpeg)
+    ("image/png" 'png)
+    ("image/gif" 'gif)
+    ("image/webp" 'webp)))
+
+(defun pi-coding-agent--image-preview-pixel-limits ()
+  "Return window-relative image preview size properties."
+  (let ((window (or (pi-coding-agent--chat-display-window)
+                    (selected-window))))
+    (list :max-width
+          (max 1 (truncate (* 0.9 (window-pixel-width window))))
+          :max-height
+          (max 1 (truncate (* 0.5 (window-pixel-height window)))))))
+
+(defun pi-coding-agent--image-preview-string (fallback &optional image)
+  "Return FALLBACK marked as an image preview, displaying IMAGE when non-nil."
+  (apply #'propertize fallback
+         (append
+          (list 'face 'pi-coding-agent-tool-header
+                'pi-coding-agent-no-fontify t
+                'pi-coding-agent-image-preview t
+                'rear-nonsticky t
+                'help-echo fallback)
+          (when image (list 'display image)))))
+
+(defun pi-coding-agent--image-preview-label (mime-type description)
+  "Return an image placeholder for MIME-TYPE and DESCRIPTION."
+  (format "[Image: %s, %s]" (or mime-type "unknown") description))
+
+(defun pi-coding-agent--render-tool-image-preview (block)
+  "Return a rendered preview string for tool-result image BLOCK."
+  (let* ((mime-type (or (plist-get block :mimeType)
+                        (plist-get block :mime-type)))
+         (data (plist-get block :data))
+         (type (pi-coding-agent--image-type-for-mime mime-type)))
+    (cond
+     ((or (null data) (and (stringp data) (string-empty-p data)))
+      (pi-coding-agent--image-preview-string
+       (pi-coding-agent--image-preview-label mime-type "empty data")))
+     ((not (stringp data))
+      (pi-coding-agent--image-preview-string
+       (pi-coding-agent--image-preview-label mime-type "decode error")))
+     (t
+      (condition-case nil
+          (let* ((raw (base64-decode-string data))
+                 (size (file-size-human-readable
+                        (length raw) 'iec " " "B")))
+            (cond
+             ((string-empty-p raw)
+              (pi-coding-agent--image-preview-string
+               (pi-coding-agent--image-preview-label mime-type "empty data")))
+             ((not type)
+              (pi-coding-agent--image-preview-string
+               (pi-coding-agent--image-preview-label
+                mime-type (format "%s, unsupported type" size))))
+             ((not (display-images-p))
+              (pi-coding-agent--image-preview-string
+               (pi-coding-agent--image-preview-label mime-type size)))
+             ((not (image-type-available-p type))
+              (pi-coding-agent--image-preview-string
+               (pi-coding-agent--image-preview-label
+                mime-type (format "%s, unavailable" size))))
+             (t
+              (condition-case nil
+                  (let ((image (apply #'create-image raw type t
+                                      (pi-coding-agent--image-preview-pixel-limits))))
+                    (if image
+                        (pi-coding-agent--image-preview-string
+                         (pi-coding-agent--image-preview-label mime-type size)
+                         image)
+                      (pi-coding-agent--image-preview-string
+                       (pi-coding-agent--image-preview-label
+                        mime-type "display error"))))
+                (error
+                 (pi-coding-agent--image-preview-string
+                  (pi-coding-agent--image-preview-label
+                   mime-type "display error")))))))
+        (error
+         (pi-coding-agent--image-preview-string
+          (pi-coding-agent--image-preview-label mime-type "decode error"))))))))
+
+(defun pi-coding-agent--tool-result-image-previews (content-blocks)
+  "Render image previews from normalized tool result CONTENT-BLOCKS."
+  (mapcar #'pi-coding-agent--render-tool-image-preview
+          (seq-filter
+           (lambda (block) (equal (plist-get block :type) "image"))
+           content-blocks)))
+
+(defun pi-coding-agent--insert-image-previews (previews)
+  "Insert rendered image PREVIEWS at point, one per line."
+  (dolist (preview previews)
+    (insert preview "\n")))
+
+(defun pi-coding-agent--image-previews-text (previews)
+  "Return rendered PREVIEWS as newline-terminated text, or nil."
+  (when previews
+    (concat (mapconcat #'identity previews "\n") "\n")))
 
 (defun pi-coding-agent--tool-block-create
     (tool-name args &optional tool-call-id order preview-state path-metadata-policy)
@@ -2938,6 +3047,8 @@ if none exists, render the result at point without a live overlay."
                                   (pi-coding-agent--render-safe-string
                                    (plist-get c :text)))
                                 text-blocks "\n"))
+         (image-previews
+          (pi-coding-agent--tool-result-image-previews content-blocks))
          ;; Determine language for syntax highlighting
          (lang (pi-coding-agent--path-to-language
                 (pi-coding-agent--tool-path-string
@@ -2989,6 +3100,9 @@ if none exists, render the result at point without a live overlay."
                  (string-trim-right display-content "\n+")
                  lang
                  is-edit-diff))
+              (pi-coding-agent--insert-image-previews image-previews)
+              (pi-coding-agent--tool-block-set-image-previews
+               block image-previews)
               (set-marker end-marker (point))
               (pi-coding-agent--tool-block-refresh-overlay block)
               ;; Note: no [error] badge — error content in the block is sufficient,
@@ -3015,6 +3129,7 @@ if none exists, render the result at point without a live overlay."
                (string-trim-right display-content "\n+")
                lang
                is-edit-diff))
+            (pi-coding-agent--insert-image-previews image-previews)
             (insert "\n")))))))
 
 (defun pi-coding-agent--ranges-excluding-property (start end prop)
@@ -3052,8 +3167,7 @@ Preserves window scroll position during the toggle."
          (lang (button-get button 'pi-coding-agent-lang))
          (is-edit-diff (button-get button 'pi-coding-agent-is-edit-diff))
          (hidden-count (button-get button 'hidden-count))
-         (btn-start (button-start button))
-         (btn-end (button-end button)))
+         (btn-start (button-start button)))
     (save-excursion
       ;; Find the tool overlay
       (goto-char btn-start)
@@ -3067,6 +3181,10 @@ Preserves window scroll position during the toggle."
         ;; Emacs 29's `font-lock-ensure' requires integer bounds below.
         (let* ((content-start (marker-position header-end))
                (block-start (car bounds))
+               (record (pi-coding-agent--tool-block-from-overlay ov))
+               (image-previews
+                (and record
+                     (pi-coding-agent--tool-block-image-previews record)))
                (saved-windows
                 (mapcar (lambda (w)
                           (let ((ws (window-start w)))
@@ -3074,18 +3192,25 @@ Preserves window scroll position during the toggle."
                                   ;; Flag: was window-start before content area?
                                   (< ws content-start))))
                         (get-buffer-window-list (current-buffer) nil t))))
-          ;; Delete from content start to after button
-          (delete-region content-start (1+ btn-end))
+          ;; Replace the complete body, including any image previews after the
+          ;; button, so each toggle keeps exactly one copy inside the overlay.
+          (delete-region content-start (overlay-end ov))
           (goto-char content-start)
           ;; Toggle: if currently expanded, show collapsed (and vice versa)
           (pi-coding-agent--insert-tool-content-with-toggle
            preview-content full-content lang is-edit-diff hidden-count (not expanded))
+          (pi-coding-agent--insert-image-previews image-previews)
           ;; Ensure fontification of inserted content (JIT font-lock is lazy)
           ;; while excluding metadata-like details payload.
           (pi-coding-agent--font-lock-ensure-excluding-property
            content-start (point) 'pi-coding-agent-no-fontify)
-          ;; Update overlay to include new content
-          (move-overlay ov block-start (point))
+          ;; Update both typed and overlay bounds after replacing the body.
+          (if record
+              (progn
+                (set-marker (pi-coding-agent--tool-block-end-marker record)
+                            (point))
+                (pi-coding-agent--tool-block-refresh-overlay record))
+            (move-overlay ov block-start (point)))
           ;; Restore window positions
           (dolist (win-state saved-windows)
             (let ((win (nth 0 win-state))
@@ -3416,7 +3541,11 @@ count because cold history must stay preview-only."
   (when-let* ((visible-body (pi-coding-agent--tool-overlay-visible-body overlay))
               (header-end (marker-position
                            (overlay-get overlay 'pi-coding-agent-header-end))))
-    (let* ((button (pi-coding-agent--find-toggle-button-in-region
+    (let* ((record (pi-coding-agent--tool-block-from-overlay overlay))
+           (image-previews
+            (and record
+                 (pi-coding-agent--tool-block-image-previews record)))
+           (button (pi-coding-agent--find-toggle-button-in-region
                     header-end (overlay-end overlay)))
            (collapsed (and button
                            (not (button-get button
@@ -3424,6 +3553,7 @@ count because cold history must stay preview-only."
            (hidden-count (and collapsed
                               (button-get button 'hidden-count))))
       (list :visible-body visible-body
+            :image-previews image-previews
             :target-metadata
             (pi-coding-agent--cold-tool-target-metadata
              overlay header-end collapsed)
@@ -3442,10 +3572,12 @@ diff annotations."
                              (overlay-get overlay 'pi-coding-agent-header-end))))
       (let* ((inhibit-read-only t)
              (hidden-count (plist-get metadata :hidden-count))
+             (image-previews (plist-get metadata :image-previews))
              (target-metadata (plist-get metadata :target-metadata))
              (cold-body (concat
                          (pi-coding-agent--wrap-in-src-block visible-body nil)
                          "\n"
+                         (pi-coding-agent--image-previews-text image-previews)
                          (when hidden-count
                            (concat (pi-coding-agent--tool-hidden-line-label hidden-count)
                                    "\n"))))

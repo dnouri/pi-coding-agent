@@ -420,6 +420,37 @@ logical block and should not start following later streamed output."
 
 ;;;; Content Tests
 
+(ert-deftest pi-coding-agent-gui-test-tool-result-image-has-real-display-property ()
+  "A real PNG result inserts an image display property in graphical Emacs."
+  (unless (and (display-images-p) (image-type-available-p 'png))
+    (ert-skip "This Emacs display cannot render PNG images"))
+  (let ((buffer (get-buffer-create "*pi-gui-image-preview*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buffer)
+          (pi-coding-agent-chat-mode)
+          (let ((block (pi-coding-agent--display-tool-start
+                        "generate" nil "gui-image")))
+            (pi-coding-agent--display-tool-end
+             "generate" nil
+             '((:type "image"
+                :mimeType "image/png"
+                :data "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGP4z8DwHwQBEPgD/U6VwW8AAAAASUVORK5CYII="))
+             nil nil block))
+          (redisplay)
+          (let* ((position
+                  (text-property-any (point-min) (point-max)
+                                     'pi-coding-agent-image-preview t))
+                 (display (and position
+                               (get-text-property position 'display)))
+                 (size (and display (image-size display t))))
+            (should position)
+            (should (eq 'image (car-safe display)))
+            (should (consp size))
+            (should (> (car size) 0))
+            (should (> (cdr size) 0))))
+      (kill-buffer buffer))))
+
 (ert-deftest pi-coding-agent-gui-test-content-tool-output-shown ()
   "Test that fake-backed tool output appears in chat and in the tool block."
   (pi-coding-agent-gui-test-with-fresh-session
