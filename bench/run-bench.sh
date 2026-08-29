@@ -15,6 +15,12 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+EMACS_BIN="${EMACS:-emacs}"
+if [ -z "${PACKAGE_USER_DIR:-}" ]; then
+    EMACS_MAJOR_VERSION=$("$EMACS_BIN" --batch -Q \
+        --eval '(princ emacs-major-version)')
+    export PACKAGE_USER_DIR="$PROJECT_DIR/.cache/elpa/$EMACS_MAJOR_VERSION"
+fi
 
 BATCH=0
 REPS=5
@@ -30,6 +36,7 @@ done
 EMACS_INIT=(
     -Q -L "$PROJECT_DIR"
     --eval "(require 'package)"
+    --eval "(let ((dir (getenv \"PACKAGE_USER_DIR\"))) (when dir (setq package-user-dir (directory-file-name (expand-file-name dir)))))"
     --eval "(package-initialize)"
     --eval "(setq load-path (cons (expand-file-name \"$PROJECT_DIR\") load-path))"
     -l "$SCRIPT_DIR/pi-coding-agent-bench.el"
@@ -41,7 +48,7 @@ echo "Project: $PROJECT_DIR"
 if [ "$BATCH" = "1" ]; then
     echo "Mode: batch (secondary lane), $REPS reps"
     echo ""
-    emacs "${EMACS_INIT[@]}" --batch \
+    "$EMACS_BIN" "${EMACS_INIT[@]}" --batch \
         -f pi-coding-agent-bench-run-batch -c "$REPS" 2>&1
 else
     echo "Mode: GUI via xvfb (primary lane), $REPS reps"
@@ -51,7 +58,7 @@ else
         exit 1
     fi
     xvfb-run -a env GDK_BACKEND=x11 PATH="$PATH" \
-        emacs "${EMACS_INIT[@]}" \
+        "$EMACS_BIN" "${EMACS_INIT[@]}" \
         --eval "(progn
                   (let ((standard-output #'external-debugging-output))
                     (pi-coding-agent-bench-run $REPS))

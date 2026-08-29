@@ -1,7 +1,16 @@
 # pi-coding-agent Makefile
 
 EMACS ?= emacs
+export EMACS
+# Keep package state project-local and separate incompatible bytecode by Emacs
+# major version so every child lane resolves the same dependency tree without
+# touching ~/.emacs.d/elpa.
+EMACS_MAJOR_VERSION := $(shell $(EMACS) --batch -Q --eval '(princ emacs-major-version)' 2>/dev/null)
+PACKAGE_USER_DIR ?= $(abspath .cache/elpa/$(EMACS_MAJOR_VERSION))
+export PACKAGE_USER_DIR
+PACKAGE_USER_DIR_INIT = --eval "(let ((dir (getenv \"PACKAGE_USER_DIR\"))) (when dir (setq package-user-dir (directory-file-name (expand-file-name dir)))))"
 BATCH = $(EMACS) --batch -Q -L . \
+	$(PACKAGE_USER_DIR_INIT) \
 	--eval "(add-to-list 'treesit-extra-load-path (expand-file-name \"~/.emacs.d/tree-sitter\"))"
 # Keep this checkout first in load-path even after package-initialize.
 LOCAL_LOAD_PATH = --eval "(setq load-path (cons (expand-file-name \".\") load-path))"
@@ -76,10 +85,18 @@ help:
 # Install package dependencies (sentinel file avoids re-running every time).
 # Requirements come from pi-coding-agent.el's Package-Requires header.
 # The helper upgrades built-in packages when Emacs ships an older version
-# than the package requires (for example transient on Emacs 29/30).
-.deps-stamp: Makefile scripts/install-deps.el scripts/pi-coding-agent-build.el pi-coding-agent.el
+# than the package requires (for example transient on Emacs 29/30).  Keep the
+# sentinel with the selected package directory so overrides cannot reuse a
+# stamp created for another dependency tree or Emacs lane.
+DEPS_STAMP = $(PACKAGE_USER_DIR)/.deps-stamp
+DEPS_INPUTS = Makefile scripts/install-deps.el scripts/pi-coding-agent-build.el pi-coding-agent.el
+.PHONY: .deps-stamp
+.deps-stamp: $(DEPS_STAMP)
+
+$(DEPS_STAMP): $(DEPS_INPUTS)
+	@mkdir -p "$(PACKAGE_USER_DIR)"
 	@$(BATCH) -L scripts -l scripts/install-deps.el
-	@touch $@
+	@touch "$@"
 
 deps: .deps-stamp
 
@@ -383,7 +400,7 @@ check: compile lint test
 # ============================================================
 
 clean:
-	@rm -f *.elc scripts/*.elc test/*.elc .deps-stamp
+	@rm -f *.elc scripts/*.elc test/*.elc .deps-stamp "$(DEPS_STAMP)"
 
 clean-cache:
 	@./scripts/ollama.sh stop 2>/dev/null || true

@@ -1738,6 +1738,38 @@ must decide whether this is a no-op."
         (ignore-errors (kill-buffer "*pi-coding-agent-test-non-pi*"))
         (delete-other-windows)))))
 
+(ert-deftest pi-coding-agent-test-batch-emacs-loads-overridden-package-directory ()
+  "A child Emacs loads dependencies from the caller's package directory."
+  (let* ((root (make-temp-file "pi-child-package-" t))
+         (package-user-dir (expand-file-name "elpa" root))
+         (package-dir (expand-file-name "pi-child-dependency-1.0"
+                                        package-user-dir)))
+    (unwind-protect
+        (progn
+          (make-directory package-dir t)
+          (with-temp-file (expand-file-name "pi-child-dependency-pkg.el"
+                                             package-dir)
+            (insert "(define-package \"pi-child-dependency\" \"1.0\" \"Test dependency\")\n"))
+          (with-temp-file (expand-file-name "pi-child-dependency-autoloads.el"
+                                             package-dir)
+            (insert "(add-to-list 'load-path\n"
+                    "             (directory-file-name\n"
+                    "              (file-name-directory\n"
+                    "               (or load-file-name buffer-file-name))))\n"))
+          (with-temp-file (expand-file-name "pi-child-dependency.el" package-dir)
+            (insert "(defconst pi-child-dependency-value 'loaded-from-override)\n"
+                    "(provide 'pi-child-dependency)\n"))
+          (let ((process-environment (copy-sequence process-environment)))
+            (setenv "PACKAGE_USER_DIR" package-user-dir)
+            (should
+             (eq 'loaded-from-override
+                 (pi-coding-agent-test--read-batch-emacs-result
+                  "(progn
+  (display-warning 'pi-coding-agent-test \"injected child warning\")
+  (require 'pi-child-dependency)
+  (prin1 pi-child-dependency-value))")))))
+      (delete-directory root t))))
+
 (ert-deftest pi-coding-agent-test-transient-warning-explains-built-in-upgrade ()
   "Loading the menu with an old transient explains how to upgrade it."
   (let* ((expression

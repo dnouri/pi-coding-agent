@@ -23,6 +23,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+EMACS_BIN="${EMACS:-emacs}"
+if [ -z "${PACKAGE_USER_DIR:-}" ]; then
+    EMACS_MAJOR_VERSION=$("$EMACS_BIN" --batch -Q \
+        --eval '(princ emacs-major-version)')
+    export PACKAGE_USER_DIR="$PROJECT_DIR/.cache/elpa/$EMACS_MAJOR_VERSION"
+fi
 
 BATCH=0
 REPS=3
@@ -196,6 +202,7 @@ EMACS_INIT=(
     -Q -L "$PROJECT_DIR"
     --eval '(setq inhibit-startup-screen t)'
     --eval '(require (quote package))'
+    --eval '(let ((dir (getenv "PACKAGE_USER_DIR"))) (when dir (setq package-user-dir (directory-file-name (expand-file-name dir)))))'
     --eval '(package-initialize)'
     --eval '(let ((project (getenv "PI_TU_BENCH_PROJECT_DIR"))) (unless project (error "PI_TU_BENCH_PROJECT_DIR is unset")) (setq load-path (cons (expand-file-name project) load-path)))'
     -l "$SCRIPT_DIR/pi-coding-agent-tool-update-bench.el"
@@ -238,7 +245,7 @@ for scenario in "${SCENARIOS[@]}"; do
 
         printf '[%s/%s] running\n' "$scenario" "$iter"
         if [[ "$BATCH" = "1" ]]; then
-            if ! emacs --batch "${EMACS_INIT[@]}" \
+            if ! "$EMACS_BIN" --batch "${EMACS_INIT[@]}" \
                 -f pi-coding-agent-tu-bench-run-batch \
                 > "$run_dir/stdout.log" 2> "$run_dir/stderr.log"; then
                 cat "$run_dir/stdout.log"
@@ -247,7 +254,7 @@ for scenario in "${SCENARIOS[@]}"; do
             fi
         else
             if ! xvfb-run -a env GDK_BACKEND=x11 PATH="$PATH" \
-                emacs --geometry 120x40 "${EMACS_INIT[@]}" \
+                "$EMACS_BIN" --geometry 120x40 "${EMACS_INIT[@]}" \
                 --eval '(let ((standard-output (function external-debugging-output))) (kill-emacs (pi-coding-agent-tu-bench--exit-status (pi-coding-agent-tu-bench-run))))' \
                 </dev/null > "$run_dir/stdout.log" 2> "$run_dir/stderr.log"; then
                 cat "$run_dir/stdout.log"

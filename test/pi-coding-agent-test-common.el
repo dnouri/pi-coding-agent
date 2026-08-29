@@ -108,28 +108,42 @@ nil.  FAKE-EXTRA-ARGS are appended after the generated fake-pi scenario args."
 
 ;;;; Batch Emacs Helpers
 
+(defconst pi-coding-agent-test--batch-result-marker
+  "\n\036PI-CODING-AGENT-BATCH-RESULT-8F3D6A\037\n"
+  "Marker separating child Emacs diagnostics from its Lisp result.")
+
 (defun pi-coding-agent-test--read-batch-emacs-result (expression)
-  "Evaluate EXPRESSION in a fresh batch Emacs and read its printed result.
+  "Evaluate EXPRESSION in a fresh batch Emacs and return its Lisp result.
 Initializes packages, then re-prepends the current project root to
-`load-path' so the checkout under test wins over any installed copy."
+`load-path' so the checkout under test wins over any installed copy.
+Diagnostic output before the framed result is ignored."
   (let* ((emacs (expand-file-name invocation-name invocation-directory))
          (repo-root (file-name-directory (locate-library "pi-coding-agent")))
          (output-buffer (generate-new-buffer " *pi-coding-agent-batch-emacs*"))
          (exit-code (call-process emacs nil output-buffer nil
                                   "--batch" "-Q" "-L" repo-root
                                   "--eval" "(require 'package)"
+                                  "--eval"
+                                  "(let ((dir (getenv \"PACKAGE_USER_DIR\")))\n  (when dir\n    (setq package-user-dir\n          (directory-file-name (expand-file-name dir)))))"
                                   "--eval" "(package-initialize)"
                                   "--eval" "(setq load-prefer-newer t)"
                                   "--eval"
                                   (format "(setq load-path (cons %S load-path))"
                                           repo-root)
-                                  "--eval" expression)))
+                                  "--eval"
+                                  (format "(prin1 (prog1 %s (princ %S)))"
+                                          expression
+                                          pi-coding-agent-test--batch-result-marker))))
     (unwind-protect
         (progn
           (unless (eq 0 exit-code)
             (error "Batch Emacs exited with %s" exit-code))
           (with-current-buffer output-buffer
             (goto-char (point-min))
+            (unless (search-forward pi-coding-agent-test--batch-result-marker
+                                    nil t)
+              (error "Batch Emacs result marker missing: %s"
+                     (buffer-string)))
             (read (current-buffer))))
       (kill-buffer output-buffer))))
 

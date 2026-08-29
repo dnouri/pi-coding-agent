@@ -24,6 +24,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 HEADLESS="${PI_HEADLESS:-0}"
+EMACS_BIN="${EMACS:-emacs}"
+if [ -z "${PACKAGE_USER_DIR:-}" ]; then
+    EMACS_MAJOR_VERSION=$("$EMACS_BIN" --batch -Q \
+        --eval '(princ emacs-major-version)')
+    export PACKAGE_USER_DIR="$PROJECT_DIR/.cache/elpa/$EMACS_MAJOR_VERSION"
+fi
 SELECTOR="\"pi-coding-agent-gui-test-\""
 
 # Parse args
@@ -67,8 +73,12 @@ cat >> "$RUNNER_FILE" << EOF
 (add-to-list 'load-path "$PROJECT_DIR")
 (add-to-list 'load-path "$PROJECT_DIR/test")
 
-;; Initialize packages to find transient
+;; Initialize the same project-local packages as the parent test lane.
 (require 'package)
+(let ((dir (getenv "PACKAGE_USER_DIR")))
+  (when dir
+    (setq package-user-dir
+          (directory-file-name (expand-file-name dir)))))
 (push '("melpa" . "https://melpa.org/packages/") package-archives)
 (package-initialize)
 
@@ -170,9 +180,10 @@ set +e
 if [ "$HEADLESS" = "1" ]; then
     # GDK_BACKEND=x11 forces GTK/PGTK to use X11 instead of auto-detecting Wayland
     # </dev/null prevents "standard input is not a tty" error in CI
-    xvfb-run -a env GDK_BACKEND=x11 PATH="$PATH" emacs -Q -l "$RUNNER_FILE" </dev/null 2>&1
+    xvfb-run -a env GDK_BACKEND=x11 PATH="$PATH" \
+        "$EMACS_BIN" -Q -l "$RUNNER_FILE" </dev/null 2>&1
 else
-    emacs -Q -l "$RUNNER_FILE" 2>&1
+    "$EMACS_BIN" -Q -l "$RUNNER_FILE" 2>&1
 fi
 EXIT_CODE=$?
 set -e
