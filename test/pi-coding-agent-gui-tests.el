@@ -330,12 +330,14 @@ logical block and should not start following later streamed output."
       (kill-buffer buf))))
 
 (ert-deftest pi-coding-agent-gui-test-table-resize-refreshes-hot-tail-only ()
-  "Resizing the frame rewraps hot tables only and preserves scroll position."
+  "Resizing rewraps hot tables only and preserves context below the table."
   (pi-coding-agent-gui-test-with-fresh-session
     (:backend fake :fake-scenario "prompt-lifecycle")
     (let* ((chat-buf (plist-get pi-coding-agent-gui-test--session :chat-buffer))
            (frame (selected-frame))
            (orig-width (frame-width))
+           chat-win
+           initial-chat-width
            (cold-table
             "| Feature | Notes |\n|---------|-------|\n| Cold history | This older table was wrapped at the original wide width and should stay frozen after resize |\n")
            (hot-table
@@ -343,7 +345,8 @@ logical block and should not start following later streamed output."
            cold-before
            hot-before
            cold-start
-           hot-start)
+           hot-start
+           filler-start)
       (unwind-protect
           (progn
             (with-current-buffer chat-buf
@@ -353,32 +356,61 @@ logical block and should not start following later streamed output."
                 (setq cold-start (point))
                 (insert cold-table "\nAssistant\n=========\nRecent reply\n\nYou · 10:05\n===========\n")
                 (setq hot-start (point))
-                (insert hot-table)
+                ;; Terminate the Markdown table before adding scrollable context.
+                ;; Without the blank line, tree-sitter treats every filler line
+                ;; as a lazy continuation row inside one giant table.
+                (insert hot-table "\n")
+                (setq filler-start (point))
                 (dotimes (i 80)
                   (insert (format "filler line %d\n" i))))
               (font-lock-ensure)
-              (let* ((chat-win (pi-coding-agent-gui-test-chat-window))
-                     (initial-width (window-width chat-win)))
-                (pi-coding-agent--decorate-tables-in-region
-                 (point-min) (point-max) initial-width)
-                (move-marker pi-coding-agent--hot-tail-start hot-start)
-                (setq cold-before
-                      (pi-coding-agent-gui-test--table-display-strings
-                       cold-start hot-start)
-                      hot-before
-                      (pi-coding-agent-gui-test--table-display-strings
-                       hot-start (point-max)))))
+              (setq chat-win (pi-coding-agent-gui-test-chat-window)
+                    initial-chat-width (window-width chat-win))
+              (pi-coding-agent--decorate-tables-in-region
+               (point-min) (point-max) initial-chat-width)
+              (move-marker pi-coding-agent--hot-tail-start hot-start)
+              (setq cold-before
+                    (pi-coding-agent-gui-test--table-display-strings
+                     cold-start hot-start)
+                    hot-before
+                    (pi-coding-agent-gui-test--table-display-strings
+                     hot-start filler-start))
+              (should cold-before)
+              (should hot-before)
+              (should-not
+               (pi-coding-agent-gui-test--table-display-strings
+                filler-start (point-max))))
             (redisplay)
             (pi-coding-agent-gui-test-scroll-up 20)
             (let ((line-before (pi-coding-agent-gui-test-top-line-number)))
               (set-frame-size frame (- orig-width 30) (frame-height))
               (redisplay)
-              (should (pi-coding-agent-test-wait-until
+              (unless (pi-coding-agent-test-wait-until
                        (lambda ()
-                         (not (equal hot-before
-                                     (pi-coding-agent-gui-test--table-display-strings
-                                      hot-start (point-max)))))
-                       2 0.05))
+                         (< (window-width chat-win) initial-chat-width))
+                       2 0.05)
+                (ert-skip
+                 (format
+                  (concat "Window manager did not honor resize request from "
+                          "frame width %d to %d: chat window width %d is not "
+                          "narrower than its initial width %d")
+                  orig-width (- orig-width 30)
+                  (window-width chat-win) initial-chat-width)))
+              ;; X11 can report the new width while a synchronous ERT body has
+              ;; not re-entered the command-loop redisplay that delivers this
+              ;; buffer-local hook.  Exercise our registered callback in the
+              ;; same selected-window context Emacs documents for the hook.
+              (with-selected-window chat-win
+                (should
+                 (memq #'pi-coding-agent--maybe-refresh-hot-tail-tables
+                       window-configuration-change-hook))
+                (run-hooks 'window-configuration-change-hook)
+                (should (= pi-coding-agent--last-table-display-width
+                           (pi-coding-agent--chat-window-width))))
+              (should-not
+               (equal hot-before
+                      (pi-coding-agent-gui-test--table-display-strings
+                       hot-start filler-start)))
               (should (equal cold-before
                              (pi-coding-agent-gui-test--table-display-strings
                               cold-start hot-start)))

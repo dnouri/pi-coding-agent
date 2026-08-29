@@ -99,6 +99,7 @@ cat >> "$RUNNER_FILE" << EOF
 
 (let* ((selector $SELECTOR)
        (passed 0)
+       (skipped 0)
        (failed 0)
        (total 0)
        (test-list (pi-coding-agent-gui-test--order-tests (ert-select-tests selector t))))
@@ -118,6 +119,14 @@ cat >> "$RUNNER_FILE" << EOF
             (setq passed (1+ passed))
             (pi-coding-agent-gui-test--log "  [%d/%d] PASS: %s (%s)" n total name elapsed)
             (insert (format "  PASS: %s (%s)\n" name elapsed)))
+           ((ert-test-skipped-p result)
+            (setq skipped (1+ skipped))
+            (let ((reason
+                   (error-message-string
+                    (ert-test-result-with-condition-condition result))))
+              (pi-coding-agent-gui-test--log
+               "  [%d/%d] SKIP: %s (%s): %s" n total name elapsed reason)
+              (insert (format "  SKIP: %s (%s): %s\n" name elapsed reason))))
            (t
             (setq failed (1+ failed))
             (pi-coding-agent-gui-test--log "  [%d/%d] FAIL: %s (%s)" n total name elapsed)
@@ -146,9 +155,12 @@ cat >> "$RUNNER_FILE" << EOF
                   (pi-coding-agent-gui-test--log "  --- Chat buffer content ---")
                   (pi-coding-agent-gui-test--log "%s" (with-current-buffer chat-buf (buffer-string)))
                   (pi-coding-agent-gui-test--log "  --- End chat buffer ---")))))))))
-    (insert (format "\n=== %d tests: %d passed, %d failed ===\n" total passed failed))
+    (insert (format "\n=== %d tests: %d passed, %d skipped, %d failed ===\n"
+                    total passed skipped failed))
     (write-region (point-min) (point-max) pi-coding-agent-gui-test--output-file))
-  (pi-coding-agent-gui-test--log "=== %d tests: %d passed, %d failed ===" total passed failed)
+  (pi-coding-agent-gui-test--log
+   "=== %d tests: %d passed, %d skipped, %d failed ==="
+   total passed skipped failed)
   (kill-emacs (if (> failed 0) 1 0)))
 EOF
 

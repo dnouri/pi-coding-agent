@@ -134,15 +134,16 @@ make test-integration-real     # real only
 
 Run a filtered subset by ERT pattern:
 ```bash
-make test SELECTOR=fontify-buffer-tail
 make test SELECTOR=toolcall-delta
 make test SELECTOR='abort\|followup'
 make test-integration-fake SELECTOR=rpc-smoke
 make test-integration-real SELECTOR=steering-contract
 ```
 
-The `SELECTOR` value is an ERT selector string — a substring match
-against test names.
+The `SELECTOR` value is exported unchanged and interpreted by ERT as an
+Emacs regexp matched against test names.  For alternation, single-quote the
+shell value and use one backslash as above; `SELECTOR='abort\\|followup'`
+passes two backslashes and does not mean regexp alternation.
 
 `make test` is intentionally terse on green runs (summary-focused output).
 For full raw ERT output, use:
