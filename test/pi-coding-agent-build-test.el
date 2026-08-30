@@ -145,6 +145,8 @@
                         "-L" pi-coding-agent-test-build--repo-root
                         "-L" scripts-dir
                         "--eval" "(require 'package)"
+                        "--eval"
+                        "(let ((dir (getenv \"PACKAGE_USER_DIR\")))\n  (when dir\n    (setq package-user-dir\n          (directory-file-name (expand-file-name dir)))))"
                         "--eval" "(package-initialize)"
                         "--eval"
                         (format "(setq load-path (cons %S load-path))"

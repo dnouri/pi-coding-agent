@@ -178,6 +178,22 @@ tool block to expand or collapse it.  Long-running commands stream
 output live, file operations (=read=, =write=, =edit=) get syntax
 highlighting, and edit diffs highlight what changed.
 
+Image content returned by completed tool results is shown inline in graphical
+Emacs and as a useful type-and-size placeholder in terminals.  Pi's built-in
+=read= already returns raster images as image content.  For SVG, the preview is
+made only from complete, standalone SVG text returned by =read=; pi-coding-agent
+never reopens the argument path, and text with obvious scripts or external
+resources is left as text.  Previews are *display-only*: outgoing prompts have
+no image field, so prompt image attachments remain separate
+[[https://github.com/dnouri/pi-coding-agent/issues/261][issue #261]] work.
+
+Current limits: images in partial tool updates appear when the final result
+arrives; custom tools can return animated or highly compressed data whose
+decoder cost is not bounded by the source-byte cap (Pi's built-in =read=
+resizes raster images to at most 2000x2000).  Moving a terminal-rendered chat to
+a GUI, resizing previews, or applying a later extension replacement may require
+a toggle or history reload.
+
 Markdown pipe tables get a display-only treatment: wide tables are
 wrapped and drawn to neatly fit window width, with cleaner separators,
 while the underlying buffer text remains ordinary Markdown.
@@ -487,6 +503,11 @@ Less common tuning knobs:
 ;; Show more tool output before it collapses, counted in visual lines:
 ;; (setopt pi-coding-agent-tool-preview-lines 20)
 ;; (setopt pi-coding-agent-bash-preview-lines 10)
+
+;; Cap inline image previews to 640 pixels as well as the chat window width;
+;; lower the 10 MiB per-image returned-source limit if desired:
+;; (setopt pi-coding-agent-image-preview-max-width 640)
+;; (setopt pi-coding-agent-image-preview-max-bytes (* 5 1024 1024))
 
 ;; Lower context warning/error colors in the header line:
 ;; (setopt pi-coding-agent-context-warning-threshold 40)

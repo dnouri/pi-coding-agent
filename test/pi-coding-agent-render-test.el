@@ -2576,6 +2576,317 @@ See https://github.com/dnouri/pi-coding-agent/issues/176."
                           nil nil)
     (should (string-match-p "file1" (buffer-string)))))
 
+(defun pi-coding-agent-test--image-preview-positions ()
+  "Return buffer positions carrying rendered image previews."
+  (let ((position (point-min))
+        positions)
+    (while (setq position
+                 (text-property-any position (point-max)
+                                    'pi-coding-agent-image-preview t))
+      (push position positions)
+      (setq position
+            (or (next-single-property-change
+                 position 'pi-coding-agent-image-preview nil (point-max))
+                (point-max))))
+    (nreverse positions)))
+
+(defconst pi-coding-agent-test--png-base64
+  "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGP4z8DwHwQBEPgD/U6VwW8AAAAASUVORK5CYII="
+  "Base64 for a two-by-one PNG used by image preview tests.")
+
+(ert-deftest pi-coding-agent-test-tool-result-image-has-terminal-placeholder ()
+  "An image result is useful text inside its tool block in a terminal."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((block (pi-coding-agent--display-tool-start
+                  "custom_image" '(:label "preview") "image-call")))
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) nil)))
+        (pi-coding-agent--display-tool-end
+         "custom_image" '(:label "preview")
+         `[(:type "text" :text "generated")
+           (:type "image" :data ,pi-coding-agent-test--png-base64
+            :mimeType "image/png")]
+         nil nil block))
+      (let* ((overlay (pi-coding-agent--tool-block-overlay block))
+             (positions (pi-coding-agent-test--image-preview-positions))
+             (position (car positions)))
+        (should (= 1 (length positions)))
+        (should (<= (overlay-start overlay) position))
+        (should (< position (overlay-end overlay)))
+        (should (get-text-property position 'pi-coding-agent-no-fontify))
+        (should-not (get-text-property position 'display))
+        (should (string-match-p
+                 "Image: image/png, 71 B"
+                 (buffer-substring-no-properties position (overlay-end overlay))))))))
+
+(ert-deftest pi-coding-agent-test-tool-result-image-inserts-scaled-display-property ()
+  "A graphical result carries one scaled image display property."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let (created)
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+                ((symbol-function 'image-type-available-p)
+                 (lambda (type) (eq type 'png)))
+                ((symbol-function 'window-pixel-width)
+                 (lambda (&optional _window) 800))
+                ((symbol-function 'window-pixel-height)
+                 (lambda (&optional _window) 600))
+                ((symbol-function 'create-image)
+                 (lambda (data type data-p &rest properties)
+                   (setq created (list data type data-p properties))
+                   'image-display-spec)))
+        (pi-coding-agent--display-tool-end
+         "custom_image" nil
+         `((:type "image" :data ,pi-coding-agent-test--png-base64
+            :mimeType "image/png"))
+         nil nil))
+      (let* ((positions (pi-coding-agent-test--image-preview-positions))
+             (position (car positions)))
+        (should (= 1 (length positions)))
+        (should (eq 'image-display-spec
+                    (get-text-property position 'display)))
+        (should (equal (list (base64-decode-string
+                              pi-coding-agent-test--png-base64)
+                             'png t '(:max-width 720 :max-height 300))
+                       created))))))
+
+(ert-deftest pi-coding-agent-test-tool-result-image-edge-cases-stay-visible ()
+  "Multiple, corrupt, unknown, unavailable, and empty images degrade to text."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+              ((symbol-function 'image-type-available-p) (lambda (_type) nil)))
+      (pi-coding-agent--display-tool-end
+       "custom_image" nil
+       `[(:type "image" :data ,pi-coding-agent-test--png-base64
+          :mimeType "image/png")
+         (:type "image" :data "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+          :mimeType "image/gif")
+         (:type "image" :data "%%%" :mimeType "image/jpeg")
+         (:type "image" :data "AAAA" :mimeType "image/tga")
+         (:type "image" :data "" :mimeType "image/webp")]
+       nil nil))
+    (should (= 5 (length (pi-coding-agent-test--image-preview-positions))))
+    (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+      (should (string-match-p "image/png, 71 B, unavailable" text))
+      (should (string-match-p "image/gif, 34 B, unavailable" text))
+      (should (string-match-p "image/jpeg, decode error" text))
+      (should (string-match-p "image/tga, 3 B, unsupported type" text))
+      (should (string-match-p "image/webp, empty data" text)))))
+
+(ert-deftest pi-coding-agent-test-tool-result-images-obey-source-and-count-caps ()
+  "Oversized and excess images become textual placeholders."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-image-preview-max-bytes 2)
+          (pi-coding-agent--image-previews-per-tool-limit 2))
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+                ((symbol-function 'create-image)
+                 (lambda (&rest _)
+                   (ert-fail "Oversized image reached create-image"))))
+        (pi-coding-agent--display-tool-end
+         "generate" nil
+         `((:type "image" :mimeType "image/png"
+            :data ,pi-coding-agent-test--png-base64)
+           (:type "image" :mimeType "image/png"
+            :data ,pi-coding-agent-test--png-base64)
+           (:type "image" :mimeType "image/png"
+            :data ,pi-coding-agent-test--png-base64))
+         nil nil)))
+    (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+      (should (= 2 (seq-count
+                    (lambda (line) (string-match-p "too large (limit 2 B)" line))
+                    (split-string text "\n" t))))
+      (should (string-match-p "1 additional preview omitted" text)))))
+
+(ert-deftest pi-coding-agent-test-tool-result-image-history-replays-preview ()
+  "History replay renders image result blocks as previews."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) nil)))
+      (pi-coding-agent--display-history-messages
+       `[(:role "assistant"
+          :content [(:type "toolCall" :id "image-history" :name "generate"
+                     :arguments (:prompt "chart"))])
+         (:role "toolResult" :toolCallId "image-history" :toolName "generate"
+          :content [(:type "image" :data ,pi-coding-agent-test--png-base64
+                     :mimeType "image/png")]
+          :isError :json-false)]))
+    (should (= 1 (length (pi-coding-agent-test--image-preview-positions))))
+    (should (string-match-p "Image: image/png"
+                            (buffer-substring-no-properties
+                             (point-min) (point-max))))))
+
+(ert-deftest pi-coding-agent-test-tool-result-image-toggle-reuses-preview ()
+  "Collapse and expand preserve one decoded preview inside stable bounds."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((pi-coding-agent-tool-preview-lines 2)
+          (create-count 0)
+          (body (mapconcat (lambda (number) (format "line-%d" number))
+                           (number-sequence 1 12) "\n")))
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+                ((symbol-function 'image-type-available-p) (lambda (_type) t))
+                ((symbol-function 'create-image)
+                 (lambda (&rest _)
+                   (setq create-count (1+ create-count))
+                   'persistent-image-spec)))
+        (let ((block (pi-coding-agent--display-tool-start
+                      "generate" nil "toggle-image")))
+          (pi-coding-agent--display-tool-end
+           "generate" nil
+           (list (list :type "text" :text body)
+                 (list :type "image"
+                       :data pi-coding-agent-test--png-base64
+                       :mimeType "image/png"))
+           nil nil block)
+          (dotimes (_ 2)
+            (let* ((overlay (pi-coding-agent--tool-block-overlay block))
+                   (button (pi-coding-agent--find-toggle-button-in-region
+                            (overlay-start overlay) (overlay-end overlay))))
+              (should button)
+              (pi-coding-agent--toggle-tool-output button)
+              (let ((position (car (pi-coding-agent-test--image-preview-positions))))
+                (should position)
+                (should (< position (overlay-end overlay)))
+                (should (eq 'persistent-image-spec
+                            (get-text-property position 'display))))))
+          (should (= 1 create-count))
+          (should (= 1 (length (pi-coding-agent-test--image-preview-positions)))))))))
+
+(ert-deftest pi-coding-agent-test-tool-result-image-survives-cooling ()
+  "Cooling history keeps the preview property while dropping heavy hot state."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((create-count 0))
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+                ((symbol-function 'image-type-available-p) (lambda (_type) t))
+                ((symbol-function 'create-image)
+                 (lambda (&rest _)
+                   (setq create-count (1+ create-count))
+                   'cooled-image-spec)))
+        (let ((block (pi-coding-agent--display-tool-start
+                      "generate" nil "cooled-image")))
+          (pi-coding-agent--display-tool-end
+           "generate" nil
+           `((:type "text" :text "done")
+             (:type "image" :data ,pi-coding-agent-test--png-base64
+              :mimeType "image/png"))
+           nil nil block)
+          (pi-coding-agent--cool-completed-tool-blocks
+           (list (pi-coding-agent--tool-block-overlay block)))))
+      (let* ((positions (pi-coding-agent-test--image-preview-positions))
+             (position (car positions)))
+        (should (= 1 create-count))
+        (should (= 1 (length positions)))
+        (should (eq 'cooled-image-spec
+                    (get-text-property position 'display)))
+        (should (get-text-property position 'pi-coding-agent-cold-tool-block))
+        (should-not (pi-coding-agent-test--all-tool-overlays))))))
+
+(ert-deftest pi-coding-agent-test-read-svg-uses-complete-returned-text ()
+  "A complete standalone SVG returned by read becomes the preview source."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((source "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"2\" height=\"1\"><rect width=\"2\" height=\"1\"/></svg>")
+          created)
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+                ((symbol-function 'image-type-available-p)
+                 (lambda (type) (eq type 'svg)))
+                ((symbol-function 'window-pixel-width)
+                 (lambda (&optional _window) 1200))
+                ((symbol-function 'window-pixel-height)
+                 (lambda (&optional _window) 600))
+                ((symbol-function 'create-image)
+                 (lambda (data type data-p &rest properties)
+                   (setq created (list data type data-p properties))
+                   'returned-svg-spec)))
+        (pi-coding-agent--display-tool-end
+         "read" '(:path "/does/not/exist.svg")
+         (list (list :type "text" :text source))
+         '(:truncation :null) nil))
+      (let ((position (car (pi-coding-agent-test--image-preview-positions))))
+        (should position)
+        (should (eq 'returned-svg-spec
+                    (get-text-property position 'display)))
+        (should (equal source (car created)))
+        (should (equal '(svg t (:max-width 900 :max-height 300
+                               :base-uri "data:" :scale 1))
+                       (cdr created)))))))
+
+(ert-deftest pi-coding-agent-test-read-svg-refuses-truncated-result ()
+  "A non-null truncation record keeps complete-looking SVG as text."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-end
+     "read" '(:path "/remote/truncated.svg")
+     '((:type "text"
+        :text "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>"))
+     '(:truncation (:originalBytes 2048 :returnedBytes 1024)) nil)
+    (should-not (pi-coding-agent-test--image-preview-positions))
+    (should (string-match-p "<svg" (buffer-string)))))
+
+(ert-deftest pi-coding-agent-test-read-svg-history-and-resource-refusal ()
+  "History previews standalone SVG text but leaves resource-backed SVG as text."
+  (let ((simple "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"1\" height=\"1\"/></svg>")
+        (resource "<svg xmlns=\"http://www.w3.org/2000/svg\"><image href=\"file:///tmp/x.png\"/></svg>"))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) nil)))
+        (pi-coding-agent--display-history-messages
+         `[( :role "assistant"
+             :content [(:type "toolCall" :id "svg-history" :name "read"
+                        :arguments (:path "gone.svg"))])
+           (:role "toolResult" :toolCallId "svg-history" :toolName "read"
+            :content [(:type "text" :text ,simple)] :isError :json-false)]))
+      (should (= 1 (length (pi-coding-agent-test--image-preview-positions))))
+      (should (string-match-p (regexp-quote "Image: image/svg+xml")
+                              (buffer-substring-no-properties
+                               (point-min) (point-max)))))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (cl-letf (((symbol-function 'create-image)
+                 (lambda (&rest _)
+                   (ert-fail "Resource-backed SVG reached create-image"))))
+        (pi-coding-agent--display-tool-end
+         "read" '(:path "/tmp/x.svg")
+         (list (list :type "text" :text resource)) nil nil))
+      (should-not (pi-coding-agent-test--image-preview-positions))
+      (should (string-match-p "file:///tmp/x.png" (buffer-string))))))
+
+(ert-deftest pi-coding-agent-test-keyed-final-does-not-use-legacy-tool-block ()
+  "A keyed final miss creates its own block instead of using the legacy block."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let* ((legacy (pi-coding-agent--display-tool-start "bash" nil))
+           (legacy-overlay (pi-coding-agent--tool-block-overlay legacy)))
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) nil)))
+        (pi-coding-agent--handle-display-event
+         `(:type "tool_execution_end" :toolCallId "late-image"
+           :toolName "generate" :isError nil
+           :result (:content [(:type "image" :mimeType "image/png"
+                               :data ,pi-coding-agent-test--png-base64)]))))
+      (let* ((position (car (pi-coding-agent-test--image-preview-positions)))
+             (result-overlay
+              (seq-find (lambda (overlay)
+                          (overlay-get overlay 'pi-coding-agent-tool-block))
+                        (overlays-at position))))
+        (should result-overlay)
+        (should-not (eq result-overlay legacy-overlay))
+        (should-not (and (<= (overlay-start legacy-overlay) position)
+                         (< position (overlay-end legacy-overlay))))))))
+
+(ert-deftest pi-coding-agent-test-text-only-tool-result-adds-no-image-preview ()
+  "Ordinary tool output remains ordinary fenced text."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-tool-end
+     "bash" '(:command "printf ok")
+     '((:type "text" :text "ok")) nil nil)
+    (should-not (pi-coding-agent-test--image-preview-positions))
+    (should (string-match-p (regexp-quote "```\nok\n```")
+                            (buffer-string)))))
+
 (ert-deftest pi-coding-agent-test-bash-output-wrapped-in-bare-fence ()
   "Bash output is wrapped in a bare fence (no language tag)."
   (with-temp-buffer

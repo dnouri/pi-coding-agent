@@ -2701,6 +2701,22 @@ Pi handles command expansion on the server side."
           (should (equal (plist-get rpc-message :message) "/greet world")))
       (delete-process fake-proc))))
 
+(ert-deftest pi-coding-agent-test-image-preview-does-not-add-prompt-images ()
+  "Display previews do not add an images field to outgoing prompts."
+  (let* ((rpc-message nil)
+         (fake-proc (start-process "test" nil "cat")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                   (lambda () fake-proc))
+                  ((symbol-function 'pi-coding-agent--rpc-async)
+                   (lambda (_proc message _callback)
+                     (setq rpc-message message))))
+          (pi-coding-agent--send-prompt "/tmp/screenshot.png")
+          (should (equal "/tmp/screenshot.png"
+                         (plist-get rpc-message :message)))
+          (should-not (plist-member rpc-message :images)))
+      (delete-process fake-proc))))
+
 (ert-deftest pi-coding-agent-test-send-prompt-marks-sending-until-preflight-fails ()
   "pi-coding-agent--send-prompt closes the local pre-agent_start idle gap."
   (let* ((rpc-callback nil)

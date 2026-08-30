@@ -200,6 +200,18 @@ Prevents huge single-line outputs from blowing up the chat buffer."
   :type 'natnum
   :group 'pi-coding-agent)
 
+(defcustom pi-coding-agent-image-preview-max-width 900
+  "Maximum pixel width for inline image previews.
+Previews are also constrained to the visible chat window."
+  :type 'natnum
+  :group 'pi-coding-agent)
+
+(defcustom pi-coding-agent-image-preview-max-bytes (* 10 1024 1024)
+  "Maximum source bytes retained for one inline image preview.
+Larger tool-result images use a textual placeholder."
+  :type 'natnum
+  :group 'pi-coding-agent)
+
 (defcustom pi-coding-agent-context-warning-threshold 70
   "Context usage percentage at which to show warning color."
   :type 'natnum
