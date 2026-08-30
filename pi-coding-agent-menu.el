@@ -216,6 +216,9 @@ and another transition may not be discarded."
      ((pi-coding-agent--prompt-start-wait-active-p)
       (message "Pi: Cannot start a new session while prompt acceptance is pending")
       nil)
+     ((pi-coding-agent--model-change-pending-p)
+      (message "Pi: Cannot start a new session while a model change is pending")
+      nil)
      ((or pi-coding-agent--followup-queue
           (pi-coding-agent--followup-drain-pending-p))
       (message "Pi: Cannot start a new session with queued follow-ups")
@@ -365,6 +368,7 @@ Call this when starting a new session to ensure no stale state persists."
         pi-coding-agent--thinking-block-order-counter 0)
   (pi-coding-agent--set-activity-phase "idle" 'reset t)
   (pi-coding-agent--clear-local-user-message-region)
+  (pi-coding-agent--invalidate-model-change)
   (pi-coding-agent--clear-unsupported-extension-ui-warnings)
   (pi-coding-agent--invalidate-history-loads)
   (pi-coding-agent--finish-session-transition
@@ -551,6 +555,8 @@ buffer from session history."
      ((not session-file)
       (message "Pi: No session file available - cannot reload"))
      (t
+      (with-current-buffer chat-buf
+        (pi-coding-agent--cancel-model-change-and-restore-followups))
       (message "Pi: Reloading...")
       (with-current-buffer chat-buf
         (let ((dir (pi-coding-agent--session-directory)))
@@ -722,7 +728,11 @@ Optional INITIAL-INPUT pre-fills the completion prompt for filtering."
         (chat-buf (pi-coding-agent--get-chat-buffer)))
     (unless proc
       (user-error "No pi process running"))
-    (let* ((state (pi-coding-agent--menu-state))
+    (when (pi-coding-agent--model-change-pending-p chat-buf)
+      (user-error "A model change is already pending"))
+    (when (pi-coding-agent--session-transition-ready-p
+           chat-buf "change models")
+      (let* ((state (pi-coding-agent--menu-state))
            (response (pi-coding-agent--rpc-sync proc '(:type "get_available_models") 5))
            (data (plist-get response :data))
            (models (plist-get data :models))
@@ -764,20 +774,48 @@ Optional INITIAL-INPUT pre-fills the completion prompt for filtering."
                         (format "Model (current: %s): "
                                 (or current-display "unknown"))
                         names nil t)))))
-      (when (and choice (not (equal choice current-display)))
+      (when (and choice
+                 (not (equal choice current-display))
+                 (pi-coding-agent--session-transition-ready-p
+                  chat-buf "change models"))
         (let* ((selected-model (cdr (assoc choice model-alist)))
                (model-id (plist-get selected-model :id))
-               (provider (plist-get selected-model :provider)))
-          (pi-coding-agent--rpc-async proc (list :type "set_model"
-                                    :provider provider
-                                    :modelId model-id)
-                         (lambda (resp)
-                           (when (and (eq (plist-get resp :success) t)
-                                      (buffer-live-p chat-buf))
+               (provider (plist-get selected-model :provider))
+               (token (pi-coding-agent--begin-model-change proc chat-buf)))
+          (if (not token)
+              (message "Pi: Process changed while selecting a model; try again")
+            (condition-case err
+                (pi-coding-agent--rpc-async
+                 proc (list :type "set_model"
+                            :provider provider
+                            :modelId model-id)
+                 (lambda (resp)
+                   (when (pi-coding-agent--model-change-current-p token chat-buf)
+                     (let ((success (eq (plist-get resp :success) t))
+                           (applied nil))
+                       (unwind-protect
+                           (when success
                              (with-current-buffer chat-buf
                                (pi-coding-agent--update-state-from-response resp)
                                (force-mode-line-update))
-                             (message "Pi: Model set to %s" choice)))))))))
+                             (setq applied t))
+                         (when (pi-coding-agent--finish-model-change
+                                token chat-buf)
+                           (when (buffer-live-p chat-buf)
+                             (with-current-buffer chat-buf
+                               (if applied
+                                   (pi-coding-agent--schedule-followup-queue-processing)
+                                 (pi-coding-agent--restore-followup-queue-to-input))))
+                           (cond
+                            (applied
+                             (message "Pi: Model set to %s" choice))
+                            ((not success)
+                             (message "Pi: Failed to set model: %s"
+                                      (or (plist-get resp :error)
+                                          "unknown error"))))))))))
+              ((error quit)
+               (pi-coding-agent--finish-model-change token chat-buf)
+               (signal (car err) (cdr err)))))))))))
 
 (defun pi-coding-agent--thinking-level-effective-value (level model)
   "Return LEVEL's provider value for MODEL.
@@ -1217,9 +1255,7 @@ Captures chat and input buffers at call time (before the async RPC)."
                 (when refresh-scheduled
                   (condition-case err
                       (when (buffer-live-p input-buf)
-                        (with-current-buffer input-buf
-                          (erase-buffer)
-                          (when text (insert text))))
+                        (pi-coding-agent--replace-input-draft input-buf text))
                     (error
                      (message "Pi: Failed to prefill fork prompt - %s"
                               (error-message-string err))))))

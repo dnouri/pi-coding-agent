@@ -260,6 +260,56 @@ Uses tool call ID \"call_1\" and contentIndex 0."
    (list (pi-coding-agent-test--toolcall "call_1" tool-name args))
    "x"))
 
+(defconst pi-coding-agent-test--prompt-image-fixtures
+  '((png . "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
+    (jpeg . "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDi6KKK+ZP3E//Z")
+    (gif . "R0lGODdhAQABAIEAAP8AAAAAAAAAAAAAACwAAAAAAQABAAAIBAABBAQAOw==")
+    (webp . "UklGRjwAAABXRUJQVlA4IDAAAADQAQCdASoBAAEAAUAmJaACdLoB+AADsAD+8ut//NgVzXPv9//S4P0uD9Lg/9KQAAA="))
+  "Valid one-pixel raster images used by prompt attachment tests.")
+
+(defun pi-coding-agent-test--prompt-image-base64 (type)
+  "Return the base64 fixture for image TYPE."
+  (or (alist-get type pi-coding-agent-test--prompt-image-fixtures)
+      (error "No prompt image fixture for %S" type)))
+
+(defun pi-coding-agent-test--write-prompt-image (path type)
+  "Write the binary prompt image fixture TYPE to PATH and return PATH."
+  (let ((coding-system-for-write 'no-conversion))
+    (with-temp-file path
+      (set-buffer-multibyte nil)
+      (insert (base64-decode-string (pi-coding-agent-test--prompt-image-base64 type)))))
+  path)
+
+(defun pi-coding-agent-test--input-header ()
+  "Return the current input header without properties."
+  (substring-no-properties (pi-coding-agent--header-line-string)))
+
+(defun pi-coding-agent-test--attach-image (path)
+  "Attach prompt image PATH through the public interactive command."
+  (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path)))
+    (call-interactively #'pi-coding-agent-attach-image)))
+
+(defun pi-coding-agent-test--attach-image-via-key (path &optional clear)
+  "Invoke the input binding for PATH, with prefix argument when CLEAR."
+  (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path)))
+    (let ((current-prefix-arg (and clear '(4))))
+      (call-interactively (key-binding (kbd "C-c C-a"))))))
+
+(cl-defmacro pi-coding-agent-test-with-prompt-image-session
+    ((dir chat-buf input-buf) &rest body)
+  "Run BODY in a fresh vision-capable mock session."
+  (declare (indent 1) (debug ((symbolp symbolp symbolp) body)))
+  `(let ((,dir (pi-coding-agent-test--make-temp-directory "pi-prompt-image-")))
+     (unwind-protect
+         (pi-coding-agent-test-with-mock-session ,dir
+           (let ((,chat-buf (get-buffer (pi-coding-agent-test--chat-buffer-name ,dir)))
+                 (,input-buf (get-buffer (pi-coding-agent-test--input-buffer-name ,dir))))
+             (with-current-buffer ,chat-buf
+               (setq pi-coding-agent--status 'idle
+                     pi-coding-agent--state '(:model (:name "Vision" :input ["text" "image"]))))
+             ,@body))
+       (delete-directory ,dir t))))
+
 ;;;; Mock Session
 
 (defmacro pi-coding-agent-test-with-mock-session (dir &rest body)

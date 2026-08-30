@@ -133,7 +133,7 @@ higher-level events until a test genuinely needs them.
 
 Fields the current Emacs code or assertions actively read:
 
-- `model`
+- `model` (the fake model advertises `input: ["text", "image"]`)
 - `thinkingLevel`
 - `isStreaming`
 - `isCompacting`
@@ -175,6 +175,18 @@ Required behavior:
 6. emit `agent_end`
 7. update `get_state.isStreaming` and `messageCount`
 8. persist enough session data to back session-file assertions
+
+A `prompt` may include `images`, which must be a JSON array.  Every item must
+be an object with `type: "image"`, nonempty string `data`, and nonempty string
+`mimeType`.  The fake validates only this upstream RPC shape: it neither
+decodes base64 nor restricts MIME values.  Valid blocks are detached from the
+request and persisted/emitted after the prompt's text block in request order.
+
+For `text_stream`, images belong only to the initial user turn; steering is
+text-only and image-bearing `steer` commands fail.  `tool_stream` preserves
+prompt images on its ordinary user message.  The extension-owned
+`extension_dialog` and `custom_message` prompt behaviors reject nonempty image
+arrays before reporting prompt success.  No new scenario type is implied.
 
 ### Tool execution path
 

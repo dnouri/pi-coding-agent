@@ -632,6 +632,45 @@
             (delete-process fake-proc)))
       (kill-buffer output-buffer))))
 
+(ert-deftest pi-coding-agent-test-rpc-async-scheduling-error-cleans-pending-state ()
+  "Encoding and sending failures leave no orphaned pending request state."
+  (let ((pi-coding-agent--request-id-counter 0)
+        (real-encode (symbol-function 'pi-coding-agent--encode-command))
+        (real-send (symbol-function 'pi-coding-agent--send-string))
+        results)
+    (dolist (failure '(encode send))
+      (let ((fake-proc (start-process "cat" nil "cat"))
+            attempted)
+        (unwind-protect
+            (cl-letf (((symbol-function 'pi-coding-agent--encode-command)
+                       (lambda (command)
+                         (if (eq failure 'encode)
+                             (progn
+                               (setq attempted t)
+                               (error "synchronous encode failure"))
+                           (funcall real-encode command))))
+                      ((symbol-function 'pi-coding-agent--send-string)
+                       (lambda (process string)
+                         (if (eq failure 'send)
+                             (progn
+                               (setq attempted t)
+                               (error "synchronous send failure"))
+                           (funcall real-send process string)))))
+              (condition-case nil
+                  (pi-coding-agent--rpc-async
+                   fake-proc '(:type "get_state") #'ignore)
+                (error nil))
+              (push
+               (list failure attempted
+                     (hash-table-count
+                      (pi-coding-agent--get-pending-requests fake-proc))
+                     (hash-table-count
+                      (pi-coding-agent--get-pending-command-types fake-proc)))
+               results))
+          (ignore-errors (delete-process fake-proc)))))
+    (should (equal (nreverse results)
+                   '((encode t 0 0) (send t 0 0))))))
+
 (ert-deftest pi-coding-agent-test-remote-rpc-queue-flushes-after-ready-marker ()
   "Remote RPC writes queue until the ready marker, then flush FIFO."
   (let ((pi-coding-agent--request-id-counter 0)
