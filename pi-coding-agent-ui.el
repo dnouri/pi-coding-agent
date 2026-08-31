@@ -879,6 +879,7 @@ This is a read-only buffer showing the conversation history."
   (setq-local pi-coding-agent--history-load-generation 0)
   (setq-local pi-coding-agent--session-transition-generation 0)
   (setq-local pi-coding-agent--session-transition-active nil)
+  (setq-local pi-coding-agent--local-user-message-region nil)
   ;; Disable hl-line-mode: its post-command-hook overlay update causes
   ;; scroll oscillation in buffers with invisible text + variable heights.
   (setq-local global-hl-line-mode nil)
@@ -1416,6 +1417,16 @@ Cleared when we receive message_start role=user from pi.
 When nil and we receive message_start role=user, we display it.
 When set but different from pi's message, we display pi's version
 \(e.g., expanded template).")
+
+(defvar-local pi-coding-agent--local-user-message-region nil
+  "Marker pair bounding the locally displayed user turn awaiting pi's echo.")
+
+(defun pi-coding-agent--clear-local-user-message-region ()
+  "Detach and clear markers for the locally displayed pending user turn."
+  (when (consp pi-coding-agent--local-user-message-region)
+    (set-marker (car pi-coding-agent--local-user-message-region) nil)
+    (set-marker (cdr pi-coding-agent--local-user-message-region) nil))
+  (setq pi-coding-agent--local-user-message-region nil))
 
 (defvar-local pi-coding-agent--prompt-start-wait-active nil
   "Non-nil while a prompt is waiting for response, agent_start, or fallback.")
@@ -2445,22 +2456,68 @@ returns the frontend to idle for that no-turn success path.")
        (pi-coding-agent--prompt-start-wait-active-p)
        (= generation pi-coding-agent--prompt-start-generation)))
 
+(defun pi-coding-agent--finish-prompt-without-agent-start
+    (chat-buf generation on-no-agent-start)
+  "Finish CHAT-BUF prompt GENERATION after Pi confirms no agent turn.
+Call ON-NO-AGENT-START after releasing local ownership."
+  (when (and (buffer-live-p chat-buf)
+             (with-current-buffer chat-buf
+               (pi-coding-agent--prompt-start-current-p generation)))
+    (with-current-buffer chat-buf
+      (setq pi-coding-agent--prompt-start-wait-active nil)
+      (setq pi-coding-agent--prompt-start-generation
+            (1+ pi-coding-agent--prompt-start-generation))
+      (when (eq pi-coding-agent--status 'sending)
+        (setq pi-coding-agent--status 'idle)
+        (pi-coding-agent--set-activity-phase "idle"))
+      (when on-no-agent-start
+        (funcall on-no-agent-start)))))
+
+(defun pi-coding-agent--probe-prompt-start-state
+    (chat-buf generation on-no-agent-start)
+  "Ask Pi whether CHAT-BUF prompt GENERATION started an agent turn.
+Call ON-NO-AGENT-START only after Pi authoritatively reports idle."
+  (let ((proc (and (buffer-live-p chat-buf)
+                   (with-current-buffer chat-buf
+                     pi-coding-agent--process))))
+    (when (and proc (process-live-p proc))
+      (condition-case nil
+          (pi-coding-agent--rpc-async
+           proc '(:type "get_state")
+           (lambda (response)
+             (when (and (buffer-live-p chat-buf)
+                        (with-current-buffer chat-buf
+                          (pi-coding-agent--prompt-start-current-p generation)))
+               (let* ((data (plist-get response :data))
+                      (active
+                       (and (eq (plist-get response :success) t)
+                            (or (pi-coding-agent--normalize-boolean
+                                 (plist-get data :isStreaming))
+                                (pi-coding-agent--normalize-boolean
+                                 (plist-get data :isCompacting))))))
+                 (if (or active (not (eq (plist-get response :success) t)))
+                     (pi-coding-agent--schedule-prompt-start-fallback
+                      chat-buf generation on-no-agent-start)
+                   (pi-coding-agent--finish-prompt-without-agent-start
+                    chat-buf generation on-no-agent-start))))))
+        (error
+         (pi-coding-agent--schedule-prompt-start-fallback
+          chat-buf generation on-no-agent-start))))))
+
 (defun pi-coding-agent--clear-sending-if-no-agent-start
     (chat-buf generation &optional on-no-agent-start)
-  "Return CHAT-BUF to idle if GENERATION produced no agent_start.
-When ON-NO-AGENT-START is non-nil, call it after the session returns to idle."
+  "Check whether CHAT-BUF prompt GENERATION produced no agent_start.
+Elapsed time alone is not authoritative: query Pi before releasing local prompt
+ownership or invoking ON-NO-AGENT-START."
   (when (buffer-live-p chat-buf)
     (with-current-buffer chat-buf
       (when (pi-coding-agent--prompt-start-current-p generation)
         (setq pi-coding-agent--prompt-start-timer nil)
-        (setq pi-coding-agent--prompt-start-wait-active nil)
-        (setq pi-coding-agent--prompt-start-generation
-              (1+ pi-coding-agent--prompt-start-generation))
-        (when (eq pi-coding-agent--status 'sending)
-          (setq pi-coding-agent--status 'idle)
-          (pi-coding-agent--set-activity-phase "idle")
-          (when on-no-agent-start
-            (funcall on-no-agent-start)))))))
+        (if (memq pi-coding-agent--status '(streaming compacting))
+            (pi-coding-agent--schedule-prompt-start-fallback
+             chat-buf generation on-no-agent-start)
+          (pi-coding-agent--probe-prompt-start-state
+           chat-buf generation on-no-agent-start))))))
 
 (defun pi-coding-agent--schedule-prompt-start-fallback
     (chat-buf generation &optional on-no-agent-start)
@@ -2540,6 +2597,7 @@ Resets activity phase and status to idle."
     (with-current-buffer chat-buf
       (pi-coding-agent--invalidate-prompt-start-wait)
       (setq pi-coding-agent--local-user-message nil)
+      (pi-coding-agent--clear-local-user-message-region)
       (setq pi-coding-agent--pre-compaction-status nil)
       (setq pi-coding-agent--status 'idle)
       (pi-coding-agent--set-activity-phase "idle"))))

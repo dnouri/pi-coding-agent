@@ -103,15 +103,39 @@ call ID in `pi-coding-agent--live-tool-blocks'.")
   (unless (pi-coding-agent--history-postprocessing-deferred-p)
     (pi-coding-agent--decorate-tables-in-region start end)))
 
-(defun pi-coding-agent--display-user-message (text &optional timestamp)
+(defun pi-coding-agent--display-user-message (text &optional timestamp track-region)
   "Display user message TEXT in the chat buffer.
-If TIMESTAMP (Emacs time value) is provided, display it in the header."
-  (let ((start (with-current-buffer (pi-coding-agent--get-chat-buffer) (point-max))))
+If TIMESTAMP (Emacs time value) is provided, display it in the header.  When
+TRACK-REGION is non-nil, return a marker pair bounding the inserted turn."
+  (let* ((chat-buffer (pi-coding-agent--get-chat-buffer))
+         (start (with-current-buffer chat-buffer (point-max))))
     (pi-coding-agent--append-to-chat
      (concat "\n" (pi-coding-agent--make-separator "You" timestamp) "\n"
              text "\n"))
-    (with-current-buffer (pi-coding-agent--get-chat-buffer)
-      (pi-coding-agent--decorate-tables-unless-deferred start (point-max)))))
+    (with-current-buffer chat-buffer
+      (pi-coding-agent--decorate-tables-unless-deferred start (point-max))
+      (when track-region
+        (cons (copy-marker start nil) (copy-marker (point-max) nil))))))
+
+(defun pi-coding-agent--discard-local-user-message ()
+  "Retract the speculative local user turn when pi handled it invisibly."
+  (unwind-protect
+      (when-let* ((region pi-coding-agent--local-user-message-region)
+                  (start (marker-position (car region)))
+                  (end (marker-position (cdr region)))
+                  ((<= start end)))
+        (let ((inhibit-read-only t))
+          (save-restriction
+            (widen)
+            (delete-region start end))))
+    (setq pi-coding-agent--local-user-message nil)
+    (pi-coding-agent--clear-local-user-message-region)))
+
+(defun pi-coding-agent--handle-no-turn-local-prompt ()
+  "Release speculative local echo state, then process queued follow-ups."
+  (unwind-protect
+      (pi-coding-agent--discard-local-user-message)
+    (pi-coding-agent--schedule-followup-queue-processing)))
 
 (defun pi-coding-agent--display-agent-start ()
   "Display separator for new agent turn.
@@ -655,6 +679,7 @@ follow-up as a fresh prompt.")
   "Finalize agent turn: normalize whitespace, handle abort, schedule queue."
   ;; Reset per-turn state for clean next turn.
   (setq pi-coding-agent--local-user-message nil)
+  (pi-coding-agent--clear-local-user-message-region)
   (setq pi-coding-agent--in-thinking-block nil)
   (pi-coding-agent--reset-thinking-state)
   (let ((was-aborted pi-coding-agent--aborted))
@@ -749,20 +774,22 @@ transitions; prompt submission marks the local pre-event window as busy."
      text
      (lambda ()
        (when (pi-coding-agent--drop-followup text)
-         (pi-coding-agent--display-user-message text (current-time))
+         (setq pi-coding-agent--local-user-message-region
+               (pi-coding-agent--display-user-message text (current-time) t))
          (setq pi-coding-agent--local-user-message text)
          (setq pi-coding-agent--assistant-header-shown nil)))
      #'pi-coding-agent--restore-followup-queue-to-input
-     #'pi-coding-agent--schedule-followup-queue-processing))
+     #'pi-coding-agent--handle-no-turn-local-prompt))
    (t
     (pi-coding-agent--send-prompt
      text
      (lambda ()
-       (pi-coding-agent--display-user-message text (current-time))
+       (setq pi-coding-agent--local-user-message-region
+             (pi-coding-agent--display-user-message text (current-time) t))
        (setq pi-coding-agent--local-user-message text)
        (setq pi-coding-agent--assistant-header-shown nil))
      (lambda () (pi-coding-agent--restore-input-text text))
-     #'pi-coding-agent--schedule-followup-queue-processing))))
+     #'pi-coding-agent--handle-no-turn-local-prompt))))
 
 (defun pi-coding-agent--process-followup-queue ()
   "Send the oldest follow-up only when it is safe to become the next prompt.
@@ -1183,6 +1210,7 @@ which asks upfront before any buffers are touched."
         (pi-coding-agent--set-process nil)
         (pi-coding-agent--set-activity-phase "idle")
         (setq pi-coding-agent--local-user-message nil)
+        (pi-coding-agent--clear-local-user-message-region)
         (setq pi-coding-agent--pre-compaction-status nil)
         (pi-coding-agent--cancel-followup-drain-timer)
         (pi-coding-agent--invalidate-prompt-start-wait)
@@ -1228,6 +1256,7 @@ Updates buffer-local state and renders display updates."
                  (local-msg pi-coding-agent--local-user-message))
             ;; Clear local tracking
             (setq pi-coding-agent--local-user-message nil)
+            (pi-coding-agent--clear-local-user-message-region)
             ;; Display if: no local message, OR pi's message differs (expanded template)
             (when (and text
                        (or (null local-msg)

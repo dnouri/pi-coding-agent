@@ -310,6 +310,7 @@ Call this when starting a new session to ensure no stale state persists."
         pi-coding-agent--tool-block-order-counter 0
         pi-coding-agent--thinking-block-order-counter 0)
   (pi-coding-agent--set-activity-phase "idle" 'reset t)
+  (pi-coding-agent--clear-local-user-message-region)
   (pi-coding-agent--clear-unsupported-extension-ui-warnings)
   (pi-coding-agent--invalidate-history-loads)
   (pi-coding-agent--finish-session-transition

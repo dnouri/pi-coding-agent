@@ -2717,6 +2717,97 @@ Pi handles command expansion on the server side."
           (should-not (plist-member rpc-message :images)))
       (delete-process fake-proc))))
 
+(ert-deftest pi-coding-agent-test-no-turn-fallback-keeps-server-active-prompt ()
+  "A delayed agent_start must not be mistaken for an extension-handled prompt."
+  (let ((fake-proc (start-process "test-active-prompt" nil "cat")))
+    (unwind-protect
+        (with-temp-buffer
+          (pi-coding-agent-chat-mode)
+          (setq pi-coding-agent--process fake-proc
+                pi-coding-agent--status 'sending
+                pi-coding-agent--local-user-message "slow prompt"
+                pi-coding-agent--followup-queue '("wait behind it"))
+          (setq pi-coding-agent--local-user-message-region
+                (pi-coding-agent--display-user-message
+                 "slow prompt" (current-time) t))
+          (let ((generation (pi-coding-agent--begin-prompt-start-wait)))
+            (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (_process command callback)
+                         (should (equal (plist-get command :type) "get_state"))
+                         (funcall callback
+                                  '(:success t
+                                    :data (:isStreaming t
+                                           :isCompacting :false)))))
+                      ((symbol-function 'run-at-time)
+                       (lambda (&rest _) 'fake-prompt-start-timer)))
+              (pi-coding-agent--clear-sending-if-no-agent-start
+               (current-buffer) generation
+               #'pi-coding-agent--handle-no-turn-local-prompt))
+            (should (pi-coding-agent--prompt-start-current-p generation))
+            (should (equal pi-coding-agent--local-user-message "slow prompt"))
+            (should pi-coding-agent--local-user-message-region)
+            (should (equal pi-coding-agent--followup-queue '("wait behind it")))
+            (should (string-match-p "slow prompt" (buffer-string)))))
+      (when (process-live-p fake-proc)
+        (delete-process fake-proc)))))
+
+(ert-deftest pi-coding-agent-test-no-turn-prompt-retracts-local-echo ()
+  "An extension-handled prompt leaves no speculative user turn behind."
+  (let ((chat-buf (generate-new-buffer "*pi-no-turn-retract-chat*"))
+        (input-buf (generate-new-buffer "*pi-no-turn-retract-input*"))
+        (fake-proc (start-process "test-no-turn-retract" nil "cat"))
+        prompt-callback state-callback fallback-callback fallback-args)
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--process fake-proc
+                  pi-coding-agent--input-buffer input-buf))
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode)
+            (setq pi-coding-agent--chat-buffer chat-buf)
+            (insert "Handle this without a turn"))
+          (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                     (lambda () fake-proc))
+                    ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                     (lambda () chat-buf))
+                    ((symbol-function 'pi-coding-agent--rpc-async)
+                     (lambda (_process command callback)
+                       (pcase (plist-get command :type)
+                         ("prompt" (setq prompt-callback callback))
+                         ("get_state" (setq state-callback callback)))))
+                    ((symbol-function 'run-at-time)
+                     (lambda (_seconds _repeat function &rest args)
+                       (if (eq function
+                               'pi-coding-agent--clear-sending-if-no-agent-start)
+                           (setq fallback-callback function
+                                 fallback-args args)
+                         'fake-drain-timer)
+                       'fake-prompt-start-timer))
+                    ((symbol-function 'message) #'ignore))
+            (with-current-buffer input-buf
+              (pi-coding-agent-send))
+            (funcall prompt-callback '(:success t))
+            (with-current-buffer chat-buf
+              (should (equal pi-coding-agent--local-user-message
+                             "Handle this without a turn"))
+              (narrow-to-region (1+ (point-min)) (point-max)))
+            (apply fallback-callback fallback-args)
+            (funcall state-callback
+                     '(:success t
+                       :data (:isStreaming :false :isCompacting :false))))
+          (with-current-buffer chat-buf
+            (widen)
+            (should (eq pi-coding-agent--status 'idle))
+            (should-not pi-coding-agent--local-user-message)
+            (should-not pi-coding-agent--local-user-message-region)
+            (should-not (string-match-p "Handle this without a turn"
+                                        (buffer-string)))))
+      (when (process-live-p fake-proc)
+        (delete-process fake-proc))
+      (kill-buffer chat-buf)
+      (kill-buffer input-buf))))
+
 (ert-deftest pi-coding-agent-test-send-prompt-marks-sending-until-preflight-fails ()
   "pi-coding-agent--send-prompt closes the local pre-agent_start idle gap."
   (let* ((rpc-callback nil)
@@ -2914,13 +3005,21 @@ Pi handles command expansion on the server side."
         (with-temp-buffer
           (pi-coding-agent-chat-mode)
           (setq pi-coding-agent--status 'idle
-                pi-coding-agent--activity-phase "idle")
+                pi-coding-agent--activity-phase "idle"
+                pi-coding-agent--process fake-proc)
           (cl-letf (((symbol-function 'pi-coding-agent--get-process)
                      (lambda () fake-proc))
                     ((symbol-function 'pi-coding-agent--get-chat-buffer)
                      (lambda () (current-buffer)))
                     ((symbol-function 'pi-coding-agent--rpc-async)
-                     (lambda (_proc _msg cb) (setq rpc-callback cb)))
+                     (lambda (_proc command cb)
+                       (pcase (plist-get command :type)
+                         ("prompt" (setq rpc-callback cb))
+                         ("get_state"
+                          (funcall cb
+                                   '(:success t
+                                     :data (:isStreaming :false
+                                            :isCompacting :false)))))))
                     ((symbol-function 'run-at-time)
                      (lambda (_secs _repeat fn &rest args)
                        (setq fallback-callback fn
@@ -2952,6 +3051,7 @@ Pi handles command expansion on the server side."
             (pi-coding-agent-chat-mode)
             (setq pi-coding-agent--status 'idle
                   pi-coding-agent--activity-phase "idle"
+                  pi-coding-agent--process fake-proc
                   pi-coding-agent--input-buffer input-buf))
           (with-current-buffer input-buf
             (pi-coding-agent-input-mode)
@@ -2962,8 +3062,15 @@ Pi handles command expansion on the server side."
                      (lambda () chat-buf))
                     ((symbol-function 'pi-coding-agent--rpc-async)
                      (lambda (_proc cmd cb)
-                       (push (plist-get cmd :message) sent-messages)
-                       (push cb rpc-callbacks)))
+                       (pcase (plist-get cmd :type)
+                         ("prompt"
+                          (push (plist-get cmd :message) sent-messages)
+                          (push cb rpc-callbacks))
+                         ("get_state"
+                          (funcall cb
+                                   '(:success t
+                                     :data (:isStreaming :false
+                                            :isCompacting :false)))))))
                     ((symbol-function 'run-at-time)
                      (lambda (_secs _repeat fn &rest args)
                        (cond
