@@ -2202,9 +2202,7 @@ blocks sending until the switch settles, so the text cannot leak into
 the outgoing session.  Failures are non-fatal."
   (when (buffer-live-p input-buf)
     (condition-case err
-        (with-current-buffer input-buf
-          (erase-buffer)
-          (when text (insert text)))
+        (pi-coding-agent--replace-input-draft input-buf text)
       (error
        (message "Pi: Failed to prefill prompt - %s"
                 (error-message-string err))))))

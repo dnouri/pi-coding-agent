@@ -85,6 +85,18 @@ class SlashCommand:
 
 
 @dataclass(frozen=True)
+class PromptImageContent:
+    """Validated immutable image content from one prompt command."""
+
+    data: str
+    mime_type: str
+
+    def to_rpc(self) -> JsonDict:
+        """Return a fresh RPC content block."""
+        return {"type": "image", "data": self.data, "mimeType": self.mime_type}
+
+
+@dataclass(frozen=True)
 class TextStreamPrompt:
     """Scenario data for a simple streamed text reply."""
 
@@ -332,6 +344,7 @@ class FakePiHarness:
             "api": "fake-api",
             "contextWindow": 8192,
             "maxTokens": 1024,
+            "input": ["text", "image"],
         }
         self.state = SessionState(model=model)
         self.user_messages: list[dict[str, str]] = []
@@ -400,20 +413,62 @@ class FakePiHarness:
             case _:
                 self._fail(command, f"Unsupported fake-pi command: {command_type}")
 
+    @staticmethod
+    def _parse_prompt_images(command: JsonDict) -> tuple[PromptImageContent, ...]:
+        """Validate and detach optional image content from a prompt COMMAND."""
+        if "images" not in command:
+            return ()
+        raw_images = command["images"]
+        if not isinstance(raw_images, list):
+            raise ValueError("prompt images must be an array")
+        images: list[PromptImageContent] = []
+        for index, block in enumerate(raw_images):
+            if not isinstance(block, dict):
+                raise ValueError(f"prompt image {index} must be an object")
+            block_type = block.get("type")
+            data = block.get("data")
+            mime_type = block.get("mimeType")
+            if not isinstance(block_type, str) or block_type != "image":
+                raise ValueError(f"prompt image {index} type must be 'image'")
+            if not isinstance(data, str) or not data:
+                raise ValueError(f"prompt image {index} data must be a nonempty string")
+            if not isinstance(mime_type, str) or not mime_type:
+                raise ValueError(
+                    f"prompt image {index} mimeType must be a nonempty string"
+                )
+            images.append(PromptImageContent(data=data, mime_type=mime_type))
+        return tuple(images)
+
     def _handle_prompt(self, command: JsonDict) -> None:
-        """Start the scenario-specific prompt behavior."""
+        """Validate and start the scenario-specific prompt behavior."""
         if self.state.is_streaming:
             self._fail(command, "Fake pi is already streaming")
             return
+        try:
+            prompt_images = self._parse_prompt_images(command)
+        except ValueError as exc:
+            self._fail(command, str(exc))
+            return
+        behavior = self.scenario.prompt
+        if prompt_images and isinstance(
+            behavior, (ExtensionDialogPrompt, CustomMessagePrompt)
+        ):
+            self._fail(
+                command,
+                "Prompt images are not supported by extension-owned fake scenarios",
+            )
+            return
         self._abort_requested.clear()
         message = str(command["message"])
-        match self.scenario.prompt:
+        match behavior:
             case TextStreamPrompt() as behavior:
                 self._respond(command)
                 self._start_run(
                     name=f"fake-pi-text-stream-{self.scenario.name}",
                     target=lambda: self._run_text_prompt(
-                        message, cast(TextStreamPrompt, behavior)
+                        message,
+                        cast(TextStreamPrompt, behavior),
+                        prompt_images=prompt_images,
                     ),
                 )
             case ExtensionDialogPrompt() as behavior:
@@ -443,13 +498,18 @@ class FakePiHarness:
                 self._respond(command)
                 self._start_run(
                     name=f"fake-pi-tool-stream-{self.scenario.name}",
-                    target=lambda: self._run_tool_prompt(message, behavior),
+                    target=lambda: self._run_tool_prompt(
+                        message, behavior, prompt_images=prompt_images
+                    ),
                 )
             case _:
                 raise AssertionError("Unknown prompt behavior")
 
     def _handle_steer(self, command: JsonDict) -> None:
-        """Queue a steering message for the active text stream."""
+        """Queue a text-only steering message for the active text stream."""
+        if "images" in command:
+            self._fail(command, "Steering images are out of scope for this fake")
+            return
         if not self.state.is_streaming:
             self._fail(command, "Cannot steer when no prompt is streaming")
             return
@@ -562,15 +622,23 @@ class FakePiHarness:
             self._extension_waiter.set()
         self._log("extension-response", command)
 
-    def _run_text_prompt(self, message: str, behavior: TextStreamPrompt) -> None:
-        """Run a streamed-text prompt scenario."""
+    def _run_text_prompt(
+        self,
+        message: str,
+        behavior: TextStreamPrompt,
+        *,
+        prompt_images: tuple[PromptImageContent, ...],
+    ) -> None:
+        """Run a streamed-text prompt, imaging only its initial user turn."""
         emitted_messages: list[JsonDict] = []
         current_message = message
+        current_images = prompt_images
         self._write_json({"type": "agent_start"})
         while True:
             completed, assistant_message = self._emit_text_turn(
                 current_message,
                 behavior=behavior,
+                prompt_images=current_images,
                 assistant_text_template=(
                     behavior.assistant_text
                     if current_message == message
@@ -586,6 +654,7 @@ class FakePiHarness:
             if pending_steer is None:
                 break
             current_message = pending_steer
+            current_images = ()
         self._finish_run(emitted_messages)
 
     def _emit_text_turn(
@@ -593,6 +662,7 @@ class FakePiHarness:
         user_text: str,
         *,
         behavior: TextStreamPrompt,
+        prompt_images: tuple[PromptImageContent, ...],
         assistant_text_template: str,
     ) -> tuple[bool, JsonDict]:
         """Emit one user->assistant text exchange.
@@ -601,7 +671,7 @@ class FakePiHarness:
         ``message_start``, an aborted result contains the authoritative partial
         message that must be emitted before ``agent_end``.
         """
-        user_message = self._build_user_message(user_text)
+        user_message = self._build_user_message(user_text, prompt_images)
         self._persist_user_message(user_message)
         if behavior.echo_user:
             self._write_json({"type": "message_start", "message": user_message})
@@ -675,10 +745,16 @@ class FakePiHarness:
         self._write_json({"type": "message_start", "message": followup})
         self._write_json({"type": "message_end", "message": followup})
 
-    def _run_tool_prompt(self, message: str, behavior: ToolStreamPrompt) -> None:
+    def _run_tool_prompt(
+        self,
+        message: str,
+        behavior: ToolStreamPrompt,
+        *,
+        prompt_images: tuple[PromptImageContent, ...],
+    ) -> None:
         """Run a prompt that emits tool-call and tool-execution events."""
         self._write_json({"type": "agent_start"})
-        user_message = self._build_user_message(message)
+        user_message = self._build_user_message(message, prompt_images)
         self._persist_user_message(user_message)
         if behavior.echo_user:
             self._write_json({"type": "message_start", "message": user_message})
@@ -996,11 +1072,15 @@ class FakePiHarness:
             "details": {"truncation": None, "fullOutputPath": None},
         }
 
-    def _build_user_message(self, text: str) -> JsonDict:
-        """Return a user message payload."""
+    def _build_user_message(
+        self, text: str, images: tuple[PromptImageContent, ...] = ()
+    ) -> JsonDict:
+        """Return a user message with detached ordered image content."""
+        content: list[JsonDict] = [{"type": "text", "text": text}]
+        content.extend(image.to_rpc() for image in images)
         return {
             "role": "user",
-            "content": [{"type": "text", "text": text}],
+            "content": content,
             "timestamp": now_ms(),
         }
 

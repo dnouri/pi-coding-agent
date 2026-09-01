@@ -53,7 +53,8 @@
 ;;
 ;; Key Bindings:
 ;;   Input buffer:
-;;     C-c C-c        Send prompt (queues as follow-up if busy)
+;;     C-c C-c        Send prompt (queues text as follow-up if busy)
+;;     C-c C-a        Attach/replace one prompt image (C-u clears)
 ;;     C-c C-s        Queue steering (interrupts after current tool; busy only)
 ;;     C-c C-k        Abort current operation
 ;;     C-c C-p        Open menu
@@ -83,9 +84,12 @@
 ;; Editor Features:
 ;;   - File reference (@): Type @ to search project files (respects .gitignore)
 ;;   - Path completion (Tab): Complete relative paths, ../, ~/, etc.
-;;   - Message queuing: Submit messages while agent is working:
+;;   - Prompt image: Attach one content-sniffed raster image to a direct,
+;;     idle, non-slash prompt; the input header shows its name and size.
+;;   - Message queuing: Submit text messages while agent is working:
 ;;       C-c C-c  queues follow-up (delivered after agent completes)
 ;;       C-c C-s  queues steering (interrupts after current tool)
+;;     Image-bearing drafts refuse these busy paths and remain intact.
 ;;
 ;; Press C-c C-p for the full transient menu with model selection,
 ;; thinking level, completed-thinking controls, session management,

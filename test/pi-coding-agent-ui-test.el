@@ -862,6 +862,7 @@ without an input window."
   (let ((header (pi-coding-agent--format-startup-header)))
     (should (string-match-p "C-c C-c" header))
     (should (string-match-p "send" header))
+    (should (string-match-p "C-c C-a   attach image (C-u clears)" header))
     (should (string-match-p "C-c C-r   sessions" header))))
 
 (ert-deftest pi-coding-agent-test-startup-header-shows-pi-label ()
@@ -984,6 +985,18 @@ without an input window."
         (pi-coding-agent--probe-process-version-async (current-buffer)))
       (should (equal captured-default-directory
                      "/ssh:pi-host:/home/pi/project/")))))
+
+(ert-deftest pi-coding-agent-test-process-replacement-invalidates-model-change ()
+  "A model callback cannot mutate state after its target process is replaced."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--process 'old-process)
+    (let ((token (pi-coding-agent--begin-model-change
+                  'old-process (current-buffer))))
+      (should (pi-coding-agent--model-change-current-p token))
+      (pi-coding-agent--set-process 'new-process)
+      (should-not (pi-coding-agent--model-change-current-p token))
+      (should-not (pi-coding-agent--model-change-pending-p)))))
 
 (ert-deftest pi-coding-agent-test-set-process-probes-version-for-current-process ()
   "Setting process starts version probe and stores result for current process."

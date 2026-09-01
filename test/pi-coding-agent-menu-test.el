@@ -2438,7 +2438,17 @@ replaced by the resumed or forked history."
                          :timestamp 1704067201000)]))
         (pi-coding-agent-test--seed-stale-session-rebuild-state
          chat-buf "STALE FORK CONTENT")
+        (with-current-buffer chat-buf
+          (setq pi-coding-agent--state
+                (plist-put pi-coding-agent--state :model
+                           '(:name "Vision" :input ["text" "image"]))))
         (with-current-buffer input-buf
+          (let ((path (make-temp-file "pi-prompt-attachment-" nil ".png")))
+            (unwind-protect
+                (progn
+                  (pi-coding-agent-test--write-prompt-image path 'png)
+                  (pi-coding-agent-test--attach-image path))
+              (delete-file path)))
           (insert "old input text"))
         (cl-letf (((symbol-function 'completing-read)
                    (lambda (&rest _) selected-choice))
@@ -2483,7 +2493,10 @@ replaced by the resumed or forked history."
           (should (string-match-p "Second question" (buffer-string)))
           (should (string-match-p "Forked answer" (buffer-string))))
         (with-current-buffer input-buf
-          (should (equal (buffer-string) "Second question")))
+          (should (equal (buffer-string) "Second question"))
+          (should-not (string-match-p
+                       "pi-prompt-attachment-"
+                       (pi-coding-agent-test--input-header))))
         (pi-coding-agent-test--assert-clean-session-rebuild
          chat-buf messages "STALE FORK CONTENT")
         (should (equal (nreverse rpc-calls)

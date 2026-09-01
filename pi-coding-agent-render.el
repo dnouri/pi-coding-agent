@@ -103,15 +103,18 @@ call ID in `pi-coding-agent--live-tool-blocks'.")
   (unless (pi-coding-agent--history-postprocessing-deferred-p)
     (pi-coding-agent--decorate-tables-in-region start end)))
 
-(defun pi-coding-agent--display-user-message (text &optional timestamp track-region)
-  "Display user message TEXT in the chat buffer.
+(defun pi-coding-agent--display-user-message
+    (text &optional timestamp content track-region)
+  "Display user message TEXT and optional image CONTENT in the chat buffer.
 If TIMESTAMP (Emacs time value) is provided, display it in the header.  When
 TRACK-REGION is non-nil, return a marker pair bounding the inserted turn."
   (let* ((chat-buffer (pi-coding-agent--get-chat-buffer))
-         (start (with-current-buffer chat-buffer (point-max))))
+         (start (with-current-buffer chat-buffer (point-max)))
+         (previews (pi-coding-agent--content-image-previews content)))
     (pi-coding-agent--append-to-chat
      (concat "\n" (pi-coding-agent--make-separator "You" timestamp) "\n"
-             text "\n"))
+             (or text "") "\n"
+             (or (pi-coding-agent--image-previews-text previews) "")))
     (with-current-buffer chat-buffer
       (pi-coding-agent--decorate-tables-unless-deferred start (point-max))
       (when track-region
@@ -136,6 +139,25 @@ TRACK-REGION is non-nil, return a marker pair bounding the inserted turn."
   (unwind-protect
       (pi-coding-agent--discard-local-user-message)
     (pi-coding-agent--schedule-followup-queue-processing)))
+
+(defun pi-coding-agent--content-has-image-p (content)
+  "Return non-nil if CONTENT has an image block."
+  (seq-some (lambda (block)
+              (equal (plist-get block :type) "image"))
+            (pi-coding-agent--content-block-list content)))
+
+(defun pi-coding-agent--local-user-message-matches-p
+    (local-message text content)
+  "Return non-nil when LOCAL-MESSAGE exactly represents TEXT and CONTENT.
+Strings retain the existing text-only echo contract.  Image turns use their
+full content vector, so an authoritative image transformation cannot be lost."
+  (cond
+   ((vectorp local-message)
+    (and (vectorp content) (equal local-message content)))
+   ((stringp local-message)
+    (and text
+         (not (pi-coding-agent--content-has-image-p content))
+         (string= text local-message)))))
 
 (defun pi-coding-agent--display-agent-start ()
   "Display separator for new agent turn.
@@ -654,6 +676,7 @@ follow-up as a fresh prompt.")
   "Return non-nil when a queued follow-up may become the next prompt."
   (and pi-coding-agent--followup-queue
        (eq pi-coding-agent--status 'idle)
+       (not (pi-coding-agent--model-change-pending-p))
        (not (pi-coding-agent--session-transition-active-p))
        (not (pi-coding-agent--prompt-start-wait-active-p))
        (null pi-coding-agent--local-user-message)))
@@ -735,14 +758,15 @@ Returns non-nil if TEXT matched a built-in command and was handled."
             (_ (funcall handler)))
           t)))))
 
-(defun pi-coding-agent--prepare-and-send (text &optional queued)
-  "Prepare chat buffer state and send TEXT to pi.
+(defun pi-coding-agent--prepare-and-send (text &optional queued prompt-image)
+  "Prepare chat buffer state and send TEXT with optional PROMPT-IMAGE to pi.
 Built-in slash commands are dispatched locally via the dispatch table.
 Other slash commands (extensions, skills, prompts) are sent to pi without
 local transcript display.  Regular text is displayed after prompt preflight
 accepts it.
 When QUEUED is non-nil, TEXT is the oldest local follow-up and is removed
-from the queue only after prompt preflight succeeds.
+from the queue only after prompt preflight succeeds.  PROMPT-IMAGE is only
+valid for a direct regular prompt.
 Must be called with chat buffer current.  Pi events own streaming/idle turn
 transitions; prompt submission marks the local pre-event window as busy."
   (pi-coding-agent--invalidate-history-loads)
@@ -769,13 +793,30 @@ transitions; prompt submission marks the local pre-event window as busy."
    ;; Regular text is displayed only after prompt preflight accepts it.  That
    ;; keeps rejected prompts out of the transcript and lets us restore them to
    ;; the input buffer for user recovery.
+   (prompt-image
+    (let* ((image-block
+            (pi-coding-agent--prompt-image-content-block prompt-image))
+           (user-content
+            (vector (list :type "text" :text text) image-block)))
+      (pi-coding-agent--send-prompt
+       text
+       (lambda ()
+         (setq pi-coding-agent--local-user-message-region
+               (pi-coding-agent--display-user-message
+                text (current-time) user-content t))
+         (setq pi-coding-agent--local-user-message user-content)
+         (setq pi-coding-agent--assistant-header-shown nil))
+       (lambda () (pi-coding-agent--restore-input-text text prompt-image))
+       #'pi-coding-agent--handle-no-turn-local-prompt
+       prompt-image)))
    (queued
     (pi-coding-agent--send-prompt
      text
      (lambda ()
        (when (pi-coding-agent--drop-followup text)
          (setq pi-coding-agent--local-user-message-region
-               (pi-coding-agent--display-user-message text (current-time) t))
+               (pi-coding-agent--display-user-message
+                text (current-time) nil t))
          (setq pi-coding-agent--local-user-message text)
          (setq pi-coding-agent--assistant-header-shown nil)))
      #'pi-coding-agent--restore-followup-queue-to-input
@@ -785,7 +826,8 @@ transitions; prompt submission marks the local pre-event window as busy."
      text
      (lambda ()
        (setq pi-coding-agent--local-user-message-region
-             (pi-coding-agent--display-user-message text (current-time) t))
+             (pi-coding-agent--display-user-message
+              text (current-time) nil t))
        (setq pi-coding-agent--local-user-message text)
        (setq pi-coding-agent--assistant-header-shown nil))
      (lambda () (pi-coding-agent--restore-input-text text))
@@ -1020,10 +1062,7 @@ Include optional STDERR in a text fence and optional DETAIL before it."
   "Handle set_editor_text method from EVENT."
   (let ((text (plist-get event :text)))
     (when-let* ((input-buf pi-coding-agent--input-buffer))
-      (when (buffer-live-p input-buf)
-        (with-current-buffer input-buf
-          (erase-buffer)
-          (insert text))))))
+      (pi-coding-agent--replace-input-draft input-buf text))))
 
 (defun pi-coding-agent--extension-ui-set-status (event)
   "Handle setStatus method from EVENT."
@@ -1208,6 +1247,7 @@ which asks upfront before any buffers are touched."
         (when pi-coding-agent--tool-args-cache
           (clrhash pi-coding-agent--tool-args-cache))
         (pi-coding-agent--set-process nil)
+        (pi-coding-agent--invalidate-model-change)
         (pi-coding-agent--set-activity-phase "idle")
         (setq pi-coding-agent--local-user-message nil)
         (pi-coding-agent--clear-local-user-message-region)
@@ -1253,17 +1293,18 @@ Updates buffer-local state and renders display updates."
                  (timestamp (plist-get message :timestamp))
                  (text (when content
                          (pi-coding-agent--extract-user-message-text content)))
+                 (has-images (pi-coding-agent--content-has-image-p content))
                  (local-msg pi-coding-agent--local-user-message))
-            ;; Clear local tracking
+            ;; Clear local tracking before rendering the authoritative turn.
             (setq pi-coding-agent--local-user-message nil)
             (pi-coding-agent--clear-local-user-message-region)
-            ;; Display if: no local message, OR pi's message differs (expanded template)
-            (when (and text
-                       (or (null local-msg)
-                           (not (string= text local-msg))))
+            (when (and (or text has-images)
+                       (not (pi-coding-agent--local-user-message-matches-p
+                             local-msg text content)))
               (pi-coding-agent--display-user-message
                text
-               (pi-coding-agent--ms-to-time timestamp))
+               (pi-coding-agent--ms-to-time timestamp)
+               content)
               ;; Reset so next assistant message shows its header
               (setq pi-coding-agent--assistant-header-shown nil))))
          ("custom"
@@ -1876,8 +1917,8 @@ path/error metadata for `pi-coding-agent-visit-file'."
           :max-height
           (max 1 (truncate (* 0.5 (window-pixel-height window)))))))
 
-(defconst pi-coding-agent--image-previews-per-tool-limit 8
-  "Maximum tool-result image blocks rendered for one tool invocation.")
+(defconst pi-coding-agent--image-previews-per-content-limit 8
+  "Maximum image blocks rendered from one message or tool result.")
 
 (defun pi-coding-agent--image-preview-byte-limit ()
   "Return the nonnegative source-byte limit for one image preview."
@@ -1919,8 +1960,8 @@ path/error metadata for `pi-coding-agent-visit-file'."
                (image-type-from-data data)
              (error nil))))
 
-(defun pi-coding-agent--render-tool-image-preview (block)
-  "Return a rendered preview string for tool-result image BLOCK."
+(defun pi-coding-agent--render-content-image-preview (block)
+  "Return a rendered preview string for image content BLOCK."
   (let* ((mime-type (or (plist-get block :mimeType)
                         (plist-get block :mime-type)))
          (data (plist-get block :data))
@@ -1984,17 +2025,17 @@ path/error metadata for `pi-coding-agent-visit-file'."
          (pi-coding-agent--image-preview-string
           (pi-coding-agent--image-preview-label mime-type "decode error"))))))))
 
-(defun pi-coding-agent--tool-result-image-previews (content-blocks)
-  "Render a bounded number of images from tool result CONTENT-BLOCKS."
+(defun pi-coding-agent--content-image-previews (content)
+  "Render a bounded number of image blocks from vector or list CONTENT."
   (let* ((blocks
           (seq-filter
            (lambda (block) (equal (plist-get block :type) "image"))
-           content-blocks))
-         (limit (max 0 pi-coding-agent--image-previews-per-tool-limit))
+           (pi-coding-agent--content-block-list content)))
+         (limit (max 0 pi-coding-agent--image-previews-per-content-limit))
          (shown (seq-take blocks limit))
          (omitted (- (length blocks) (length shown))))
     (append
-     (mapcar #'pi-coding-agent--render-tool-image-preview shown)
+     (mapcar #'pi-coding-agent--render-content-image-preview shown)
      (when (> omitted 0)
        (list
         (pi-coding-agent--image-preview-string
@@ -3214,7 +3255,7 @@ if none exists, render the result at point without a live overlay."
                                    (plist-get c :text)))
                                 text-blocks "\n"))
          (content-image-previews
-          (pi-coding-agent--tool-result-image-previews content-blocks))
+          (pi-coding-agent--content-image-previews content-blocks))
          (svg-preview
           (and (null content-image-previews)
                (pi-coding-agent--read-svg-preview
@@ -6820,10 +6861,14 @@ Tool calls are rendered with headers, output, overlays, and toggles."
              (role (plist-get message :role)))
         (pcase role
           ("user"
-           (let* ((text (pi-coding-agent--extract-history-user-message-text message))
-                  (timestamp (pi-coding-agent--ms-to-time (plist-get message :timestamp))))
-             (when text
-               (pi-coding-agent--display-user-message text timestamp)))
+           (let* ((content (plist-get message :content))
+                  (text (pi-coding-agent--extract-history-user-message-text message))
+                  (has-images
+                   (pi-coding-agent--content-has-image-p content))
+                  (timestamp
+                   (pi-coding-agent--ms-to-time (plist-get message :timestamp))))
+             (when (or text has-images)
+               (pi-coding-agent--display-user-message text timestamp content)))
            (setq prev-role "user"))
           ("assistant"
            (when (not (equal prev-role "assistant"))

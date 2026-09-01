@@ -2717,6 +2717,550 @@ Pi handles command expansion on the server side."
           (should-not (plist-member rpc-message :images)))
       (delete-process fake-proc))))
 
+(ert-deftest pi-coding-agent-test-prompt-image-png-end-to-end ()
+  "C-c C-a content-sniffs a misleadingly named PNG for exact RPC content."
+  (pi-coding-agent-test-with-prompt-image-session (dir chat-buf input-buf)
+    (let* ((path (pi-coding-agent-test--write-prompt-image
+                  (expand-file-name "pixel.txt" dir) 'png))
+           (data (pi-coding-agent-test--prompt-image-base64 'png))
+           rpc-message)
+      (with-current-buffer input-buf
+        (pi-coding-agent-test--attach-image-via-key path)
+        (should (string-match-p "pixel.txt" (pi-coding-agent-test--input-header)))
+        (pi-coding-agent-test--attach-image-via-key path 'clear)
+        (should-not (string-match-p "pixel.txt" (pi-coding-agent-test--input-header)))
+        (pi-coding-agent-test--attach-image-via-key path)
+        (delete-file path)
+        (insert "Describe the pixel")
+        (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                   (lambda () 'image-process))
+                  ((symbol-function 'process-live-p) (lambda (_) t))
+                  ((symbol-function 'pi-coding-agent--rpc-async)
+                   (lambda (_process command _callback)
+                     (setq rpc-message command))))
+          (pi-coding-agent-send))
+        (should (equal rpc-message
+                       (list :type "prompt" :message "Describe the pixel" :images
+                             (vector (list :type "image" :data data :mimeType "image/png")))))
+        (should (equal (ring-ref pi-coding-agent--input-ring 0) "Describe the pixel"))))))
+
+(ert-deftest pi-coding-agent-test-prompt-image-sync-rpc-error-restores-draft ()
+  "A synchronous RPC error restores the exact pending image draft."
+  (pi-coding-agent-test-with-prompt-image-session (dir chat-buf input-buf)
+    (let* ((path (pi-coding-agent-test--write-prompt-image
+                  (expand-file-name "sync-error.png" dir) 'png))
+           (text "Keep this image prompt")
+           attached-image
+           chat-before)
+      (with-current-buffer input-buf
+        (pi-coding-agent-test--attach-image path)
+        (setq attached-image (pi-coding-agent--get-prompt-image))
+        (insert text))
+      (setq chat-before (with-current-buffer chat-buf (buffer-string)))
+      (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                 (lambda () 'image-process))
+                ((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (&rest _) (error "synchronous RPC failure")))
+                ((symbol-function 'message) #'ignore))
+        (with-current-buffer input-buf
+          (condition-case nil
+              (pi-coding-agent-send)
+            (error nil))))
+      (with-current-buffer input-buf
+        (should (equal (buffer-string) text))
+        (should (eq (pi-coding-agent--get-prompt-image) attached-image)))
+      (with-current-buffer chat-buf
+        (should-not (pi-coding-agent--prompt-start-wait-active-p))
+        (should (eq pi-coding-agent--status 'idle))
+        (should-not pi-coding-agent--local-user-message)
+        (should (equal (buffer-string) chat-before))))))
+
+(ert-deftest pi-coding-agent-test-prompt-image-signatures-and-rejections ()
+  "Other raster signatures attach; non-images and over-cap sources do not."
+  (pi-coding-agent-test-with-prompt-image-session (dir _chat-buf input-buf)
+    (with-current-buffer input-buf
+      (let (previous)
+        (dolist (spec '((jpeg "photo.jpg") (gif "pixel.gif")
+                        (webp "pixel.webp")))
+          (when previous
+            (pi-coding-agent-test--attach-image-via-key previous 'clear))
+          (setq previous
+                (pi-coding-agent-test--write-prompt-image
+                 (expand-file-name (cadr spec) dir) (car spec)))
+          (pi-coding-agent-test--attach-image previous)
+          (should (string-match-p
+                   (regexp-quote (file-name-nondirectory previous))
+                   (pi-coding-agent-test--input-header))))
+        (pi-coding-agent-test--attach-image-via-key previous 'clear))
+      (let* ((not-image (expand-file-name "not-image.txt" dir))
+             (too-large (pi-coding-agent-test--write-prompt-image
+                         (expand-file-name "too-large.png" dir) 'png)))
+        (with-temp-file not-image (insert "not an image"))
+        (dolist (case `((,not-image nil "image\\|format")
+                        (,too-large 1 "large\\|limit\\|byte\\|size")))
+          (let (feedback)
+            (cl-letf (((symbol-function 'message)
+                       (lambda (format-string &rest args)
+                         (when format-string
+                           (setq feedback (apply #'format format-string args))))))
+              (condition-case error-data
+                  (let ((pi-coding-agent-prompt-image-max-bytes
+                         (or (cadr case) most-positive-fixnum)))
+                    (pi-coding-agent-test--attach-image (car case)))
+                (user-error (setq feedback (error-message-string error-data)))))
+            (should (string-match-p (caddr case) (downcase (or feedback ""))))
+            (should-not (string-match-p
+                         (regexp-quote (file-name-nondirectory (car case)))
+                         (pi-coding-agent-test--input-header)))))))))
+
+(ert-deftest pi-coding-agent-test-prompt-image-refusal-matrix-preserves-draft ()
+  "Capability, busy, slash, steering, and empty refusals retain the draft."
+  (pi-coding-agent-test-with-prompt-image-session (dir chat-buf input-buf)
+    (let ((path (pi-coding-agent-test--write-prompt-image
+                 (expand-file-name "guard.png" dir) 'png)))
+      (dolist (case '((text-model "Describe" idle send "model\\|support")
+                      (missing-input "Missing metadata" idle send "model\\|support\\|load")
+                      (unknown-model "Unknown model" idle send "model\\|support\\|load")
+                      (busy "Wait" streaming send "busy\\|stream")
+                      (slash "/new" idle send "slash\\|command")
+                      (steering "Change" streaming steer "steer")
+                      (empty "" idle send "empty\\|text\\|prompt")))
+        (pcase-let ((`(,kind ,text ,status ,action ,reason) case))
+          (with-current-buffer input-buf
+            (erase-buffer)
+            (pi-coding-agent-test--attach-image path)
+            (insert text))
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--status status
+                  pi-coding-agent--state
+                  (pcase kind
+                    ('text-model '(:model (:name "Text" :input ["text"])))
+                    ('missing-input '(:model (:name "Loading")))
+                    ('unknown-model nil)
+                    (_ '(:model (:name "Vision" :input ["text" "image"]))))))
+          (let (feedback rpc-called builtin-called)
+            (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                       (lambda () 'image-process))
+                      ((symbol-function 'process-live-p) (lambda (_) t))
+                      ((symbol-function 'pi-coding-agent--rpc-async)
+                       (lambda (&rest _) (setq rpc-called t)))
+                      ((symbol-function 'pi-coding-agent-new-session)
+                       (lambda () (setq builtin-called t)))
+                      ((symbol-function 'message)
+                       (lambda (format-string &rest args)
+                         (when format-string
+                           (setq feedback (apply #'format format-string args))))))
+              (with-current-buffer input-buf
+                (pcase action
+                  ('send (pi-coding-agent-send))
+                  ('steer (pi-coding-agent-queue-steering)))
+                (should (equal (buffer-string) text))
+                (should (string-match-p "guard.png"
+                                        (pi-coding-agent-test--input-header))))
+              (should-not rpc-called)
+              (should-not builtin-called)
+              (should (string-match-p reason (downcase (or feedback "")))))
+          (with-current-buffer input-buf
+            (pi-coding-agent-test--attach-image-via-key path 'clear))))))))
+
+(ert-deftest pi-coding-agent-test-prompt-image-waits-for-model-change ()
+  "Image send waits for model selection, then uses the accepted model state."
+  (pi-coding-agent-test-with-prompt-image-session (dir chat-buf input-buf)
+    (let* ((path (pi-coding-agent-test--write-prompt-image
+                  (expand-file-name "model-change.png" dir) 'png))
+           (old-model '(:id "vision-old" :name "Vision Old"
+                        :provider "fake" :input ["text" "image"]))
+           (new-model '(:id "vision-next" :name "Vision Next"
+                        :provider "fake" :input ["text" "image"]))
+           (text "Wait for the selected model")
+           attached-image
+           model-callback
+           prompt-command)
+      (with-current-buffer chat-buf
+        (setq pi-coding-agent--process 'image-process
+              pi-coding-agent--state (list :model old-model)))
+      (with-current-buffer input-buf
+        (pi-coding-agent-test--attach-image path)
+        (setq attached-image (pi-coding-agent--get-prompt-image))
+        (insert text))
+      (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                 (lambda () 'image-process))
+                ((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'pi-coding-agent--rpc-sync)
+                 (lambda (&rest _)
+                   (list :success t :data
+                         (list :models (vector old-model new-model)))))
+                ((symbol-function 'completing-read)
+                 (lambda (_prompt collection &rest _)
+                   (or (seq-find
+                        (lambda (candidate)
+                          (string-match-p "Vision Next" candidate))
+                        collection)
+                       (ert-fail "Missing Vision Next model choice"))))
+                ((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (_process command callback)
+                   (pcase (plist-get command :type)
+                     ("set_model" (setq model-callback callback))
+                     ("prompt" (setq prompt-command command)))))
+                ((symbol-function 'message) #'ignore))
+        (with-current-buffer input-buf
+          (pi-coding-agent-select-model)
+          (should (functionp model-callback))
+          (pi-coding-agent-send)
+          (should (equal (buffer-string) text))
+          (should (eq (pi-coding-agent--get-prompt-image) attached-image)))
+        (should-not prompt-command)
+        (funcall model-callback
+                 (list :success t :command "set_model" :data new-model))
+        (with-current-buffer input-buf
+          (pi-coding-agent-send)
+          (should (string-empty-p (buffer-string)))
+          (should-not (pi-coding-agent--get-prompt-image)))
+        (should (equal (plist-get prompt-command :message) text))
+        (should (plist-member prompt-command :images))))))
+
+(ert-deftest pi-coding-agent-test-model-change-refuses-image-preflight ()
+  "Model selection cannot overlap an image prompt awaiting acceptance."
+  (pi-coding-agent-test-with-prompt-image-session (_dir chat-buf _input-buf)
+    (let (rpc-called feedback)
+      (with-current-buffer chat-buf
+        (setq pi-coding-agent--process 'image-process
+              pi-coding-agent--status 'sending
+              pi-coding-agent--prompt-start-wait-active t))
+      (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                 (lambda () 'image-process))
+                ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                 (lambda () chat-buf))
+                ((symbol-function 'pi-coding-agent--rpc-sync)
+                 (lambda (&rest _)
+                   (setq rpc-called t)))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (when format-string
+                     (setq feedback (apply #'format format-string args))))))
+        (with-current-buffer chat-buf
+          (pi-coding-agent-select-model)))
+      (should-not rpc-called)
+      (should (string-match-p "Cannot change models"
+                              (or feedback ""))))))
+
+(ert-deftest pi-coding-agent-test-model-change-aborts-if-process-changes-during-selection ()
+  "A selector cannot acquire a model gate for a process that was replaced."
+  (pi-coding-agent-test-with-prompt-image-session (_dir chat-buf _input-buf)
+    (let* ((old-model '(:id "old" :name "Old" :provider "fake"))
+           (new-model '(:id "new" :name "New" :provider "fake"))
+           rpc-called
+           feedback)
+      (with-current-buffer chat-buf
+        (setq pi-coding-agent--process 'old-process
+              pi-coding-agent--state (list :model old-model)))
+      (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                 (lambda () 'old-process))
+                ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                 (lambda () chat-buf))
+                ((symbol-function 'pi-coding-agent--rpc-sync)
+                 (lambda (&rest _)
+                   (list :success t :data
+                         (list :models (vector old-model new-model)))))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _)
+                   (with-current-buffer chat-buf
+                     (setq pi-coding-agent--process 'new-process))
+                   "New [fake]"))
+                ((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (&rest _)
+                   (setq rpc-called t)))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (when format-string
+                     (setq feedback (apply #'format format-string args))))))
+        (with-current-buffer chat-buf
+          (pi-coding-agent-select-model)))
+      (should-not rpc-called)
+      (with-current-buffer chat-buf
+        (should-not (pi-coding-agent--model-change-pending-p)))
+      (should (equal feedback
+                     "Pi: Process changed while selecting a model; try again")))))
+
+(ert-deftest pi-coding-agent-test-model-cancellation-restores-gated-queue ()
+  "Cancelling a model change makes text queued behind it visible."
+  (pi-coding-agent-test-with-prompt-image-session (_dir chat-buf input-buf)
+    (with-current-buffer chat-buf
+      (setq pi-coding-agent--process 'old-process)
+      (should (pi-coding-agent--begin-model-change
+               'old-process chat-buf))
+      (pi-coding-agent--push-followup "do not strand me")
+      (pi-coding-agent--cancel-model-change-and-restore-followups chat-buf)
+      (pi-coding-agent--set-process 'new-process)
+      (should-not (pi-coding-agent--model-change-pending-p))
+      (should-not pi-coding-agent--followup-queue))
+    (with-current-buffer input-buf
+      (should (equal (buffer-string) "do not strand me")))))
+
+(ert-deftest pi-coding-agent-test-failed-model-change-restores-queued-text ()
+  "A failed model change must not send queued text under the old model."
+  (pi-coding-agent-test-with-prompt-image-session (_dir chat-buf input-buf)
+    (let* ((old-model '(:id "old" :name "Old" :provider "fake"))
+           (new-model '(:id "new" :name "New" :provider "fake"))
+           model-callback
+           prompt-called
+           feedback)
+      (with-current-buffer chat-buf
+        (setq pi-coding-agent--process 'image-process
+              pi-coding-agent--state (list :model old-model)))
+      (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                 (lambda () 'image-process))
+                ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                 (lambda () chat-buf))
+                ((symbol-function 'pi-coding-agent--rpc-sync)
+                 (lambda (&rest _)
+                   (list :success t :data
+                         (list :models (vector old-model new-model)))))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _) "New [fake]"))
+                ((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (_process command callback)
+                   (pcase (plist-get command :type)
+                     ("set_model" (setq model-callback callback))
+                     ("prompt" (setq prompt-called t)))))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (when format-string
+                     (setq feedback (apply #'format format-string args))))))
+        (with-current-buffer chat-buf
+          (pi-coding-agent-select-model))
+        (with-current-buffer input-buf
+          (insert "keep this queued")
+          (pi-coding-agent-send)
+          (should (string-empty-p (buffer-string))))
+        (should (functionp model-callback))
+        (funcall model-callback '(:success :false :error "model unavailable")))
+      (should-not prompt-called)
+      (with-current-buffer chat-buf
+        (should-not (pi-coding-agent--model-change-pending-p))
+        (should-not pi-coding-agent--followup-queue)
+        (should (equal (plist-get pi-coding-agent--state :model) old-model)))
+      (with-current-buffer input-buf
+        (should (equal (buffer-string) "keep this queued")))
+      (should (equal feedback
+                     "Pi: Failed to set model: model unavailable")))))
+
+(ert-deftest pi-coding-agent-test-prompt-image-stale-model-callback-stays-gated ()
+  "A replaced process's model callback cannot release the current gate."
+  (pi-coding-agent-test-with-prompt-image-session (dir chat-buf input-buf)
+    (let* ((path (pi-coding-agent-test--write-prompt-image
+                  (expand-file-name "stale-model.png" dir) 'png))
+           (old-model '(:id "vision-old" :name "Vision Old"
+                        :provider "fake" :input ["text" "image"]))
+           (model-a '(:id "vision-a" :name "Vision A"
+                      :provider "fake" :input ["text" "image"]))
+           (model-b '(:id "vision-b" :name "Vision B"
+                      :provider "fake" :input ["text" "image"]))
+           (text "Keep gating this image")
+           (current-process 'image-process)
+           choice-name attached-image model-callbacks prompt-command)
+      (with-current-buffer chat-buf
+        (setq pi-coding-agent--process current-process
+              pi-coding-agent--state (list :model old-model)))
+      (with-current-buffer input-buf
+        (pi-coding-agent-test--attach-image path)
+        (setq attached-image (pi-coding-agent--get-prompt-image))
+        (insert text))
+      (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                 (lambda () current-process))
+                ((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'pi-coding-agent--rpc-sync)
+                 (lambda (&rest _)
+                   (list :success t :data
+                         (list :models (vector old-model model-a model-b)))))
+                ((symbol-function 'completing-read)
+                 (lambda (_prompt collection &rest _)
+                   (or (seq-find
+                        (lambda (candidate)
+                          (string-match-p choice-name candidate))
+                        collection)
+                       (ert-fail "Missing requested model choice"))))
+                ((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (_process command callback)
+                   (pcase (plist-get command :type)
+                     ("set_model"
+                      (push (cons (plist-get command :modelId) callback)
+                            model-callbacks))
+                     ("prompt" (setq prompt-command command)))))
+                ((symbol-function 'message) #'ignore))
+        (setq choice-name "Vision A")
+        (with-current-buffer input-buf
+          (pi-coding-agent-select-model))
+        (setq current-process 'replacement-process)
+        (with-current-buffer chat-buf
+          (pi-coding-agent--set-process current-process))
+        (setq choice-name "Vision B")
+        (with-current-buffer input-buf
+          (pi-coding-agent-select-model))
+        (let ((callback-a (alist-get "vision-a" model-callbacks
+                                     nil nil #'equal))
+              (callback-b (alist-get "vision-b" model-callbacks
+                                     nil nil #'equal)))
+          (should (functionp callback-a))
+          (should (functionp callback-b))
+          (funcall callback-a
+                   (list :success t :command "set_model" :data model-a))
+          (with-current-buffer input-buf
+            (pi-coding-agent-send)
+            (should (equal (buffer-string) text))
+            (should (eq (pi-coding-agent--get-prompt-image) attached-image)))
+          (should-not prompt-command)
+          (funcall callback-b
+                   (list :success t :command "set_model" :data model-b))
+          (with-current-buffer chat-buf
+            (should (equal (plist-get (plist-get pi-coding-agent--state :model)
+                                      :id)
+                           "vision-b")))
+          (with-current-buffer input-buf
+            (pi-coding-agent-send)
+            (should (string-empty-p (buffer-string)))
+            (should-not (pi-coding-agent--get-prompt-image)))
+          (should (equal (plist-get prompt-command :message) text))
+          (should (plist-member prompt-command :images)))))))
+
+(ert-deftest pi-coding-agent-test-prompt-image-preflight-ownership ()
+  "No-process and rejected sends restore image bytes; acceptance consumes them."
+  (pi-coding-agent-test-with-prompt-image-session (dir chat-buf input-buf)
+    (let* ((path (pi-coding-agent-test--write-prompt-image
+                  (expand-file-name "restored.png" dir) 'png))
+           (data (pi-coding-agent-test--prompt-image-base64 'png))
+           rpc-message rpc-callback attached-image)
+      (with-current-buffer input-buf
+        (pi-coding-agent-test--attach-image path)
+        (setq attached-image (pi-coding-agent--get-prompt-image))
+        (delete-file path)
+        (insert "Recover this turn")
+        (cl-letf (((symbol-function 'pi-coding-agent--get-process) (lambda () nil))
+                  ((symbol-function 'message) #'ignore))
+          (pi-coding-agent-send))
+        (should (equal (buffer-string) "Recover this turn"))
+        (should (string-match-p "restored.png"
+                                (pi-coding-agent-test--input-header)))
+        (cl-labels ((send ()
+                      (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                                 (lambda () 'image-process))
+                                ((symbol-function 'process-live-p) (lambda (_) t))
+                                ((symbol-function 'pi-coding-agent--rpc-async)
+                                 (lambda (_process command callback)
+                                   (setq rpc-message command
+                                         rpc-callback callback)))
+                                ((symbol-function 'message) #'ignore))
+                        (pi-coding-agent-send))))
+          (send)
+          (let ((pending-block (aref (plist-get rpc-message :images) 0)))
+            (should (equal (plist-get pending-block :data) data))
+            (should-error (pi-coding-agent-attach-image 'clear)
+                          :type 'user-error)
+            (funcall rpc-callback '(:success nil :error "rejected"))
+            (should (eq (pi-coding-agent--get-prompt-image) attached-image))
+            (should (equal
+                     (pi-coding-agent--prompt-image-content-block
+                      (pi-coding-agent--get-prompt-image))
+                     pending-block)))
+          (should (equal (buffer-string) "Recover this turn"))
+          (should (string-match-p "restored.png"
+                                  (pi-coding-agent-test--input-header)))
+          (setq rpc-message nil rpc-callback nil)
+          (send)
+          (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) nil)))
+            (funcall rpc-callback '(:success t))))
+        (should (string-empty-p (buffer-string)))
+        (should-not (string-match-p "restored.png"
+                                    (pi-coding-agent-test--input-header))))
+      (with-current-buffer chat-buf
+        (should (string-match-p "Recover this turn" (buffer-string)))
+        (should (string-match-p "Image: image/png" (buffer-string)))))))
+
+(ert-deftest pi-coding-agent-test-prompt-image-authoritative-echo-compares-content ()
+  "A same-text echo with a different image renders authoritative content."
+  (pi-coding-agent-test-with-prompt-image-session (dir chat-buf input-buf)
+    (let* ((path (pi-coding-agent-test--write-prompt-image
+                  (expand-file-name "original.png" dir) 'png))
+           (text "Inspect this image")
+           (jpeg-data (pi-coding-agent-test--prompt-image-base64 'jpeg))
+           rpc-callback)
+      (with-current-buffer input-buf
+        (pi-coding-agent-test--attach-image path)
+        (insert text)
+        (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                   (lambda () 'image-process))
+                  ((symbol-function 'process-live-p) (lambda (_) t))
+                  ((symbol-function 'pi-coding-agent--rpc-async)
+                   (lambda (_process _command callback)
+                     (setq rpc-callback callback))))
+          (pi-coding-agent-send)))
+      (should (functionp rpc-callback))
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) nil)))
+        (funcall rpc-callback '(:success t))
+        (with-current-buffer chat-buf
+          (pi-coding-agent--handle-display-event '(:type "agent_start"))
+          (should (string-match-p "Image: image/png" (buffer-string)))
+          (pi-coding-agent--handle-display-event
+           (list :type "message_start"
+                 :message
+                 (list :role "user" :timestamp 1704067200000
+                       :content
+                       (vector (list :type "text" :text text)
+                               (list :type "image" :data jpeg-data
+                                     :mimeType "image/jpeg")))))
+          (should (string-match-p "Image: image/jpeg" (buffer-string))))))))
+
+(ert-deftest pi-coding-agent-test-prompt-image-no-turn-success-retracts-local-echo ()
+  "An extension-handled image prompt leaves no phantom user turn."
+  (pi-coding-agent-test-with-prompt-image-session (dir chat-buf input-buf)
+    (let* ((path (pi-coding-agent-test--write-prompt-image
+                  (expand-file-name "handled.png" dir) 'png))
+           rpc-callback state-callback fallback-callback fallback-args)
+      (with-current-buffer chat-buf
+        (setq pi-coding-agent--process 'image-process))
+      (with-current-buffer input-buf
+        (pi-coding-agent-test--attach-image path)
+        (insert "Handle this without a turn"))
+      (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                 (lambda () 'image-process))
+                ((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (_process command callback)
+                   (pcase (plist-get command :type)
+                     ("prompt" (setq rpc-callback callback))
+                     ("get_state" (setq state-callback callback)))))
+                ((symbol-function 'run-at-time)
+                 (lambda (_secs _repeat function &rest args)
+                   (if (eq function
+                           'pi-coding-agent--clear-sending-if-no-agent-start)
+                       (setq fallback-callback function
+                             fallback-args args)
+                     'fake-drain-timer)
+                   'fake-prompt-start-timer))
+                ((symbol-function 'display-images-p) (lambda (&rest _) nil))
+                ((symbol-function 'message) #'ignore))
+        (with-current-buffer input-buf
+          (pi-coding-agent-send))
+        (funcall rpc-callback '(:success t))
+        (with-current-buffer chat-buf
+          (should pi-coding-agent--local-user-message)
+          (should (string-match-p "Handle this without a turn"
+                                  (buffer-string)))
+          (narrow-to-region (1+ (point-min)) (point-max)))
+        (apply fallback-callback fallback-args)
+        (should (functionp state-callback))
+        (funcall state-callback
+                 '(:success t
+                   :data (:isStreaming :false :isCompacting :false))))
+      (with-current-buffer chat-buf
+        (widen)
+        (should (eq pi-coding-agent--status 'idle))
+        (should-not pi-coding-agent--local-user-message)
+        (should-not pi-coding-agent--local-user-message-region)
+        (should-not (string-match-p "Handle this without a turn"
+                                    (buffer-string)))))))
+
 (ert-deftest pi-coding-agent-test-no-turn-fallback-keeps-server-active-prompt ()
   "A delayed agent_start must not be mistaken for an extension-handled prompt."
   (let ((fake-proc (start-process "test-active-prompt" nil "cat")))
@@ -2729,7 +3273,7 @@ Pi handles command expansion on the server side."
                 pi-coding-agent--followup-queue '("wait behind it"))
           (setq pi-coding-agent--local-user-message-region
                 (pi-coding-agent--display-user-message
-                 "slow prompt" (current-time) t))
+                 "slow prompt" (current-time) nil t))
           (let ((generation (pi-coding-agent--begin-prompt-start-wait)))
             (cl-letf (((symbol-function 'pi-coding-agent--rpc-async)
                        (lambda (_process command callback)

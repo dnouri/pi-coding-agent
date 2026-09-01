@@ -64,6 +64,7 @@
 ;; pi-coding-agent-input.el (input buffer commands)
 (declare-function pi-coding-agent-quit "pi-coding-agent-input")
 (declare-function pi-coding-agent-send "pi-coding-agent-input")
+(declare-function pi-coding-agent-attach-image "pi-coding-agent-input")
 (declare-function pi-coding-agent-abort "pi-coding-agent-input")
 (declare-function pi-coding-agent-previous-input "pi-coding-agent-input")
 (declare-function pi-coding-agent-next-input "pi-coding-agent-input")
@@ -207,8 +208,13 @@ Previews are also constrained to the visible chat window."
   :group 'pi-coding-agent)
 
 (defcustom pi-coding-agent-image-preview-max-bytes (* 10 1024 1024)
-  "Maximum source bytes retained for one inline image preview.
-Larger tool-result images use a textual placeholder."
+  "Maximum source bytes decoded for one inline image preview.
+Larger user-message or tool-result images use a textual placeholder."
+  :type 'natnum
+  :group 'pi-coding-agent)
+
+(defcustom pi-coding-agent-prompt-image-max-bytes (* 3 1024 1024)
+  "Maximum source bytes for the image attached to a prompt draft."
   :type 'natnum
   :group 'pi-coding-agent)
 
@@ -879,6 +885,8 @@ This is a read-only buffer showing the conversation history."
   (setq-local pi-coding-agent--history-load-generation 0)
   (setq-local pi-coding-agent--session-transition-generation 0)
   (setq-local pi-coding-agent--session-transition-active nil)
+  (setq-local pi-coding-agent--model-change-generation 0)
+  (setq-local pi-coding-agent--model-change-active-token nil)
   (setq-local pi-coding-agent--local-user-message-region nil)
   ;; Disable hl-line-mode: its post-command-hook overlay update causes
   ;; scroll oscillation in buffers with invisible text + variable heights.
@@ -919,6 +927,7 @@ removing the instructional header that would otherwise appear."
 (defvar pi-coding-agent-input-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'pi-coding-agent-send)
+    (define-key map (kbd "C-c C-a") #'pi-coding-agent-attach-image)
     (define-key map (kbd "TAB") #'pi-coding-agent-complete)
     (define-key map (kbd "C-c C-k") #'pi-coding-agent-abort)
     (define-key map (kbd "C-c C-p") #'pi-coding-agent-menu)
@@ -1069,10 +1078,89 @@ of the current session in the selected frame."
 (defvar-local pi-coding-agent--process-version nil
   "Detected pi CLI version for the current process.")
 
+(defvar-local pi-coding-agent--model-change-generation 0
+  "Monotonic generation for asynchronous model-change callbacks.")
+
+(defvar-local pi-coding-agent--model-change-active-token nil
+  "Process-bound token owned by the active model change, or nil.")
+
+(defun pi-coding-agent--begin-model-change (process &optional chat-buffer)
+  "Begin a model change through PROCESS in CHAT-BUFFER and return its token.
+Return nil if PROCESS is no longer current.  CHAT-BUFFER defaults to the
+current buffer."
+  (let ((buffer (or chat-buffer (current-buffer))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when (eq process pi-coding-agent--process)
+          (setq pi-coding-agent--model-change-generation
+                (1+ (or pi-coding-agent--model-change-generation 0)))
+          (setq pi-coding-agent--model-change-active-token
+                (cons pi-coding-agent--model-change-generation process)))))))
+
+(defun pi-coding-agent--model-change-owned-p (token &optional chat-buffer)
+  "Return non-nil when TOKEN owns CHAT-BUFFER's model-change gate.
+CHAT-BUFFER defaults to the current buffer."
+  (let ((buffer (or chat-buffer (current-buffer))))
+    (and token
+         (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (and (eq token pi-coding-agent--model-change-active-token)
+                (eql (car token) pi-coding-agent--model-change-generation))))))
+
+(defun pi-coding-agent--model-change-current-p (token &optional chat-buffer)
+  "Return non-nil when TOKEN owns CHAT-BUFFER's current-process model change.
+CHAT-BUFFER defaults to the current buffer."
+  (let ((buffer (or chat-buffer (current-buffer))))
+    (and (pi-coding-agent--model-change-owned-p token buffer)
+         (with-current-buffer buffer
+           (eq (cdr token) pi-coding-agent--process)))))
+
+(defun pi-coding-agent--finish-model-change (token &optional chat-buffer)
+  "Finish CHAT-BUFFER's model change only when TOKEN still owns it.
+Unlike applying its response, cleanup does not require TOKEN's process to
+remain current.  CHAT-BUFFER defaults to the current buffer."
+  (let ((buffer (or chat-buffer (current-buffer))))
+    (when (pi-coding-agent--model-change-owned-p token buffer)
+      (with-current-buffer buffer
+        (setq pi-coding-agent--model-change-active-token nil))
+      t)))
+
+(defun pi-coding-agent--invalidate-model-change (&optional chat-buffer)
+  "Invalidate any model change in CHAT-BUFFER and return the new generation.
+CHAT-BUFFER defaults to the current buffer."
+  (let ((buffer (or chat-buffer (current-buffer))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (setq pi-coding-agent--model-change-generation
+              (1+ (or pi-coding-agent--model-change-generation 0))
+              pi-coding-agent--model-change-active-token nil)
+        pi-coding-agent--model-change-generation))))
+
+(defun pi-coding-agent--model-change-pending-p (&optional chat-buffer)
+  "Return whether CHAT-BUFFER has an active model change.
+CHAT-BUFFER defaults to the current buffer."
+  (let ((buffer (or chat-buffer (current-buffer))))
+    (and (buffer-live-p buffer)
+         (buffer-local-value 'pi-coding-agent--model-change-active-token buffer)
+         t)))
+
+(defun pi-coding-agent--cancel-model-change-and-restore-followups
+    (&optional chat-buffer)
+  "Cancel CHAT-BUFFER's model change and restore text queued behind it."
+  (let ((buffer (or chat-buffer (current-buffer))))
+    (when (and (buffer-live-p buffer)
+               (pi-coding-agent--model-change-pending-p buffer))
+      (with-current-buffer buffer
+        (pi-coding-agent--invalidate-model-change)
+        (pi-coding-agent--restore-followup-queue-to-input))
+      t)))
+
 (defun pi-coding-agent--set-process (process)
   "Set the pi RPC subprocess PROCESS for this session.
 Resets cached process version and starts a delayed version probe for
 new live processes in interactive sessions."
+  (unless (eq process pi-coding-agent--process)
+    (pi-coding-agent--invalidate-model-change))
   (setq pi-coding-agent--process process
         pi-coding-agent--process-version nil)
   (when (and (processp process)
@@ -1335,6 +1423,52 @@ execution; this slot remains only for older single-tool flows.")
   "Non-nil if Assistant header has been shown for current prompt.
 Used to avoid duplicate headers during retry sequences.")
 
+(cl-defstruct (pi-coding-agent--prompt-image
+               (:constructor pi-coding-agent--make-prompt-image))
+  "Materialized image attached to one input-buffer prompt draft."
+  name
+  mime-type
+  byte-size
+  data)
+
+(defvar-local pi-coding-agent--draft-prompt-image nil
+  "Materialized prompt image attached to the current input draft.")
+
+(defun pi-coding-agent--get-prompt-image (&optional input-buffer)
+  "Return the draft prompt image in INPUT-BUFFER or the current buffer."
+  (let ((buffer (or input-buffer (current-buffer))))
+    (when (buffer-live-p buffer)
+      (buffer-local-value 'pi-coding-agent--draft-prompt-image buffer))))
+
+(defun pi-coding-agent--set-prompt-image (image &optional input-buffer)
+  "Set IMAGE as the draft prompt image in INPUT-BUFFER or current buffer."
+  (let ((buffer (or input-buffer (current-buffer))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (setq pi-coding-agent--draft-prompt-image image)
+        (force-mode-line-update t)))
+    image))
+
+(defun pi-coding-agent--clear-prompt-image (&optional input-buffer)
+  "Clear the draft prompt image in INPUT-BUFFER or the current buffer."
+  (pi-coding-agent--set-prompt-image nil input-buffer))
+
+(defun pi-coding-agent--prompt-image-content-block (image)
+  "Return the RPC image content block for prompt IMAGE."
+  (list :type "image"
+        :data (pi-coding-agent--prompt-image-data image)
+        :mimeType (pi-coding-agent--prompt-image-mime-type image)))
+
+(defun pi-coding-agent--replace-input-draft (input-buffer text)
+  "Replace INPUT-BUFFER's draft with TEXT and clear its prompt image."
+  (when (buffer-live-p input-buffer)
+    (with-current-buffer input-buffer
+      (erase-buffer)
+      (when text
+        (insert text))
+      (pi-coding-agent--clear-prompt-image)
+      (goto-char (point-max)))))
+
 (defvar-local pi-coding-agent--followup-queue nil
   "List of follow-up messages queued while agent is busy.
 Messages are added when the user sends while streaming, compacting, or
@@ -1364,8 +1498,8 @@ Follow-ups are processed in FIFO order: first pushed, first sent."
   "Return queued follow-up messages in the order they would be sent."
   (reverse pi-coding-agent--followup-queue))
 
-(defun pi-coding-agent--restore-input-text (text)
-  "Restore TEXT to the linked input buffer for user recovery.
+(defun pi-coding-agent--restore-input-text (text &optional prompt-image)
+  "Restore TEXT and optional PROMPT-IMAGE to the linked input buffer.
 Recovered text is older than any draft currently in the input buffer, so it is
 placed first and separated from the draft by a blank line."
   (when-let* ((input-buf pi-coding-agent--input-buffer)
@@ -1376,6 +1510,8 @@ placed first and separated from the draft by a blank line."
         (insert text)
         (unless (string-empty-p draft)
           (insert "\n\n" draft))
+        (when prompt-image
+          (pi-coding-agent--set-prompt-image prompt-image))
         (goto-char (point-max))))))
 
 (defun pi-coding-agent--restore-followup-queue-to-input ()
@@ -1411,12 +1547,12 @@ prompt preflight succeeds, so rejected queued prompts remain available."
   (and pi-coding-agent--followup-drain-timer t))
 
 (defvar-local pi-coding-agent--local-user-message nil
-  "Text of user message we displayed locally, awaiting pi's echo.
-Set when displaying a user message (normal send, follow-up).
-Cleared when we receive message_start role=user from pi.
-When nil and we receive message_start role=user, we display it.
-When set but different from pi's message, we display pi's version
-\(e.g., expanded template).")
+  "Locally displayed user turn awaiting pi's authoritative echo.
+A string records an existing text-only turn.  An image turn stores its full
+normalized content vector so text and image blocks must both match.  Nil means
+there is no local echo to suppress.  The value is cleared on message_start;
+when the authoritative turn differs, pi's version is also displayed (for
+example, after prompt or image transformation).")
 
 (defvar-local pi-coding-agent--local-user-message-region nil
   "Marker pair bounding the locally displayed user turn awaiting pi's echo.")
@@ -1438,10 +1574,11 @@ When set but different from pi's message, we display pi's version
 (defun pi-coding-agent--session-busy-p (&optional chat-buf)
   "Return non-nil when CHAT-BUF has active or locally pending work.
 When CHAT-BUF is nil, inspect the current buffer.  This includes Pi-owned
-activity from `pi-coding-agent--status' plus session transitions, prompt
-preflight, and follow-up drain waits."
+activity from `pi-coding-agent--status' plus model changes, session
+transitions, prompt preflight, and follow-up drain waits."
   (with-current-buffer (or chat-buf (current-buffer))
     (or (memq pi-coding-agent--status '(sending streaming compacting))
+        (pi-coding-agent--model-change-pending-p)
         (pi-coding-agent--session-transition-active-p)
         (pi-coding-agent--prompt-start-wait-active-p)
         (pi-coding-agent--followup-drain-pending-p))))
@@ -2187,6 +2324,7 @@ Stores the result in CHAT-BUF and emits a minibuffer notice when available."
     (concat
      separator "\n"
      "C-c C-c   send prompt\n"
+     "C-c C-a   attach image (C-u clears)\n"
      "C-c C-k   abort\n"
      "C-c C-r   sessions\n"
      "C-c C-p   menu\n")))
@@ -2330,6 +2468,17 @@ when no extension info exists."
         (concat " │ " (mapconcat #'identity (nreverse parts) " · "))
       "")))
 
+(defun pi-coding-agent--header-format-prompt-image (image)
+  "Format a leading-pipe header group for prompt IMAGE."
+  (if (not image)
+      ""
+    (let ((name (pi-coding-agent--header-escape-text
+                 (pi-coding-agent--prompt-image-name image)))
+          (size (file-size-human-readable
+                 (pi-coding-agent--prompt-image-byte-size image)
+                 'iec " " "B")))
+      (format " │ image: %s (%s)" name size))))
+
 (defun pi-coding-agent--header-line-string ()
   "Return formatted header-line string for input buffer.
 Accesses state from the linked chat buffer."
@@ -2365,7 +2514,9 @@ Accesses state from the linked chat buffer."
      (pi-coding-agent--header-format-identity model-short thinking activity-phase-str)
      (pi-coding-agent--header-format-stats stats)
      (pi-coding-agent--header-format-context-group session-name)
-     (pi-coding-agent--header-format-extension-group ext-status working-message))))
+     (pi-coding-agent--header-format-extension-group ext-status working-message)
+     (pi-coding-agent--header-format-prompt-image
+      (pi-coding-agent--get-prompt-image)))))
 
 ;;; State Management
 
@@ -2533,29 +2684,39 @@ ON-NO-AGENT-START is called if the fallback actually fires."
                            #'pi-coding-agent--clear-sending-if-no-agent-start
                            chat-buf generation on-no-agent-start))))))
 
+(defun pi-coding-agent--handle-prompt-send-failure
+    (chat-buf generation on-failure &optional error-text)
+  "Finish the current failed prompt send owned by GENERATION.
+Restore user input through ON-FAILURE, reset CHAT-BUF, and report ERROR-TEXT.
+Return non-nil only when GENERATION still owned the prompt-start wait."
+  (let ((current-failure
+         (and (buffer-live-p chat-buf)
+              (with-current-buffer chat-buf
+                (pi-coding-agent--prompt-start-current-p generation)))))
+    (when current-failure
+      (pi-coding-agent--abort-send chat-buf on-failure)
+      (message "Pi: Send failed%s"
+               (if error-text (format ": %s" error-text) "")))
+    current-failure))
+
 (defun pi-coding-agent--send-prompt
-    (text &optional on-success on-failure on-no-agent-start)
-  "Send TEXT as a prompt to the pi process.
+    (text &optional on-success on-failure on-no-agent-start prompt-image)
+  "Send TEXT and optional PROMPT-IMAGE to the pi process.
 Slash commands are sent literally - pi handles expansion.
 Shows an error message if process is unavailable.
 ON-SUCCESS is called in the chat buffer after prompt preflight accepts TEXT.
-ON-FAILURE is called in the chat buffer if preflight rejects TEXT.
-ON-NO-AGENT-START is called if success is not followed by agent_start."
+ON-FAILURE is called in the chat buffer if preflight rejects TEXT or scheduling
+fails synchronously.  ON-NO-AGENT-START is called if success is not followed
+by agent_start."
   (let ((proc (pi-coding-agent--get-process))
         (chat-buf (pi-coding-agent--get-chat-buffer))
         (prompt-generation nil))
     (cond
      ((null proc)
-      (when (and on-failure (buffer-live-p chat-buf))
-        (with-current-buffer chat-buf
-          (funcall on-failure)))
-      (pi-coding-agent--abort-send chat-buf)
+      (pi-coding-agent--abort-send chat-buf on-failure)
       (message "Pi: No process available - try M-x pi-coding-agent-reload or C-c C-p R"))
      ((not (process-live-p proc))
-      (when (and on-failure (buffer-live-p chat-buf))
-        (with-current-buffer chat-buf
-          (funcall on-failure)))
-      (pi-coding-agent--abort-send chat-buf)
+      (pi-coding-agent--abort-send chat-buf on-failure)
       (message "Pi: Process died - try M-x pi-coding-agent-reload or C-c C-p R"))
      (t
       (when (buffer-live-p chat-buf)
@@ -2563,44 +2724,54 @@ ON-NO-AGENT-START is called if success is not followed by agent_start."
           (setq prompt-generation (pi-coding-agent--begin-prompt-start-wait))
           (setq pi-coding-agent--status 'sending)
           (pi-coding-agent--set-activity-phase "thinking")))
-      (pi-coding-agent--rpc-async
-       proc
-       (list :type "prompt" :message text)
-       (lambda (response)
-         (if (eq (plist-get response :success) t)
-             (when (buffer-live-p chat-buf)
-               (with-current-buffer chat-buf
-                 (when (pi-coding-agent--prompt-start-current-p prompt-generation)
-                   (when on-success
-                     (funcall on-success))
-                   (pi-coding-agent--schedule-prompt-start-fallback
-                    chat-buf prompt-generation on-no-agent-start))))
-           (let ((current-failure nil))
-             (when (buffer-live-p chat-buf)
-               (with-current-buffer chat-buf
-                 (when (pi-coding-agent--prompt-start-current-p prompt-generation)
-                   (setq current-failure t)
-                   (pi-coding-agent--invalidate-prompt-start-wait)
-                   (when on-failure
-                     (funcall on-failure)))))
-             (when current-failure
-               (pi-coding-agent--abort-send chat-buf)
-               (message "Pi: Send failed%s"
-                        (if-let* ((error-text (plist-get response :error)))
-                            (format ": %s" error-text)
-                          "")))))))))))
+      (condition-case err
+          (pi-coding-agent--rpc-async
+           proc
+           (append (list :type "prompt" :message text)
+                   (when prompt-image
+                     (list :images
+                           (vector
+                            (pi-coding-agent--prompt-image-content-block
+                             prompt-image)))))
+           (lambda (response)
+             (if (eq (plist-get response :success) t)
+                 (when (buffer-live-p chat-buf)
+                   (with-current-buffer chat-buf
+                     (when (pi-coding-agent--prompt-start-current-p
+                            prompt-generation)
+                       (when on-success
+                         (funcall on-success))
+                       (pi-coding-agent--schedule-prompt-start-fallback
+                        chat-buf prompt-generation on-no-agent-start))))
+               (pi-coding-agent--handle-prompt-send-failure
+                chat-buf prompt-generation on-failure
+                (plist-get response :error)))))
+        ((error quit)
+         (if (eq (car err) 'quit)
+             (unwind-protect
+                 (pi-coding-agent--handle-prompt-send-failure
+                  chat-buf prompt-generation on-failure
+                  (error-message-string err))
+               (signal (car err) (cdr err)))
+           (pi-coding-agent--handle-prompt-send-failure
+            chat-buf prompt-generation on-failure
+            (error-message-string err)))))))))
 
-(defun pi-coding-agent--abort-send (chat-buf)
+(defun pi-coding-agent--abort-send (chat-buf &optional on-failure)
   "Clean up after a failed send attempt in CHAT-BUF.
-Resets activity phase and status to idle."
+Call ON-FAILURE once after invalidating the prompt wait, then reset activity,
+local echo state, and status to idle even if restoration signals."
   (when (buffer-live-p chat-buf)
     (with-current-buffer chat-buf
       (pi-coding-agent--invalidate-prompt-start-wait)
-      (setq pi-coding-agent--local-user-message nil)
-      (pi-coding-agent--clear-local-user-message-region)
-      (setq pi-coding-agent--pre-compaction-status nil)
-      (setq pi-coding-agent--status 'idle)
-      (pi-coding-agent--set-activity-phase "idle"))))
+      (unwind-protect
+          (when on-failure
+            (funcall on-failure))
+        (setq pi-coding-agent--local-user-message nil)
+        (pi-coding-agent--clear-local-user-message-region)
+        (setq pi-coding-agent--pre-compaction-status nil)
+        (setq pi-coding-agent--status 'idle)
+        (pi-coding-agent--set-activity-phase "idle")))))
 
 
 (provide 'pi-coding-agent-ui)

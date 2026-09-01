@@ -1174,6 +1174,59 @@ SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
       (with-current-buffer chat-buf
         (should (file-exists-p (plist-get pi-coding-agent--state :session-file)))))))
 
+(ert-deftest pi-coding-agent-fake-pi-test-prompt-image-persists-canonical-content ()
+  "A UI-attached PNG survives the fake prompt and canonical history contract."
+  (let* ((dir (make-temp-file "pi-coding-agent-fake-pi-image-" t))
+         (path (pi-coding-agent-test--write-prompt-image
+                (expand-file-name "pixel.png" dir) 'png))
+         (data (pi-coding-agent-test--prompt-image-base64 'png))
+         (text "Describe this fake-contract pixel"))
+    (unwind-protect
+        (pi-coding-agent-fake-pi-test-with-session
+            (session "prompt-lifecycle")
+          (let ((chat-buf (plist-get session :chat-buffer))
+                (input-buf (plist-get session :input-buffer))
+                (proc (plist-get session :process)))
+            (pi-coding-agent-fake-pi-test--wait-or-fail
+             proc
+             (lambda ()
+               (pi-coding-agent--model-supports-image-input-p chat-buf))
+             "vision model state")
+            (with-current-buffer input-buf
+              (erase-buffer)
+              (insert text)
+              (cl-letf (((symbol-function 'read-file-name)
+                         (lambda (&rest _) path)))
+                (call-interactively #'pi-coding-agent-attach-image))
+              (delete-file path)
+              (pi-coding-agent-send))
+            (pi-coding-agent-fake-pi-test--wait-or-fail
+             proc
+             (lambda ()
+               (with-current-buffer chat-buf
+                 (and (eq pi-coding-agent--status 'idle)
+                      (not (pi-coding-agent--prompt-start-wait-active-p))
+                      (string-match-p "Fake reply for:" (buffer-string)))))
+             "image prompt settlement")
+            (with-current-buffer chat-buf
+              (should (string-match-p "Image: image/png" (buffer-string))))
+            (let* ((response
+                    (pi-coding-agent--rpc-sync
+                     proc '(:type "get_messages")
+                     pi-coding-agent-fake-pi-test--timeout))
+                   (messages (plist-get (plist-get response :data) :messages))
+                   (user (seq-find
+                          (lambda (message)
+                            (equal (plist-get message :role) "user"))
+                          (append messages nil))))
+              (should (eq (plist-get response :success) t))
+              (should
+               (equal (plist-get user :content)
+                      (vector (list :type "text" :text text)
+                              (list :type "image" :data data
+                                    :mimeType "image/png")))))))
+      (delete-directory dir t))))
+
 (ert-deftest pi-coding-agent-fake-pi-test-extension-confirm-displays-through-emacs-seam ()
   "An extension confirm round-trip renders the follow-up message in chat." 
   (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_prompt) t)))

@@ -2132,6 +2132,26 @@ since we don't display them locally. Let pi's message_start handle it."
                          "Prefilled text")))
       (kill-buffer input-buf))))
 
+(ert-deftest pi-coding-agent-test-prompt-image-draft-replacements-clear-attachment ()
+  "Extension and browser prefills cannot retain a stale prompt image."
+  (pi-coding-agent-test-with-prompt-image-session (dir chat-buf input-buf)
+    (let ((path (pi-coding-agent-test--write-prompt-image (expand-file-name "stale.png" dir) 'png)))
+      (with-current-buffer input-buf
+        (insert "old draft")
+        (pi-coding-agent-test--attach-image path))
+      (with-current-buffer chat-buf
+        (pi-coding-agent--handle-extension-ui-request
+         '(:type "extension_ui_request" :id "replace-image-draft"
+           :method "set_editor_text" :text "Extension replacement")))
+      (with-current-buffer input-buf
+        (should (equal (buffer-string) "Extension replacement"))
+        (should-not (string-match-p "stale.png" (pi-coding-agent-test--input-header)))
+        (pi-coding-agent-test--attach-image path))
+      (pi-coding-agent--browse-prefill-input input-buf "Browser replacement")
+      (with-current-buffer input-buf
+        (should (equal (buffer-string) "Browser replacement"))
+        (should-not (string-match-p "stale.png" (pi-coding-agent-test--input-header)))))))
+
 (ert-deftest pi-coding-agent-test-extension-ui-set-status ()
   "extension_ui_request setStatus updates extension status storage."
   (with-temp-buffer
@@ -2619,6 +2639,26 @@ See https://github.com/dnouri/pi-coding-agent/issues/176."
                  "Image: image/png, 71 B"
                  (buffer-substring-no-properties position (overlay-end overlay))))))))
 
+(ert-deftest pi-coding-agent-test-prompt-image-live-and-history-use-image-preview ()
+  "Live and replayed user image blocks use the bounded #221 renderer."
+  (let ((image (list :type "image" :mimeType "image/png"
+                     :data (pi-coding-agent-test--prompt-image-base64 'png))))
+    (dolist (route '(live history))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) nil)))
+          (let ((message
+                 (list :role "user" :timestamp 1704067200000
+                       :content (vector '(:type "text" :text "Visual question")
+                                        image))))
+            (if (eq route 'live)
+                (pi-coding-agent--handle-display-event
+                 (list :type "message_start" :message message))
+              (pi-coding-agent--display-history-messages (vector message)))))
+        (should (string-match-p "Visual question" (buffer-string)))
+        (should (string-match-p "Image: image/png, 69 B" (buffer-string)))
+        (should (= 1 (length (pi-coding-agent-test--image-preview-positions))))))))
+
 (ert-deftest pi-coding-agent-test-tool-result-image-inserts-scaled-display-property ()
   "A graphical result carries one scaled image display property."
   (with-temp-buffer
@@ -2679,7 +2719,7 @@ See https://github.com/dnouri/pi-coding-agent/issues/176."
   (with-temp-buffer
     (pi-coding-agent-chat-mode)
     (let ((pi-coding-agent-image-preview-max-bytes 2)
-          (pi-coding-agent--image-previews-per-tool-limit 2))
+          (pi-coding-agent--image-previews-per-content-limit 2))
       (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
                 ((symbol-function 'create-image)
                  (lambda (&rest _)

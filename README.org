@@ -130,8 +130,9 @@ two windows:
 
 The input header line shows the current model, thinking level,
 activity phase, cost and context usage, session name, and extension
-status when available.  The model and thinking fields can be clicked
-to change their values.
+status when available.  When a prompt image is attached, it also shows
+the image's basename and source size.  The model and thinking fields
+can be clicked to change their values.
 
 Type in the input buffer and press =C-c C-c= to send.  If Pi is
 already working, =C-c C-c= queues the text as a follow-up and sends it
@@ -153,6 +154,27 @@ prompts, paste from other buffers, use the kill ring, keyboard macros,
 registers, spell checks, Evil, or whatever else your setup already
 gives you.  Your prompt stays in the bottom window while the
 conversation streams above it.
+
+Press =C-c C-a= to attach one image: select a file, or paste its path
+into the file prompt.  Attaching another image replaces the first;
+=C-u C-c C-a= clears it.  The header line keeps the attached basename
+and size visible.  The file is read and materialized when attached,
+and PNG, JPEG, GIF, and WebP are recognized from their content rather
+than their extension.  The default source limit is 3 MiB.  Send it
+with a nonempty ordinary prompt while using a vision-capable model.
+
+Image-bearing drafts can be sent only as direct prompts while Pi is
+idle.  They are not queued while Pi is busy, used as steering
+messages, or combined with slash commands.  A refusal preserves both
+prompt text and image.  Image bytes are sent as attached, without
+resizing or format conversion.
+Clipboard image extraction, automatic detection of paths typed into
+the prompt, and multiple attachments are deferred.
+
+Image files are read by Emacs, so an Emacs-readable path may use a
+file-name handler such as TRAMP.  Pi receives encoded bytes, not the
+path.  Remote reads still depend on the configured handler and are not
+broadly tested.
 
 Slash commands work with completion: type =/= then =TAB= to complete
 built-in commands and pi commands such as prompt templates, skills,
@@ -178,19 +200,19 @@ tool block to expand or collapse it.  Long-running commands stream
 output live, file operations (=read=, =write=, =edit=) get syntax
 highlighting, and edit diffs highlight what changed.
 
-Image content returned by completed tool results is shown inline in graphical
-Emacs and as a useful type-and-size placeholder in terminals.  Pi's built-in
-=read= already returns raster images as image content.  For SVG, the preview is
-made only from complete, standalone SVG text returned by =read=; pi-coding-agent
-never reopens the argument path, and text with obvious scripts or external
-resources is left as text.  Previews are *display-only*: outgoing prompts have
-no image field, so prompt image attachments remain separate
-[[https://github.com/dnouri/pi-coding-agent/issues/261][issue #261]] work.
+Image content in sent user turns and completed tool results is shown inline in
+graphical Emacs and as a useful type-and-size placeholder in terminals.  Sent
+and returned image content share the same bounded renderer.  Pi's built-in
+=read= already returns raster images as image content.  For SVG, a returned
+preview is made only from complete, standalone SVG text supplied by =read=;
+pi-coding-agent never reopens the argument path, and text with obvious scripts
+or external resources is left as text.
 
 Current limits: images in partial tool updates appear when the final result
-arrives; custom tools can return animated or highly compressed data whose
-decoder cost is not bounded by the source-byte cap (Pi's built-in =read=
-resizes raster images to at most 2000x2000).  Moving a terminal-rendered chat to
+arrives; unresized prompt images and custom tools can supply animated or highly
+compressed data whose decoder cost is not bounded by the source-byte cap (Pi's
+built-in =read= resizes raster images to at most 2000x2000).  Moving a
+terminal-rendered chat to
 a GUI, resizing previews, or applying a later extension replacement may require
 a toggle or history reload.
 
@@ -266,6 +288,8 @@ configured warning and error thresholds.
 | Key              | Context | Description                                    |
 |------------------+---------+------------------------------------------------|
 | =C-c C-c=        | input   | 📮 Send prompt, or queue follow-up if busy    |
+| =C-c C-a=        | input   | 🖼️ Attach or replace one prompt image         |
+| =C-u C-c C-a=    | input   | 🧹 Clear the attached prompt image            |
 | =C-c C-s=        | input   | 🐎 Send steering message while Pi is busy     |
 | =C-c C-k=        | input   | 🪓 Abort current response or compaction       |
 | =C-c C-p=        | input   | 🎛️ Open transient menu                        |
@@ -504,8 +528,11 @@ Less common tuning knobs:
 ;; (setopt pi-coding-agent-tool-preview-lines 20)
 ;; (setopt pi-coding-agent-bash-preview-lines 10)
 
+;; Lower the 3 MiB source limit for an outgoing prompt image:
+;; (setopt pi-coding-agent-prompt-image-max-bytes (* 2 1024 1024))
+
 ;; Cap inline image previews to 640 pixels as well as the chat window width;
-;; lower the 10 MiB per-image returned-source limit if desired:
+;; lower the 10 MiB per-image preview-source limit if desired:
 ;; (setopt pi-coding-agent-image-preview-max-width 640)
 ;; (setopt pi-coding-agent-image-preview-max-bytes (* 5 1024 1024))
 

@@ -33,6 +33,7 @@
 ;;
 ;; Key entry points:
 ;;   `pi-coding-agent-send'                  Send prompt (C-c C-c)
+;;   `pi-coding-agent-attach-image'          Attach one prompt image (C-c C-a)
 ;;   `pi-coding-agent-abort'                 Abort current operation (C-c C-k)
 ;;   `pi-coding-agent-quit'                  Close session
 ;;   `pi-coding-agent-previous-input'        History backward (M-p)
@@ -286,14 +287,120 @@ markup visibility, mode identity, and keybindings.  Set
   (pi-coding-agent--call-in-visible-chat-window
    #'pi-coding-agent-previous-message))
 
+;;;; Prompt Images
+
+(defun pi-coding-agent--prompt-image-byte-limit ()
+  "Return the configured nonnegative byte limit for a prompt image."
+  (if (natnump pi-coding-agent-prompt-image-max-bytes)
+      pi-coding-agent-prompt-image-max-bytes
+    (* 3 1024 1024)))
+
+(defun pi-coding-agent--sniff-prompt-image-mime-type (data)
+  "Return the supported MIME type sniffed from unibyte DATA, or nil."
+  (let ((length (length data)))
+    (cond
+     ((and (>= length 8)
+           (= (aref data 0) #x89)
+           (equal (substring data 1 8) "PNG\r\n\x1a\n"))
+      "image/png")
+     ((and (>= length 3)
+           (= (aref data 0) #xff)
+           (= (aref data 1) #xd8)
+           (= (aref data 2) #xff))
+      "image/jpeg")
+     ((and (>= length 6)
+           (member (substring data 0 6) '("GIF87a" "GIF89a")))
+      "image/gif")
+     ((and (>= length 12)
+           (equal (substring data 0 4) "RIFF")
+           (equal (substring data 8 12) "WEBP"))
+      "image/webp"))))
+
+(defun pi-coding-agent--read-prompt-image (path)
+  "Read and materialize supported prompt image PATH.
+The file is read literally through Emacs, including through file-name
+handlers, and is never handed to the Pi process as a path."
+  (let* ((path (pi-coding-agent--route-preserving-expand-file-name path))
+         (limit (pi-coding-agent--prompt-image-byte-limit))
+         (attributes (file-attributes path 'string))
+         (reported-size (and attributes (file-attribute-size attributes))))
+    (unless (and attributes (file-regular-p path) (file-readable-p path))
+      (user-error "Prompt image is not a readable regular file: %s" path))
+    (when (> reported-size limit)
+      (user-error "Prompt image is too large (%s; limit %s)"
+                  (file-size-human-readable reported-size 'iec " " "B")
+                  (file-size-human-readable limit 'iec " " "B")))
+    (let ((data (with-temp-buffer
+                  (set-buffer-multibyte nil)
+                  (let ((coding-system-for-read 'no-conversion))
+                    (insert-file-contents-literally
+                     path nil 0
+                     (and (< limit most-positive-fixnum) (1+ limit))))
+                  (buffer-string))))
+      (when (> (length data) limit)
+        (user-error "Prompt image exceeds the %s byte limit"
+                    (file-size-human-readable limit 'iec " " "B")))
+      (let ((mime-type (pi-coding-agent--sniff-prompt-image-mime-type data)))
+        (unless mime-type
+          (user-error "Unsupported prompt image format: %s" path))
+        (pi-coding-agent--make-prompt-image
+         :name (file-name-nondirectory path)
+         :mime-type mime-type
+         :byte-size (length data)
+         :data (base64-encode-string data t))))))
+
+;;;###autoload
+(defun pi-coding-agent-attach-image (&optional clear)
+  "Attach one materialized image to the current prompt draft.
+With prefix argument CLEAR, remove the attached image instead.  A new image
+replaces the previous draft image."
+  (interactive "P")
+  (let ((input-buffer (pi-coding-agent--get-input-buffer)))
+    (unless (buffer-live-p input-buffer)
+      (user-error "No pi input buffer for this command"))
+    (with-current-buffer input-buffer
+      (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+        (when (and (buffer-live-p chat-buf)
+                   (with-current-buffer chat-buf
+                     (pi-coding-agent--prompt-start-wait-active-p)))
+          (user-error
+           "Cannot change prompt image while prompt acceptance is pending"))
+        (if clear
+            (progn
+              (pi-coding-agent--clear-prompt-image)
+              (message "Pi: Prompt image cleared"))
+          (let* ((path (read-file-name "Attach prompt image: " nil nil t))
+                 (image (pi-coding-agent--read-prompt-image path)))
+            (pi-coding-agent--set-prompt-image image)
+            (message "Pi: Attached image %s"
+                     (pi-coding-agent--prompt-image-name image))))))))
+
+(defun pi-coding-agent--model-supports-image-input-p (chat-buffer)
+  "Return non-nil only when CHAT-BUFFER's model advertises image input."
+  (let* ((state (and (buffer-live-p chat-buffer)
+                     (buffer-local-value 'pi-coding-agent--state chat-buffer)))
+         (model (and (listp state) (plist-get state :model))))
+    (condition-case nil
+        (and (listp model)
+             (plist-member model :input)
+             (let ((input (plist-get model :input)))
+               (and (or (vectorp input) (listp input))
+                    (member "image" (if (vectorp input)
+                                        (append input nil)
+                                      input))
+                    t)))
+      (error nil))))
+
 ;;;; Sending Prompts
 
-(defun pi-coding-agent--accept-input-text (text)
-  "Accept TEXT from input buffer state.
-Adds TEXT to history, resets history navigation, and clears input."
+(defun pi-coding-agent--accept-input-text (text &optional prompt-image)
+  "Accept TEXT from input buffer state, consuming optional PROMPT-IMAGE.
+Adds only TEXT to history, resets history navigation, and clears input."
   (pi-coding-agent--history-add text)
   (setq pi-coding-agent--input-ring-index nil
         pi-coding-agent--input-saved nil)
+  (when prompt-image
+    (pi-coding-agent--clear-prompt-image))
   (erase-buffer))
 
 (defun pi-coding-agent--queue-followup-text (chat-buf text)
@@ -306,19 +413,33 @@ Adds TEXT to history, resets history navigation, and clears input."
   "Send the current input buffer contents to pi.
 Clears the input buffer after sending.  Does nothing if buffer is empty.
 If pi is busy (sending, streaming, or compacting), queues a local follow-up.
+An attached image is accepted only with a direct, ordinary, idle prompt.
 All built-in slash commands are handled locally; other slash commands are
 sent to pi."
   (interactive)
   (let* ((text (string-trim (buffer-string)))
          (chat-buf (pi-coding-agent--get-chat-buffer))
+         (prompt-image (pi-coding-agent--get-prompt-image))
          (transitioning (and chat-buf
                              (pi-coding-agent--session-transition-active-p
                               chat-buf)))
          (busy (and chat-buf (pi-coding-agent--session-busy-p chat-buf))))
     (cond
-     ((string-empty-p text) nil)
+     ((string-empty-p text)
+      (when prompt-image
+        (message "Pi: Add prompt text before sending the attached image")))
      (transitioning
       (message "Pi: Cannot send while session is switching"))
+     ((and prompt-image
+           (pi-coding-agent--model-change-pending-p chat-buf))
+      (message "Pi: Wait for the pending model change before sending an image"))
+     ((and prompt-image busy)
+      (message "Pi: Cannot send an attached image while Pi is busy"))
+     ((and prompt-image (string-prefix-p "/" text))
+      (message "Pi: Attached images cannot be sent with slash commands"))
+     ((and prompt-image
+           (not (pi-coding-agent--model-supports-image-input-p chat-buf)))
+      (message "Pi: Current model does not support known image input"))
      ((and busy (pi-coding-agent--builtin-command-text-p text))
       (message "Pi: Cannot queue /%s while Pi is busy"
                (pi-coding-agent--builtin-command-name text)))
@@ -326,6 +447,11 @@ sent to pi."
       (pi-coding-agent--queue-followup-text chat-buf text)
       (pi-coding-agent--maybe-hide-input-window)
       (message "Pi: Message queued (will send when Pi is ready)"))
+     (prompt-image
+      (pi-coding-agent--accept-input-text text prompt-image)
+      (pi-coding-agent--maybe-hide-input-window)
+      (with-current-buffer chat-buf
+        (pi-coding-agent--prepare-and-send text nil prompt-image)))
      (t
       (pi-coding-agent--accept-input-text text)
       (pi-coding-agent--maybe-hide-input-window)
@@ -566,30 +692,33 @@ assistant output completes).
 
 When compaction is in progress, steering text is queued as a local
 follow-up.  It is sent after non-retry compaction, or after Pi's
-automatic overflow retry turn finishes."
+automatic overflow retry turn finishes.  Steering refuses a draft image."
   (interactive)
   (let ((text (string-trim (buffer-string))))
-    (unless (string-empty-p text)
-      (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
-        (when chat-buf
-          (let ((status (buffer-local-value 'pi-coding-agent--status chat-buf)))
-            (cond
-             ((pi-coding-agent--session-transition-active-p chat-buf)
-              (message "Pi: Cannot send steering while session is switching"))
-             ((and (eq status 'idle)
-                   (not (pi-coding-agent--session-busy-p chat-buf)))
-              (message "Pi: Nothing to interrupt - use C-c C-c to send"))
-             ((or (eq status 'compacting)
-                  (and (eq status 'idle)
-                       (pi-coding-agent--session-busy-p chat-buf)))
-              (pi-coding-agent--queue-followup-text chat-buf text)
-              (message "Pi: Steering queued (will send when Pi is ready)"))
-             ((memq status '(sending streaming))
-              (when (pi-coding-agent--send-steer-message text)
-                (pi-coding-agent--accept-input-text text)
-                (message "Pi: Steering message sent")))
-             (t
-              (message "Pi: Cannot steer while session status is %s" status)))))))))
+    (if (pi-coding-agent--get-prompt-image)
+        (message "Pi: Cannot steer with an attached image")
+      (unless (string-empty-p text)
+        (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+          (when chat-buf
+            (let ((status (buffer-local-value 'pi-coding-agent--status chat-buf)))
+              (cond
+               ((pi-coding-agent--session-transition-active-p chat-buf)
+                (message "Pi: Cannot send steering while session is switching"))
+               ((and (eq status 'idle)
+                     (not (pi-coding-agent--session-busy-p chat-buf)))
+                (message "Pi: Nothing to interrupt - use C-c C-c to send"))
+               ((or (eq status 'compacting)
+                    (and (eq status 'idle)
+                         (pi-coding-agent--session-busy-p chat-buf)))
+                (pi-coding-agent--queue-followup-text chat-buf text)
+                (message "Pi: Steering queued (will send when Pi is ready)"))
+               ((memq status '(sending streaming))
+                (when (pi-coding-agent--send-steer-message text)
+                  (pi-coding-agent--accept-input-text text)
+                  (message "Pi: Steering message sent")))
+               (t
+                (message "Pi: Cannot steer while session status is %s"
+                         status))))))))))
 
 (defun pi-coding-agent-queue-followup ()
   "Queue current input as a follow-up message.

@@ -466,15 +466,24 @@ Maps request IDs to command type strings."
 (defun pi-coding-agent--rpc-async (process command callback)
   "Send COMMAND to pi PROCESS asynchronously.
 COMMAND is a plist that will be augmented with a unique ID.
-CALLBACK is called with the response plist when received."
+CALLBACK is called with the response plist when received.
+Encoding or scheduling failures leave no pending request behind."
   (let* ((id (pi-coding-agent--next-request-id))
          (full-command (plist-put (copy-sequence command) :id id))
+         ;; Encode before registration so serialization failures cannot create
+         ;; pending state that no response could ever resolve.
+         (encoded-command (pi-coding-agent--encode-command full-command))
          (pending (pi-coding-agent--get-pending-requests process))
          (pending-types (pi-coding-agent--get-pending-command-types process)))
-    (puthash id callback pending)
-    (puthash id (plist-get command :type) pending-types)
-    (pi-coding-agent--send-string
-     process (pi-coding-agent--encode-command full-command))))
+    (condition-case err
+        (progn
+          (puthash id callback pending)
+          (puthash id (plist-get command :type) pending-types)
+          (pi-coding-agent--send-string process encoded-command))
+      ((error quit)
+       (remhash id pending)
+       (remhash id pending-types)
+       (signal (car err) (cdr err))))))
 
 (defun pi-coding-agent--send-extension-ui-response (process response)
   "Send extension UI RESPONSE to pi PROCESS.
