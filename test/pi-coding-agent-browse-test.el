@@ -2533,6 +2533,209 @@ no RPC, no append (no clearing in Phase 2)."
             (should (member "Pi: Rename cancelled" messages))))
       (kill-buffer chat-buf))))
 
+;;;; Session Delete
+
+(defun pi-coding-agent-test--delete-at-point (item chat-buf answer)
+  "Run `session-browser-delete' with ANSWER at ITEM's section.
+ITEM is a session plist (its :name locates the section); CHAT-BUF is
+the browse buffer's chat link.  The post-delete refresh is stubbed
+out; callers mock the delete seams they assert on."
+  (with-temp-buffer
+    (pi-coding-agent-session-browser-mode)
+    (setq pi-coding-agent--chat-buffer chat-buf
+          pi-coding-agent--session-browser-items (list item))
+    (pi-coding-agent--session-browser-rerender)
+    (goto-char (point-min))
+    (search-forward (plist-get item :name))
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (_prompt &rest _) answer))
+              ((symbol-function 'pi-coding-agent--session-browser-fetch-and-render)
+               #'ignore))
+      (pi-coding-agent-session-browser-delete))))
+
+(ert-deftest pi-coding-agent-test-delete-keymap-bindings ()
+  "The session browser and session sections both bind `d' to delete."
+  (should (eq (lookup-key pi-coding-agent-session-browser-mode-map "d")
+              #'pi-coding-agent-session-browser-delete))
+  (should (eq (lookup-key pi-coding-agent-session-section-map "d")
+              #'pi-coding-agent-session-browser-delete)))
+
+(ert-deftest pi-coding-agent-test-delete-other-session-removes-file ()
+  "Deleting a non-current session unlinks the session file outright
+when `delete-by-moving-to-trash' is nil (the default), leaves the
+current session alone, and refreshes."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-delete-other"))
+         (path (expand-file-name "target.jsonl" dir))
+         (current-path (expand-file-name "current.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-delete-chat*")))
+    (pi-coding-agent-test--write-session-lines
+     path
+     (list (pi-coding-agent-test--make-session-header "sid-target")
+           (pi-coding-agent-test--user-line "m1" nil "doomed session")
+           (pi-coding-agent-test--jsonl-line
+            "session_info" "s1" "m1" :name "Doomed session")))
+    (pi-coding-agent-test--write-session-lines
+     current-path (list (pi-coding-agent-test--make-session-header "sid-current")))
+    (unwind-protect
+        (let ((delete-by-moving-to-trash nil))
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :session-file current-path)))
+          (pi-coding-agent-test--delete-at-point
+           (list :path path :name "Doomed session" :messageCount 1
+                 :modified "2026-03-02T10:00:00Z")
+           chat-buf t)
+          (should-not (file-exists-p path))
+          (should (file-exists-p current-path)))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-delete-dead-linked-chat-allowed ()
+  "A dead linked chat buffer does not block deletion.
+The chat's :session-file matches, no live process exists, and the
+confirm answer is t: the stale session is deletable."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-delete-dead"))
+         (current-path (expand-file-name "stale.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-delete-dead-chat*")))
+    (pi-coding-agent-test--write-session-lines
+     current-path
+     (list (pi-coding-agent-test--make-session-header "sid-stale")
+           (pi-coding-agent-test--user-line "m1" nil "stale session")
+           (pi-coding-agent-test--jsonl-line
+            "session_info" "s1" "m1" :name "Stale session")))
+    (unwind-protect
+        (let ((delete-by-moving-to-trash nil))
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :session-file current-path)))
+          (pi-coding-agent-test--delete-at-point
+           (list :path current-path :name "Stale session" :messageCount 1
+                 :modified "2026-03-02T10:00:00Z")
+           chat-buf t)
+          (should-not (file-exists-p current-path)))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-delete-without-linked-chat ()
+  "A standalone browser (no linked chat buffer) deletes fine.
+`pi-coding-agent--browse-session-file-matches-p' is nil-safe, so the
+live-session guard simply does not apply."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-delete-nil-chat"))
+         (path (expand-file-name "target.jsonl" dir)))
+    (pi-coding-agent-test--write-session-lines
+     path
+     (list (pi-coding-agent-test--make-session-header "sid-target")
+           (pi-coding-agent-test--user-line "m1" nil "loose session")
+           (pi-coding-agent-test--jsonl-line
+            "session_info" "s1" "m1" :name "Loose session")))
+    (let ((delete-by-moving-to-trash nil))
+      (pi-coding-agent-test--delete-at-point
+       (list :path path :name "Loose session" :messageCount 1
+             :modified "2026-03-02T10:00:00Z")
+       nil t)
+      (should-not (file-exists-p path)))))
+
+(ert-deftest pi-coding-agent-test-delete-current-session-refused ()
+  "The currently active session (live linked chat + live pi process)
+is refused with a `user-error' before any prompt; the file survives."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-delete-live"))
+         (current-path (expand-file-name "current.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-delete-live-chat*")))
+    (pi-coding-agent-test--write-session-lines
+     current-path
+     (list (pi-coding-agent-test--make-session-header "sid-current")
+           (pi-coding-agent-test--user-line "m1" nil "active session")
+           (pi-coding-agent-test--jsonl-line
+            "session_info" "s1" "m1" :name "Active session")))
+    (unwind-protect
+        (let ((delete-by-moving-to-trash nil))
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :session-file current-path)))
+          (cl-letf (((symbol-function 'pi-coding-agent--session-live-process-p)
+                     (lambda (&rest _) t)))
+            (should-error
+             (pi-coding-agent-test--delete-at-point
+              (list :path current-path :name "Active session" :messageCount 1
+                    :modified "2026-03-02T10:00:00Z")
+              chat-buf t)
+             :type 'user-error))
+          (should (file-exists-p current-path)))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-delete-cancelled-keeps-file ()
+  "Answering no at the confirm prompt cancels with a message and
+leaves the session file byte-for-byte intact."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-delete-cancel"))
+         (path (expand-file-name "target.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-delete-cancel-chat*"))
+         (messages nil))
+    (pi-coding-agent-test--write-session-lines
+     path
+     (list (pi-coding-agent-test--make-session-header "sid-target")
+           (pi-coding-agent-test--user-line "m1" nil "target session")
+           (pi-coding-agent-test--jsonl-line
+            "session_info" "s1" "m1" :name "Target session")))
+    (unwind-protect
+        (let ((delete-by-moving-to-trash nil)
+              (before (pi-coding-agent-test--file-contents path)))
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state (list :session-file path)))
+          (cl-letf (((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (push (apply #'format fmt args) messages))))
+            (pi-coding-agent-test--delete-at-point
+             (list :path path :name "Target session" :messageCount 1
+                   :modified "2026-03-02T10:00:00Z")
+             chat-buf nil))
+          (should (member "Pi: Delete cancelled" messages))
+          (should (equal (pi-coding-agent-test--file-contents path) before)))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-delete-no-session-at-point ()
+  "With no session under point, delete messages and touches no file."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-delete-none"))
+         (path (expand-file-name "bystander.jsonl" dir))
+         (messages nil))
+    (pi-coding-agent-test--write-session-lines
+     path (list (pi-coding-agent-test--make-session-header "sid-x")))
+    (let ((delete-by-moving-to-trash nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (push (apply #'format fmt args) messages)))
+                ((symbol-function 'pi-coding-agent--session-browser-fetch-and-render)
+                 #'ignore))
+        (with-temp-buffer
+          (pi-coding-agent-session-browser-mode)
+          (pi-coding-agent-session-browser-delete)))
+      (should (member "Pi: No session at point" messages))
+      (should (file-exists-p path)))))
+
+(ert-deftest pi-coding-agent-test-delete-trashes-when-configured ()
+  "With `delete-by-moving-to-trash' non-nil the file goes through
+`move-file-to-trash' (stubbed to relocate) instead of being unlinked."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-delete-trash"))
+         (path (expand-file-name "target.jsonl" dir))
+         (chat-buf (generate-new-buffer " *test-delete-trash-chat*")))
+    (pi-coding-agent-test--write-session-lines
+     path
+     (list (pi-coding-agent-test--make-session-header "sid-target")
+           (pi-coding-agent-test--user-line "m1" nil "trashed session")
+           (pi-coding-agent-test--jsonl-line
+            "session_info" "s1" "m1" :name "Trashed session")))
+    (unwind-protect
+        (let ((delete-by-moving-to-trash t))
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--state
+                  (list :session-file
+                        (expand-file-name "current.jsonl" dir))))
+          (cl-letf (((symbol-function 'move-file-to-trash)
+                     (lambda (file)
+                       (rename-file file (concat file ".trashed")))))
+            (pi-coding-agent-test--delete-at-point
+             (list :path path :name "Trashed session" :messageCount 1
+                   :modified "2026-03-02T10:00:00Z")
+             chat-buf t))
+          (should-not (file-exists-p path))
+          (should (file-exists-p (concat path ".trashed"))))
+      (kill-buffer chat-buf)
+      (ignore-errors (delete-file (concat path ".trashed") t)))))
+
 ;;;; Phase 3: Tree Browser Live (disk-based) + Labels
 
 (defmacro pi-coding-agent-test--with-tree-link (chat-buf &rest body)

@@ -538,6 +538,7 @@ Groups: \"Today\", \"Yesterday\", \"This Week\", \"Older\"."
     (define-key map (kbd "/") #'pi-coding-agent-session-browser-search)
     (define-key map (kbd "t") #'pi-coding-agent-session-browser-toggle-scope)
     (define-key map (kbd "r") #'pi-coding-agent-session-browser-rename)
+    (define-key map (kbd "d") #'pi-coding-agent-session-browser-delete)
     (define-key map (kbd "RET") #'pi-coding-agent-session-browser-switch)
     (define-key map (kbd "?") #'pi-coding-agent-session-browser-dispatch)
     (define-key map (kbd "h") #'pi-coding-agent-session-browser-dispatch)
@@ -547,6 +548,7 @@ Groups: \"Today\", \"Yesterday\", \"This Week\", \"Older\"."
 (defvar pi-coding-agent-session-section-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'pi-coding-agent-session-browser-switch)
+    (define-key map (kbd "d") #'pi-coding-agent-session-browser-delete)
     map)
   "Keymap for session sections (text property on each session line).")
 
@@ -614,6 +616,7 @@ browser's state on the real rendering path."
    ["Actions"
     ("RET" "switch" pi-coding-agent-session-browser-switch)
     ("r" "rename" pi-coding-agent-session-browser-rename)
+    ("d" "delete" pi-coding-agent-session-browser-delete)
     ("g" "refresh" pi-coding-agent-browse-refresh)
     ("q" "quit" quit-window)]
    ["Filter & Sort"
@@ -1024,6 +1027,43 @@ current-vs-other session (see
                 (pi-coding-agent--session-browser-fetch-and-render))
             (when (pi-coding-agent--browse-append-session-info path clean)
               (pi-coding-agent--session-browser-fetch-and-render)))))
+    (message "Pi: No session at point")))
+
+(defun pi-coding-agent-session-browser-delete ()
+  "Delete the session at point, trashing the file when configured.
+Mirrors pi's /resume picker: refuse the currently active session
+\(a live linked chat buffer whose pi process is running on this
+session file), confirm with `y-or-n-p', then delete with the TRASH
+argument of `delete-file' — the file moves to the trash when
+`delete-by-moving-to-trash' is non-nil and is unlinked otherwise.
+
+The live-session guard only sees Emacs-side processes — a pi
+running in a terminal on the same file is invisible, exactly as the
+TUI's own guard cannot see Emacs — and a dead linked chat does not
+block: its session is stale history and deletable.  Afterwards the
+browser refreshes and the message reports whether the file was
+trashed or unlinked."
+  (interactive)
+  (if-let* ((section (magit-current-section))
+            (path (oref section value))
+            (item (cl-find path pi-coding-agent--session-browser-items
+                           :key (lambda (it) (plist-get it :path))
+                           :test #'equal)))
+      (let* ((chat-buf pi-coding-agent--chat-buffer)
+             (name (or (plist-get item :name)
+                       (file-name-nondirectory path))))
+        (when (and (pi-coding-agent--browse-session-file-matches-p chat-buf path)
+                   (pi-coding-agent--session-live-process-p
+                    (buffer-local-value 'pi-coding-agent--process chat-buf)))
+          (user-error "Cannot delete the currently active session"))
+        (if (not (y-or-n-p (format "Delete session %s? " name)))
+            (message "Pi: Delete cancelled")
+          (delete-file path t)
+          (pi-coding-agent--session-browser-fetch-and-render)
+          (message (if delete-by-moving-to-trash
+                       "Pi: moved %s to trash"
+                     "Pi: deleted %s")
+                   name)))
     (message "Pi: No session at point")))
 
 ;;;; Point-Preserving Rerender

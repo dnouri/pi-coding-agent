@@ -239,8 +239,10 @@ current frame.
 the persistent, disk-backed session browser.  Press =RET= to switch to
 the session at point, =/= to search with regexp tokens, =s= to cycle
 threaded/recent/relevance sorting, =t= to toggle current/all-project
-scope, =f= for named sessions only, and =r= to rename.  Press =?= to
-see these commands in a small browser menu.
+scope, =f= for named sessions only, =r= to rename, and =d= to delete
+the session at point after confirmation (trashed when
+=delete-by-moving-to-trash= is set; the currently active session is
+refused).  Press =?= to see these commands in a small browser menu.
 
 In the main transient (=C-c C-p=), Session =r= opens =sessions= and
 Context =w= opens the disk-backed conversation =tree=.  In the tree
