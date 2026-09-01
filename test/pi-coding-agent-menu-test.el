@@ -196,6 +196,90 @@ Also verifies that the new session-file is stored in state for reload to work."
       (when (buffer-live-p chat-buf)
         (kill-buffer chat-buf)))))
 
+(ert-deftest pi-coding-agent-test-new-session-refuses-prompt-preflight ()
+  "New session cannot discard a prompt whose acceptance is unresolved."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--process 'mock-proc
+          pi-coding-agent--status 'sending
+          pi-coding-agent--prompt-start-wait-active t)
+    (let (rpc-called feedback)
+      (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                 (lambda () 'mock-proc))
+                ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                 (lambda () (current-buffer)))
+                ((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (&rest _)
+                   (setq rpc-called t)))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (when format-string
+                     (setq feedback (apply #'format format-string args))))))
+        (pi-coding-agent-new-session))
+      (should-not rpc-called)
+      (should (string-match-p "Cannot start a new session"
+                              (or feedback ""))))))
+
+(ert-deftest pi-coding-agent-test-new-session-preserves-queued-followups ()
+  "Reset refuses rather than silently discarding accepted local follow-ups."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--process 'mock-proc
+          pi-coding-agent--status 'streaming
+          pi-coding-agent--followup-queue '("keep me"))
+    (let (rpc-called feedback)
+      (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                 (lambda () 'mock-proc))
+                ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                 (lambda () (current-buffer)))
+                ((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (&rest _)
+                   (setq rpc-called t)))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (when format-string
+                     (setq feedback (apply #'format format-string args))))))
+        (pi-coding-agent-new-session))
+      (should-not rpc-called)
+      (should (equal pi-coding-agent--followup-queue '("keep me")))
+      (should (string-match-p "queued follow-ups" (or feedback ""))))))
+
+(ert-deftest pi-coding-agent-test-new-session-can-reset-server-streaming ()
+  "A deliberate reset still reaches Pi while its agent is streaming."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--process 'mock-proc
+          pi-coding-agent--status 'streaming)
+    (let (callback)
+      (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                 (lambda () 'mock-proc))
+                ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                 (lambda () (current-buffer)))
+                ((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (_process _command cb)
+                   (setq callback cb))))
+        (pi-coding-agent-new-session)
+        (should (functionp callback))
+        (should (pi-coding-agent--session-transition-active-p))))))
+
+(ert-deftest pi-coding-agent-test-new-session-blocks-work-until-response ()
+  "A scheduled reset owns the session transition until its response."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--process 'mock-proc
+          pi-coding-agent--status 'idle)
+    (let (callback)
+      (cl-letf (((symbol-function 'pi-coding-agent--get-process)
+                 (lambda () 'mock-proc))
+                ((symbol-function 'pi-coding-agent--get-chat-buffer)
+                 (lambda () (current-buffer)))
+                ((symbol-function 'pi-coding-agent--rpc-async)
+                 (lambda (_process _command cb)
+                   (setq callback cb))))
+        (pi-coding-agent-new-session)
+        (should (functionp callback))
+        (should (pi-coding-agent--session-transition-active-p))))))
+
 (ert-deftest pi-coding-agent-test-find-session-returns-existing ()
   "pi-coding-agent--find-session returns an existing chat buffer."
   (let* ((root (pi-coding-agent-test--make-temp-directory

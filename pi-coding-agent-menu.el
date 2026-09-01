@@ -204,25 +204,79 @@ from either chat or input buffer."
   "Format OBJ's current thinking-display value for the transient menu."
   (propertize (symbol-name (oref obj value)) 'face 'transient-value))
 
+(defun pi-coding-agent--new-session-ready-p (chat-buf)
+  "Return non-nil when CHAT-BUF can safely start a fresh session.
+Server-owned streaming may be reset deliberately; unresolved local ownership
+and another transition may not be discarded."
+  (with-current-buffer chat-buf
+    (cond
+     ((pi-coding-agent--session-transition-active-p)
+      (message "Pi: Cannot start a new session while session is switching")
+      nil)
+     ((pi-coding-agent--prompt-start-wait-active-p)
+      (message "Pi: Cannot start a new session while prompt acceptance is pending")
+      nil)
+     ((or pi-coding-agent--followup-queue
+          (pi-coding-agent--followup-drain-pending-p))
+      (message "Pi: Cannot start a new session with queued follow-ups")
+      nil)
+     (pi-coding-agent--local-user-message
+      (message "Pi: Wait for pi to echo your prompt before starting a new session")
+      nil)
+     (t t))))
+
 ;;;###autoload
 (defun pi-coding-agent-new-session ()
   "Start a new pi session (reset)."
   (interactive)
   (when-let* ((proc (pi-coding-agent--get-process))
-             (chat-buf (pi-coding-agent--get-chat-buffer)))
-    (pi-coding-agent--rpc-async proc '(:type "new_session")
-                   (lambda (response)
-                     (let* ((data (plist-get response :data))
-                            (cancelled (plist-get data :cancelled)))
-                       (if (and (eq (plist-get response :success) t)
-                                (pi-coding-agent--json-false-p cancelled))
-                           (when (buffer-live-p chat-buf)
-                             (with-current-buffer chat-buf
-                               (pi-coding-agent--clear-chat-buffer)
-                               (pi-coding-agent--refresh-header))
-                             (pi-coding-agent--refresh-session-state proc chat-buf)
-                             (message "Pi: New session started"))
-                         (message "Pi: New session cancelled")))))))
+             (chat-buf (pi-coding-agent--get-chat-buffer))
+             ((pi-coding-agent--new-session-ready-p chat-buf)))
+    (let ((generation
+           (with-current-buffer chat-buf
+             (pi-coding-agent--begin-session-transition proc))))
+      (condition-case err
+          (pi-coding-agent--rpc-async
+           proc '(:type "new_session")
+           (lambda (response)
+             (when (pi-coding-agent--session-transition-current-p
+                    chat-buf proc generation)
+               (condition-case callback-error
+                   (let* ((success (eq (plist-get response :success) t))
+                          (data (plist-get response :data))
+                          (cancelled (plist-get data :cancelled)))
+                     (cond
+                      ((and success
+                            (pi-coding-agent--json-false-p cancelled))
+                       (unwind-protect
+                           (with-current-buffer chat-buf
+                             (pi-coding-agent--clear-chat-buffer)
+                             (pi-coding-agent--refresh-header))
+                         (pi-coding-agent--refresh-session-state proc chat-buf))
+                       (message "Pi: New session started"))
+                      (t
+                       (with-current-buffer chat-buf
+                         (pi-coding-agent--finish-session-transition generation))
+                       (if (and success cancelled
+                                (not (pi-coding-agent--json-false-p cancelled)))
+                           (message "Pi: New session cancelled")
+                         (message "Pi: Failed to start new session: %s"
+                                  (or (plist-get response :error)
+                                      "unknown error"))))))
+                 ((error quit)
+                  (when (pi-coding-agent--session-transition-current-p
+                         chat-buf proc generation)
+                    (with-current-buffer chat-buf
+                      (pi-coding-agent--finish-session-transition generation)))
+                  (if (eq (car callback-error) 'quit)
+                      (signal (car callback-error) (cdr callback-error))
+                    (message "Pi: Failed to start new session: %s"
+                             (error-message-string callback-error))))))))
+        ((error quit)
+         (when (buffer-live-p chat-buf)
+           (with-current-buffer chat-buf
+             (pi-coding-agent--finish-session-transition generation)))
+         (signal (car err) (cdr err)))))))
 
 (defun pi-coding-agent--session-list-directory (&optional chat-buf)
   "Return the directory containing CHAT-BUF's current JSONL session file.
@@ -310,6 +364,7 @@ Call this when starting a new session to ensure no stale state persists."
         pi-coding-agent--tool-block-order-counter 0
         pi-coding-agent--thinking-block-order-counter 0)
   (pi-coding-agent--set-activity-phase "idle" 'reset t)
+  (pi-coding-agent--clear-local-user-message-region)
   (pi-coding-agent--clear-unsupported-extension-ui-warnings)
   (pi-coding-agent--invalidate-history-loads)
   (pi-coding-agent--finish-session-transition
@@ -447,28 +502,34 @@ handled, even when the response failed."
       (let* ((own-generation (null generation))
              (generation (or generation
                              (pi-coding-agent--begin-session-transition))))
-        (pi-coding-agent--rpc-async proc '(:type "get_state")
-          (lambda (response)
-            (when (pi-coding-agent--session-transition-current-p
-                   chat-buf proc generation)
-              (unwind-protect
-                  (when (eq (plist-get response :success) t)
-                    (pi-coding-agent--apply-state-response chat-buf response)
-                    (when (buffer-live-p chat-buf)
+        (condition-case err
+            (pi-coding-agent--rpc-async proc '(:type "get_state")
+              (lambda (response)
+                (when (pi-coding-agent--session-transition-current-p
+                       chat-buf proc generation)
+                  (unwind-protect
+                      (when (eq (plist-get response :success) t)
+                        (pi-coding-agent--apply-state-response chat-buf response)
+                        (when (buffer-live-p chat-buf)
+                          (with-current-buffer chat-buf
+                            (unless session-file
+                              (when-let* ((current-session-file
+                                           (plist-get pi-coding-agent--state
+                                                      :session-file)))
+                                (pi-coding-agent--update-session-name-from-file
+                                 current-session-file)))
+                            (force-mode-line-update t))))
+                    (when completion-callback
+                      (funcall completion-callback response))
+                    (when (and own-generation (buffer-live-p chat-buf))
                       (with-current-buffer chat-buf
-                        (unless session-file
-                          (when-let* ((current-session-file
-                                       (plist-get pi-coding-agent--state
-                                                  :session-file)))
-                            (pi-coding-agent--update-session-name-from-file
-                             current-session-file)))
-                        (force-mode-line-update t))))
-                (when completion-callback
-                  (funcall completion-callback response))
-                (when (and own-generation (buffer-live-p chat-buf))
-                  (with-current-buffer chat-buf
-                    (pi-coding-agent--finish-session-transition
-                     generation)))))))))))
+                        (pi-coding-agent--finish-session-transition
+                         generation)))))))
+          ((error quit)
+           (when (and own-generation (buffer-live-p chat-buf))
+             (with-current-buffer chat-buf
+               (pi-coding-agent--finish-session-transition generation)))
+           (signal (car err) (cdr err))))))))
 
 ;;;###autoload
 (defun pi-coding-agent-reload ()
