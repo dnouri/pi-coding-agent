@@ -51,7 +51,7 @@ RESULTS_FILE=$(mktemp /tmp/ert-results.XXXXXX)
 RUNNER_FILE=$(mktemp /tmp/run-gui-tests.XXXXXX.el)
 trap 'rm -f "$RESULTS_FILE" "$RUNNER_FILE"' EXIT
 
-echo "=== Pi.el GUI Tests ==="
+echo "=== piem GUI Tests ==="
 echo "Project: $PROJECT_DIR"
 echo "Selector: $SELECTOR"
 if [ "$HEADLESS" = "1" ]; then
