@@ -16,7 +16,7 @@
 # Examples:
 #   ./test/run-gui-tests.sh                        # Run with display
 #   ./test/run-gui-tests.sh --headless             # Run headless
-#   ./test/run-gui-tests.sh pi-coding-agent-gui-test-session    # Run one GUI test
+#   ./test/run-gui-tests.sh piem-gui-test-session    # Run one GUI test
 
 set -e
 
@@ -30,7 +30,7 @@ if [ -z "${PACKAGE_USER_DIR:-}" ]; then
         --eval '(princ emacs-major-version)')
     export PACKAGE_USER_DIR="$PROJECT_DIR/.cache/elpa/$EMACS_MAJOR_VERSION"
 fi
-SELECTOR="\"pi-coding-agent-gui-test-\""
+SELECTOR="\"piem-gui-test-\""
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -51,7 +51,7 @@ RESULTS_FILE=$(mktemp /tmp/ert-results.XXXXXX)
 RUNNER_FILE=$(mktemp /tmp/run-gui-tests.XXXXXX.el)
 trap 'rm -f "$RESULTS_FILE" "$RUNNER_FILE"' EXIT
 
-echo "=== Pi.el GUI Tests ==="
+echo "=== piem GUI Tests ==="
 echo "Project: $PROJECT_DIR"
 echo "Selector: $SELECTOR"
 if [ "$HEADLESS" = "1" ]; then
@@ -83,24 +83,24 @@ cat >> "$RUNNER_FILE" << EOF
 (package-initialize)
 
 ;; Load test utilities and tests
-(require 'pi-coding-agent-gui-test-utils)
-(require 'pi-coding-agent-gui-tests)
+(require 'piem-gui-test-utils)
+(require 'piem-gui-tests)
 
 ;; Redirect messages to file for results
-(defvar pi-coding-agent-gui-test--output-file "$RESULTS_FILE")
+(defvar piem-gui-test--output-file "$RESULTS_FILE")
 
 ;; Helper to print to stderr immediately (unbuffered, works in non-batch mode)
-(defun pi-coding-agent-gui-test--log (fmt &rest args)
+(defun piem-gui-test--log (fmt &rest args)
   "Print formatted message to stderr immediately."
   (princ (concat (apply #'format fmt args) "\n") #'external-debugging-output))
 
 ;; Run tests and collect results
 ;; Order tests: session-starts first, then alphabetically
-(defun pi-coding-agent-gui-test--order-tests (tests)
+(defun piem-gui-test--order-tests (tests)
   "Order TESTS so session-starts runs first."
   (let (first-test rest-tests)
     (dolist (test tests)
-      (if (eq (ert-test-name test) 'pi-coding-agent-gui-test-session-starts)
+      (if (eq (ert-test-name test) 'piem-gui-test-session-starts)
           (setq first-test test)
         (push test rest-tests)))
     (if first-test
@@ -112,9 +112,9 @@ cat >> "$RUNNER_FILE" << EOF
        (skipped 0)
        (failed 0)
        (total 0)
-       (test-list (pi-coding-agent-gui-test--order-tests (ert-select-tests selector t))))
+       (test-list (piem-gui-test--order-tests (ert-select-tests selector t))))
   (setq total (length test-list))
-  (pi-coding-agent-gui-test--log "Running %d GUI tests..." total)
+  (piem-gui-test--log "Running %d GUI tests..." total)
   (with-temp-buffer
     (insert "=== GUI Test Results ===\n\n")
     (let ((n 0))
@@ -122,53 +122,53 @@ cat >> "$RUNNER_FILE" << EOF
         (let* ((name (ert-test-name test))
                (start (float-time))
                (result (ert-run-test test))
-               (elapsed (pi-coding-agent-test-format-elapsed (- (float-time) start))))
+               (elapsed (piem-test-format-elapsed (- (float-time) start))))
           (setq n (1+ n))
           (cond
            ((ert-test-passed-p result)
             (setq passed (1+ passed))
-            (pi-coding-agent-gui-test--log "  [%d/%d] PASS: %s (%s)" n total name elapsed)
+            (piem-gui-test--log "  [%d/%d] PASS: %s (%s)" n total name elapsed)
             (insert (format "  PASS: %s (%s)\n" name elapsed)))
            ((ert-test-skipped-p result)
             (setq skipped (1+ skipped))
             (let ((reason
                    (error-message-string
                     (ert-test-result-with-condition-condition result))))
-              (pi-coding-agent-gui-test--log
+              (piem-gui-test--log
                "  [%d/%d] SKIP: %s (%s): %s" n total name elapsed reason)
               (insert (format "  SKIP: %s (%s): %s\n" name elapsed reason))))
            (t
             (setq failed (1+ failed))
-            (pi-coding-agent-gui-test--log "  [%d/%d] FAIL: %s (%s)" n total name elapsed)
+            (piem-gui-test--log "  [%d/%d] FAIL: %s (%s)" n total name elapsed)
             (insert (format "  FAIL: %s (%s)\n" name elapsed))
             (when (ert-test-failed-p result)
               (insert (format "        %S\n" (ert-test-result-with-condition-condition result))))
             ;; Debug: print diagnostic info on failure
-            (when (and (boundp 'pi-coding-agent-gui-test--session) pi-coding-agent-gui-test--session)
-              (pi-coding-agent-gui-test--log "  --- Session config ---")
-              (pi-coding-agent-gui-test--log "  Backend: %s"
-                                (plist-get (plist-get pi-coding-agent-gui-test--session :backend)
+            (when (and (boundp 'piem-gui-test--session) piem-gui-test--session)
+              (piem-gui-test--log "  --- Session config ---")
+              (piem-gui-test--log "  Backend: %s"
+                                (plist-get (plist-get piem-gui-test--session :backend)
                                            :label))
-              (pi-coding-agent-gui-test--log "  Options: %S"
-                                (plist-get pi-coding-agent-gui-test--session :options))
+              (piem-gui-test--log "  Options: %S"
+                                (plist-get piem-gui-test--session :options))
               ;; Process status
-              (when-let ((proc (plist-get pi-coding-agent-gui-test--session :process)))
-                (pi-coding-agent-gui-test--log "  --- Process status ---")
-                (pi-coding-agent-gui-test--log "  Status: %s, Exit: %s"
+              (when-let ((proc (plist-get piem-gui-test--session :process)))
+                (piem-gui-test--log "  --- Process status ---")
+                (piem-gui-test--log "  Status: %s, Exit: %s"
                                   (process-status proc) (process-exit-status proc))
-                (pi-coding-agent-gui-test--log "  Events: %s, Last event: %S"
-                                  (or (process-get proc 'pi-coding-agent-gui-test-event-count) 0)
-                                  (process-get proc 'pi-coding-agent-gui-test-last-event)))
+                (piem-gui-test--log "  Events: %s, Last event: %S"
+                                  (or (process-get proc 'piem-gui-test-event-count) 0)
+                                  (process-get proc 'piem-gui-test-last-event)))
               ;; Chat buffer content
-              (when-let ((chat-buf (plist-get pi-coding-agent-gui-test--session :chat-buffer)))
+              (when-let ((chat-buf (plist-get piem-gui-test--session :chat-buffer)))
                 (when (buffer-live-p chat-buf)
-                  (pi-coding-agent-gui-test--log "  --- Chat buffer content ---")
-                  (pi-coding-agent-gui-test--log "%s" (with-current-buffer chat-buf (buffer-string)))
-                  (pi-coding-agent-gui-test--log "  --- End chat buffer ---")))))))))
+                  (piem-gui-test--log "  --- Chat buffer content ---")
+                  (piem-gui-test--log "%s" (with-current-buffer chat-buf (buffer-string)))
+                  (piem-gui-test--log "  --- End chat buffer ---")))))))))
     (insert (format "\n=== %d tests: %d passed, %d skipped, %d failed ===\n"
                     total passed skipped failed))
-    (write-region (point-min) (point-max) pi-coding-agent-gui-test--output-file))
-  (pi-coding-agent-gui-test--log
+    (write-region (point-min) (point-max) piem-gui-test--output-file))
+  (piem-gui-test--log
    "=== %d tests: %d passed, %d skipped, %d failed ==="
    total passed skipped failed)
   (kill-emacs (if (> failed 0) 1 0)))

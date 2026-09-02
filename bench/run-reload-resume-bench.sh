@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-reload-resume-bench.sh - Run pi-coding-agent reload/resume benchmarks
+# run-reload-resume-bench.sh - Run piem reload/resume benchmarks
 #
 # Usage:
 #   ./bench/run-reload-resume-bench.sh                         # GUI via xvfb (primary lane)
@@ -96,7 +96,7 @@ if [[ -z "$OUT_DIR" || "$OUT_DIR" == "/" ]]; then
     exit 1
 fi
 
-BENCH_MARKER="$OUT_DIR/.pi-coding-agent-reload-resume-bench"
+BENCH_MARKER="$OUT_DIR/.piem-reload-resume-bench"
 if [[ -L "$OUT_DIR" ]]; then
     echo "ERROR: refusing symlink output directory: $OUT_DIR" >&2
     exit 1
@@ -183,10 +183,10 @@ EMACS_INIT=(
     --eval "(let ((dir (getenv \"PACKAGE_USER_DIR\"))) (when dir (setq package-user-dir (directory-file-name (expand-file-name dir)))))"
     --eval "(package-initialize)"
     --eval "(setq load-path (cons (expand-file-name \"$PROJECT_DIR\") load-path))"
-    -l "$SCRIPT_DIR/pi-coding-agent-reload-resume-bench.el"
+    -l "$SCRIPT_DIR/piem-reload-resume-bench.el"
 )
 
-printf '=== pi-coding-agent Reload/Resume Benchmarks ===\n'
+printf '=== piem Reload/Resume Benchmarks ===\n'
 printf 'Project: %s\n' "$PROJECT_DIR"
 if [[ "$BATCH" = "1" ]]; then
     MODE="batch"
@@ -229,7 +229,7 @@ for scenario in "${SCENARIOS[@]}"; do
         printf '[%s/%s] running\n' "$scenario" "$iter"
         if [[ "$BATCH" = "1" ]]; then
             if ! "$EMACS_BIN" --batch "${EMACS_INIT[@]}" \
-                -f pi-coding-agent-rr-bench-run-batch \
+                -f piem-rr-bench-run-batch \
                 > "$run_dir/stdout.log" 2> "$run_dir/stderr.log"; then
                 cat "$run_dir/stdout.log"
                 cat "$run_dir/stderr.log" >&2
@@ -238,7 +238,7 @@ for scenario in "${SCENARIOS[@]}"; do
         else
             if ! xvfb-run -a env GDK_BACKEND=x11 PATH="$PATH" \
                 "$EMACS_BIN" --geometry 120x40 "${EMACS_INIT[@]}" \
-                --eval "(let ((standard-output #'external-debugging-output)) (kill-emacs (if (pi-coding-agent-rr-bench-run) 0 1)))" \
+                --eval "(let ((standard-output #'external-debugging-output)) (kill-emacs (if (piem-rr-bench-run) 0 1)))" \
                 </dev/null > "$run_dir/stdout.log" 2> "$run_dir/stderr.log"; then
                 cat "$run_dir/stdout.log"
                 cat "$run_dir/stderr.log" >&2
@@ -297,7 +297,7 @@ if rows:
         writer.writerows(rows)
 
 summary_lines: list[str] = []
-summary_lines.append("# pi-coding-agent reload/resume benchmark summary")
+summary_lines.append("# piem reload/resume benchmark summary")
 summary_lines.append("")
 summary_lines.append("Synthetic deterministic fixtures only; no private session content is used.")
 summary_lines.append("")

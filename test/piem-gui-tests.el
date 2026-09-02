@@ -1,0 +1,620 @@
+;;; piem-gui-tests.el --- GUI integration tests for piem -*- lexical-binding: t; -*-
+
+;;; Commentary:
+;;
+;; ERT tests that require a real Emacs GUI (windows, frames, scrolling).
+;; Run with: make test-gui [SELECTOR=pattern]
+;;
+;; These tests focus on behavior that CANNOT be tested with unit tests:
+;; - Real window scrolling during streamed updates in a displayed buffer
+;; - Auto-scroll vs scroll-preservation with deterministic fake scenarios
+;; - Tool-block overlays and extension UI behavior through the subprocess seam
+;;
+;; Many behaviors (history, spacing, and linked-buffer teardown) are covered
+;; more directly by unit tests.
+;;
+;; For quick fake-backed debugging with a visible window:
+;;   ./test/run-gui-tests.sh piem-gui-test-scroll-auto-when-at-end
+
+;;; Code:
+
+(require 'ert)
+(require 'piem-gui-test-utils)
+(require 'piem-test-common)
+
+(defun piem-gui-test--table-display-strings (beg end)
+  "Return ordered table overlay display strings between BEG and END."
+  (when-let ((buf (plist-get piem-gui-test--session :chat-buffer)))
+    (with-current-buffer buf
+      (mapcar (lambda (ov) (overlay-get ov 'display))
+              (sort (seq-filter
+                     (lambda (ov) (overlay-get ov 'piem-table-display))
+                     (overlays-in beg end))
+                    (lambda (left right)
+                      (< (overlay-start left) (overlay-start right))))))))
+
+(defun piem-gui-test--thinking-scroll-lines (prefix count)
+  "Return COUNT newline-separated lines starting with PREFIX."
+  (mapconcat (lambda (n) (format "%s %02d" prefix n))
+             (number-sequence 1 count)
+             "\n"))
+
+(defun piem-gui-test--thinking-scroll-messages ()
+  "Return canonical history that exercises thinking-display scroll behavior."
+  (vector
+   (list :role "user"
+         :content (vector (list :type "text" :text "Question one"))
+         :timestamp 1704067200000)
+   (list :role "assistant"
+         :content (vector (list :type "text"
+                                :text (concat
+                                       (piem-gui-test--thinking-scroll-lines
+                                        "Earlier assistant line" 18)
+                                       "\n\nShort bridge.")))
+         :timestamp 1704067200500)
+   (list :role "user"
+         :content (vector (list :type "text" :text "Question two"))
+         :timestamp 1704067200800)
+   (list :role "assistant"
+         :content (vector
+                   (list :type "text"
+                         :text "Prelude line A\nPrelude line B\nPrelude line C")
+                   (list :type "thinking"
+                         :thinking (concat
+                                    (piem-gui-test--thinking-scroll-lines
+                                     "Thinking detail" 30)
+                                    "\n\nConclusion thought"))
+                   (list :type "text"
+                         :text (concat "\n"
+                                       (piem-gui-test--thinking-scroll-lines
+                                        "Final answer line" 12))))
+         :timestamp 1704067201000)))
+
+(defun piem-gui-test--thinking-scroll-hidden-stub ()
+  "Return the collapsed thinking stub used by the scroll-history fixture."
+  (piem--thinking-hidden-stub
+   (piem--thinking-normalize-text
+    (concat
+     (piem-gui-test--thinking-scroll-lines
+      "Thinking detail" 30)
+     "\n\nConclusion thought"))))
+
+(defun piem-gui-test--render-thinking-scroll-history (buffer display-mode)
+  "Render scroll-regression history into BUFFER using DISPLAY-MODE."
+  (with-current-buffer buffer
+    (piem-chat-mode)
+    (setq piem--status 'idle
+          piem--thinking-display display-mode
+          piem--canonical-messages
+          (piem-gui-test--thinking-scroll-messages))
+    (piem--display-session-history piem--canonical-messages
+                                              buffer)
+    (font-lock-ensure)
+    (redisplay)))
+
+(defun piem-gui-test--window-visible-screen-lines (window)
+  "Return how many screen lines WINDOW currently shows from buffer text."
+  (count-screen-lines (window-start window) (window-end window t) nil window))
+
+(defun piem-gui-test--window-point-row (window)
+  "Return WINDOW point's screen-line row within the current viewport."
+  (count-screen-lines (window-start window) (window-point window) nil window))
+
+(defun piem-gui-test--window-current-line (window)
+  "Return WINDOW point's current line without text properties."
+  (with-selected-window window
+    (buffer-substring-no-properties (line-beginning-position)
+                                    (line-end-position))))
+
+(defun piem-gui-test--window-thinking-block-order (window)
+  "Return the completed-thinking block order at WINDOW point, or nil."
+  (with-selected-window window
+    (piem--thinking-block-at-pos (point))))
+
+(defun piem-gui-test--window-substantially-filled-p (window)
+  "Return non-nil when WINDOW shows nearly a full body of buffer text."
+  (>= (piem-gui-test--window-visible-screen-lines window)
+      (- (window-body-height window) 2)))
+
+;;;; Session Tests
+
+(ert-deftest piem-gui-test-session-starts ()
+  "Test that a fake-backed pi session starts with proper layout."
+  (piem-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "prompt-lifecycle")
+    (should (piem-gui-test-session-active-p))
+    (should (piem-gui-test-chat-window))
+    (should (piem-gui-test-input-window))
+    (should (piem-gui-test-verify-layout))))
+
+;;;; Scroll Preservation Tests
+
+(ert-deftest piem-gui-test-scroll-preserved-streaming ()
+  "Test scroll position is preserved while a fake stream updates below."
+  (piem-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "scrolling-text")
+    (piem-gui-test-send "first turn")
+    ;; The fake stream is usually tall enough already, but large frames can make
+    ;; the buffer barely non-scrollable.  Top off with dummy lines so the test
+    ;; exercises scroll preservation rather than frame geometry.
+    (piem-gui-test-ensure-scrollable)
+    (piem-gui-test-scroll-up 20)
+    (should-not (piem-gui-test-at-end-p))
+    (let ((line-before (piem-gui-test-top-line-number)))
+      (should (> line-before 1))
+      (piem-gui-test-send "second turn")
+      (should (= line-before (piem-gui-test-top-line-number)))
+      (should (piem-gui-test-chat-contains "Scroll line 24 for second turn")))))
+
+(ert-deftest piem-gui-test-scroll-preserved-tool-use ()
+  "Test scroll position is preserved while fake tool output arrives."
+  (piem-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "tool-read")
+    (piem-gui-test-ensure-scrollable)
+    (piem-gui-test-scroll-up 20)
+    (should-not (piem-gui-test-at-end-p))
+    (let ((line-before (piem-gui-test-top-line-number)))
+      (should (> line-before 1))
+      (piem-gui-test-send "Use the fake read tool")
+      (should (= line-before (piem-gui-test-top-line-number)))
+      (should (piem-gui-test-chat-contains "fake tool output")))))
+
+(ert-deftest piem-gui-test-scroll-auto-when-at-end ()
+  "Test auto-scroll when user is at end across deterministic fake turns.
+Regression: `piem--display-agent-end' must leave window-point at
+buffer end so the next streamed turn still follows automatically."
+  (piem-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "scrolling-text")
+    (piem-gui-test-send "first turn")
+    (should (piem-gui-test-window-point-at-end-p))
+    (should (piem-gui-test-at-end-p))
+    (piem-gui-test-send "second turn")
+    (should (piem-gui-test-window-point-at-end-p))
+    (should (piem-gui-test-at-end-p))
+    (should (piem-gui-test-chat-contains "Scroll line 24 for second turn"))))
+
+(ert-deftest piem-gui-test-thinking-display-toggle-keeps-tail-filled ()
+  "Toggling completed thinking keeps a tail-following chat window filled.
+After the toggle, a new streamed turn should still auto-scroll from the tail."
+  (let ((buf (get-buffer-create "*pi-gui-thinking-tail*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buf)
+          (piem-gui-test--render-thinking-scroll-history buf 'visible)
+          (let ((win (selected-window)))
+            (goto-char (point-max))
+            (recenter -1)
+            (redisplay)
+            (should (>= (window-point win) (1- (point-max))))
+            (should (piem-gui-test--window-substantially-filled-p win))
+            (piem-toggle-thinking-display)
+            (redisplay)
+            (should (string-match-p
+                     (regexp-quote
+                      (piem-gui-test--thinking-scroll-hidden-stub))
+                     (buffer-string)))
+            (should (>= (window-point win) (1- (point-max))))
+            (should (>= (window-end win t) (1- (point-max))))
+            (should (piem-gui-test--window-substantially-filled-p win))
+            (piem--display-agent-start)
+            (piem--display-message-delta "Streaming tail line 01\n")
+            (redisplay)
+            (should (>= (window-point win) (1- (point-max))))
+            (should (>= (window-end win t) (1- (point-max))))
+            (piem--display-message-delta "Streaming tail line 02\n")
+            (piem--display-agent-end)
+            (redisplay)
+            (should (>= (window-point win) (1- (point-max))))
+            (should (>= (window-end win t) (1- (point-max))))
+            (should (string-match-p "Streaming tail line 02" (buffer-string)))))
+      (kill-buffer buf))))
+
+(ert-deftest piem-gui-test-thinking-display-toggle-keeps-context-window-usable ()
+  "Toggling completed thinking keeps a non-tail chat window usable.
+Point should stay on the same logical thinking block and the window should
+remain substantially filled even when the collapsed tail is shorter."
+  (let ((buf (get-buffer-create "*pi-gui-thinking-context*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buf)
+          (piem-gui-test--render-thinking-scroll-history buf 'visible)
+          (let ((win (selected-window))
+                block-before)
+            (goto-char (point-min))
+            (should (search-forward "Thinking detail 25" nil t))
+            (beginning-of-line)
+            (recenter 10)
+            (redisplay)
+            (setq block-before
+                  (piem-gui-test--window-thinking-block-order win))
+            (should block-before)
+            (should (piem-gui-test--window-substantially-filled-p win))
+            (should (equal "> Thinking detail 25"
+                           (piem-gui-test--window-current-line win)))
+            (piem-toggle-thinking-display)
+            (redisplay)
+            (should (string-match-p
+                     (regexp-quote
+                      (piem-gui-test--thinking-scroll-hidden-stub))
+                     (buffer-string)))
+            (should (equal (piem-gui-test--thinking-scroll-hidden-stub)
+                           (piem-gui-test--window-current-line win)))
+            (should (equal block-before
+                           (piem-gui-test--window-thinking-block-order win)))
+            (should (piem-gui-test--window-substantially-filled-p win))))
+      (kill-buffer buf))))
+
+(ert-deftest piem-gui-test-thinking-display-toggle-expands-same-block-from-hidden-stub ()
+  "Expanding a hidden thinking stub restores the same logical block.
+Point should land back on the same completed-thinking block rather than an
+unrelated raw offset in the conversation."
+  (let ((buf (get-buffer-create "*pi-gui-thinking-expand*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buf)
+          (piem-gui-test--render-thinking-scroll-history buf 'hidden)
+          (let ((win (selected-window))
+                block-before)
+            (goto-char (point-min))
+            (should (search-forward
+                     (piem-gui-test--thinking-scroll-hidden-stub)
+                     nil t))
+            (beginning-of-line)
+            (recenter 10)
+            (redisplay)
+            (setq block-before
+                  (piem-gui-test--window-thinking-block-order win))
+            (should block-before)
+            (should (equal (piem-gui-test--thinking-scroll-hidden-stub)
+                           (piem-gui-test--window-current-line win)))
+            (piem-toggle-thinking-display)
+            (redisplay)
+            (should (string-match-p "Thinking detail 25" (buffer-string)))
+            (should (equal block-before
+                           (piem-gui-test--window-thinking-block-order win)))
+            (should (string-match-p
+                     "^> Thinking detail [0-9][0-9]$"
+                     (piem-gui-test--window-current-line win)))
+            (should (piem-gui-test--window-substantially-filled-p win))))
+      (kill-buffer buf))))
+
+(ert-deftest piem-gui-test-thinking-display-toggle-restores-each-visible-window ()
+  "Toggling completed thinking preserves each visible window's own context.
+The tail window should stay at the end, while the context window keeps its
+logical block and should not start following later streamed output."
+  (let ((buf (get-buffer-create "*pi-gui-thinking-multi-window*")))
+    (unwind-protect
+        (progn
+          (delete-other-windows)
+          (switch-to-buffer buf)
+          (piem-gui-test--render-thinking-scroll-history buf 'visible)
+          (let* ((tail-win (selected-window))
+                 (context-win (split-window-below)))
+            (set-window-buffer context-win buf)
+            (with-selected-window tail-win
+              (goto-char (point-max))
+              (recenter -1)
+              (redisplay))
+            (with-selected-window context-win
+              (goto-char (point-min))
+              (should (search-forward "Thinking detail 25" nil t))
+              (beginning-of-line)
+              (recenter 8)
+              (redisplay))
+            (let ((context-line-before
+                   (piem-gui-test--window-current-line context-win))
+                  context-start-after-toggle)
+              (with-selected-window tail-win
+                (piem-toggle-thinking-display))
+              (redisplay)
+              (should (eq (selected-window) tail-win))
+              (should (>= (window-point tail-win) (1- (with-current-buffer buf (point-max)))))
+              (should (>= (window-end tail-win t)
+                          (1- (with-current-buffer buf (point-max)))))
+              (should (piem-gui-test--window-substantially-filled-p tail-win))
+              (should (equal "> Thinking detail 25" context-line-before))
+              (should (equal (piem-gui-test--thinking-scroll-hidden-stub)
+                             (piem-gui-test--window-current-line context-win)))
+              (should (piem-gui-test--window-substantially-filled-p context-win))
+              (setq context-start-after-toggle (window-start context-win))
+              (with-current-buffer buf
+                (piem--display-agent-start)
+                (piem--display-message-delta "Dual window tail line\n"))
+              (redisplay)
+              (should (>= (window-point tail-win) (1- (with-current-buffer buf (point-max)))))
+              (should (>= (window-end tail-win t)
+                          (1- (with-current-buffer buf (point-max)))))
+              (should (= context-start-after-toggle (window-start context-win)))
+              (should (equal (piem-gui-test--thinking-scroll-hidden-stub)
+                             (piem-gui-test--window-current-line context-win))))))
+      (kill-buffer buf))))
+
+(ert-deftest piem-gui-test-table-resize-refreshes-hot-tail-only ()
+  "Resizing rewraps hot tables only and preserves context below the table."
+  (piem-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "prompt-lifecycle")
+    (let* ((chat-buf (plist-get piem-gui-test--session :chat-buffer))
+           (frame (selected-frame))
+           (orig-width (frame-width))
+           chat-win
+           initial-chat-width
+           (cold-table
+            "| Feature | Notes |\n|---------|-------|\n| Cold history | This older table was wrapped at the original wide width and should stay frozen after resize |\n")
+           (hot-table
+            "| Feature | Notes |\n|---------|-------|\n| Hot tail | This recent table should rewrap when the window narrows so the columns remain readable |\n")
+           cold-before
+           hot-before
+           cold-start
+           hot-start
+           filler-start)
+      (unwind-protect
+          (progn
+            (with-current-buffer chat-buf
+              (let ((inhibit-read-only t))
+                (erase-buffer)
+                (insert "You · 10:00\n===========\n")
+                (setq cold-start (point))
+                (insert cold-table "\nAssistant\n=========\nRecent reply\n\nYou · 10:05\n===========\n")
+                (setq hot-start (point))
+                ;; Terminate the Markdown table before adding scrollable context.
+                ;; Without the blank line, tree-sitter treats every filler line
+                ;; as a lazy continuation row inside one giant table.
+                (insert hot-table "\n")
+                (setq filler-start (point))
+                (dotimes (i 80)
+                  (insert (format "filler line %d\n" i))))
+              (font-lock-ensure)
+              (setq chat-win (piem-gui-test-chat-window)
+                    initial-chat-width (window-width chat-win))
+              (piem--decorate-tables-in-region
+               (point-min) (point-max) initial-chat-width)
+              (move-marker piem--hot-tail-start hot-start)
+              (setq cold-before
+                    (piem-gui-test--table-display-strings
+                     cold-start hot-start)
+                    hot-before
+                    (piem-gui-test--table-display-strings
+                     hot-start filler-start))
+              (should cold-before)
+              (should hot-before)
+              (should-not
+               (piem-gui-test--table-display-strings
+                filler-start (point-max))))
+            (redisplay)
+            (piem-gui-test-scroll-up 20)
+            (let ((line-before (piem-gui-test-top-line-number)))
+              (set-frame-size frame (- orig-width 30) (frame-height))
+              (redisplay)
+              (unless (piem-test-wait-until
+                       (lambda ()
+                         (< (window-width chat-win) initial-chat-width))
+                       2 0.05)
+                (ert-skip
+                 (format
+                  (concat "Window manager did not honor resize request from "
+                          "frame width %d to %d: chat window width %d is not "
+                          "narrower than its initial width %d")
+                  orig-width (- orig-width 30)
+                  (window-width chat-win) initial-chat-width)))
+              ;; X11 can report the new width while a synchronous ERT body has
+              ;; not re-entered the command-loop redisplay that delivers this
+              ;; buffer-local hook.  Exercise our registered callback in the
+              ;; same selected-window context Emacs documents for the hook.
+              (with-selected-window chat-win
+                (should
+                 (memq #'piem--maybe-refresh-hot-tail-tables
+                       window-configuration-change-hook))
+                (run-hooks 'window-configuration-change-hook)
+                (should (= piem--last-table-display-width
+                           (piem--chat-window-width))))
+              (should-not
+               (equal hot-before
+                      (piem-gui-test--table-display-strings
+                       hot-start filler-start)))
+              (should (equal cold-before
+                             (piem-gui-test--table-display-strings
+                              cold-start hot-start)))
+              (should (= line-before (piem-gui-test-top-line-number)))))
+        (set-frame-size frame orig-width (frame-height))
+        (redisplay)))))
+
+;;;; Content Tests
+
+(ert-deftest piem-gui-test-tool-result-image-has-real-display-property ()
+  "A real PNG result inserts an image display property in graphical Emacs."
+  (unless (and (display-images-p) (image-type-available-p 'png))
+    (ert-skip "This Emacs display cannot render PNG images"))
+  (let ((buffer (get-buffer-create "*pi-gui-image-preview*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buffer)
+          (piem-chat-mode)
+          (let ((block (piem--display-tool-start
+                        "generate" nil "gui-image")))
+            (piem--display-tool-end
+             "generate" nil
+             '((:type "image"
+                :mimeType "image/png"
+                :data "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGP4z8DwHwQBEPgD/U6VwW8AAAAASUVORK5CYII="))
+             nil nil block))
+          (redisplay)
+          (let* ((position
+                  (text-property-any (point-min) (point-max)
+                                     'piem-image-preview t))
+                 (display (and position
+                               (get-text-property position 'display)))
+                 (size (and display (image-size display t))))
+            (should position)
+            (should (eq 'image (car-safe display)))
+            (should (consp size))
+            (should (> (car size) 0))
+            (should (> (cdr size) 0))))
+      (kill-buffer buffer))))
+
+(ert-deftest piem-gui-test-read-svg-has-real-display-property ()
+  "A complete standalone SVG returned by read renders graphically."
+  (unless (and (display-images-p) (image-type-available-p 'svg))
+    (ert-skip "This Emacs display cannot render SVG images"))
+  (let ((buffer (get-buffer-create "*pi-gui-svg-preview*"))
+        (source
+         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"2\" height=\"1\"><rect width=\"2\" height=\"1\" fill=\"#369\"/></svg>"))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buffer)
+          (piem-chat-mode)
+          (piem--display-tool-end
+           "read" '(:path "/missing/returned.svg")
+           (list (list :type "text" :text source)) nil nil)
+          (redisplay)
+          (let* ((position
+                  (text-property-any (point-min) (point-max)
+                                     'piem-image-preview t))
+                 (display (and position
+                               (get-text-property position 'display)))
+                 (size (and display (image-size display t))))
+            (should position)
+            (should (eq 'image (car-safe display)))
+            (should (consp size))
+            (should (> (car size) 0))
+            (should (> (cdr size) 0))))
+      (kill-buffer buffer))))
+
+(ert-deftest piem-gui-test-content-tool-output-shown ()
+  "Test that fake-backed tool output appears in chat and in the tool block."
+  (piem-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "tool-read")
+    (piem-gui-test-send "Use the fake read tool")
+    (should (piem-gui-test-chat-contains "read /tmp/fake-tool.txt"))
+    (should (piem-gui-test-chat-text-in-tool-block-p "fake tool output"))
+    (should (piem-gui-test-chat-contains "Tool finished"))))
+
+(ert-deftest piem-gui-test-tool-overlay-bounded ()
+  "Test that the tool overlay stops before later assistant text.
+Regression: `piem--tool-overlay-finalize' must replace the
+rear-advance overlay before assistant text continues after the tool block."
+  (piem-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "tool-read")
+    (piem-gui-test-send "Use the fake read tool")
+    (with-current-buffer (plist-get piem-gui-test--session :chat-buffer)
+      (goto-char (point-min))
+      (search-forward "fake tool output")
+      (let* ((tool-pos (match-beginning 0))
+             (tool-overlay (seq-find
+                            (lambda (ov) (overlay-get ov 'piem-tool-block))
+                            (overlays-at tool-pos))))
+        (should tool-overlay))
+      (goto-char (point-min))
+      (search-forward "Tool finished")
+      (let* ((assistant-pos (match-beginning 0))
+             (tool-overlay (seq-find
+                            (lambda (ov) (overlay-get ov 'piem-tool-block))
+                            (overlays-at assistant-pos))))
+        (should-not tool-overlay)))))
+
+;;;; Extension Command Tests
+
+(ert-deftest piem-gui-test-extension-command-returns-to-idle ()
+  "Fake extension command without a visible turn returns to idle immediately."
+  (piem-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "extension-noop")
+    (piem-gui-test-send "/test-noop" t)
+    (should (piem-gui-test-wait-for-idle 2))))
+
+(ert-deftest piem-gui-test-extension-custom-message-displayed ()
+  "Fake extension command displays a custom message in chat."
+  (piem-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "extension-message")
+    (piem-gui-test-send "/test-message")
+    (should (piem-gui-test-chat-contains "Test message from extension"))))
+
+(ert-deftest piem-gui-test-extension-confirm-response-displayed ()
+  "Fake extension confirm response triggers the displayed follow-up message."
+  (piem-gui-test-with-fresh-session
+    (:backend fake :fake-scenario "extension-confirm")
+    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_prompt) t)))
+      (piem-gui-test-send "/test-confirm")
+      (should (piem-gui-test-chat-contains "CONFIRMED")))))
+
+;;;; Tool Toggle Tests
+
+(ert-deftest piem-gui-test-tool-toggle-expand-collapse-cycle ()
+  "TAB expands, collapses, and re-expands in a displayed GUI buffer.
+Regression for issue #166: collapsing from the [-] button placed cursor
+at the overlay boundary (half-open interval), making the next TAB fall
+through to `outline-cycle' instead of toggling.  Uses a standalone
+chat-mode buffer to isolate the toggle logic from RPC timing."
+  (let ((buf (get-buffer-create "*pi-gui-toggle-test*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buf)
+          (piem-chat-mode)
+          (piem--display-tool-start "read" '(:path "/tmp/test.txt"))
+          (piem--display-tool-end "read" '(:path "/tmp/test.txt")
+            `((:type "text"
+               :text ,(mapconcat (lambda (n) (format "Line %02d of file" n))
+                                 (number-sequence 1 20) "\n")))
+            nil nil)
+          (font-lock-ensure)
+          (redisplay)
+          ;; Initially collapsed
+          (should (string-match-p "more lines)" (buffer-string)))
+          (should-not (string-match-p "Line 20" (buffer-string)))
+          ;; Expand from the collapsed indicator
+          (goto-char (point-min))
+          (search-forward "more lines)" nil t)
+          (beginning-of-line)
+          (piem-toggle-tool-section)
+          (redisplay)
+          (should (string-match-p "Line 20" (buffer-string)))
+          ;; Navigate to [-] button and collapse
+          (goto-char (point-min))
+          (search-forward "[-]" nil t)
+          (beginning-of-line)
+          (piem-toggle-tool-section)
+          (redisplay)
+          (should (string-match-p "more lines)" (buffer-string)))
+          (should-not (string-match-p "Line 20" (buffer-string)))
+          ;; Re-expand must still work from current cursor position
+          (piem-toggle-tool-section)
+          (redisplay)
+          (should (string-match-p "Line 20" (buffer-string))))
+      (kill-buffer buf))))
+
+;;;; Streaming Fontification Tests
+
+(ert-deftest piem-gui-test-streaming-no-fences ()
+  "Streaming write content shows no fence markers to the user.
+Fences exist in the buffer for tree-sitter parsing, but
+`md-ts-hide-markup' makes them invisible.  Uses a displayed
+buffer (jit-lock active) to verify under real GUI conditions."
+  (let ((buf (get-buffer-create "*pi-gui-fontify-test*")))
+    (unwind-protect
+        (progn
+          (switch-to-buffer buf)
+          (piem-chat-mode)
+          (piem--handle-display-event '(:type "agent_start"))
+          (piem--handle-display-event
+           '(:type "message_start" :message (:role "assistant" :content [])))
+          (piem-test--send-assistant-message-update
+           '(:type "toolcall_start" :contentIndex 0
+             :id "call_1" :toolName "write"))
+          (redisplay)
+          (piem-test--send-assistant-message-update
+           '(:type "toolcall_delta" :contentIndex 0
+             :delta "{\"path\":\"/tmp/test.py\",\"content\":\"def hello():\\n    return 42\\n\"}"))
+          (font-lock-ensure)
+          ;; Fences are in the buffer (for tree-sitter) but invisible
+          (let ((visible (piem--visible-text
+                          (point-min) (point-max))))
+            (should-not (string-match-p "```" visible)))
+          ;; Content is present with syntax faces
+          (goto-char (point-min))
+          (should (search-forward "def" nil t))
+          (let ((face (get-text-property (match-beginning 0) 'face)))
+            (should (or (eq face 'font-lock-keyword-face)
+                        (and (listp face)
+                             (memq 'font-lock-keyword-face face))))))
+      (kill-buffer buf))))
+
+(provide 'piem-gui-tests)
+;;; piem-gui-tests.el ends here

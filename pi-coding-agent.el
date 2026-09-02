@@ -1,13 +1,9 @@
-;;; pi-coding-agent.el --- Emacs frontend for pi coding agent -*- lexical-binding: t; -*-
+;;; pi-coding-agent.el --- Deprecated aliases for piem -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Daniel Nouri
 
-;; Author: Daniel Nouri <daniel.nouri@gmail.com>
-;; Maintainer: Daniel Nouri <daniel.nouri@gmail.com>
-;; URL: https://github.com/dnouri/pi-coding-agent
-;; Keywords: ai llm ai-pair-programming tools
-;; Version: 2.9.1
-;; Package-Requires: ((emacs "29.1") (transient "0.9.0") (magit-section "4.0.0") (md-ts-mode "0.3.0") (markdown-table-wrap "0.2.0"))
+;; Version: 3.0.0
+;; Package-Requires: ((emacs "29.1"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -28,296 +24,157 @@
 
 ;;; Commentary:
 
-;; Emacs frontend for the pi coding agent (https://pi.dev).
-;; Provides a two-window interface for AI-assisted coding: chat history
-;; with rendered markdown, and a separate prompt composition buffer.
-;;
-;; Requirements:
-;;   - Emacs 29.1 or later (tree-sitter support required)
-;;   - pi coding agent @earendil-works/pi-coding-agent 0.84.2 or later,
-;;     installed and in PATH on the host where Pi runs
-;;   - tree-sitter grammars for markdown and markdown-inline
-;;
-;; pi-coding-agent uses `md-ts-mode` for its own chat and input buffers;
-;; loading it does not change global Markdown file associations.
-;;
-;; Usage:
-;;   M-x pi-coding-agent                    Start or focus session in current project
-;;   C-u M-x pi-coding-agent                Start a named session
-;;   M-x pi-coding-agent-open-session-file  Open a JSONL session file as live session
-;;   M-x pi-coding-agent-toggle             Hide/show session windows in current frame
-;;   M-x pi-coding-agent-session-browser    Browse sessions (filter, switch)
-;;   M-x pi-coding-agent-tree-browser       Browse conversation tree (navigate, label)
-;;
-;; Many users define an alias: (defalias 'pi 'pi-coding-agent)
-;;
-;; Key Bindings:
-;;   Input buffer:
-;;     C-c C-c        Send prompt (queues text as follow-up if busy)
-;;     C-c C-a        Attach/replace one prompt image (C-u clears)
-;;     C-c C-s        Queue steering (interrupts after current tool; busy only)
-;;     C-c C-k        Abort current operation
-;;     C-c C-p        Open menu
-;;     C-c C-r        Browse sessions
-;;     M-p / M-n      History navigation
-;;     C-r            Incremental history search (like readline)
-;;     TAB            Path/file completion
-;;     @              File reference (search project files)
-;;
-;;   Chat buffer:
-;;     n / p          Navigate messages
-;;     TAB            Toggle completed thinking/tool section or fold turn
-;;     !              Run a Dired-inspired shell command on a strict file target
-;;                    (command + dash-options appends it; otherwise use *)
-;;     RET            Visit strict file target at point (tool content,
-;;                    plain path, or local Markdown label)
-;;     C-c C-k        Abort current operation
-;;     C-c C-n        New session
-;;     C-c C-r        Browse sessions
-;;     C-c C-e        Export HTML
-;;     C-c C-c        Compact context
-;;     C-c C-m        Select model
-;;     C-c C-t        Cycle thinking level
-;;     C-c C-y        Copy last message
-;;     C-c C-p        Open menu
-;;
-;; Editor Features:
-;;   - File reference (@): Type @ to search project files (respects .gitignore)
-;;   - Path completion (Tab): Complete relative paths, ../, ~/, etc.
-;;   - Prompt image: Attach one content-sniffed raster image to a direct,
-;;     idle, non-slash prompt; the input header shows its name and size.
-;;   - Message queuing: Submit text messages while agent is working:
-;;       C-c C-c  queues follow-up (delivered after agent completes)
-;;       C-c C-s  queues steering (interrupts after current tool)
-;;     Image-bearing drafts refuse these busy paths and remain intact.
-;;
-;; Press C-c C-p for the full transient menu with model selection,
-;; thinking level, completed-thinking controls, session management,
-;; and custom commands.  Its Session r entry opens the disk-backed
-;; session browser, and Context w opens the conversation-tree browser;
-;; press ? in either browser to discover switching/navigation, search,
-;; filters, renaming, and labels.
-;;
-;; See README.org for more documentation.
+;; Compatibility shim for configurations predating the rename of
+;; pi-coding-agent to piem (v3.0.0).  Requiring this feature loads piem
+;; and defines deprecated aliases under the old names.  Everything
+;; declared here is gone in 4.0.
 
 ;;; Code:
 
-(require 'pi-coding-agent-menu)
-(require 'pi-coding-agent-input)
-(require 'pi-coding-agent-browse)
+(require 'piem)
 
-(declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
-
-;;;; Main Entry Point
-
-(defcustom pi-coding-agent-evil-integration t
-  "When non-nil, load Evil keybindings automatically when Evil is in use.
-Loads `pi-coding-agent-evil' when a session is set up while Evil is
-present.  Set to nil before loading this package to opt out."
-  :type 'boolean
-  :group 'pi-coding-agent)
-
-(defun pi-coding-agent--maybe-load-evil-integration ()
-  "Load the optional Evil integration when Evil is in use.
-Skips when `pi-coding-agent-evil-integration' is nil or Evil has not
-been loaded.  Called before session buffers are created so initial
-Evil states apply to them."
-  (when (and pi-coding-agent-evil-integration (featurep 'evil))
-    (require 'pi-coding-agent-evil nil t)))
-
-(defun pi-coding-agent--setup-session (dir &optional session)
-  "Set up a new or existing session for DIR with optional SESSION name.
-Returns the chat buffer."
-  (pi-coding-agent--maybe-load-evil-integration)
-  (let* ((chat-buf (pi-coding-agent--get-or-create-buffer :chat dir session))
-         (input-buf (pi-coding-agent--get-or-create-buffer :input dir session))
-         (new-session nil))
-    ;; Link buffers to each other
-    (with-current-buffer chat-buf
-      (pi-coding-agent--set-chat-session-identity dir session)
-      (pi-coding-agent--set-input-buffer input-buf)
-      ;; Start process if not already running
-      (unless (and pi-coding-agent--process (process-live-p pi-coding-agent--process))
-        (pi-coding-agent--check-dependencies dir)
-        (pi-coding-agent--set-process (pi-coding-agent--start-process dir))
-        (setq new-session t)
-        ;; Associate process events and ownership with this chat buffer.
-        (when (processp pi-coding-agent--process)
-          (set-process-buffer pi-coding-agent--process chat-buf)
-          (process-put pi-coding-agent--process 'pi-coding-agent-chat-buffer chat-buf)
-          ;; Register event handler
-          (pi-coding-agent--register-display-handler pi-coding-agent--process)
-          ;; Initialize state from server
-          (let ((buf chat-buf)
-                (proc pi-coding-agent--process))  ; Capture for closures
-            (pi-coding-agent--rpc-async proc '(:type "get_state")
-              (lambda (response)
-                (if (eq (plist-get response :success) t)
-                    (progn
-                      (pi-coding-agent--apply-state-response buf response)
-                      ;; Check if no model available and warn user
-                      (when (buffer-live-p buf)
-                        (with-current-buffer buf
-                          (unless (plist-get pi-coding-agent--state :model)
-                            (pi-coding-agent--display-no-model-warning)))))
-                  (when (buffer-live-p buf)
-                    (with-current-buffer buf
-                      (when (eq pi-coding-agent--process proc)
-                        (pi-coding-agent--display-startup-error
-                         (plist-get response :error)
-                         (plist-get response :stderr)
-                         (plist-get response :exitCode))
-                        ;; Core invokes pending callbacks before the generic exit
-                        ;; handler.  Remember this dead process was rendered so
-                        ;; that handler does not append the same diagnostic again.
-                        (when (and (plist-get response :processExit)
-                                   (processp proc)
-                                   (not (process-live-p proc)))
-                          (process-put
-                           proc 'pi-coding-agent-exit-error-rendered t))))))))
-            ;; Fetch commands via RPC (independent of get_state)
-            (pi-coding-agent--fetch-commands proc
-              (lambda (commands)
-                (when (buffer-live-p buf)
-                  (with-current-buffer buf
-                    (pi-coding-agent--set-commands commands)
-                    (pi-coding-agent--rebuild-commands-menu))))
-              dir))))
-      ;; Display startup header for new sessions
-      (when new-session
-        (pi-coding-agent--display-startup-header)))
-    (with-current-buffer input-buf
-      (setq default-directory dir)
-      (pi-coding-agent--set-chat-buffer chat-buf))
-    chat-buf))
-
-(defun pi-coding-agent--show-session-buffers (chat-buf input-buf)
-  "Show CHAT-BUF and INPUT-BUF, focusing input when both are visible.
-When `pi-coding-agent-input-window-display' is `hidden', a freshly
-displayed session starts with only the chat window visible."
-  (if (and (get-buffer-window-list chat-buf nil)
-           (get-buffer-window-list input-buf nil))
-      (pi-coding-agent--focus-input-window chat-buf input-buf)
-    (pi-coding-agent--display-buffers
-     chat-buf input-buf
-     (eq pi-coding-agent-input-window-display 'hidden))))
-
-(defun pi-coding-agent--dired-regular-file-at-point ()
-  "Return Dired's regular file at point, or nil."
-  (when (derived-mode-p 'dired-mode)
-    (when-let* ((file (dired-get-filename nil t)))
-      (and (file-regular-p file)
-           (pi-coding-agent--route-preserving-expand-file-name file)))))
-
-(defun pi-coding-agent--regular-jsonl-file-p (file)
-  "Return non-nil if FILE is a cheap local JSONL file candidate."
-  (when (stringp file)
-    (let ((path (expand-file-name file)))
-      (and (string-suffix-p ".jsonl" path)
-           (not (file-remote-p path))
-           (ignore-errors
-             (and (file-regular-p path)
-                  (file-readable-p path)))))))
-
-(defun pi-coding-agent--visited-jsonl-file-prompt-default ()
-  "Return the current buffer's visited JSONL file for the prompt, or nil."
-  (when-let* ((file buffer-file-name)
-              (path (expand-file-name file)))
-    (and (pi-coding-agent--regular-jsonl-file-p path)
-         path)))
-
-(defun pi-coding-agent--session-file-prompt-default ()
-  "Return an explicit default file for the session-file prompt, or nil."
-  (if (derived-mode-p 'dired-mode)
-      (pi-coding-agent--dired-regular-file-at-point)
-    (pi-coding-agent--visited-jsonl-file-prompt-default)))
-
-(defun pi-coding-agent--read-session-file-name ()
-  "Read an existing pi session file name from the minibuffer."
-  (let* ((default-file (pi-coding-agent--session-file-prompt-default))
-         (default-dir (and default-file
-                           (pi-coding-agent--route-preserving-file-name-directory
-                            default-file)))
-         (initial (and default-file (file-name-nondirectory default-file)))
-         ;; `read-file-name' otherwise uses the current buffer's visited file
-         ;; as a hidden default when DEFAULT-FILENAME and INITIAL are nil.
-         (buffer-file-name nil))
-    (read-file-name "Pi session file: "
-                    default-dir
-                    default-file
-                    t
-                    initial)))
+;;;; Command aliases
 
 ;;;###autoload
-(defun pi-coding-agent (&optional session)
-  "Start or switch to pi coding agent session in current project.
-With prefix arg, prompt for SESSION name to allow multiple sessions.
-If already in a pi buffer and no SESSION specified, ensures this session
-is visible. When both chat and input are already shown in the current
-frame, keeps layout unchanged and focuses the input window."
-  (interactive
-   (list (when current-prefix-arg
-           (read-string "Session name: "))))
-  (let (chat-buf input-buf)
-    (if (and (derived-mode-p 'pi-coding-agent-chat-mode 'pi-coding-agent-input-mode)
-             (not session))
-        ;; Already in pi buffer with no new session requested - use current session
-        (setq chat-buf (pi-coding-agent--get-chat-buffer)
-              input-buf (pi-coding-agent--get-input-buffer))
-      ;; Find or create session for current directory
-      (let ((dir (pi-coding-agent--session-directory)))
-        (setq chat-buf (pi-coding-agent--setup-session dir session))
-        (setq input-buf (buffer-local-value 'pi-coding-agent--input-buffer chat-buf))))
-    (pi-coding-agent--show-session-buffers chat-buf input-buf)))
-
+(define-obsolete-function-alias 'pi-coding-agent 'piem "3.0")
 ;;;###autoload
-(defun pi-coding-agent-open-session-file (session-file)
-  "Open pi JSONL SESSION-FILE as a live session.
-This uses the normal chat/input UI and switches pi to SESSION-FILE; it is not a
-static viewer.  The session header must record a non-empty absolute cwd that
-names an existing directory.  Interactively, prompt for an existing file.  In
-Dired, default to the regular file at point; otherwise, default to the current
-visited local regular readable .jsonl file when there is one."
-  (interactive (list (pi-coding-agent--read-session-file-name)))
-  (let* ((session-file (pi-coding-agent--route-preserving-expand-file-name
-                        session-file))
-         (dir (pi-coding-agent--session-file-cwd-or-error session-file)))
-    (pi-coding-agent--check-dependencies dir)
-    (let* ((chat-buf (pi-coding-agent--setup-session dir))
-           (input-buf (buffer-local-value 'pi-coding-agent--input-buffer
-                                          chat-buf))
-           (proc (buffer-local-value 'pi-coding-agent--process chat-buf)))
-      (pi-coding-agent--show-session-buffers chat-buf input-buf)
-      (when (pi-coding-agent--session-transition-ready-p chat-buf "open")
-        (pi-coding-agent--resume-selected-session proc chat-buf session-file))
-      chat-buf)))
-
+(define-obsolete-function-alias 'pi-coding-agent-toggle 'piem-toggle "3.0")
 ;;;###autoload
-(defun pi-coding-agent-toggle ()
-  "Toggle pi coding agent window visibility for the current project.
-If pi windows are visible in the current frame, hide them.
-If hidden there but a session exists, show them.
-If no session exists, signal an error."
-  (interactive)
-  (let* ((chat-buf (if (derived-mode-p 'pi-coding-agent-chat-mode 'pi-coding-agent-input-mode)
-                       (pi-coding-agent--get-chat-buffer)
-                     (car (pi-coding-agent-project-buffers))))
-         (input-buf (and chat-buf
-                         (buffer-local-value 'pi-coding-agent--input-buffer chat-buf))))
-    (cond
-     ;; No session at all
-     ((null chat-buf)
-      (user-error "No pi session for this project"))
-     ;; Session visible in current frame: hide it
-     ((or (get-buffer-window-list chat-buf nil)
-          (and input-buf (get-buffer-window-list input-buf nil)))
-      (with-current-buffer chat-buf
-        (pi-coding-agent--hide-session-windows)))
-     ;; Session hidden: show it (chat only when input is shown on demand)
-     (t
-      (pi-coding-agent--display-buffers
-       chat-buf input-buf
-       (pi-coding-agent--input-window-on-demand-p))))))
+(define-obsolete-function-alias 'pi-coding-agent-open-session-file 'piem-open-session-file "3.0")
+;;;###autoload
+(define-obsolete-function-alias 'pi-coding-agent-new-session 'piem-new-session "3.0")
+;;;###autoload
+(define-obsolete-function-alias 'pi-coding-agent-reload 'piem-reload "3.0")
+;;;###autoload
+(define-obsolete-function-alias 'pi-coding-agent-session-browser 'piem-session-browser "3.0")
+;;;###autoload
+(define-obsolete-function-alias 'pi-coding-agent-tree-browser 'piem-tree-browser "3.0")
+;;;###autoload
+(define-obsolete-function-alias 'pi-coding-agent-install-grammars 'piem-install-grammars "3.0")
+;;;###autoload
+(define-obsolete-function-alias 'pi-coding-agent-attach-image 'piem-attach-image "3.0")
+;;;###autoload
+(define-obsolete-function-alias 'pi-coding-agent-evil-setup 'piem-evil-setup "3.0")
+
+;;;; Variable aliases
+
+;; User configurations that set an old variable name before this stub
+;; loads would otherwise lose the setting: `defvaralias' overwrites an
+;; existing old-name binding (with a warning) instead of transferring
+;; it, and Customize entries queued on the old symbol never apply to
+;; the new one.  Migrate each setting before aliasing so `setq' values
+;; and queued `custom-set-variables' entries survive the rename, then
+;; leave the old symbol unbound so `defvaralias' stays silent.  A
+;; piem-name value set by the user wins over the old-name value.
+
+(defun pi-coding-agent--untouched-default-p (variable)
+  "Return non-nil if VARIABLE still has its defcustom default value.
+VARIABLE counts as untouched when its default value is absent (the
+defcustom has not run yet) or still equal to the standard value
+recorded by `defcustom'."
+  (let ((standard (get variable 'standard-value)))
+    (if standard
+        (and (default-boundp variable)
+             (equal (default-value variable)
+                    (eval (car standard) t)))
+      (not (default-boundp variable)))))
+(defun pi-coding-agent--migrated-value (old-name)
+  "Return the user setting stored under OLD-NAME as a list, or nil.
+Cover plain bindings set under the old name and Customize entries
+queued by `custom-set-variables', which land as `saved-value' and
+`theme-value' properties rather than as bindings while the
+variable is still undefined."
+  (cond ((default-boundp old-name)
+         (list (default-value old-name)))
+        ((get old-name 'saved-value)
+         (list (eval (car (get old-name 'saved-value)) t)))
+        ((assq 'user (get old-name 'theme-value))
+         (list (eval (nth 2 (assq 'user (get old-name 'theme-value)))
+                     t)))))
+
+(defun pi-coding-agent--migrate-old-setting (old-name new-name)
+  "Move a user setting from OLD-NAME to NEW-NAME before aliasing.
+If NEW-NAME was itself set away from its defcustom default, the
+new-name setting wins and the old one is discarded.  Otherwise the
+old value and any queued Customize state under the old name move
+to NEW-NAME.  OLD-NAME is left unbound so the subsequent
+`define-obsolete-variable-alias' neither warns nor clobbers."
+  (let ((value (pi-coding-agent--migrated-value old-name)))
+    (when value
+      (if (pi-coding-agent--untouched-default-p new-name)
+          (progn
+            (set-default new-name (car value))
+            (dolist (prop '(saved-value saved-variable-comment
+                                        theme-value))
+              (when (get old-name prop)
+                (put new-name prop (get old-name prop))
+                (put old-name prop nil))))
+        ;; NEW-NAME carries an explicit setting; drop the orphaned
+        ;; old-name Customize state.
+        (dolist (prop '(saved-value saved-variable-comment theme-value))
+          (put old-name prop nil)))
+      (makunbound old-name))))
+
+(pi-coding-agent--migrate-old-setting
+ 'pi-coding-agent-executable 'piem-executable)
+(define-obsolete-variable-alias 'pi-coding-agent-executable 'piem-executable "3.0")
+(pi-coding-agent--migrate-old-setting
+ 'pi-coding-agent-project-trust-policy 'piem-project-trust-policy)
+(define-obsolete-variable-alias 'pi-coding-agent-project-trust-policy 'piem-project-trust-policy "3.0")
+(pi-coding-agent--migrate-old-setting
+ 'pi-coding-agent-rpc-timeout 'piem-rpc-timeout)
+(define-obsolete-variable-alias 'pi-coding-agent-rpc-timeout 'piem-rpc-timeout "3.0")
+(pi-coding-agent--migrate-old-setting
+ 'pi-coding-agent-input-window-height 'piem-input-window-height)
+(define-obsolete-variable-alias 'pi-coding-agent-input-window-height 'piem-input-window-height "3.0")
+(pi-coding-agent--migrate-old-setting
+ 'pi-coding-agent-quit-without-confirmation
+ 'piem-quit-without-confirmation)
+(define-obsolete-variable-alias 'pi-coding-agent-quit-without-confirmation 'piem-quit-without-confirmation "3.0")
+(pi-coding-agent--migrate-old-setting
+ 'pi-coding-agent-evil-integration 'piem-evil-integration)
+(define-obsolete-variable-alias 'pi-coding-agent-evil-integration 'piem-evil-integration "3.0")
+(pi-coding-agent--migrate-old-setting
+ 'pi-coding-agent-evil-chat-state 'piem-evil-chat-state)
+(define-obsolete-variable-alias 'pi-coding-agent-evil-chat-state 'piem-evil-chat-state "3.0")
+(pi-coding-agent--migrate-old-setting
+ 'pi-coding-agent-evil-input-state 'piem-evil-input-state)
+(define-obsolete-variable-alias 'pi-coding-agent-evil-input-state 'piem-evil-input-state "3.0")
+
+;;;; Face aliases
+
+(define-obsolete-face-alias 'pi-coding-agent-timestamp 'piem-timestamp "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-tool-name 'piem-tool-name "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-tool-command 'piem-tool-command "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-tool-output 'piem-tool-output "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-tool-block 'piem-tool-block "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-tool-block-error 'piem-tool-block-error "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-diff-line-added 'piem-diff-line-added "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-diff-line-removed 'piem-diff-line-removed "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-collapsed-indicator 'piem-collapsed-indicator "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-model-name 'piem-model-name "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-activity-phase 'piem-activity-phase "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-retry-notice 'piem-retry-notice "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-error-notice 'piem-error-notice "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-session-name 'piem-session-name "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-session-message-count 'piem-session-message-count "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-session-age 'piem-session-age "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-session-thread-connector 'piem-session-thread-connector "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-session-group-header 'piem-session-group-header "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-tree-user 'piem-tree-user "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-tree-assistant 'piem-tree-assistant "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-tree-tool 'piem-tree-tool "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-tree-compaction 'piem-tree-compaction "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-tree-summary 'piem-tree-summary "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-tree-active 'piem-tree-active "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-tree-label 'piem-tree-label "3.0")
+(define-obsolete-face-alias 'pi-coding-agent-tree-connector 'piem-tree-connector "3.0")
+
+;;;; Customize group
+
+(defgroup pi-coding-agent nil
+  "Deprecated alias for the `piem' group."
+  :group 'piem)
 
 (provide 'pi-coding-agent)
 ;;; pi-coding-agent.el ends here

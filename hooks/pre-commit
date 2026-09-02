@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Git pre-commit hook for pi.el
+# Git pre-commit hook for piem
 # Runs byte-compilation and tests before allowing commits
 
 exec ./scripts/check.sh
