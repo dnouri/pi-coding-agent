@@ -91,7 +91,11 @@ Pi authenticates in one of two ways:
 
 ** Install the Emacs package 📦
 
-Install from [[https://melpa.org/#/pi-coding-agent][MELPA]]:
+Install from [[https://melpa.org/#/pi-coding-agent][MELPA]].  MELPA alone does not
+resolve every dependency right now: its =transient= build needs
+=compat ≥ 31.0=, which is only published on
+[[https://elpa.gnu.org/][GNU ELPA]], so add GNU ELPA as a second
+archive before installing:
 
 #+begin_src
 M-x package-install RET pi-coding-agent RET
@@ -426,7 +430,8 @@ executable's absolute remote directory to =tramp-remote-path=:
 Emacs may load its bundled =transient= before the newer MELPA package.
 If the menu complains about =transient=, set
 =package-install-upgrade-built-in= to =t=, install or upgrade
-=transient= from MELPA, and restart Emacs.
+=transient= (needs the GNU ELPA archive for its =compat=
+dependency), and restart Emacs.
 
 #+html: </details>
 
@@ -789,7 +794,8 @@ Track busy sessions for your own mode-line or tab display:
 
 ** Installation details 🧱
 
-MELPA installs =transient=, =md-ts-mode=, and =markdown-table-wrap=
+MELPA (with [[https://elpa.gnu.org/][GNU ELPA]] added for =compat=)
+installs =transient=, =md-ts-mode=, and =markdown-table-wrap=
 automatically.  =pi-coding-agent= uses =md-ts-mode= only for its own
 chat and input buffers, so installing or loading this package does not
 change how unrelated =.md= files open.  If you want tree-sitter
@@ -803,26 +809,29 @@ With =use-package=:
   :init (defalias 'pi 'pi-coding-agent))
 #+end_src
 
-If you do not have MELPA configured, add it to your init file first:
+If you do not have MELPA configured, add it — plus GNU ELPA, which
+publishes =compat= — to your init file first:
 
 #+begin_src emacs-lisp
 (require 'package)
 (add-to-list 'package-archives '("melpa" . "https://melpa.org/packages/") t)
+(add-to-list 'package-archives '("gnu" . "https://elpa.gnu.org/packages/") t)
 (package-initialize)
 #+end_src
 
-For a plain Git checkout, configure MELPA first, then evaluate this
-once to install the external dependencies:
+For a plain Git checkout, configure MELPA and GNU ELPA first, then
+evaluate this once to install the external dependencies:
 
 #+begin_src emacs-lisp
 (require 'package)
 (add-to-list 'package-archives '("melpa" . "https://melpa.org/packages/") t)
+(add-to-list 'package-archives '("gnu" . "https://elpa.gnu.org/packages/") t)
 (package-initialize)
 
 ;; Must be set before installing/upgrading Emacs's bundled transient.
 (setq package-install-upgrade-built-in t)
 
-;; Refresh once after adding MELPA.
+;; Refresh once after adding the archives.
 (package-refresh-contents)
 
 (package-install 'transient)
