@@ -58,13 +58,87 @@
 
 ;;;; Variable aliases
 
+;; User configurations that set an old variable name before this stub
+;; loads would otherwise lose the setting: `defvaralias' overwrites an
+;; existing old-name binding (with a warning) instead of transferring
+;; it, and Customize entries queued on the old symbol never apply to
+;; the new one.  Migrate each setting before aliasing so `setq' values
+;; and queued `custom-set-variables' entries survive the rename, then
+;; leave the old symbol unbound so `defvaralias' stays silent.  A
+;; piem-name value set by the user wins over the old-name value.
+
+(defun pi-coding-agent--untouched-default-p (variable)
+  "Return non-nil if VARIABLE still has its defcustom default value.
+VARIABLE counts as untouched when its default value is absent (the
+defcustom has not run yet) or still equal to the standard value
+recorded by `defcustom'."
+  (let ((standard (get variable 'standard-value)))
+    (if standard
+        (and (default-boundp variable)
+             (equal (default-value variable)
+                    (eval (car standard) t)))
+      (not (default-boundp variable)))))
+(defun pi-coding-agent--migrated-value (old-name)
+  "Return the user setting stored under OLD-NAME as a list, or nil.
+Cover plain bindings set under the old name and Customize entries
+queued by `custom-set-variables', which land as `saved-value' and
+`theme-value' properties rather than as bindings while the
+variable is still undefined."
+  (cond ((default-boundp old-name)
+         (list (default-value old-name)))
+        ((get old-name 'saved-value)
+         (list (eval (car (get old-name 'saved-value)) t)))
+        ((assq 'user (get old-name 'theme-value))
+         (list (eval (nth 2 (assq 'user (get old-name 'theme-value)))
+                     t)))))
+
+(defun pi-coding-agent--migrate-old-setting (old-name new-name)
+  "Move a user setting from OLD-NAME to NEW-NAME before aliasing.
+If NEW-NAME was itself set away from its defcustom default, the
+new-name setting wins and the old one is discarded.  Otherwise the
+old value and any queued Customize state under the old name move
+to NEW-NAME.  OLD-NAME is left unbound so the subsequent
+`define-obsolete-variable-alias' neither warns nor clobbers."
+  (let ((value (pi-coding-agent--migrated-value old-name)))
+    (when value
+      (if (pi-coding-agent--untouched-default-p new-name)
+          (progn
+            (set-default new-name (car value))
+            (dolist (prop '(saved-value saved-variable-comment
+                                        theme-value))
+              (when (get old-name prop)
+                (put new-name prop (get old-name prop))
+                (put old-name prop nil))))
+        ;; NEW-NAME carries an explicit setting; drop the orphaned
+        ;; old-name Customize state.
+        (dolist (prop '(saved-value saved-variable-comment theme-value))
+          (put old-name prop nil)))
+      (makunbound old-name))))
+
+(pi-coding-agent--migrate-old-setting
+ 'pi-coding-agent-executable 'piem-executable)
 (define-obsolete-variable-alias 'pi-coding-agent-executable 'piem-executable "3.0")
+(pi-coding-agent--migrate-old-setting
+ 'pi-coding-agent-project-trust-policy 'piem-project-trust-policy)
 (define-obsolete-variable-alias 'pi-coding-agent-project-trust-policy 'piem-project-trust-policy "3.0")
+(pi-coding-agent--migrate-old-setting
+ 'pi-coding-agent-rpc-timeout 'piem-rpc-timeout)
 (define-obsolete-variable-alias 'pi-coding-agent-rpc-timeout 'piem-rpc-timeout "3.0")
+(pi-coding-agent--migrate-old-setting
+ 'pi-coding-agent-input-window-height 'piem-input-window-height)
 (define-obsolete-variable-alias 'pi-coding-agent-input-window-height 'piem-input-window-height "3.0")
+(pi-coding-agent--migrate-old-setting
+ 'pi-coding-agent-quit-without-confirmation
+ 'piem-quit-without-confirmation)
 (define-obsolete-variable-alias 'pi-coding-agent-quit-without-confirmation 'piem-quit-without-confirmation "3.0")
+(pi-coding-agent--migrate-old-setting
+ 'pi-coding-agent-evil-integration 'piem-evil-integration)
 (define-obsolete-variable-alias 'pi-coding-agent-evil-integration 'piem-evil-integration "3.0")
+(pi-coding-agent--migrate-old-setting
+ 'pi-coding-agent-evil-chat-state 'piem-evil-chat-state)
 (define-obsolete-variable-alias 'pi-coding-agent-evil-chat-state 'piem-evil-chat-state "3.0")
+(pi-coding-agent--migrate-old-setting
+ 'pi-coding-agent-evil-input-state 'piem-evil-input-state)
 (define-obsolete-variable-alias 'pi-coding-agent-evil-input-state 'piem-evil-input-state "3.0")
 
 ;;;; Face aliases

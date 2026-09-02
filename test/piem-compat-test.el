@@ -11,6 +11,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'cl-lib)
 (require 'pi-coding-agent)
 
 (defconst piem-compat-test-command-aliases
@@ -141,6 +142,111 @@ keeping the README's (defalias 'pi ...) tip alive for package users."
   (dolist (old piem-compat-test-face-aliases)
     (should (eq (get old 'face-alias)
                 (piem-compat-test--new-name old)))))
+
+;;;; Pre-load settings under old names
+
+;; `defvaralias' overwrites — rather than transfers — an existing old-name
+;; binding when the base variable is already bound, and Customize entries
+;; queued on the old name before the stub loads never apply (smoke findings
+;; B2 and B5).  These tests reproduce a user init file that sets old names
+;; before the stub is loaded, which requires a fresh Emacs: by the time this
+;; suite runs, the aliases already exist and reads/writes go through them.
+
+(defun piem-compat-test--child-emacs (program)
+  "Run a child Emacs executing PROGRAM, a string of Elisp.
+The child inherits this session's `load-path' so the repository
+sources and package dependencies resolve exactly as in the parent.
+Return (OUTPUT . EXIT-CODE), where OUTPUT combines stdout and
+stderr so load-time warnings are visible."
+  (let* ((emacs (expand-file-name invocation-name invocation-directory))
+         (logfile (make-temp-file "piem-compat-child" nil ".txt"))
+         (exit-code
+          (call-process emacs nil `((:file ,logfile) t) nil
+                        "--batch" "-Q"
+                        "--eval" "(setq load-prefer-newer t)"
+                        "--eval" (format "(setq load-path '%S)" load-path)
+                        "--eval" program)))
+    (unwind-protect
+        (cons (with-temp-buffer
+                (insert-file-contents logfile)
+                (buffer-string))
+              exit-code)
+      (delete-file logfile))))
+
+(defconst piem-compat-test--result-regexp "\\n?RESULT \\(.*\\)\\n?"
+  "Regexp extracting the RESULT line printed by child Emacs drivers.")
+
+(defun piem-compat-test--child-result (output)
+  "Return the RESULT message from child OUTPUT as a string."
+  (unless (string-match piem-compat-test--result-regexp output)
+    (error "No RESULT line in child output: %s" output))
+  (match-string 1 output))
+
+(ert-deftest piem-compat-test-preload-setq-migrates-to-piem ()
+  "Values set under old names before the stub loads reach the piem vars.
+Covers `setq' in a user init file that runs before the stub is
+loaded (smoke finding B2): the old binding must transfer to the
+piem variable instead of being dropped with a defvaralias warning.
+The evil variable covers the case where the piem defcustom has not
+even run when the stub loads."
+  (pcase-let* ((program "(progn
+  (setq pi-coding-agent-executable '(\"/opt/renamed/bin/pi\")
+        pi-coding-agent-rpc-timeout 42
+        pi-coding-agent-evil-input-state 'normal)
+  (require 'pi-coding-agent)
+  (require 'piem-evil)
+  (message \"RESULT %S\"
+           (list piem-executable piem-rpc-timeout
+                 piem-evil-input-state
+                 (eq (indirect-variable 'pi-coding-agent-executable)
+                     'piem-executable))))")
+              (`(,output . ,exit-code)
+               (piem-compat-test--child-emacs program)))
+    (should (zerop exit-code))
+    (should (equal (read (piem-compat-test--child-result output))
+                   '(("/opt/renamed/bin/pi") 42 normal t)))
+    (should-not (string-match-p "Overwriting value" output))))
+
+(ert-deftest piem-compat-test-preload-customize-entries-migrate ()
+  "Customize entries queued on old names before load land on piem vars.
+A `custom-set-variables' block saved under the old names queues
+values on the old symbols when the variables are not defined yet;
+those entries were dropped silently before (smoke finding B5)."
+  (pcase-let* ((program "(progn
+  (custom-set-variables
+   '(pi-coding-agent-rpc-timeout 42)
+   '(pi-coding-agent-input-window-height 9)
+   '(pi-coding-agent-quit-without-confirmation t))
+  (require 'pi-coding-agent)
+  (let ((queued (list piem-rpc-timeout
+                      piem-input-window-height
+                      piem-quit-without-confirmation)))
+    (custom-set-variables '(pi-coding-agent-input-window-height 7))
+    (message \"RESULT %S\" (list queued piem-input-window-height))))")
+              (`(,output . ,exit-code)
+               (piem-compat-test--child-emacs program)))
+    (should (zerop exit-code))
+    (should (equal (read (piem-compat-test--child-result output))
+                   '((42 9 t) 7)))))
+
+(ert-deftest piem-compat-test-preload-new-name-setting-wins ()
+  "A piem value set before the stub loads beats the old-name value.
+When both names carry user values at stub-load time, the new-name
+setting wins and the old one is discarded without a warning."
+  (pcase-let* ((program "(progn
+  (setq pi-coding-agent-rpc-timeout 42
+        piem-rpc-timeout 55)
+  (require 'pi-coding-agent)
+  (message \"RESULT %S\"
+           (list piem-rpc-timeout
+                 (eq (indirect-variable 'pi-coding-agent-rpc-timeout)
+                     'piem-rpc-timeout))))")
+              (`(,output . ,exit-code)
+               (piem-compat-test--child-emacs program)))
+    (should (zerop exit-code))
+    (should (equal (read (piem-compat-test--child-result output))
+                   '(55 t)))
+    (should-not (string-match-p "Overwriting value" output))))
 
 (provide 'piem-compat-test)
 ;;; piem-compat-test.el ends here
