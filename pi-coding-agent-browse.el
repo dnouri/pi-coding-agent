@@ -754,7 +754,7 @@ Inherits section navigation from `magit-section-mode'."
       (pi-coding-agent--session-browser-insert-session item 0 nil))))
 
 (defun pi-coding-agent--session-browser-insert-session (session depth threaded)
-  "Insert SESSION as a magit-section at DEPTH.
+  "Insert SESSION as a `magit-section' section at DEPTH.
 When THREADED is non-nil, prepend threading connector at DEPTH.
 In non-threaded modes, forked sessions get a \"fork:\" prefix.
 Message count and age are rendered as a right-margin overlay."
@@ -1147,7 +1147,7 @@ Wrapped because that alist is a private Magit internal; if Magit ever
 changes the mechanism, this is the single place to adapt.
 
 Unregistered types (e.g. the `time-group' headings, which are not
-interactive) silently fall back to the plain `magit-section' class;
+interactive) silently fall back to the plain `magit-section' section class;
 that is fine for display-only sections."
   (setf (alist-get 'session magit--section-type-alist)
         'pi-coding-agent-session-section)

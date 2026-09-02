@@ -5084,7 +5084,7 @@ or LIMIT for an incomplete streamed tail."
 (defun pi-coding-agent--semantic-link-markdown-host-parser ()
   "Return md-ts-mode's trustworthy canonical Markdown host parser.
 The canonical host parser is the sole unrestricted Markdown parser whose
-actual root covers the accessible buffer and lookup position.  md-ts-mode uses
+actual root covers the accessible buffer and lookup position.  `md-ts-mode' uses
 that shape for its document parser and restricted, no-reuse parsers for local
 work.  Requiring this shape avoids parser-list ordering and refuses ambiguous
 or partial host state rather than querying the wrong Markdown document."
@@ -5114,7 +5114,7 @@ or partial host state rather than querying the wrong Markdown document."
 
 (defun pi-coding-agent--semantic-link-inline-host-node-at-point ()
   "Return the Markdown host node whose inline grammar owns point.
-Installed md-ts-mode injects `markdown-inline' only into Markdown `inline' and
+Installed `md-ts-mode' injects `markdown-inline' only into Markdown `inline' and
 `pipe_table_cell' nodes.  Consult its canonical unrestricted host tree so
 fenced/indented code, reference definitions, restricted competing parsers, and
 other block source cannot be reinterpreted merely because it resembles inline
@@ -5450,7 +5450,7 @@ single semantic owner at point before projecting only that owner's label.  This
 keeps deeply nested/recovery trees linear and fails ambiguity closed before
 expensive projection.  All node types, bounds, labels, and destinations are
 copied to a plist before deleting the parser; no caller observes a tree node
-after its parser lifetime.  Installed md-ts-mode 0.3 creates its own local
+after its parser lifetime.  Installed `md-ts-mode' 0.3 creates its own local
 inline parsers lazily during fontification and exposes no public link resolver.
 This parser never changes text, overlays, font-lock properties, visibility, or
 the mode's parser set."
@@ -5705,7 +5705,7 @@ identity before its first error is re-signaled."
   "Return explicit tri-state semantic Markdown link resolution at point.
 The `:status' value is exactly one of `:not-a-link', `:owned-valid', or
 `:owned-invalid'.  Ownership is source/tree based, independent of font-lock,
-invisibility, faces, buttons, file existence, and unreleased md-ts-mode APIs.
+invisibility, faces, buttons, file existence, and unreleased `md-ts-mode' APIs.
 This distinction prevents an owned non-file or malformed link from falling
 through to a path-like visible label.
 
