@@ -1,5 +1,5 @@
 /**
- * Test extension for pi-coding-agent integration tests.
+ * Test extension for piem integration tests.
  * Load with: pi --mode rpc -e test/fixtures/test-extension.ts --no-extensions
  */
 

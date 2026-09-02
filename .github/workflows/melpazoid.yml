@@ -25,7 +25,7 @@ jobs:
     - name: Run
       env:
         LOCAL_REPO: ${{ github.workspace }}
-        RECIPE: (pi-coding-agent :fetcher github :repo "dnouri/pi-coding-agent")
+        RECIPE: (piem :fetcher github :repo "dnouri/pi-coding-agent")
         WARN_IS_ERROR: false
         EXIST_OK: true
       run: make -C ~/melpazoid

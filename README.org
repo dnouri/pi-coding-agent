@@ -1,13 +1,13 @@
-#+title: pi-coding-agent
+#+title: piem
 #+author: Daniel Nouri
 #+options: toc:nil num:nil
 
-#+html: <a href="https://melpa.org/#/pi-coding-agent"><img alt="MELPA" src="https://melpa.org/packages/pi-coding-agent-badge.svg"/></a>
-#+html: <a href="https://github.com/dnouri/pi-coding-agent/actions/workflows/test-unit.yml"><img alt="Unit Tests" src="https://github.com/dnouri/pi-coding-agent/actions/workflows/test-unit.yml/badge.svg"/></a>
-#+html: <a href="https://github.com/dnouri/pi-coding-agent/actions/workflows/test-integration.yml"><img alt="Integration Tests" src="https://github.com/dnouri/pi-coding-agent/actions/workflows/test-integration.yml/badge.svg"/></a>
-#+html: <a href="https://github.com/dnouri/pi-coding-agent/actions/workflows/test-gui.yml"><img alt="GUI Tests" src="https://github.com/dnouri/pi-coding-agent/actions/workflows/test-gui.yml/badge.svg"/></a>
-#+html: <a href="https://github.com/dnouri/pi-coding-agent/actions/workflows/nightly.yml"><img alt="Nightly" src="https://github.com/dnouri/pi-coding-agent/actions/workflows/nightly.yml/badge.svg"/></a>
-#+html: <a href="https://github.com/dnouri/pi-coding-agent/actions/workflows/melpazoid.yml"><img alt="melpazoid" src="https://github.com/dnouri/pi-coding-agent/actions/workflows/melpazoid.yml/badge.svg"/></a>
+#+html: <a href="https://melpa.org/#/piem"><img alt="MELPA" src="https://melpa.org/packages/piem-badge.svg"/></a>
+#+html: <a href="https://github.com/dnouri/piem/actions/workflows/test-unit.yml"><img alt="Unit Tests" src="https://github.com/dnouri/piem/actions/workflows/test-unit.yml/badge.svg"/></a>
+#+html: <a href="https://github.com/dnouri/piem/actions/workflows/test-integration.yml"><img alt="Integration Tests" src="https://github.com/dnouri/piem/actions/workflows/test-integration.yml/badge.svg"/></a>
+#+html: <a href="https://github.com/dnouri/piem/actions/workflows/test-gui.yml"><img alt="GUI Tests" src="https://github.com/dnouri/piem/actions/workflows/test-gui.yml/badge.svg"/></a>
+#+html: <a href="https://github.com/dnouri/piem/actions/workflows/nightly.yml"><img alt="Nightly" src="https://github.com/dnouri/piem/actions/workflows/nightly.yml/badge.svg"/></a>
+#+html: <a href="https://github.com/dnouri/piem/actions/workflows/melpazoid.yml"><img alt="melpazoid" src="https://github.com/dnouri/piem/actions/workflows/melpazoid.yml/badge.svg"/></a>
 
 #+html: <p><em>Jump to:</em> <a href="#quick-start">Quick start</a> ·
 #+html: <a href="#everyday-workflow">Everyday workflow</a>
@@ -20,9 +20,9 @@
 #+html: <a href="#advanced-features-and-configuration">Advanced</a> ·
 #+html: <a href="#development">Development</a></p>
 
-* What is pi-coding-agent for Emacs? 🦬
+* What is piem for Emacs? 🦬
 
-=pi-coding-agent= is an Emacs frontend for [[https://pi.dev][Pi]].  The Pi CLI still runs
+=piem= is an Emacs frontend for [[https://pi.dev][Pi]].  The Pi CLI still runs
 the agent, talks to models, and executes tools.  This package wraps Pi
 in an ergonomic Emacs interface: a Markdown chat buffer for the
 conversation and a separate prompt buffer where you compose the next
@@ -35,7 +35,7 @@ scroll through the chat without losing focus, navigate and copy from
 previous output with ease, and use the key bindings and editing habits
 you already have.
 
-#+html: <a href="https://danielnouri.org/media/pi-coding-agent-demo.mp4"><img src="https://danielnouri.org/media/pi-coding-agent-preview.gif" alt="Narrated pi-coding-agent demo video (6:38) - click to play" width="600" height="600"></a>
+#+html: <a href="https://danielnouri.org/media/pi-coding-agent-demo.mp4"><img src="https://danielnouri.org/media/pi-coding-agent-preview.gif" alt="Narrated piem demo video (6:38) - click to play" width="600" height="600"></a>
 #+html: <p><small>Video music: "Electrodoodle" by Kevin MacLeod
 #+html: (<a href="https://incompetech.com">incompetech.com</a>),
 #+html: licensed under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.</small></p>
@@ -91,19 +91,19 @@ Pi authenticates in one of two ways:
 
 ** Install the Emacs package 📦
 
-Install from [[https://melpa.org/#/pi-coding-agent][MELPA]]:
+Install from [[https://melpa.org/#/piem][MELPA]]:
 
 #+begin_src
-M-x package-install RET pi-coding-agent RET
+M-x package-install RET piem RET
 #+end_src
 
 Then start a session:
 
 #+begin_src
-M-x pi-coding-agent
+M-x piem
 #+end_src
 
-On first start, =pi-coding-agent= may prompt to install the
+On first start, =piem= may prompt to install the
 tree-sitter grammars needed for Markdown rendering.  Say yes if you
 want the chat buffer to render properly.  Grammar installation is a
 one-time step and requires a C compiler (=gcc= or =cc=).
@@ -111,7 +111,7 @@ one-time step and requires a C compiler (=gcc= or =cc=).
 You may also define a shorter command name:
 
 #+begin_src emacs-lisp
-(defalias 'pi 'pi-coding-agent)
+(defalias 'pi 'piem)
 #+end_src
 
 After that, =M-x pi= starts or focuses the current project's pi
@@ -120,7 +120,7 @@ session.
 #+html: <a id="everyday-workflow"></a>
 * Everyday workflow 🧭
 
-Start a session with =M-x pi-coding-agent=.  =pi-coding-agent= opens
+Start a session with =M-x piem=.  =piem= opens
 two windows:
 
 - *Chat buffer* at the top: rendered Markdown conversation history,
@@ -205,7 +205,7 @@ graphical Emacs and as a useful type-and-size placeholder in terminals.  Sent
 and returned image content share the same bounded renderer.  Pi's built-in
 =read= already returns raster images as image content.  For SVG, a returned
 preview is made only from complete, standalone SVG text supplied by =read=;
-pi-coding-agent never reopens the argument path, and text with obvious scripts
+piem never reopens the argument path, and text with obvious scripts
 or external resources is left as text.
 
 Current limits: images in partial tool updates appear when the final result
@@ -232,7 +232,7 @@ retain native Dired point and marks.  A target without a location keeps the
 point, mark, and narrowing chosen by normal Emacs file visiting.
 
 By default Pi requests the native other-window opener.  Use =C-u RET= to invert
-=pi-coding-agent-visit-file-other-window= for that visit; with the default
+=piem-visit-file-other-window= for that visit; with the default
 setting this requests the same-window opener instead.  Emacs display policy may
 redirect the final placement.
 
@@ -252,12 +252,12 @@ messages, and =f= to fork the conversation from the turn at point.
 ** Sessions and context 🗂️
 
 Each project directory gets its own session automatically.  Running
-=M-x pi-coding-agent= again from a Pi buffer restores missing panes;
+=M-x piem= again from a Pi buffer restores missing panes;
 if both panes are visible, focus moves to the input window.  Use =M-x
-pi-coding-agent-toggle= to hide or show the session windows in the
+piem-toggle= to hide or show the session windows in the
 current frame.
 
-=C-c C-r=, =/resume=, or =M-x pi-coding-agent-session-browser= opens
+=C-c C-r=, =/resume=, or =M-x piem-session-browser= opens
 the persistent, disk-backed session browser.  Press =RET= to switch to
 the session at point, =/= to search with regexp tokens, =s= to cycle
 threaded/recent/relevance sorting, =t= to toggle current/all-project
@@ -272,7 +272,7 @@ selected node, and =l= sets or clears a label.  Press =?= for its
 browser menu and =g= to refresh the last persisted state.
 
 For multiple live sessions in the same directory, use =C-u M-x
-pi-coding-agent= and enter a name.  This is an Emacs live-session
+piem= and enter a name.  This is an Emacs live-session
 identity used to distinguish buffer pairs; it does not set the
 persisted Pi session name.  Rename the persisted session with =r= in
 the session browser, =C-c C-p N=, or =/name=.  Fork with =C-c C-p f=.
@@ -322,7 +322,7 @@ configured warning and error thresholds.
 Make sure the [[https://pi.dev/docs/latest/providers][Pi CLI is authenticated]] before expecting models to
 appear: set a provider API key, or run =pi= in a terminal once and use
 =/login=.  Then make the running session pick up the new credentials:
-press =C-c C-p R= (or =M-x pi-coding-agent-reload=) to restart the Pi
+press =C-c C-p R= (or =M-x piem-reload=) to restart the Pi
 process without losing the conversation.
 
 #+html: </details>
@@ -330,15 +330,15 @@ process without losing the conversation.
 #+html: <details>
 #+html: <summary><strong>Emacs cannot find the <code>pi</code> executable</strong></summary>
 
-=pi-coding-agent= runs the command in =pi-coding-agent-executable=,
+=piem= runs the command in =piem-executable=,
 which defaults to =("pi")=.  If Emacs cannot find =pi=, install the
 CLI with the npm command from Quick Start on the host where Pi runs,
 adjust the relevant search path, or customize
-=pi-coding-agent-executable=.  An example:
+=piem-executable=.  An example:
 
 #+begin_src emacs-lisp
 ;; npx users:
-(setopt pi-coding-agent-executable
+(setopt piem-executable
         '("npx" "-y" "@earendil-works/pi-coding-agent@latest"))
 #+end_src
 
@@ -361,17 +361,17 @@ If you configure Node from init.el, update both:
 
 Pi does not show its project trust prompt in RPC mode.  To make Emacs
 sessions behave like the usual trusted project workflow,
-=pi-coding-agent= passes =--approve= by default so project-local
+=piem= passes =--approve= by default so project-local
 =.pi= prompts, skills, settings, themes, and extensions are active.
 
-Set =pi-coding-agent-project-trust-policy= to =default= to pass no
+Set =piem-project-trust-policy= to =default= to pass no
 trust flag and let Pi use its saved trust decisions and
 =defaultProjectTrust=:
 
 #+begin_src emacs-lisp
 ;; Let Pi decide project trust from ~/.pi/agent/trust.json
 ;; and its global defaultProjectTrust setting.
-(setopt pi-coding-agent-project-trust-policy 'default)
+(setopt piem-project-trust-policy 'default)
 #+end_src
 
 Set it to =no-approve= to pass =--no-approve= and ignore
@@ -386,31 +386,31 @@ Grammar installation needs a working C compiler.  Install =gcc= or
 =cc=, then run:
 
 #+begin_src
-M-x pi-coding-agent-install-grammars
+M-x piem-install-grammars
 #+end_src
 
 If an old system Markdown grammar is loaded and tables render
 incorrectly, remove the old =libtree-sitter-markdown= from
 =treesit-extra-load-path=, your Emacs tree-sitter directory, or your
 system packages, then restart Emacs or run =M-x
-pi-coding-agent-install-grammars=.
+piem-install-grammars=.
 
 #+html: </details>
 
 #+html: <details>
 #+html: <summary><strong>TRAMP projects run Pi on the remote host</strong></summary>
 
-When the current project is a TRAMP directory, =pi-coding-agent=
+When the current project is a TRAMP directory, =piem=
 starts the Pi CLI on the remote host.  Install =pi= there.
 
 Authentication and configuration are remote too: run =pi= and =/login=
 on that host, or set provider environment variables for the remote
 process.  Paths such as =~/.pi/agent/auth.json= and absolute entries in
-=pi-coding-agent-executable= are interpreted on the host where Pi runs.
+=piem-executable= are interpreted on the host where Pi runs.
 
 For Emacs to find the command on the remote host, its directory must be
 in TRAMP's remote search path; Emacs's local =exec-path= is not used.
-Use an absolute path in =pi-coding-agent-executable=, or add the
+Use an absolute path in =piem-executable=, or add the
 executable's absolute remote directory to =tramp-remote-path=:
 
 #+begin_src emacs-lisp
@@ -433,7 +433,7 @@ If the menu complains about =transient=, set
 #+html: <a id="how-it-compares"></a>
 * How does it compare to other Emacs LLM helpers? 🧭
 
-=pi-coding-agent= is the Emacs frontend for Pi.  Pi is an open,
+=piem= is the Emacs frontend for Pi.  Pi is an open,
 extensible coding-agent harness with many model providers, local and
 custom models, reusable skills, prompt templates, TypeScript
 extensions, custom tools, custom providers, packages, compaction,
@@ -444,7 +444,7 @@ without embedding Pi's terminal UI.
 
 Choice guide:
 
-- =pi-coding-agent=: best when you want the Pi runtime (providers,
+- =piem=: best when you want the Pi runtime (providers,
   sessions, extensions, skills, templates, custom tools, and custom
   providers) with an Emacs-native user interface.  It is not a general
   Emacs LLM library and not a universal shell for every agent; it is a
@@ -487,7 +487,7 @@ Choice guide:
 
 This section is for more advanced usage, including changing defaults,
 managing grammars yourself, using extension features, or integrating
-=pi-coding-agent= into the rest of your Emacs setup.
+=piem= into the rest of your Emacs setup.
 
 ** Configuration 🎛️
 
@@ -495,71 +495,71 @@ Here's some common non-default preferences:
 
 #+begin_src emacs-lisp
 ;; Collapse completed thinking in new chats; live thinking still streams:
-(setopt pi-coding-agent-thinking-display 'hidden)
+(setopt piem-thinking-display 'hidden)
 
 ;; Make the input pane 25% of the Pi window pair; rebalanced on frame resize:
-(setopt pi-coding-agent-input-window-height 0.25)
+(setopt piem-input-window-height 0.25)
 
 ;; Show the input pane only when launching a session and while composing;
-;; hide it after each send and reopen it with M-x pi-coding-agent-open-input:
-(setopt pi-coding-agent-input-window-display 'on-demand)
+;; hide it after each send and reopen it with M-x piem-open-input:
+(setopt piem-input-window-display 'on-demand)
 
 ;; Start sessions with only the chat window visible; open the input on
-;; demand (M-x pi-coding-agent-open-input, or `i'/`a' under Evil) and
+;; demand (M-x piem-open-input, or `i'/`a' under Evil) and
 ;; have it hide again after each send:
-(setopt pi-coding-agent-input-window-display 'hidden)
+(setopt piem-input-window-display 'hidden)
 
 ;; Copy source Markdown from the chat buffer instead of only visible text:
-(setopt pi-coding-agent-copy-raw-markdown t)
+(setopt piem-copy-raw-markdown t)
 
 ;; Request the native same-window opener for chat file targets;
 ;; use C-u RET to invert this request for one visit.  Emacs display policy
 ;; may redirect final placement:
-(setopt pi-coding-agent-visit-file-other-window nil)
+(setopt piem-visit-file-other-window nil)
 #+end_src
 
 Less common tuning knobs:
 
 #+begin_src emacs-lisp
 ;; New input buffers use plain text instead of Markdown highlighting:
-;; (setopt pi-coding-agent-input-markdown-highlighting nil)
+;; (setopt piem-input-markdown-highlighting nil)
 
 ;; Show more tool output before it collapses, counted in visual lines:
-;; (setopt pi-coding-agent-tool-preview-lines 20)
-;; (setopt pi-coding-agent-bash-preview-lines 10)
+;; (setopt piem-tool-preview-lines 20)
+;; (setopt piem-bash-preview-lines 10)
 
 ;; Lower the 3 MiB source limit for an outgoing prompt image:
-;; (setopt pi-coding-agent-prompt-image-max-bytes (* 2 1024 1024))
+;; (setopt piem-prompt-image-max-bytes (* 2 1024 1024))
 
 ;; Cap inline image previews to 640 pixels as well as the chat window width;
 ;; lower the 10 MiB per-image preview-source limit if desired:
-;; (setopt pi-coding-agent-image-preview-max-width 640)
-;; (setopt pi-coding-agent-image-preview-max-bytes (* 5 1024 1024))
+;; (setopt piem-image-preview-max-width 640)
+;; (setopt piem-image-preview-max-bytes (* 5 1024 1024))
 
 ;; Lower context warning/error colors in the header line:
-;; (setopt pi-coding-agent-context-warning-threshold 40)
-;; (setopt pi-coding-agent-context-error-threshold 60)
+;; (setopt piem-context-warning-threshold 40)
+;; (setopt piem-context-error-threshold 60)
 
 ;; Keep more recent turns live for table rewrapping and tool overlays:
 ;; Older history is cooled to keep long sessions fast.
-;; (setopt pi-coding-agent-hot-tail-turn-count 5)
+;; (setopt piem-hot-tail-turn-count 5)
 
 ;; Let Pi's saved project trust decisions decide whether .pi resources load:
-;; (setopt pi-coding-agent-project-trust-policy 'default)
+;; (setopt piem-project-trust-policy 'default)
 
 ;; Hidden thinking uses generic line-count stubs instead of first-line previews:
-;; (setopt pi-coding-agent-thinking-hidden-preview nil)
+;; (setopt piem-thinking-hidden-preview nil)
 #+end_src
 
 You can also inspect the whole customization group with:
 
 #+begin_src
-M-x customize-group RET pi-coding-agent RET
+M-x customize-group RET piem RET
 #+end_src
 
 ** Evil integration 😈
 
-Optional Evil keybindings ship in =pi-coding-agent-evil.el=, modeled on
+Optional Evil keybindings ship in =piem-evil.el=, modeled on
 how Evil and Magit cooperate: the read-only chat buffer starts in
 motion state so navigation keys just work, the input buffer starts in
 insert state, and =?= opens the transient menu.  It loads
@@ -567,7 +567,7 @@ automatically when a session is set up while Evil is in use; to opt
 out, set this before loading the package:
 
 #+begin_src emacs-lisp
-(setq pi-coding-agent-evil-integration nil)
+(setq piem-evil-integration nil)
 #+end_src
 
 Chat buffer (motion state):
@@ -590,26 +590,26 @@ Input buffer (normal state):
 | q   | close input window |
 | ?   | transient menu     |
 
-Setup also sets =pi-coding-agent-copy-raw-markdown= buffer-locally in
+Setup also sets =piem-copy-raw-markdown= buffer-locally in
 chat buffers, so that yanking preserves code fences and markup without
 changing the global default.  Each part can be tuned independently
 before loading:
 
 #+begin_src emacs-lisp
 ;; Different initial states:
-(setq pi-coding-agent-evil-chat-state 'normal)
+(setq piem-evil-chat-state 'normal)
 
 ;; Open and focus the input window in normal state instead of insert
 ;; (press i to start composing, RET sends, q closes the window):
-(setq pi-coding-agent-evil-input-state 'normal)
+(setq piem-evil-input-state 'normal)
 
 ;; Keep copying only visible text instead of raw Markdown:
-(setq pi-coding-agent-evil-copy-raw-markdown nil)
+(setq piem-evil-copy-raw-markdown nil)
 #+end_src
 
-User bindings made after =pi-coding-agent-evil-setup= runs (e.g. with
+User bindings made after =piem-evil-setup= runs (e.g. with
 =evil-define-key= or Doom's =map!=) take precedence over these
-defaults, and =M-x pi-coding-agent-evil-setup= re-applies them after
+defaults, and =M-x piem-evil-setup= re-applies them after
 changing options.
 
 With =evil-snipe= (enabled by default in Doom): its minor-mode keymaps
@@ -619,18 +619,18 @@ outcome =magit-mode= gets from its entry in
 =evil-snipe-disabled-modes=, and effective regardless of load order.
 Fork stays on =f=, char-finding remains available on =F=, =t=, and
 =T=, and snipe stays active in the input buffer.  Set
-=pi-coding-agent-evil-disable-snipe= to nil to keep snipe active in
+=piem-evil-disable-snipe= to nil to keep snipe active in
 chat buffers.
 
 ** Display of thinking 💭
 
-New chat buffers inherit =pi-coding-agent-thinking-display=.  The
+New chat buffers inherit =piem-thinking-display=.  The
 default is =visible=: live thinking streams while the assistant is
 working and remains expanded when that thinking block finishes.  Use
 =C-c C-p h= to change the current chat, or =C-c C-p H= to change the
 default for future chat buffers in the current Emacs session.  To make
 that default persist across restarts, set
-=pi-coding-agent-thinking-display= in your init file or via =M-x
+=piem-thinking-display= in your init file or via =M-x
 customize-option=.
 
 Press =TAB= inside completed thinking to toggle that block locally.
@@ -643,7 +643,7 @@ changes.  Older history stays frozen at its previous width to avoid
 expensive whole-buffer redisplay on every resize.  Tool blocks in
 older history also lose their expand/collapse buttons and syntax
 highlighting, keeping long sessions snappy.  Customize
-=pi-coding-agent-hot-tail-turn-count= to choose how many recent
+=piem-hot-tail-turn-count= to choose how many recent
 =You=/=Assistant= turns stay live.
 
 ** Sessions, transcripts, and exports 🗃️
@@ -651,7 +651,7 @@ highlighting, keeping long sessions snappy.  Customize
 To open an existing Pi JSONL session file directly, run:
 
 #+begin_src
-M-x pi-coding-agent-open-session-file
+M-x piem-open-session-file
 #+end_src
 
 This opens the file as a live Pi session in the normal chat/input UI,
@@ -666,7 +666,7 @@ C-p e=) or run =/export=.
 
 ** Extension support 🧩
 
-The =pi-coding-agent= Emacs frontend has basic support for Pi
+The =piem= Emacs frontend has basic support for Pi
 extensions.  Extension commands show up in slash completion and the
 transient menu, extension tools run normally, and extensions can use
 notifications, confirm/select/input prompts, prefill the input buffer,
@@ -677,44 +677,44 @@ widgets, custom editor components, custom headers/footers, and other
 component-based views are unavailable or fall back.  Hover extension
 status text in the header line to see the exact =statusKey=, which you
 can use to change the font for that extension's status text using
-=pi-coding-agent-extension-status-faces=.
+=piem-extension-status-faces=.
 
 ** Tree-sitter grammar management 🌳
 
-=pi-coding-agent= uses Emacs's built-in tree-sitter support to render
+=piem= uses Emacs's built-in tree-sitter support to render
 Markdown and highlight code blocks in the chat and input buffers.  The
 two essential grammars are =markdown= and =markdown-inline=.  Optional
 grammars such as =python=, =javascript=, =rust=, and =go= improve
 syntax highlighting inside code blocks.
 
-On first session start, =pi-coding-agent= prompts to install the
+On first session start, =piem= prompts to install the
 essential grammars.  If you decline that prompt, it appears again next
 time until the grammars are installed or you change
-=pi-coding-agent-essential-grammar-action=.  A separate optional
+=piem-essential-grammar-action=.  A separate optional
 prompt offers additional grammars for syntax highlighting inside code
 blocks.  Declining the optional prompt is remembered and it appears
 again only if new grammar recipes are added or you clear
-=pi-coding-agent-grammar-declined-set=.
+=piem-grammar-declined-set=.
 
 To check which grammars are installed or install them later:
 
 #+begin_src
-M-x pi-coding-agent-install-grammars
+M-x piem-install-grammars
 #+end_src
 
 If you manage tree-sitter grammars outside of Emacs, for example
 through a system package manager, set
-=pi-coding-agent-essential-grammar-action= to =warn= to suppress the
+=piem-essential-grammar-action= to =warn= to suppress the
 essential grammar prompt:
 
 #+begin_src
-(setopt pi-coding-agent-essential-grammar-action 'warn)
+(setopt piem-essential-grammar-action 'warn)
 #+end_src
 
 ** Activity phase hooks 🪝
 
 For custom UI changes tied to activity, add functions to
-=pi-coding-agent-activity-phase-functions=.  Each function receives:
+=piem-activity-phase-functions=.  Each function receives:
 
 #+begin_src emacs-lisp
 (CHAT-BUFFER INPUT-BUFFER OLD-PHASE NEW-PHASE REASON)
@@ -731,7 +731,7 @@ For custom UI changes tied to activity, add functions to
 | =input-link=   | A newly linked input should apply the phase.  |
 | =input-unlink= | An old input should clean up local UI state.  |
 
-Handlers should be idempotent.  =pi-coding-agent= may reapply the same
+Handlers should be idempotent.  =piem= may reapply the same
 phase when buffers are relinked, reset, or torn down.  =INPUT-BUFFER=
 may also be nil or dead during teardown.
 
@@ -752,7 +752,7 @@ busy:
               (face-remap-add-relative
                'default :background "gray20"))))))
 
-(add-hook 'pi-coding-agent-activity-phase-functions
+(add-hook 'piem-activity-phase-functions
           #'my-pi-tint-input-while-busy)
 #+end_src
 
@@ -767,7 +767,7 @@ the old input, but that does not mean Pi finished working.
              (string= new "idle"))
     (message "Pi finished in %s" (buffer-name chat))))
 
-(add-hook 'pi-coding-agent-activity-phase-functions
+(add-hook 'piem-activity-phase-functions
           #'my-pi-message-when-done)
 #+end_src
 
@@ -783,14 +783,14 @@ Track busy sessions for your own mode-line or tab display:
       (push chat my-pi-busy-sessions))
     (force-mode-line-update t)))
 
-(add-hook 'pi-coding-agent-activity-phase-functions
+(add-hook 'piem-activity-phase-functions
           #'my-pi-track-busy-sessions)
 #+end_src
 
 ** Installation details 🧱
 
 MELPA installs =transient=, =md-ts-mode=, and =markdown-table-wrap=
-automatically.  =pi-coding-agent= uses =md-ts-mode= only for its own
+automatically.  =piem= uses =md-ts-mode= only for its own
 chat and input buffers, so installing or loading this package does not
 change how unrelated =.md= files open.  If you want tree-sitter
 Markdown globally, configure =md-ts-mode= separately.
@@ -798,9 +798,9 @@ Markdown globally, configure =md-ts-mode= separately.
 With =use-package=:
 
 #+begin_src emacs-lisp
-(use-package pi-coding-agent
+(use-package piem
   :ensure t
-  :init (defalias 'pi 'pi-coding-agent))
+  :init (defalias 'pi 'piem))
 #+end_src
 
 If you do not have MELPA configured, add it to your init file first:
@@ -836,29 +836,29 @@ bundled =transient= when needed.
 Then clone the repository and add it to your load path:
 
 #+begin_src bash
-git clone https://github.com/dnouri/pi-coding-agent ~/.emacs.d/site-lisp/pi-coding-agent
+git clone https://github.com/dnouri/piem ~/.emacs.d/site-lisp/piem
 #+end_src
 
 #+begin_src emacs-lisp
 (require 'package)
 (package-initialize)
-(add-to-list 'load-path "~/.emacs.d/site-lisp/pi-coding-agent")
-(require 'pi-coding-agent)
+(add-to-list 'load-path "~/.emacs.d/site-lisp/piem")
+(require 'piem)
 #+end_src
 
 Or with =use-package= after installing the dependencies above:
 
 #+begin_src emacs-lisp
-(use-package pi-coding-agent
-  :load-path "~/.emacs.d/site-lisp/pi-coding-agent"
-  :init (defalias 'pi 'pi-coding-agent))
+(use-package piem
+  :load-path "~/.emacs.d/site-lisp/piem"
+  :init (defalias 'pi 'piem))
 #+end_src
 
 If you prefer not to install the Pi CLI globally, customize
-=pi-coding-agent-executable=.  For example:
+=piem-executable=.  For example:
 
 #+begin_src emacs-lisp
-(setq pi-coding-agent-executable
+(setq piem-executable
       '("npx" "-y" "@earendil-works/pi-coding-agent@latest"))
 #+end_src
 
@@ -933,7 +933,7 @@ auto-detects whether to show a window or run headless.
 ./test/run-gui-tests.sh
 
 # Run one visible regression directly
-./test/run-gui-tests.sh pi-coding-agent-gui-test-scroll-auto-when-at-end
+./test/run-gui-tests.sh piem-gui-test-scroll-auto-when-at-end
 
 # Force headless even with display available
 ./test/run-gui-tests.sh --headless

@@ -113,9 +113,8 @@ keeping the README's (defalias 'pi ...) tip alive for package users."
   (let ((source (piem-compat-test--stub-source)))
     (dolist (old piem-compat-test-command-aliases)
       (should (string-match-p
-               (concat ";;;###autoload[ \t]*"
-                       "(define-obsolete-function-alias[\n\r\t ]+'"
-                       (regexp-quote (symbol-name old)) "[\n\r\t ]")
+               (concat ";;;###autoload[ \t]*\n?[ \t]*(define-obsolete-function-alias"
+                       "[\n\r\t ]+'" (regexp-quote (symbol-name old)) "[\n\r\t ]")
                source)))))
 
 ;;;; Variable aliases

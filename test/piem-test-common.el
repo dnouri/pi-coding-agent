@@ -1,0 +1,452 @@
+;;; piem-test-common.el --- Shared test utilities and configuration -*- lexical-binding: t; -*-
+
+;;; Commentary:
+
+;; Common definitions shared across piem test files.
+;; Centralizes timeout values, fake-pi launch helpers, the mock-session
+;; macro, and toolcall streaming helpers for easy adjustment (e.g., slow CI).
+
+;;; Code:
+
+(require 'cl-lib) ; for cl-letf in mock-session macro
+(require 'ert)
+(require 'json)
+
+;;; Timeout Configuration
+
+(defvar piem-test-short-wait 0.5
+  "Short wait in seconds for async operations to complete.")
+
+(defvar piem-test-poll-interval 0.1
+  "Polling interval in seconds for waiting loops.")
+
+(defvar piem-test-rpc-timeout 10
+  "Timeout in seconds for RPC calls in tests.")
+
+(defvar piem-test-integration-timeout 600
+  "Timeout in seconds for real-backend integration tests.
+The shared contract still includes multi-turn model interactions, so the real
+lane keeps a generous timeout for slower CI runners.")
+
+(defvar piem-test-gui-timeout 180
+  "Timeout in seconds for GUI tests.
+The GUI suite is fake-backed, but it still waits for real Emacs window updates,
+redisplay, and subprocess event delivery.")
+
+;;;; Formatting Helpers
+
+(defun piem-test-format-elapsed (seconds)
+  "Format SECONDS as a human-readable duration with millisecond precision."
+  (format "%.3fs" (float seconds)))
+
+;;;; JSON Fixtures
+
+(defvar piem-test--fixture-dir
+  (expand-file-name "test/fixtures/"
+                    (or (and load-file-name
+                             (file-name-directory
+                              (directory-file-name
+                               (file-name-directory load-file-name))))
+                        (locate-dominating-file default-directory "Makefile")
+                        default-directory))
+  "Directory containing JSON test fixtures.")
+
+(defun piem-test--read-json-fixture (filename)
+  "Read JSON fixture FILENAME from test/fixtures/ and return as plist."
+  (let ((path (expand-file-name filename piem-test--fixture-dir)))
+    (with-temp-buffer
+      (insert-file-contents path)
+      (json-parse-string (buffer-string) :object-type 'plist))))
+
+;;;; Fake-pi Helpers
+
+(defconst piem-test-fake-pi-script
+  (expand-file-name "support/fake_pi.py"
+                    (file-name-directory (or load-file-name buffer-file-name)))
+  "Absolute path to the fake-pi harness script.")
+
+(defun piem-test-python-executable ()
+  "Return a Python executable path, or skip if none is available."
+  (or (executable-find "python3")
+      (executable-find "python")
+      (ert-skip "python3 or python not found")))
+
+(defun piem-test-fake-pi-executable ()
+  "Return the command list for launching the fake-pi harness.
+Uses python3 in the test suite so local and CI runs do not need a
+separate uv dependency, while the script itself still keeps uv metadata
+and an executable shebang for manual runs."
+  (list (piem-test-python-executable)
+        piem-test-fake-pi-script))
+
+(defun piem-test-fake-pi-extra-args (scenario &optional extra-args)
+  "Return fake-pi CLI args for SCENARIO plus optional EXTRA-ARGS."
+  (append (list "--scenario" scenario) extra-args))
+
+(defun piem-test-backend-spec
+    (backend default-fake-scenario &optional fake-scenario fake-extra-args)
+  "Return shared backend launch data for BACKEND.
+DEFAULT-FAKE-SCENARIO is used when BACKEND is `fake' and FAKE-SCENARIO is
+nil.  FAKE-EXTRA-ARGS are appended after the generated fake-pi scenario args."
+  (pcase backend
+    ('fake
+     (let* ((scenario (or fake-scenario default-fake-scenario))
+            (extra-args (piem-test-fake-pi-extra-args
+                         scenario fake-extra-args)))
+       (list :name 'fake
+             :label (format "fake:%s" scenario)
+             :executable (piem-test-fake-pi-executable)
+             :extra-args extra-args
+             :scenario scenario)))
+    ('real
+     (list :name 'real
+           :label "real"
+           :executable piem-executable
+           :extra-args piem-extra-args))
+    (_
+     (error "Unknown test backend: %S" backend))))
+
+;;;; Batch Emacs Helpers
+
+(defconst piem-test--batch-result-marker
+  "\n\036PI-CODING-AGENT-BATCH-RESULT-8F3D6A\037\n"
+  "Marker separating child Emacs diagnostics from its Lisp result.")
+
+(defun piem-test--read-batch-emacs-result (expression)
+  "Evaluate EXPRESSION in a fresh batch Emacs and return its Lisp result.
+Initializes packages, then re-prepends the current project root to
+`load-path' so the checkout under test wins over any installed copy.
+Diagnostic output before the framed result is ignored."
+  (let* ((emacs (expand-file-name invocation-name invocation-directory))
+         (repo-root (file-name-directory (locate-library "piem")))
+         (output-buffer (generate-new-buffer " *piem-batch-emacs*"))
+         (exit-code (call-process emacs nil output-buffer nil
+                                  "--batch" "-Q" "-L" repo-root
+                                  "--eval" "(require 'package)"
+                                  "--eval"
+                                  "(let ((dir (getenv \"PACKAGE_USER_DIR\")))\n  (when dir\n    (setq package-user-dir\n          (directory-file-name (expand-file-name dir)))))"
+                                  "--eval" "(package-initialize)"
+                                  "--eval" "(setq load-prefer-newer t)"
+                                  "--eval"
+                                  (format "(setq load-path (cons %S load-path))"
+                                          repo-root)
+                                  "--eval"
+                                  (format "(prin1 (prog1 %s (princ %S)))"
+                                          expression
+                                          piem-test--batch-result-marker))))
+    (unwind-protect
+        (progn
+          (unless (eq 0 exit-code)
+            (error "Batch Emacs exited with %s" exit-code))
+          (with-current-buffer output-buffer
+            (goto-char (point-min))
+            (unless (search-forward piem-test--batch-result-marker
+                                    nil t)
+              (error "Batch Emacs result marker missing: %s"
+                     (buffer-string)))
+            (read (current-buffer))))
+      (kill-buffer output-buffer))))
+
+(defun piem-test--markdown-load-state (library)
+  "Return Markdown association state after requiring LIBRARY in batch Emacs."
+  (piem-test--read-batch-emacs-result
+   (format "(progn
+  (defvar major-mode-remap-alist nil)
+  (defvar treesit-major-mode-remap-alist nil)
+  (let ((before-auto (copy-tree auto-mode-alist))
+        (before-major-remap (copy-tree major-mode-remap-alist))
+        (before-treesit-remap (copy-tree treesit-major-mode-remap-alist)))
+    (require '%s)
+    (prin1 (list
+            :auto-unchanged (equal before-auto auto-mode-alist)
+            :major-remap-unchanged (equal before-major-remap major-mode-remap-alist)
+            :treesit-remap-unchanged (equal before-treesit-remap treesit-major-mode-remap-alist)
+            :md-mode-defined (fboundp 'md-ts-mode)
+            :md-mode-maybe-defined (fboundp 'md-ts-mode-maybe)
+            :before-md-association (assoc \"\\.md\\'\" before-auto)
+            :after-md-association (assoc \"\\.md\\'\" auto-mode-alist)
+            :before-major-markdown-remap (alist-get 'markdown-mode before-major-remap)
+            :after-major-markdown-remap (alist-get 'markdown-mode major-mode-remap-alist)
+            :before-treesit-markdown-remap (alist-get 'markdown-mode before-treesit-remap)
+            :after-treesit-markdown-remap (alist-get 'markdown-mode treesit-major-mode-remap-alist)))))"
+           library)))
+
+;;;; Waiting Helpers
+
+(defun piem-test-wait-until (predicate &optional timeout poll-interval process)
+  "Wait until PREDICATE returns non-nil or TIMEOUT seconds elapse.
+POLL-INTERVAL controls how often to check (default
+`piem-test-poll-interval'). If PROCESS is non-nil, it is
+passed to `accept-process-output' to allow process I/O.
+
+Returns the predicate value, or nil on timeout."
+  (let* ((timeout (or timeout piem-test-short-wait))
+         (poll-interval (or poll-interval piem-test-poll-interval))
+         (start (float-time))
+         (result (funcall predicate)))
+    (while (and (not result)
+                (< (- (float-time) start) timeout))
+      (accept-process-output process poll-interval)
+      (setq result (funcall predicate)))
+    result))
+
+(defun piem-test-wait-for-process-exit (process &optional timeout)
+  "Wait until PROCESS is no longer live, up to TIMEOUT seconds.
+Returns non-nil if the process exits before the timeout."
+  (piem-test-wait-until
+   (lambda () (not (process-live-p process)))
+   (or timeout piem-test-short-wait)
+   piem-test-poll-interval
+   process))
+
+;;;; Toolcall Streaming Helpers
+
+(defun piem-test--count-matches (regexp string)
+  "Count non-overlapping occurrences of REGEXP in STRING."
+  (let ((count 0) (start 0))
+    (while (string-match regexp string start)
+      (setq count (1+ count)
+            start (match-end 0)))
+    count))
+
+(defmacro piem-test--with-streaming-assistant (&rest body)
+  "Run BODY in a temp chat buffer with an active assistant stream."
+  (declare (indent 0) (debug body))
+  `(with-temp-buffer
+     (piem-chat-mode)
+     (piem--handle-display-event '(:type "agent_start"))
+     (piem--handle-display-event
+      '(:type "message_start" :message (:role "assistant")))
+     ,@body))
+
+(defun piem-test--toolcall (id tool-name args)
+  "Return a toolCall content block for ID, TOOL-NAME, and ARGS."
+  `(:type "toolCall" :id ,id :name ,tool-name :arguments ,args))
+
+(defun piem-test--send-assistant-message-update (message-event)
+  "Send delta-only MESSAGE-EVENT using Pi's current RPC wire shape."
+  (piem--handle-display-event
+   `(:type "message_update" :assistantMessageEvent ,message-event)))
+
+(defun piem-test--send-toolcall-message-update
+    (event-type content-index toolcalls &optional _delta)
+  "Render one cumulative toolcall snapshot for focused display tests.
+EVENT-TYPE controls streaming versus completed presentation.  CONTENT-INDEX
+selects the toolCall in TOOLCALLS.  Protocol-facing tests should instead use
+`piem-test--send-assistant-message-update' with raw JSON deltas."
+  (let ((tool-call (nth content-index toolcalls)))
+    (unless tool-call
+      (error "No test tool call at content index %s" content-index))
+    (piem--reconcile-toolcall-preview-block
+     content-index tool-call event-type)))
+
+(defmacro piem-test--with-toolcall (tool-name args &rest body)
+  "Set up a chat buffer with a streaming tool call, then run BODY.
+Creates a temp buffer in chat mode, fires agent_start, message_start,
+and toolcall_start for TOOL-NAME with ARGS (a plist).  The tool call
+ID is \"call_1\" and contentIndex is 0."
+  (declare (indent 2) (debug (sexp sexp body)))
+  `(piem-test--with-streaming-assistant
+     (piem-test--send-toolcall-message-update
+      "toolcall_start" 0
+      (list (piem-test--toolcall "call_1" ,tool-name ,args)))
+     ,@body))
+
+(defun piem-test--send-delta (tool-name args)
+  "Send a toolcall_delta event for TOOL-NAME with ARGS.
+Uses tool call ID \"call_1\" and contentIndex 0."
+  (piem-test--send-toolcall-message-update
+   "toolcall_delta" 0
+   (list (piem-test--toolcall "call_1" tool-name args))
+   "x"))
+
+(defconst piem-test--prompt-image-fixtures
+  '((png . "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
+    (jpeg . "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDi6KKK+ZP3E//Z")
+    (gif . "R0lGODdhAQABAIEAAP8AAAAAAAAAAAAAACwAAAAAAQABAAAIBAABBAQAOw==")
+    (webp . "UklGRjwAAABXRUJQVlA4IDAAAADQAQCdASoBAAEAAUAmJaACdLoB+AADsAD+8ut//NgVzXPv9//S4P0uD9Lg/9KQAAA="))
+  "Valid one-pixel raster images used by prompt attachment tests.")
+
+(defun piem-test--prompt-image-base64 (type)
+  "Return the base64 fixture for image TYPE."
+  (or (alist-get type piem-test--prompt-image-fixtures)
+      (error "No prompt image fixture for %S" type)))
+
+(defun piem-test--write-prompt-image (path type)
+  "Write the binary prompt image fixture TYPE to PATH and return PATH."
+  (let ((coding-system-for-write 'no-conversion))
+    (with-temp-file path
+      (set-buffer-multibyte nil)
+      (insert (base64-decode-string (piem-test--prompt-image-base64 type)))))
+  path)
+
+(defun piem-test--input-header ()
+  "Return the current input header without properties."
+  (substring-no-properties (piem--header-line-string)))
+
+(defun piem-test--attach-image (path)
+  "Attach prompt image PATH through the public interactive command."
+  (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path)))
+    (call-interactively #'piem-attach-image)))
+
+(defun piem-test--attach-image-via-key (path &optional clear)
+  "Invoke the input binding for PATH, with prefix argument when CLEAR."
+  (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path)))
+    (let ((current-prefix-arg (and clear '(4))))
+      (call-interactively (key-binding (kbd "C-c C-a"))))))
+
+(cl-defmacro piem-test-with-prompt-image-session
+    ((dir chat-buf input-buf) &rest body)
+  "Run BODY in a fresh vision-capable mock session."
+  (declare (indent 1) (debug ((symbolp symbolp symbolp) body)))
+  `(let ((,dir (piem-test--make-temp-directory "pi-prompt-image-")))
+     (unwind-protect
+         (piem-test-with-mock-session ,dir
+           (let ((,chat-buf (get-buffer (piem-test--chat-buffer-name ,dir)))
+                 (,input-buf (get-buffer (piem-test--input-buffer-name ,dir))))
+             (with-current-buffer ,chat-buf
+               (setq piem--status 'idle
+                     piem--state '(:model (:name "Vision" :input ["text" "image"]))))
+             ,@body))
+       (delete-directory ,dir t))))
+
+;;;; Mock Session
+
+(defmacro piem-test-with-mock-session (dir &rest body)
+  "Execute BODY with a mocked pi session in DIR, cleaning up after.
+DIR should be a unique directory path, typically created with
+`piem-test--make-temp-directory'.
+Mocks `project-current', dependency checks, process startup, and display.
+Automatically cleans up chat and input buffers."
+  (declare (indent 1) (debug t))
+  `(let ((default-directory ,dir))
+     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+               ((symbol-function 'piem--check-dependencies) #'ignore)
+               ((symbol-function 'piem--start-process) (lambda (_) nil))
+               ((symbol-function 'piem--display-buffers) #'ignore))
+       (unwind-protect
+           (progn (piem) ,@body)
+         (piem-test--kill-session-buffers ,dir)))))
+
+(defun piem-test--chat-buffer-name (dir &optional session)
+  "Return the chat buffer name for DIR and optional SESSION."
+  (piem--buffer-name :chat dir session))
+
+(defun piem-test--input-buffer-name (dir &optional session)
+  "Return the input buffer name for DIR and optional SESSION."
+  (piem--buffer-name :input dir session))
+
+(defun piem-test--kill-session-buffers (dir &optional session)
+  "Kill chat and input buffers for DIR and optional SESSION."
+  (piem-test--kill-live-buffers
+   (get-buffer (piem-test--input-buffer-name dir session))
+   (get-buffer (piem-test--chat-buffer-name dir session))))
+
+(defun piem-test--kill-live-buffers (&rest buffers)
+  "Kill each live buffer in BUFFERS without interactive session prompts."
+  (let ((piem-quit-without-confirmation t))
+    (dolist (buf buffers)
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+(defun piem-test--make-temp-directory (prefix)
+  "Create and return a fresh temporary directory for tests.
+PREFIX is forwarded to `make-temp-file'.  The returned path always has a
+trailing slash so it behaves like `default-directory'."
+  (file-name-as-directory (make-temp-file prefix t)))
+
+(defun piem-test--write-session-file (path &optional text cwd)
+  "Write a minimal pi session file to PATH.
+When TEXT is non-nil, include it as the first user message.  When CWD is
+non-nil, include it in the session header."
+  (with-temp-file path
+    (insert (json-encode `(:type "session" :id "test"
+                           ,@(when cwd (list :cwd cwd))))
+            "\n")
+    (when text
+      (insert (json-encode `(:type "message"
+                             :message (:role "user"
+                                       :content [(:type "text" :text ,text)])))
+              "\n"))))
+
+(defun piem-test--write-chat-buffer (chat prefix &optional appended-text)
+  "Save CHAT to a temp markdown file and return the file name.
+PREFIX is forwarded to `make-temp-file'.  When APPENDED-TEXT is non-nil,
+append it to CHAT before saving.  The temp file is created without initial
+contents so tests can verify the full write result explicitly."
+  (let ((file (make-temp-file prefix nil ".md")))
+    (delete-file file)
+    (with-current-buffer chat
+      (when appended-text
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (insert appended-text)))
+      (write-file file))
+    file))
+
+;;;; Tree Fixtures
+
+(defun piem-test--build-tree (&rest specs)
+  "Build a conversation tree from flat node SPECS.
+Each SPEC is (ID PARENT-OVERRIDE TYPE &rest PROPS) where:
+- ID is the node identifier string
+- PARENT-OVERRIDE is nil (auto-chain to previous node) or a parent ID
+- TYPE is \"message\", \"compaction\", \"model_change\", etc.
+- PROPS are keyword plist properties (:role, :preview, etc.)
+First node with nil PARENT-OVERRIDE becomes the root.
+Returns (:tree VECTOR :leafId LAST-ID)."
+  (let ((nodes (make-hash-table :test 'equal))
+        (child-ids (make-hash-table :test 'equal))
+        (roots nil)
+        (prev-id nil)
+        (last-id nil))
+    ;; Pass 1: create nodes, track parent-child relationships
+    (dolist (spec specs)
+      (let* ((id (nth 0 spec))
+             (parent-override (nth 1 spec))
+             (type (nth 2 spec))
+             (props (nthcdr 3 spec))
+             (parent-id (or parent-override prev-id))
+             (node (append (list :id id :type type)
+                           (when parent-id (list :parentId parent-id))
+                           props)))
+        (puthash id node nodes)
+        (if parent-id
+            (puthash parent-id
+                     (append (gethash parent-id child-ids) (list id))
+                     child-ids)
+          (push id roots))
+        (setq prev-id id
+              last-id id)))
+    ;; Pass 2: build nested structure with :children vectors
+    (cl-labels ((build (id)
+                  (let* ((node (gethash id nodes))
+                         (kids (gethash id child-ids))
+                         (child-vec (if kids
+                                        (apply #'vector (mapcar #'build kids))
+                                      [])))
+                    (append node (list :children child-vec)))))
+      (list :tree (apply #'vector (mapcar #'build (nreverse roots)))
+            :leafId last-id))))
+
+(defun piem-test--make-3turn-fork-messages ()
+  "Return get_fork_messages payload for three user turns."
+  [(:entryId "u1" :text "First question")
+   (:entryId "u2" :text "Second question")
+   (:entryId "u3" :text "Third question")])
+
+;;;; Chat Buffer Fixtures
+
+(defun piem-test--insert-chat-turns ()
+  "Insert a 3-turn chat with setext headings into current buffer.
+Returns the buffer with content ready for navigation tests."
+  (insert "Pi 1.0.0\n========\nWelcome\n\n"
+          "You · 10:00\n===========\nFirst question\n\n"
+          "Assistant\n=========\nFirst answer\n\n"
+          "You · 10:05\n===========\nSecond question\n\n"
+          "Assistant\n=========\nSecond answer\n\n"
+          "You · 10:10\n===========\nThird question\n\n"
+          "Assistant\n=========\nThird answer\n"))
+
+(provide 'piem-test-common)
+;;; piem-test-common.el ends here

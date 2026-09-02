@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-tool-update-bench.sh - Run pi-coding-agent tool-update storm benchmarks
+# run-tool-update-bench.sh - Run piem tool-update storm benchmarks
 #
 # Usage:
 #   ./bench/run-tool-update-bench.sh                         # GUI via xvfb (primary lane)
@@ -113,7 +113,7 @@ if [[ -z "$OUT_DIR" || "$OUT_DIR" == "/" ]]; then
     exit 1
 fi
 
-BENCH_MARKER="$OUT_DIR/.pi-coding-agent-tool-update-bench"
+BENCH_MARKER="$OUT_DIR/.piem-tool-update-bench"
 if [[ -L "$OUT_DIR" ]]; then
     echo "ERROR: refusing symlink output directory: $OUT_DIR" >&2
     exit 1
@@ -205,10 +205,10 @@ EMACS_INIT=(
     --eval '(let ((dir (getenv "PACKAGE_USER_DIR"))) (when dir (setq package-user-dir (directory-file-name (expand-file-name dir)))))'
     --eval '(package-initialize)'
     --eval '(let ((project (getenv "PI_TU_BENCH_PROJECT_DIR"))) (unless project (error "PI_TU_BENCH_PROJECT_DIR is unset")) (setq load-path (cons (expand-file-name project) load-path)))'
-    -l "$SCRIPT_DIR/pi-coding-agent-tool-update-bench.el"
+    -l "$SCRIPT_DIR/piem-tool-update-bench.el"
 )
 
-printf '=== pi-coding-agent Tool-Update Benchmarks ===\n'
+printf '=== piem Tool-Update Benchmarks ===\n'
 printf 'Project: %s\n' "$PROJECT_DIR"
 if [[ "$BATCH" = "1" ]]; then
     MODE="batch"
@@ -246,7 +246,7 @@ for scenario in "${SCENARIOS[@]}"; do
         printf '[%s/%s] running\n' "$scenario" "$iter"
         if [[ "$BATCH" = "1" ]]; then
             if ! "$EMACS_BIN" --batch "${EMACS_INIT[@]}" \
-                -f pi-coding-agent-tu-bench-run-batch \
+                -f piem-tu-bench-run-batch \
                 > "$run_dir/stdout.log" 2> "$run_dir/stderr.log"; then
                 cat "$run_dir/stdout.log"
                 cat "$run_dir/stderr.log" >&2
@@ -255,7 +255,7 @@ for scenario in "${SCENARIOS[@]}"; do
         else
             if ! xvfb-run -a env GDK_BACKEND=x11 PATH="$PATH" \
                 "$EMACS_BIN" --geometry 120x40 "${EMACS_INIT[@]}" \
-                --eval '(let ((standard-output (function external-debugging-output))) (kill-emacs (pi-coding-agent-tu-bench--exit-status (pi-coding-agent-tu-bench-run))))' \
+                --eval '(let ((standard-output (function external-debugging-output))) (kill-emacs (piem-tu-bench--exit-status (piem-tu-bench-run))))' \
                 </dev/null > "$run_dir/stdout.log" 2> "$run_dir/stderr.log"; then
                 cat "$run_dir/stdout.log"
                 cat "$run_dir/stderr.log" >&2
@@ -357,7 +357,7 @@ if rows:
         writer.writerows(rows)
 
 summary_lines: list[str] = []
-summary_lines.append("# pi-coding-agent tool-update benchmark summary")
+summary_lines.append("# piem tool-update benchmark summary")
 summary_lines.append("")
 summary_lines.append("Synthetic deterministic workload only; no private session content is used.")
 summary_lines.append("")
