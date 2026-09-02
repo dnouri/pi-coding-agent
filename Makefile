@@ -386,9 +386,10 @@ lint-package:
 		--eval "(require 'package)" \
 		--eval "(push '(\"melpa\" . \"https://melpa.org/packages/\") package-archives)" \
 		--eval "(package-initialize)" \
-		--eval "(unless (package-installed-p 'package-lint) \
-		          (package-refresh-contents) \
-		          (package-install 'package-lint))" \
+		--eval "(package-refresh-contents)" \
+		--eval "(let ((desc (cadr (assq 'package-lint package-archive-contents)))) \
+		          (when (and desc (not (package-installed-p 'package-lint (package-desc-version desc)))) \
+		            (package-install 'package-lint)))" \
 		--eval "(require 'package-lint)" \
 		--eval "(setq package-lint-main-file \"pi-coding-agent.el\")" \
 		-f package-lint-batch-and-exit pi-coding-agent.el pi-coding-agent-ui.el pi-coding-agent-table.el pi-coding-agent-render.el pi-coding-agent-input.el pi-coding-agent-menu.el pi-coding-agent-browse.el pi-coding-agent-core.el pi-coding-agent-jsonl.el pi-coding-agent-grammars.el
