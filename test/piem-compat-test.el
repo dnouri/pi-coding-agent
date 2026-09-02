@@ -248,5 +248,66 @@ setting wins and the old one is discarded without a warning."
                    '(55 t)))
     (should-not (string-match-p "Overwriting value" output))))
 
+;;;; Old package coexistence (smoke findings B8/B9)
+
+(defun piem-compat-test--captured-warnings (body)
+  "Run BODY capturing calls to `display-warning'.
+Return the list of (TYPE . MESSAGE) arguments passed."
+  (let ((warnings nil))
+    (cl-letf (((symbol-function 'display-warning)
+               (lambda (type message &rest _)
+                 (push (cons type message) warnings))))
+      (funcall body))
+    (nreverse warnings)))
+
+(defun piem-compat-test--synthetic-old-package-alist ()
+  "Return a `package-alist' containing only the old 2.9.1 package."
+  (list (cons 'pi-coding-agent
+              (list (package-desc-create
+                     :name 'pi-coding-agent
+                     :version '(2 9 1)
+                     :kind 'tar)))))
+
+(ert-deftest piem-compat-test-warns-when-old-package-installed ()
+  "piem warns when the pre-rename package is still installed.
+package.el activates the old package's directory ahead of piem's,
+so the old pi-coding-agent.el silently shadows this stub for every
+fresh Emacs (smoke findings B8/B9).  Loading piem must tell the
+user how to remove the old package."
+  (let ((warnings
+         (piem-compat-test--captured-warnings
+          (lambda ()
+            (let ((package-alist
+                   (piem-compat-test--synthetic-old-package-alist)))
+              (piem--warn-about-old-package))))))
+    (should (= 1 (length warnings)))
+    (should (eq 'piem (car (car warnings))))
+    (should (string-match-p "pi-coding-agent" (cdr (car warnings))))
+    (should (string-match-p "package-delete" (cdr (car warnings))))))
+
+(ert-deftest piem-compat-test-no-old-package-warning-when-clean ()
+  "No coexistence warning without the old package installed."
+  (dolist (alist (list nil `((piem . ,(cdr (assq 'piem package-alist))))))
+    (let ((warnings
+           (piem-compat-test--captured-warnings
+            (lambda ()
+              (let ((package-alist alist))
+                (piem--warn-about-old-package))))))
+      (should (null warnings)))))
+
+(ert-deftest piem-compat-test-no-old-package-warning-when-package-unbound ()
+  "No coexistence warning — and no error — without package.el state.
+In batch Emacs without `package-initialize' `package-alist' may be
+unbound or nil; the guard must stay silent either way."
+  (let ((saved (and (boundp 'package-alist) package-alist)))
+    (unwind-protect
+        (let ((warnings
+               (piem-compat-test--captured-warnings
+                (lambda ()
+                  (makunbound 'package-alist)
+                  (piem--warn-about-old-package)))))
+          (should (null warnings)))
+      (when saved (setq package-alist saved)))))
+
 (provide 'piem-compat-test)
 ;;; piem-compat-test.el ends here

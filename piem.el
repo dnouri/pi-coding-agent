@@ -108,6 +108,31 @@
 
 (declare-function dired-get-filename "dired" (&optional localp no-error-if-not-filep))
 
+;;;; Old package coexistence
+
+;; Silence the byte compiler: package.el defines this variable and may
+;; not be initialized yet when piem loads.
+(defvar package-alist)
+
+(defun piem--warn-about-old-package ()
+  "Warn at load time when the pre-rename pi-coding-agent package is installed.
+package.el activates package directories in reverse-name order, so
+while the old 2.x package remains installed its files deterministically
+shadow this package's compatibility stub in every fresh Emacs, and
+package.el itself stays silent about it.  Deleting the old package is
+part of upgrading; see the \"Upgrading from pi-coding-agent\" section
+of the README."
+  (when (and (boundp 'package-alist)
+             (assq 'pi-coding-agent package-alist))
+    (display-warning
+     'piem
+     (concat "The obsolete pi-coding-agent package is installed and its "
+             "files shadow this package's compatibility aliases.  "
+             "Delete it with M-x package-delete RET pi-coding-agent RET.")
+     :warning)))
+
+(piem--warn-about-old-package)
+
 ;;;; Main Entry Point
 
 (defcustom piem-evil-integration t
