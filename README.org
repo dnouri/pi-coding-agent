@@ -130,6 +130,38 @@ You may also define a shorter command name:
 After that, =M-x pi= starts or focuses the current project's pi
 session.
 
+** Upgrading from pi-coding-agent ⬆️
+
+=piem= 3.0 is the renamed =pi-coding-agent= package (the rename was
+[[https://github.com/dnouri/piem][dnouri/piem]] on GitHub).  Old
+configurations keep working through a compatibility stub, with one
+required step and two caveats:
+
+1. *Delete the old package* after installing =piem=:
+
+   #+begin_src
+   M-x package-delete RET pi-coding-agent RET
+   #+end_src
+
+   This step is required: while both packages are installed, the old
+   package's directory wins every =pi-coding-agent= lookup
+   deterministically, so old code silently keeps running the old
+   package and anything that also loads =piem= ends up with two
+   independent variable and face families.  package.el warns about
+   none of this; the only notice you get is a =piem= warning when
+   loading =piem= while the old package is still installed.
+
+2. Old-name =setq= and =custom-set-variables= values that are set
+   /before/ =piem= loads are migrated to the new =piem-*=
+   variables automatically, and a value set under the new name wins
+   over one set under the old name.
+
+3. Custom themes that reference old face names (=pi-coding-agent-*=)
+   must be enabled /after/ =piem= loads.  Face aliases cannot
+   retro-map specs a theme recorded under the old names before the
+   aliases existed; re-enabling the theme (or renaming the faces in
+   it) after loading =piem= applies them.
+
 #+html: <a id="everyday-workflow"></a>
 * Everyday workflow 🧭
 
