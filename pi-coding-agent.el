@@ -4,6 +4,7 @@
 
 ;; Version: 3.0.0
 ;; Package-Requires: ((emacs "29.1"))
+;; Homepage: https://github.com/dnouri/piem
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -35,26 +36,28 @@
 
 ;;;; Command aliases
 
+(declare-function piem-evil-setup "piem-evil")
+
 ;;;###autoload
 (define-obsolete-function-alias 'pi-coding-agent 'piem "3.0")
 ;;;###autoload
-(define-obsolete-function-alias 'pi-coding-agent-toggle 'piem-toggle "3.0")
+(define-obsolete-function-alias 'pi-coding-agent-toggle #'piem-toggle "3.0")
 ;;;###autoload
-(define-obsolete-function-alias 'pi-coding-agent-open-session-file 'piem-open-session-file "3.0")
+(define-obsolete-function-alias 'pi-coding-agent-open-session-file #'piem-open-session-file "3.0")
 ;;;###autoload
-(define-obsolete-function-alias 'pi-coding-agent-new-session 'piem-new-session "3.0")
+(define-obsolete-function-alias 'pi-coding-agent-new-session #'piem-new-session "3.0")
 ;;;###autoload
-(define-obsolete-function-alias 'pi-coding-agent-reload 'piem-reload "3.0")
+(define-obsolete-function-alias 'pi-coding-agent-reload #'piem-reload "3.0")
 ;;;###autoload
-(define-obsolete-function-alias 'pi-coding-agent-session-browser 'piem-session-browser "3.0")
+(define-obsolete-function-alias 'pi-coding-agent-session-browser #'piem-session-browser "3.0")
 ;;;###autoload
-(define-obsolete-function-alias 'pi-coding-agent-tree-browser 'piem-tree-browser "3.0")
+(define-obsolete-function-alias 'pi-coding-agent-tree-browser #'piem-tree-browser "3.0")
 ;;;###autoload
-(define-obsolete-function-alias 'pi-coding-agent-install-grammars 'piem-install-grammars "3.0")
+(define-obsolete-function-alias 'pi-coding-agent-install-grammars #'piem-install-grammars "3.0")
 ;;;###autoload
-(define-obsolete-function-alias 'pi-coding-agent-attach-image 'piem-attach-image "3.0")
+(define-obsolete-function-alias 'pi-coding-agent-attach-image #'piem-attach-image "3.0")
 ;;;###autoload
-(define-obsolete-function-alias 'pi-coding-agent-evil-setup 'piem-evil-setup "3.0")
+(define-obsolete-function-alias 'pi-coding-agent-evil-setup #'piem-evil-setup "3.0")
 
 ;;;; Variable aliases
 
