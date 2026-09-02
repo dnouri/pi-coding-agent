@@ -25,7 +25,11 @@ jobs:
     - name: Run
       env:
         LOCAL_REPO: ${{ github.workspace }}
-        RECIPE: (piem :fetcher github :repo "dnouri/piem" :old-names (pi-coding-agent))
+        # Mirrors the real MELPA recipe plus a :files scope: melpazoid's
+        # namespace check cannot exempt the legacy compat stub
+        # (pi-coding-agent.el), which is linted by `make lint` as its own
+        # main file instead.
+        RECIPE: (piem :fetcher github :repo "dnouri/piem" :old-names (pi-coding-agent) :files ("piem*.el"))
         WARN_IS_ERROR: false
         EXIST_OK: true
       run: make -C ~/melpazoid
