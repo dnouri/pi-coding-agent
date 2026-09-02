@@ -388,12 +388,18 @@ lint-package:
 		--eval "(require 'package)" \
 		--eval "(push '(\"melpa\" . \"https://melpa.org/packages/\") package-archives)" \
 		--eval "(package-initialize)" \
-		--eval "(unless (package-installed-p 'package-lint) \
-		          (package-refresh-contents) \
-		          (package-install 'package-lint))" \
+		--eval "(package-refresh-contents)" \
+		--eval "(let ((desc (cadr (assq 'package-lint package-archive-contents)))) \
+		          (when (and desc (not (package-installed-p 'package-lint (package-desc-version desc)))) \
+		            (package-install 'package-lint)))" \
 		--eval "(require 'package-lint)" \
 		--eval "(setq package-lint-main-file \"piem.el\")" \
 		-f package-lint-batch-and-exit piem.el piem-ui.el piem-table.el piem-render.el piem-input.el piem-menu.el piem-browse.el piem-core.el piem-jsonl.el piem-grammars.el
+	@$(BATCH) \
+		--eval "(require 'package)" \
+		--eval "(package-initialize)" \
+		--eval "(require 'package-lint)" \
+		-f package-lint-batch-and-exit pi-coding-agent.el
 
 check: compile lint test
 
