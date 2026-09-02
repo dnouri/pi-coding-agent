@@ -132,6 +132,7 @@ test: .deps-stamp
 		-l pi-coding-agent-gui-test-utils-test \
 		-l pi-coding-agent-integration-test-common-test \
 		-l pi-coding-agent-test \
+		-l piem-compat-test \
 		$(ERT_RUN) \
 		>$$OUTPUT 2>&1; \
 	STATUS=$$?; \
