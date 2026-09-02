@@ -20,7 +20,7 @@
 #+html: <a href="#advanced-features-and-configuration">Advanced</a> ·
 #+html: <a href="#development">Development</a></p>
 
-* What is piem for Emacs? 🦬
+* What is piem? 🦬
 
 =piem= is an Emacs frontend for [[https://pi.dev][Pi]].  The Pi CLI still runs
 the agent, talks to models, and executes tools.  This package wraps Pi
@@ -132,7 +132,7 @@ session.
 
 ** Upgrading from pi-coding-agent ⬆️
 
-=piem= 3.0 is the renamed =pi-coding-agent= package (the rename was
+=piem= 3.0 is the renamed =pi-coding-agent= package (now
 [[https://github.com/dnouri/piem][dnouri/piem]] on GitHub).  Old
 configurations keep working through a compatibility stub, with one
 required step and two caveats:
@@ -276,7 +276,7 @@ the file.  Coordinates apply only to file-visiting buffers; directory targets
 retain native Dired point and marks.  A target without a location keeps the
 point, mark, and narrowing chosen by normal Emacs file visiting.
 
-By default Pi requests the native other-window opener.  Use =C-u RET= to invert
+By default piem requests the native other-window opener.  Use =C-u RET= to invert
 =piem-visit-file-other-window= for that visit; with the default
 setting this requests the same-window opener instead.  Emacs display policy may
 redirect the final placement.
@@ -712,7 +712,7 @@ C-p e=) or run =/export=.
 
 ** Extension support 🧩
 
-The =piem= Emacs frontend has basic support for Pi
+=piem= has basic support for Pi
 extensions.  Extension commands show up in slash completion and the
 transient menu, extension tools run normally, and extensions can use
 notifications, confirm/select/input prompts, prefill the input buffer,

@@ -2320,7 +2320,7 @@ Stores the result in CHAT-BUF and emits a minibuffer notice when available."
 
 (defun piem--format-startup-header ()
   "Format the startup header string with styled separator."
-  (let ((separator (piem--make-separator "Pi Coding Agent for Emacs")))
+  (let ((separator (piem--make-separator "piem")))
     (concat
      separator "\n"
      "C-c C-c   send prompt\n"

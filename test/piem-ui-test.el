@@ -852,11 +852,6 @@ without an input window."
 
 ;;; Startup Header
 
-(ert-deftest piem-test-startup-header-shows-version ()
-  "Startup header includes version."
-  (let ((header (piem--format-startup-header)))
-    (should (string-match-p "Pi" header))))
-
 (ert-deftest piem-test-startup-header-shows-keybindings ()
   "Startup header includes key keybindings."
   (let ((header (piem--format-startup-header)))
@@ -865,10 +860,10 @@ without an input window."
     (should (string-match-p "C-c C-a   attach image (C-u clears)" header))
     (should (string-match-p "C-c C-r   sessions" header))))
 
-(ert-deftest piem-test-startup-header-shows-pi-label ()
-  "Startup header includes the product label."
+(ert-deftest piem-test-startup-header-shows-label ()
+  "Startup header labels the buffer with the package name."
   (let ((header (piem--format-startup-header)))
-    (should (string-match-p "^Pi Coding Agent for Emacs$" header))))
+    (should (string-match-p "^piem$" header))))
 
 (ert-deftest piem-test-extract-pi-version-from-clean-output ()
   "Extract the plain semantic version returned by pi."
