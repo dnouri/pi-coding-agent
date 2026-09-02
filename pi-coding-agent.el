@@ -4,6 +4,10 @@
 
 ;; Author: Daniel Nouri <daniel.nouri@gmail.com>
 ;; Maintainer: Daniel Nouri <daniel.nouri@gmail.com>
+;; Assisted-by: pi:kimi-k3
+;; Assisted-by: pi:glm-5.3
+;; Assisted-by: pi:gpt-5.6
+;; Assisted-by: pi:claude-opus-4.6
 ;; URL: https://github.com/dnouri/pi-coding-agent
 ;; Keywords: ai llm ai-pair-programming tools
 ;; Version: 2.9.1
