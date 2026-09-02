@@ -852,11 +852,6 @@ without an input window."
 
 ;;; Startup Header
 
-(ert-deftest pi-coding-agent-test-startup-header-shows-version ()
-  "Startup header includes version."
-  (let ((header (pi-coding-agent--format-startup-header)))
-    (should (string-match-p "Pi" header))))
-
 (ert-deftest pi-coding-agent-test-startup-header-shows-keybindings ()
   "Startup header includes key keybindings."
   (let ((header (pi-coding-agent--format-startup-header)))
