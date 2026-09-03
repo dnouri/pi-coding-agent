@@ -1,4 +1,4 @@
-# pi-coding-agent Makefile
+# pilish Makefile
 
 EMACS ?= emacs
 export EMACS
@@ -83,13 +83,13 @@ help:
 # ============================================================
 
 # Install package dependencies (sentinel file avoids re-running every time).
-# Requirements come from pi-coding-agent.el's Package-Requires header.
+# Requirements come from pilish.el's Package-Requires header.
 # The helper upgrades built-in packages when Emacs ships an older version
 # than the package requires (for example transient on Emacs 29/30).  Keep the
 # sentinel with the selected package directory so overrides cannot reuse a
 # stamp created for another dependency tree or Emacs lane.
 DEPS_STAMP = $(PACKAGE_USER_DIR)/.deps-stamp
-DEPS_INPUTS = Makefile scripts/install-deps.el scripts/pi-coding-agent-build.el pi-coding-agent.el
+DEPS_INPUTS = Makefile scripts/install-deps.el scripts/pilish-build.el pilish.el
 .PHONY: .deps-stamp
 .deps-stamp: $(DEPS_STAMP)
 
@@ -118,20 +118,20 @@ test: .deps-stamp
 		--eval "(require 'package)" \
 		--eval "(package-initialize)" \
 		$(LOCAL_LOAD_PATH) \
-		-l pi-coding-agent \
-		-l pi-coding-agent-core-test \
-		-l pi-coding-agent-ui-test \
-		-l pi-coding-agent-render-test \
-		-l pi-coding-agent-table-test \
-		-l pi-coding-agent-input-test \
-		-l pi-coding-agent-menu-test \
-		-l pi-coding-agent-browse-test \
-		-l pi-coding-agent-jsonl-test \
-		-l pi-coding-agent-build-test \
-		-l pi-coding-agent-fake-pi-test \
-		-l pi-coding-agent-gui-test-utils-test \
-		-l pi-coding-agent-integration-test-common-test \
-		-l pi-coding-agent-test \
+		-l pilish \
+		-l pilish-core-test \
+		-l pilish-ui-test \
+		-l pilish-render-test \
+		-l pilish-table-test \
+		-l pilish-input-test \
+		-l pilish-menu-test \
+		-l pilish-browse-test \
+		-l pilish-jsonl-test \
+		-l pilish-build-test \
+		-l pilish-fake-pi-test \
+		-l pilish-gui-test-utils-test \
+		-l pilish-integration-test-common-test \
+		-l pilish-test \
 		$(ERT_RUN) \
 		>$$OUTPUT 2>&1; \
 	STATUS=$$?; \
@@ -148,28 +148,28 @@ test: .deps-stamp
 BATCH_TEST = $(BATCH) -L test --eval "(setq load-prefer-newer t)" \
 	--eval "(require 'package)" --eval "(package-initialize)" \
 	$(LOCAL_LOAD_PATH) \
-	-l pi-coding-agent
+	-l pilish
 
 test-core: .deps-stamp
-	@$(BATCH_TEST) -l pi-coding-agent-core-test $(ERT_RUN)
+	@$(BATCH_TEST) -l pilish-core-test $(ERT_RUN)
 test-ui: .deps-stamp
-	@$(BATCH_TEST) -l pi-coding-agent-ui-test $(ERT_RUN)
+	@$(BATCH_TEST) -l pilish-ui-test $(ERT_RUN)
 test-render: .deps-stamp
-	@$(BATCH_TEST) -l pi-coding-agent-render-test $(ERT_RUN)
+	@$(BATCH_TEST) -l pilish-render-test $(ERT_RUN)
 test-table: .deps-stamp
-	@$(BATCH_TEST) -l pi-coding-agent-table-test $(ERT_RUN)
+	@$(BATCH_TEST) -l pilish-table-test $(ERT_RUN)
 test-input: .deps-stamp
-	@$(BATCH_TEST) -l pi-coding-agent-input-test $(ERT_RUN)
+	@$(BATCH_TEST) -l pilish-input-test $(ERT_RUN)
 test-menu: .deps-stamp
-	@$(BATCH_TEST) -l pi-coding-agent-menu-test $(ERT_RUN)
+	@$(BATCH_TEST) -l pilish-menu-test $(ERT_RUN)
 test-browse: .deps-stamp
-	@$(BATCH_TEST) -l pi-coding-agent-browse-test $(ERT_RUN)
+	@$(BATCH_TEST) -l pilish-browse-test $(ERT_RUN)
 
 test-jsonl: .deps-stamp
-	@$(BATCH_TEST) -l pi-coding-agent-jsonl-test $(ERT_RUN)
+	@$(BATCH_TEST) -l pilish-jsonl-test $(ERT_RUN)
 
 test-build: .deps-stamp
-	@$(BATCH_TEST) -l pi-coding-agent-build-test $(ERT_RUN)
+	@$(BATCH_TEST) -l pilish-build-test $(ERT_RUN)
 
 test-unit: compile test
 
@@ -206,7 +206,7 @@ INTEGRATION_BATCH = $(BATCH) -L test \
 	--eval "(require 'package)" \
 	--eval "(package-initialize)" \
 	$(LOCAL_LOAD_PATH) \
-	-l pi-coding-agent -l pi-coding-agent-integration-test \
+	-l pilish -l pilish-integration-test \
 	$(ERT_RUN)
 # Reuse CI's session directory when provided, but stay locally runnable by
 # creating and cleaning up a temporary session directory otherwise.
@@ -343,7 +343,7 @@ ollama-status:
 
 check-parens:
 	@echo "=== Check Parens ==="
-	@OUTPUT=$$($(BATCH) --eval '(condition-case err (dolist (f (list "scripts/pi-coding-agent-build.el" "scripts/install-deps.el" "scripts/install-ts-grammars.el" "pi-coding-agent-core.el" "pi-coding-agent-jsonl.el" "pi-coding-agent-grammars.el" "pi-coding-agent-ui.el" "pi-coding-agent-table.el" "pi-coding-agent-render.el" "pi-coding-agent-input.el" "pi-coding-agent-menu.el" "pi-coding-agent-browse.el" "pi-coding-agent.el")) (with-current-buffer (find-file-noselect f) (check-parens) (message "%s OK" f))) (user-error (message "FAIL: %s" (error-message-string err)) (kill-emacs 1)))' 2>&1); \
+	@OUTPUT=$$($(BATCH) --eval '(condition-case err (dolist (f (list "scripts/pilish-build.el" "scripts/install-deps.el" "scripts/install-ts-grammars.el" "pilish-core.el" "pilish-jsonl.el" "pilish-grammars.el" "pilish-ui.el" "pilish-table.el" "pilish-render.el" "pilish-input.el" "pilish-menu.el" "pilish-browse.el" "pilish.el")) (with-current-buffer (find-file-noselect f) (check-parens) (message "%s OK" f))) (user-error (message "FAIL: %s" (error-message-string err)) (kill-emacs 1)))' 2>&1); \
 	echo "$$OUTPUT" | grep -E "OK$$|FAIL:"; \
 	echo "$$OUTPUT" | grep -q "FAIL:" && exit 1 || true
 
@@ -355,7 +355,7 @@ compile: .deps-stamp
 		--eval "(package-initialize)" \
 		$(LOCAL_LOAD_PATH) \
 		--eval "(setq byte-compile-error-on-warn t)" \
-		-f batch-byte-compile scripts/pi-coding-agent-build.el scripts/install-deps.el scripts/install-ts-grammars.el pi-coding-agent-core.el pi-coding-agent-jsonl.el pi-coding-agent-grammars.el pi-coding-agent-ui.el pi-coding-agent-table.el pi-coding-agent-render.el pi-coding-agent-input.el pi-coding-agent-menu.el pi-coding-agent-browse.el pi-coding-agent.el
+		-f batch-byte-compile scripts/pilish-build.el scripts/install-deps.el scripts/install-ts-grammars.el pilish-core.el pilish-jsonl.el pilish-grammars.el pilish-ui.el pilish-table.el pilish-render.el pilish-input.el pilish-menu.el pilish-browse.el pilish.el
 
 lint: lint-checkdoc lint-package
 
@@ -364,19 +364,19 @@ lint-checkdoc:
 	@OUTPUT=$$($(BATCH) \
 		--eval "(require 'checkdoc)" \
 		--eval "(setq sentence-end-double-space nil)" \
-		--eval "(checkdoc-file \"scripts/pi-coding-agent-build.el\")" \
+		--eval "(checkdoc-file \"scripts/pilish-build.el\")" \
 		--eval "(checkdoc-file \"scripts/install-deps.el\")" \
 		--eval "(checkdoc-file \"scripts/install-ts-grammars.el\")" \
-		--eval "(checkdoc-file \"pi-coding-agent-core.el\")" \
-		--eval "(checkdoc-file \"pi-coding-agent-jsonl.el\")" \
-		--eval "(checkdoc-file \"pi-coding-agent-grammars.el\")" \
-		--eval "(checkdoc-file \"pi-coding-agent-ui.el\")" \
-		--eval "(checkdoc-file \"pi-coding-agent-table.el\")" \
-		--eval "(checkdoc-file \"pi-coding-agent-render.el\")" \
-		--eval "(checkdoc-file \"pi-coding-agent-input.el\")" \
-		--eval "(checkdoc-file \"pi-coding-agent-menu.el\")" \
-		--eval "(checkdoc-file \"pi-coding-agent-browse.el\")" \
-		--eval "(checkdoc-file \"pi-coding-agent.el\")" 2>&1); \
+		--eval "(checkdoc-file \"pilish-core.el\")" \
+		--eval "(checkdoc-file \"pilish-jsonl.el\")" \
+		--eval "(checkdoc-file \"pilish-grammars.el\")" \
+		--eval "(checkdoc-file \"pilish-ui.el\")" \
+		--eval "(checkdoc-file \"pilish-table.el\")" \
+		--eval "(checkdoc-file \"pilish-render.el\")" \
+		--eval "(checkdoc-file \"pilish-input.el\")" \
+		--eval "(checkdoc-file \"pilish-menu.el\")" \
+		--eval "(checkdoc-file \"pilish-browse.el\")" \
+		--eval "(checkdoc-file \"pilish.el\")" 2>&1); \
 	WARNINGS=$$(echo "$$OUTPUT" | grep -A1 "^Warning" | grep -v "^Warning\|^--$$"); \
 	if [ -n "$$WARNINGS" ]; then echo "$$WARNINGS"; exit 1; else echo "OK"; fi
 
@@ -391,8 +391,8 @@ lint-package:
 		          (when (and desc (not (package-installed-p 'package-lint (package-desc-version desc)))) \
 		            (package-install 'package-lint)))" \
 		--eval "(require 'package-lint)" \
-		--eval "(setq package-lint-main-file \"pi-coding-agent.el\")" \
-		-f package-lint-batch-and-exit pi-coding-agent.el pi-coding-agent-ui.el pi-coding-agent-table.el pi-coding-agent-render.el pi-coding-agent-input.el pi-coding-agent-menu.el pi-coding-agent-browse.el pi-coding-agent-core.el pi-coding-agent-jsonl.el pi-coding-agent-grammars.el
+		--eval "(setq package-lint-main-file \"pilish.el\")" \
+		-f package-lint-batch-and-exit pilish.el pilish-ui.el pilish-table.el pilish-render.el pilish-input.el pilish-menu.el pilish-browse.el pilish-core.el pilish-jsonl.el pilish-grammars.el
 
 check: compile lint test
 
