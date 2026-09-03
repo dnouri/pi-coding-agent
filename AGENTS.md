@@ -1,4 +1,4 @@
-# pilish — Development Guide
+# Pilish — Development Guide
 
 Emacs frontend for the [pi coding agent](https://pi.dev).
 Two-window UI: markdown chat buffer + prompt composition buffer.

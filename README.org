@@ -1,4 +1,4 @@
-#+title: pilish
+#+title: Pilish
 #+author: Daniel Nouri
 #+options: toc:nil num:nil
 
@@ -22,7 +22,7 @@
 
 * What is Pilish? 🦬
 
-=pilish= is an Emacs frontend for [[https://pi.dev][Pi]].  The Pi CLI still runs
+Pilish is an Emacs frontend for [[https://pi.dev][Pi]].  The Pi CLI still runs
 the agent, talks to models, and executes tools.  This package wraps Pi
 in an ergonomic Emacs interface: a Markdown chat buffer for the
 conversation and a separate prompt buffer where you compose the next
@@ -35,7 +35,7 @@ scroll through the chat without losing focus, navigate and copy from
 previous output with ease, and use the key bindings and editing habits
 you already have.
 
-#+html: <a href="https://danielnouri.org/media/pi-coding-agent-demo.mp4"><img src="https://danielnouri.org/media/pi-coding-agent-preview.gif" alt="Narrated pilish demo video (6:38) - click to play" width="600" height="600"></a>
+#+html: <a href="https://danielnouri.org/media/pi-coding-agent-demo.mp4"><img src="https://danielnouri.org/media/pi-coding-agent-preview.gif" alt="Narrated Pilish demo video (6:38) - click to play" width="600" height="600"></a>
 #+html: <p><small>Video music: "Electrodoodle" by Kevin MacLeod
 #+html: (<a href="https://incompetech.com">incompetech.com</a>),
 #+html: licensed under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.</small></p>
@@ -116,7 +116,7 @@ Then start a session:
 M-x pilish
 #+end_src
 
-On first start, =pilish= may prompt to install the
+On first start, Pilish may prompt to install the
 tree-sitter grammars needed for Markdown rendering.  Say yes if you
 want the chat buffer to render properly.  Grammar installation is a
 one-time step and requires a C compiler (=gcc= or =cc=).
@@ -167,7 +167,7 @@ and old-name settings do not carry over automatically.
 #+html: <a id="everyday-workflow"></a>
 * Everyday workflow 🧭
 
-Start a session with =M-x pilish=.  =pilish= opens
+Start a session with =M-x pilish=.  Pilish opens
 two windows:
 
 - *Chat buffer* at the top: rendered Markdown conversation history,
@@ -252,7 +252,7 @@ graphical Emacs and as a useful type-and-size placeholder in terminals.  Sent
 and returned image content share the same bounded renderer.  Pi's built-in
 =read= already returns raster images as image content.  For SVG, a returned
 preview is made only from complete, standalone SVG text supplied by =read=;
-=pilish= never reopens the argument path, and text with obvious scripts
+Pilish never reopens the argument path, and text with obvious scripts
 or external resources is left as text.
 
 Current limits: images in partial tool updates appear when the final result
@@ -278,7 +278,7 @@ the file.  Coordinates apply only to file-visiting buffers; directory targets
 retain native Dired point and marks.  A target without a location keeps the
 point, mark, and narrowing chosen by normal Emacs file visiting.
 
-By default =pilish= requests the native other-window opener.  Use =C-u RET= to invert
+By default Pilish requests the native other-window opener.  Use =C-u RET= to invert
 =pilish-visit-file-other-window= for that visit; with the default
 setting this requests the same-window opener instead.  Emacs display policy may
 redirect the final placement.
@@ -299,7 +299,7 @@ messages, and =f= to fork the conversation from the turn at point.
 ** Sessions and context 🗂️
 
 Each project directory gets its own session automatically.  Running
-=M-x pilish= again from a pilish buffer restores missing panes;
+=M-x pilish= again from a Pilish buffer restores missing panes;
 if both panes are visible, focus moves to the input window.  Use =M-x
 pilish-toggle= to hide or show the session windows in the
 current frame.
@@ -377,7 +377,7 @@ process without losing the conversation.
 #+html: <details>
 #+html: <summary><strong>Emacs cannot find the <code>pi</code> executable</strong></summary>
 
-=pilish= runs the command in =pilish-executable=,
+Pilish runs the command in =pilish-executable=,
 which defaults to =("pi")=.  If Emacs cannot find =pi=, install the
 CLI with the npm command from Quick Start on the host where Pi runs,
 adjust the relevant search path, or customize
@@ -408,7 +408,7 @@ If you configure Node from init.el, update both:
 
 Pi does not show its project trust prompt in RPC mode.  To make Emacs
 sessions behave like the usual trusted project workflow,
-=pilish= passes =--approve= by default so project-local
+Pilish passes =--approve= by default so project-local
 =.pi= prompts, skills, settings, themes, and extensions are active.
 
 Set =pilish-project-trust-policy= to =default= to pass no
@@ -447,7 +447,7 @@ pilish-install-grammars=.
 #+html: <details>
 #+html: <summary><strong>TRAMP projects run Pi on the remote host</strong></summary>
 
-When the current project is a TRAMP directory, =pilish=
+When the current project is a TRAMP directory, Pilish
 starts the Pi CLI on the remote host.  Install =pi= there.
 
 Authentication and configuration are remote too: run =pi= and =/login=
@@ -481,7 +481,7 @@ dependency), and restart Emacs.
 #+html: <a id="how-it-compares"></a>
 * How does it compare to other Emacs LLM helpers? 🧭
 
-=pilish= is an Emacs frontend for Pi.  Pi is an open,
+Pilish is an Emacs frontend for Pi.  Pi is an open,
 extensible coding-agent harness with many model providers, local and
 custom models, reusable skills, prompt templates, TypeScript
 extensions, custom tools, custom providers, packages, compaction,
@@ -535,7 +535,7 @@ Choice guide:
 
 This section is for more advanced usage, including changing defaults,
 managing grammars yourself, using extension features, or integrating
-=pilish= into the rest of your Emacs setup.
+Pilish into the rest of your Emacs setup.
 
 ** Configuration 🎛️
 
@@ -714,7 +714,7 @@ C-p e=) or run =/export=.
 
 ** Extension support 🧩
 
-=pilish= has basic support for Pi
+Pilish has basic support for Pi
 extensions.  Extension commands show up in slash completion and the
 transient menu, extension tools run normally, and extensions can use
 notifications, confirm/select/input prompts, prefill the input buffer,
@@ -729,13 +729,13 @@ can use to change the font for that extension's status text using
 
 ** Tree-sitter grammar management 🌳
 
-=pilish= uses Emacs's built-in tree-sitter support to render
+Pilish uses Emacs's built-in tree-sitter support to render
 Markdown and highlight code blocks in the chat and input buffers.  The
 two essential grammars are =markdown= and =markdown-inline=.  Optional
 grammars such as =python=, =javascript=, =rust=, and =go= improve
 syntax highlighting inside code blocks.
 
-On first session start, =pilish= prompts to install the
+On first session start, Pilish prompts to install the
 essential grammars.  If you decline that prompt, it appears again next
 time until the grammars are installed or you change
 =pilish-essential-grammar-action=.  A separate optional
@@ -779,7 +779,7 @@ For custom UI changes tied to activity, add functions to
 | =input-link=   | A newly linked input should apply the phase.  |
 | =input-unlink= | An old input should clean up local UI state.  |
 
-Handlers should be idempotent.  =pilish= may reapply the same
+Handlers should be idempotent.  Pilish may reapply the same
 phase when buffers are relinked, reset, or torn down.  =INPUT-BUFFER=
 may also be nil or dead during teardown.
 
@@ -839,7 +839,7 @@ Track busy sessions for your own mode-line or tab display:
 
 MELPA (with [[https://elpa.gnu.org/][GNU ELPA]] added for =compat=)
 installs =transient=, =magit-section=, =md-ts-mode=, and
-=markdown-table-wrap= automatically.  =pilish= uses =md-ts-mode= only for its own
+=markdown-table-wrap= automatically.  Pilish uses =md-ts-mode= only for its own
 chat and input buffers, so installing or loading this package does not
 change how unrelated =.md= files open.  If you want tree-sitter
 Markdown globally, configure =md-ts-mode= separately.

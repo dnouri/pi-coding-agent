@@ -42,7 +42,7 @@
 ;;     installed and in PATH on the host where Pi runs
 ;;   - tree-sitter grammars for markdown and markdown-inline
 ;;
-;; pilish uses `md-ts-mode` for its own chat and input buffers;
+;; Pilish uses `md-ts-mode` for its own chat and input buffers;
 ;; loading it does not change global Markdown file associations.
 ;;
 ;; Usage:
