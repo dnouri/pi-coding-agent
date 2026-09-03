@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-bench.sh - Run pi-coding-agent table rendering benchmarks
+# run-bench.sh - Run pilish table rendering benchmarks
 #
 # Usage:
 #   ./bench/run-bench.sh              # GUI via xvfb (primary lane)
@@ -39,17 +39,17 @@ EMACS_INIT=(
     --eval "(let ((dir (getenv \"PACKAGE_USER_DIR\"))) (when dir (setq package-user-dir (directory-file-name (expand-file-name dir)))))"
     --eval "(package-initialize)"
     --eval "(setq load-path (cons (expand-file-name \"$PROJECT_DIR\") load-path))"
-    -l "$SCRIPT_DIR/pi-coding-agent-bench.el"
+    -l "$SCRIPT_DIR/pilish-bench.el"
 )
 
-echo "=== pi-coding-agent Table Rendering Benchmarks ==="
+echo "=== pilish Table Rendering Benchmarks ==="
 echo "Project: $PROJECT_DIR"
 
 if [ "$BATCH" = "1" ]; then
     echo "Mode: batch (secondary lane), $REPS reps"
     echo ""
     "$EMACS_BIN" "${EMACS_INIT[@]}" --batch \
-        -f pi-coding-agent-bench-run-batch -c "$REPS" 2>&1
+        -f pilish-bench-run-batch -c "$REPS" 2>&1
 else
     echo "Mode: GUI via xvfb (primary lane), $REPS reps"
     echo ""
@@ -61,6 +61,6 @@ else
         "$EMACS_BIN" "${EMACS_INIT[@]}" \
         --eval "(progn
                   (let ((standard-output #'external-debugging-output))
-                    (pi-coding-agent-bench-run $REPS))
+                    (pilish-bench-run $REPS))
                   (kill-emacs 0))" </dev/null 2>&1
 fi

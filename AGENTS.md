@@ -1,4 +1,4 @@
-# pi-coding-agent — Development Guide
+# pilish — Development Guide
 
 Emacs frontend for the [pi coding agent](https://pi.dev).
 Two-window UI: markdown chat buffer + prompt composition buffer.
@@ -10,7 +10,7 @@ Ten production source modules form a dependency DAG (no cycles), plus
 an optional Evil integration module.  Direct internal `require` edges are:
 
 ```
-pi-coding-agent.el -> menu, input, browse
+pilish.el -> menu, input, browse
 menu.el           -> jsonl, render
 input.el          -> render
 browse.el         -> core, jsonl, ui
@@ -33,7 +33,7 @@ makes those commands available without introducing a cycle.
 External package dependency:
 
 - `md-ts-mode` ← tree-sitter markdown major mode used by chat buffers
-  (loading `pi-coding-agent` must not globally claim unrelated Markdown files)
+  (loading `pilish` must not globally claim unrelated Markdown files)
 
 `menu.el` and `input.el` are siblings — neither requires the other.  Shared
 session state lives in `ui.el`.  `table.el` requires `ui.el` for visible-text
@@ -47,62 +47,62 @@ module, direct `setq` is fine.
 
 | File | Purpose |
 |------|---------|
-| `pi-coding-agent.el` | Entry point, autoloads, `--setup-session` |
-| `pi-coding-agent-core.el` | JSON parsing, line buffering, RPC request correlation, and process protocol |
-| `pi-coding-agent-ui.el` | Shared session/buffer state, accessors, faces, customization, chat/input modes and keymaps, header/activity UI, and local slash-command dispatch; requires core and grammars, not jsonl |
-| `pi-coding-agent-render.el` | Streaming and history rendering for user, assistant, branch-summary, and compaction messages; tool output, deferred completed-tool cooling outside the hot tail, fontification, diffs, and deferred history table postprocessing |
-| `pi-coding-agent-table.el` | Display-only pipe table decoration, wrapping, overlay management, and resize refresh over UI visible-text/scroll seams |
-| `pi-coding-agent-input.el` | Input history/isearch, send/abort, file/path/slash completion, queuing, and local `/resume` dispatch to the session browser |
-| `pi-coding-agent-menu.el` | Transient menu; guarded new/reload/resume transitions; canonical jsonl cwd/name metadata; model, thinking, command, export, and stats actions; `r` sessions and `w` tree entries |
-| `pi-coding-agent-browse.el` | Persistent magit-section session/tree browsers: time-sliced disk session discovery, filters/search/sort/scope, guarded switching and rename; disk tree projection, filters/search, labels, and guarded navigation through an atomic local rewrite plus the menu resume flow. Browsing and labels need no live process; switching/navigation do. TRAMP non-atomicity and independent-writer races are documented constraints |
-| `pi-coding-agent-grammars.el` | Tree-sitter grammar recipes, install prompts, `M-x pi-coding-agent-install-grammars` |
-| `pi-coding-agent-jsonl.el` | Pure core-only JSONL APIs: whole-file reading, canonical regex-first session metadata, sessions-root/cwd directory mapping, raw tree building and display projection, tool-call previews, and byte-preserving navigation target/line calculations. Production browsers consume these disk APIs rather than `get_tree`/`get_entries` RPCs |
-| `pi-coding-agent-evil.el` | Optional Evil keybindings; auto-loaded by `pi-coding-agent--maybe-load-evil-integration` when a session is set up while Evil is present. Leaf module: requires `ui`, `input`, and `menu` directly (never the top-level feature, to avoid a recursive require during auto-load). Must byte-compile and load without Evil installed |
+| `pilish.el` | Entry point, autoloads, `--setup-session` |
+| `pilish-core.el` | JSON parsing, line buffering, RPC request correlation, and process protocol |
+| `pilish-ui.el` | Shared session/buffer state, accessors, faces, customization, chat/input modes and keymaps, header/activity UI, and local slash-command dispatch; requires core and grammars, not jsonl |
+| `pilish-render.el` | Streaming and history rendering for user, assistant, branch-summary, and compaction messages; tool output, deferred completed-tool cooling outside the hot tail, fontification, diffs, and deferred history table postprocessing |
+| `pilish-table.el` | Display-only pipe table decoration, wrapping, overlay management, and resize refresh over UI visible-text/scroll seams |
+| `pilish-input.el` | Input history/isearch, send/abort, file/path/slash completion, queuing, and local `/resume` dispatch to the session browser |
+| `pilish-menu.el` | Transient menu; guarded new/reload/resume transitions; canonical jsonl cwd/name metadata; model, thinking, command, export, and stats actions; `r` sessions and `w` tree entries |
+| `pilish-browse.el` | Persistent magit-section session/tree browsers: time-sliced disk session discovery, filters/search/sort/scope, guarded switching and rename; disk tree projection, filters/search, labels, and guarded navigation through an atomic local rewrite plus the menu resume flow. Browsing and labels need no live process; switching/navigation do. TRAMP non-atomicity and independent-writer races are documented constraints |
+| `pilish-grammars.el` | Tree-sitter grammar recipes, install prompts, `M-x pilish-install-grammars` |
+| `pilish-jsonl.el` | Pure core-only JSONL APIs: whole-file reading, canonical regex-first session metadata, sessions-root/cwd directory mapping, raw tree building and display projection, tool-call previews, and byte-preserving navigation target/line calculations. Production browsers consume these disk APIs rather than `get_tree`/`get_entries` RPCs |
+| `pilish-evil.el` | Optional Evil keybindings; auto-loaded by `pilish--maybe-load-evil-integration` when a session is set up while Evil is present. Leaf module: requires `ui`, `input`, and `menu` directly (never the top-level feature, to avoid a recursive require during auto-load). Must byte-compile and load without Evil installed |
 
 ## Test Files
 
 | File | Covers |
 |------|--------|
-| `test/pi-coding-agent-core-test.el` | Core/RPC protocol, framing, request lifecycle, and JSON normalization |
-| `test/pi-coding-agent-ui-test.el` | Buffer naming/modes, session directories, direct browser key bindings, startup header, slash dispatch, and grammar install |
-| `test/pi-coding-agent-render-test.el` | Streaming/history response display, branch summaries, tools, tables, file actions, fontification, and diffs |
-| `test/pi-coding-agent-table-test.el` | Table decoration, overlays, streaming, resize |
-| `test/pi-coding-agent-input-test.el` | History, send/abort, queuing, completion, and local `/resume` browser routing |
-| `test/pi-coding-agent-menu-test.el` | Session transitions and cwd guards, canonical jsonl name metadata, transient browser entries, model/command actions, and reconnect |
-| `test/pi-coding-agent-browse-test.el` | Session/tree helpers, magit rendering and point restoration; asynchronous disk scans, cancellation/error states, search/filter/sort/scope, switch guards and rename; disk tree loading, labels, and navigation guards/targets, atomic rewrite failures, prefill, and settle/quit behavior |
-| `test/pi-coding-agent-jsonl-test.el` | JSONL reading, canonical session metadata, raw tree/projection and golden fixtures, tool-call formatting, session discovery, navigation targets, and byte-preserving line reordering across branches/malformed input |
-| `test/pi-coding-agent-fake-pi-test.el` | Black-box fake subprocess contract: strict framing/events, valid v3 persistence, entry/tree/message RPC projections, transactional switching, and full resume/history choreography |
-| `test/pi-coding-agent-build-test.el` | Batch helper scripts for dependency and grammar installation |
-| `test/pi-coding-agent-test.el` | Entry point / cross-module integration |
-| `test/pi-coding-agent-test-common.el` | Shared fixtures: mock-session macro, toolcall helpers, fake-pi launch helpers |
-| `test/pi-coding-agent-integration-test-common.el` | Shared integration backend helpers and contract macros |
-| `test/pi-coding-agent-integration-test-common-test.el` | Unit tests for shared integration helper macros |
-| `test/pi-coding-agent-integration-rpc-smoke-test.el` | Cheap shared fake/real RPC canaries |
-| `test/pi-coding-agent-integration-prompt-contract-test.el` | Shared fake/real prompt lifecycle + abort contracts |
-| `test/pi-coding-agent-integration-session-contract-test.el` | Shared fake/real session-file persistence contract |
-| `test/pi-coding-agent-integration-steering-contract-test.el` | Shared fake/real steering contract |
-| `test/pi-coding-agent-integration-tool-contract-test.el` | Shared fake/real tool execution contract |
-| `test/pi-coding-agent-integration-test.el` | Integration suite entry point (loads all shared contract modules) |
-| `test/pi-coding-agent-gui-tests.el` | GUI tests (require display or xvfb) |
+| `test/pilish-core-test.el` | Core/RPC protocol, framing, request lifecycle, and JSON normalization |
+| `test/pilish-ui-test.el` | Buffer naming/modes, session directories, direct browser key bindings, startup header, slash dispatch, and grammar install |
+| `test/pilish-render-test.el` | Streaming/history response display, branch summaries, tools, tables, file actions, fontification, and diffs |
+| `test/pilish-table-test.el` | Table decoration, overlays, streaming, resize |
+| `test/pilish-input-test.el` | History, send/abort, queuing, completion, and local `/resume` browser routing |
+| `test/pilish-menu-test.el` | Session transitions and cwd guards, canonical jsonl name metadata, transient browser entries, model/command actions, and reconnect |
+| `test/pilish-browse-test.el` | Session/tree helpers, magit rendering and point restoration; asynchronous disk scans, cancellation/error states, search/filter/sort/scope, switch guards and rename; disk tree loading, labels, and navigation guards/targets, atomic rewrite failures, prefill, and settle/quit behavior |
+| `test/pilish-jsonl-test.el` | JSONL reading, canonical session metadata, raw tree/projection and golden fixtures, tool-call formatting, session discovery, navigation targets, and byte-preserving line reordering across branches/malformed input |
+| `test/pilish-fake-pi-test.el` | Black-box fake subprocess contract: strict framing/events, valid v3 persistence, entry/tree/message RPC projections, transactional switching, and full resume/history choreography |
+| `test/pilish-build-test.el` | Batch helper scripts for dependency and grammar installation |
+| `test/pilish-test.el` | Entry point / cross-module integration |
+| `test/pilish-test-common.el` | Shared fixtures: mock-session macro, toolcall helpers, fake-pi launch helpers |
+| `test/pilish-integration-test-common.el` | Shared integration backend helpers and contract macros |
+| `test/pilish-integration-test-common-test.el` | Unit tests for shared integration helper macros |
+| `test/pilish-integration-rpc-smoke-test.el` | Cheap shared fake/real RPC canaries |
+| `test/pilish-integration-prompt-contract-test.el` | Shared fake/real prompt lifecycle + abort contracts |
+| `test/pilish-integration-session-contract-test.el` | Shared fake/real session-file persistence contract |
+| `test/pilish-integration-steering-contract-test.el` | Shared fake/real steering contract |
+| `test/pilish-integration-tool-contract-test.el` | Shared fake/real tool execution contract |
+| `test/pilish-integration-test.el` | Integration suite entry point (loads all shared contract modules) |
+| `test/pilish-gui-tests.el` | GUI tests (require display or xvfb) |
 
 ## Other Files
 
 | File | Purpose |
 |------|---------|
 | `Makefile` | Build, test, lint targets |
-| `bench/pi-coding-agent-bench.el` | Table rendering benchmark harness (xvfb GUI or batch) |
+| `bench/pilish-bench.el` | Table rendering benchmark harness (xvfb GUI or batch) |
 | `bench/run-bench.sh` | Table benchmark runner script; `--batch` for headless lane |
-| `bench/pi-coding-agent-reload-resume-bench.el` | Synthetic reload/resume harness; the resume lane opens the real async disk-backed session browser, selects the target magit section, switches through browser RET behavior, and checks rebuilt history |
+| `bench/pilish-reload-resume-bench.el` | Synthetic reload/resume harness; the resume lane opens the real async disk-backed session browser, selects the target magit section, switches through browser RET behavior, and checks rebuilt history |
 | `bench/fake-pi-reload-resume.py` | Fake JSON-over-stdio backend for reload/resume benchmark state, switch, history, commands, and content-free traffic evidence |
 | `bench/run-reload-resume-bench.sh` | Reload/resume benchmark runner; GUI uses `xvfb-run`, `--batch` for headless lane |
-| `bench/pi-coding-agent-tool-update-bench.el` | Synthetic tool-update storm and deferred agent_end cooling benchmark harness |
+| `bench/pilish-tool-update-bench.el` | Synthetic tool-update storm and deferred agent_end cooling benchmark harness |
 | `bench/fake-pi-tool-update-storm.py` | Fake JSON-over-stdio pi backend emitting tool-update storm and cooling scenarios |
 | `bench/run-tool-update-bench.sh` | Tool-update/cooling benchmark runner; GUI uses `xvfb-run`, `--batch` for headless lane |
 | `bench/fixtures/tables.md` | Sample pipe tables used by the table benchmark |
 | `test/support/fake_pi.py` | Deterministic JSONL RPC subprocess double with scenario-driven events, valid v3 persistence, inspection RPCs, and transactional session switching |
 | `test/support/fake-pi-contract.md` | Maintainer-facing wire, scenario/event/tool, v3 record, projection, and switch contract for `fake_pi.py` |
 | `scripts/check.sh` | Pre-commit hook: byte-compile + lint + tests |
-| `scripts/pi-coding-agent-build.el` | Shared batch helpers for dependency and grammar installation |
+| `scripts/pilish-build.el` | Shared batch helpers for dependency and grammar installation |
 | `scripts/install-deps.el` | Batch script: install required Emacs package dependencies |
 | `scripts/install-ts-grammars.el` | Batch script: install tree-sitter grammars |
 
@@ -223,10 +223,10 @@ Every spike script needs this boilerplate at the top (use the actual
 absolute path to your checkout):
 ```elisp
 (setq inhibit-startup-screen t)
-(add-to-list 'load-path "/absolute/path/to/pi-coding-agent")
+(add-to-list 'load-path "/absolute/path/to/pilish")
 (require 'package)
 (package-initialize)
-(require 'pi-coding-agent)
+(require 'pilish)
 ```
 
 `package-initialize` is required here so installed dependencies like
@@ -239,20 +239,20 @@ tmux new-session -d -s test -x 120 -y 40 \
 sleep 2 && tmux capture-pane -t test -p
 ```
 
-To start a full interactive pi-coding-agent session in tmux:
+To start a full interactive `pilish` session in tmux:
 ```bash
 tmux new-session -d -s test -x 120 -y 40 \
   "emacs -nw -Q --eval \"(progn (require 'package) (package-initialize) \
     (add-to-list 'load-path \\\"$PWD\\\") \
-    (require 'pi-coding-agent) (pi-coding-agent))\""
+    (require 'pilish) (pilish))\""
 ```
 
 Common gotchas:
 - **`-Q` is required** but skips package init — the boilerplate above fixes that
 - **Sleep timing**: use `sleep 2` for UI ops, `sleep 10`+ for LLM responses
-- **Buffer names** follow `*pi-coding-agent-{chat,input}:<dir>*` (abbreviated),
-  e.g. `*pi-coding-agent-chat:~/co/pi-coding-agent/*`
-- **Window focus**: the pi-coding-agent layout has two windows; `C-x o` switches between them.
+- **Buffer names** follow `*pilish-{chat,input}:<dir>*` (abbreviated),
+  e.g. `*pilish-chat:~/co/pilish/*`
+- **Window focus**: the `pilish` layout has two windows; `C-x o` switches between them.
   Prefer spike scripts over interactive `tmux send-keys` when possible —
   they're reproducible, debuggable, and don't require tracking focus state
 
@@ -302,7 +302,7 @@ Run `git status` before committing to verify what's staged.
 
 ## Key Conventions
 
-- All public symbols are prefixed `pi-coding-agent-`
-- Internal symbols use `pi-coding-agent--` (double dash)
-- Tests are named `pi-coding-agent-test-<description>`
-- Test files require `pi-coding-agent-test-common` for shared fixtures
+- All public symbols are prefixed `pilish-`
+- Internal symbols use `pilish--` (double dash)
+- Tests are named `pilish-test-<description>`
+- Test files require `pilish-test-common` for shared fixtures

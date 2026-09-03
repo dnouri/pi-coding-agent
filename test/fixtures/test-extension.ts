@@ -1,9 +1,9 @@
 /**
- * Test extension for pi-coding-agent integration tests.
+ * Test extension for pilish integration tests.
  * Load with: pi --mode rpc -e test/fixtures/test-extension.ts --no-extensions
  */
 
-import type { ExtensionAPI } from "@anthropic/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("test-noop", {

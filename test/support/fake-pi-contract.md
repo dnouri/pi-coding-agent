@@ -8,9 +8,9 @@ of internal Emacs functions.
 
 The Emacs frontend already has the right seam:
 
-- `pi-coding-agent-executable`
-- `pi-coding-agent-extra-args`
-- `pi-coding-agent--start-process`
+- `pilish-executable`
+- `pilish-extra-args`
+- `pilish--start-process`
 - the real process filter / sentinel / display handler path
 
 The fake must enter through that seam unchanged. Test helpers may bind the
