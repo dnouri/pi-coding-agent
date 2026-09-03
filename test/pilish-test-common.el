@@ -289,11 +289,16 @@ Uses tool call ID \"call_1\" and contentIndex 0."
   (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path)))
     (call-interactively #'pilish-attach-image)))
 
-(defun pilish-test--attach-image-via-key (path &optional clear)
-  "Invoke the input binding for PATH, with prefix argument when CLEAR."
+(defun pilish-test--menu-suffix-command (prefix key)
+  "Return the command bound to KEY in transient PREFIX's layout."
+  (plist-get (cdr (transient-get-suffix prefix key)) :command))
+
+(defun pilish-test--attach-image-via-menu (path &optional clear)
+  "Invoke the attach-menu image entry for PATH, with prefix arg when CLEAR."
   (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) path)))
-    (let ((current-prefix-arg (and clear '(4))))
-      (call-interactively (key-binding (kbd "C-c C-a"))))))
+    (let* ((command (pilish-test--menu-suffix-command 'pilish-attach-menu "i"))
+           (current-prefix-arg (and clear '(4))))
+      (call-interactively command))))
 
 (cl-defmacro pilish-test-with-prompt-image-session
     ((dir chat-buf input-buf) &rest body)

@@ -2718,18 +2718,18 @@ Pi handles command expansion on the server side."
       (delete-process fake-proc))))
 
 (ert-deftest pilish-test-prompt-image-png-end-to-end ()
-  "C-c C-a content-sniffs a misleadingly named PNG for exact RPC content."
+  "Menu attach-image entry content-sniffs a misleadingly named PNG for exact RPC content."
   (pilish-test-with-prompt-image-session (dir chat-buf input-buf)
     (let* ((path (pilish-test--write-prompt-image
                   (expand-file-name "pixel.txt" dir) 'png))
            (data (pilish-test--prompt-image-base64 'png))
            rpc-message)
       (with-current-buffer input-buf
-        (pilish-test--attach-image-via-key path)
+        (pilish-test--attach-image-via-menu path)
         (should (string-match-p "pixel.txt" (pilish-test--input-header)))
-        (pilish-test--attach-image-via-key path 'clear)
+        (pilish-test--attach-image-via-menu path 'clear)
         (should-not (string-match-p "pixel.txt" (pilish-test--input-header)))
-        (pilish-test--attach-image-via-key path)
+        (pilish-test--attach-image-via-menu path)
         (delete-file path)
         (insert "Describe the pixel")
         (cl-letf (((symbol-function 'pilish--get-process)
@@ -2784,7 +2784,7 @@ Pi handles command expansion on the server side."
         (dolist (spec '((jpeg "photo.jpg") (gif "pixel.gif")
                         (webp "pixel.webp")))
           (when previous
-            (pilish-test--attach-image-via-key previous 'clear))
+            (pilish-test--attach-image-via-menu previous 'clear))
           (setq previous
                 (pilish-test--write-prompt-image
                  (expand-file-name (cadr spec) dir) (car spec)))
@@ -2792,7 +2792,7 @@ Pi handles command expansion on the server side."
           (should (string-match-p
                    (regexp-quote (file-name-nondirectory previous))
                    (pilish-test--input-header))))
-        (pilish-test--attach-image-via-key previous 'clear))
+        (pilish-test--attach-image-via-menu previous 'clear))
       (let* ((not-image (expand-file-name "not-image.txt" dir))
              (too-large (pilish-test--write-prompt-image
                          (expand-file-name "too-large.png" dir) 'png)))
@@ -2862,7 +2862,7 @@ Pi handles command expansion on the server side."
               (should-not builtin-called)
               (should (string-match-p reason (downcase (or feedback "")))))
           (with-current-buffer input-buf
-            (pilish-test--attach-image-via-key path 'clear))))))))
+            (pilish-test--attach-image-via-menu path 'clear))))))))
 
 (ert-deftest pilish-test-prompt-image-waits-for-model-change ()
   "Image send waits for model selection, then uses the accepted model state."
