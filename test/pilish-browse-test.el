@@ -1144,7 +1144,7 @@ completes in-call."
                 ((symbol-function 'run-at-time)
                  (lambda (_secs _repeat fn &rest args) (apply fn args))))
         (let ((process-environment
-               (cons (format "PI_PILISH_DIR=%s" (directory-file-name root))
+               (cons (format "PI_CODING_AGENT_DIR=%s" (directory-file-name root))
                      process-environment)))
           (pilish--session-browser-fetch-and-render)))
       (should-not pilish--session-browser-error)
@@ -1704,7 +1704,7 @@ read) with no linked chat renders its link-error message."
             ;; No --get-process mock: reading from disk needs no process.
             (let ((default-directory root)
                   (process-environment
-                   (cons (format "PI_PILISH_DIR=%s"
+                   (cons (format "PI_CODING_AGENT_DIR=%s"
                                 (directory-file-name root))
                          process-environment)))
               (cl-letf (((symbol-function 'pilish--session-list-directory)
@@ -1834,7 +1834,7 @@ end-of-line conversion; otherwise return decoded text."
           (let ((default-directory (file-name-as-directory project))
                 (pilish--chat-buffer nil)
                 (process-environment (copy-sequence process-environment)))
-            (setenv "PI_PILISH_DIR" agent-root)
+            (setenv "PI_CODING_AGENT_DIR" agent-root)
             (should
              (equal
               (pilish--browse-current-session-directory)
@@ -1902,7 +1902,7 @@ and non-munged directories.  scope=current scans one directory."
       (pilish-session-browser-mode)
       (let ((default-directory root)
             (process-environment
-             (cons (format "PI_PILISH_DIR=%s" (directory-file-name root))
+             (cons (format "PI_CODING_AGENT_DIR=%s" (directory-file-name root))
                    process-environment)))
         (cl-letf (((symbol-function 'pilish--session-list-directory)
                    (lambda (&optional _chat-buf) nil))
@@ -1979,7 +1979,7 @@ by the fetch token."
       (pilish-session-browser-mode)
       (let ((default-directory root)
             (process-environment
-             (cons (format "PI_PILISH_DIR=%s" (directory-file-name root))
+             (cons (format "PI_CODING_AGENT_DIR=%s" (directory-file-name root))
                    process-environment)))
         (cl-letf (((symbol-function 'pilish--session-list-directory)
                    (lambda (&optional _chat-buf) nil))
@@ -2090,7 +2090,7 @@ and the browser names the interruption."
       (setq pilish--session-browser-scope "all")
       (let ((default-directory root)
             (process-environment
-             (cons (format "PI_PILISH_DIR=%s" (directory-file-name root))
+             (cons (format "PI_CODING_AGENT_DIR=%s" (directory-file-name root))
                    process-environment)))
         (cl-letf (((symbol-function 'pilish--session-list-directory)
                    (lambda (&optional _chat-buf) nil))
@@ -2124,7 +2124,7 @@ gone for the session browser (the tree browser keeps it until Phase 3)."
       (pilish-session-browser-mode)
       (let ((default-directory root)
             (process-environment
-             (cons (format "PI_PILISH_DIR=%s" (directory-file-name root))
+             (cons (format "PI_CODING_AGENT_DIR=%s" (directory-file-name root))
                    process-environment)))
         (cl-letf (((symbol-function 'pilish--session-list-directory)
                    (lambda (&optional _chat-buf) nil))

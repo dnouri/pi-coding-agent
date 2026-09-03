@@ -211,7 +211,7 @@ INTEGRATION_BATCH = $(BATCH) -L test \
 # Reuse CI's session directory when provided, but stay locally runnable by
 # creating and cleaning up a temporary session directory otherwise.
 REAL_INTEGRATION_RUN = \
-	SESSION_DIR="$$PI_PILISH_DIR"; \
+	SESSION_DIR="$$PI_CODING_AGENT_DIR"; \
 	CLEANUP_SESSION_DIR=0; \
 	if [ -z "$$SESSION_DIR" ]; then \
 		SESSION_DIR=$$(mktemp -d); \
@@ -220,7 +220,7 @@ REAL_INTEGRATION_RUN = \
 		mkdir -p "$$SESSION_DIR"; \
 	fi; \
 	cp test/fixtures/ollama-models.json "$$SESSION_DIR/models.json"; \
-	env PATH="$(PI_BIN_DIR):$$PATH" PI_PILISH_DIR="$$SESSION_DIR" PI_RUN_INTEGRATION=1 PI_INTEGRATION_BACKENDS=real \
+	env PATH="$(PI_BIN_DIR):$$PATH" PI_CODING_AGENT_DIR="$$SESSION_DIR" PI_RUN_INTEGRATION=1 PI_INTEGRATION_BACKENDS=real \
 		$(INTEGRATION_BATCH); \
 	status=$$?; \
 	if [ "$$CLEANUP_SESSION_DIR" = "1" ]; then rm -rf "$$SESSION_DIR"; fi; \

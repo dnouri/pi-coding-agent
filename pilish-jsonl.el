@@ -221,7 +221,7 @@ without parsing their full payloads.")
 
 (defun pilish-jsonl-sessions-root (&optional anchor)
   "Return pi's sessions root directory as a directory name (trailing slash).
-The default is PI_PILISH_DIR, else ~/.pi/agent, plus
+The default is PI_CODING_AGENT_DIR, else ~/.pi/agent, plus
 \"sessions\" (a port of pi's getAgentDir), expanded.
 ANCHOR, when remote (see `file-remote-p'), roots the scan on that
 remote instead: the parent of ANCHOR's own directory — pass a session
@@ -230,7 +230,7 @@ the expanded default always applies."
   (if (and anchor (file-remote-p anchor))
       (file-name-directory
        (directory-file-name (file-name-directory anchor)))
-    (concat (expand-file-name (or (getenv "PI_PILISH_DIR")
+    (concat (expand-file-name (or (getenv "PI_CODING_AGENT_DIR")
                                   "~/.pi/agent"))
             "/sessions/")))
 

@@ -1084,8 +1084,8 @@ wrap the result in --…-- under ROOT (default: sessions-root)."
                   (pilish-jsonl-session-dir-for-cwd
                    "/home/daniel/co/pi" "/r/sessions"))
                  "/r/sessions/--home-daniel-co-pi--"))
-  ;; Root defaults to sessions-root (PI_PILISH_DIR honored).
-  (let ((process-environment '("PI_PILISH_DIR=/tmp/fake-root")))
+  ;; Root defaults to sessions-root (PI_CODING_AGENT_DIR honored).
+  (let ((process-environment '("PI_CODING_AGENT_DIR=/tmp/fake-root")))
     (should (equal (expand-file-name
                     (pilish-jsonl-session-dir-for-cwd "/a/b"))
                    "/tmp/fake-root/sessions/--a-b--")))
@@ -1115,16 +1115,16 @@ wrap the result in --…-- under ROOT (default: sessions-root)."
 (ert-deftest pilish-test-jsonl-sessions-root ()
   "sessions-root expands the agent dir, always with a trailing slash.
 The default is ~/.pi/agent/sessions (mirroring pi's getAgentDir);
-PI_PILISH_DIR overrides it.  Remote anchors move the root onto
+PI_CODING_AGENT_DIR overrides it.  Remote anchors move the root onto
 the remote (the parent of the anchor file's directory); local anchors
 are ignored."
   ;; Default: expanded ~/.pi/agent/sessions with a trailing slash.
   (let ((process-environment '("HOME=/tmp/fake-home")))
     (should (equal (pilish-jsonl-sessions-root)
                    "/tmp/fake-home/.pi/agent/sessions/")))
-  ;; PI_PILISH_DIR replaces the default agent dir.
+  ;; PI_CODING_AGENT_DIR replaces the default agent dir.
   (let ((process-environment '("HOME=/tmp/fake-home"
-                               "PI_PILISH_DIR=/tmp/agent-dir")))
+                               "PI_CODING_AGENT_DIR=/tmp/agent-dir")))
     (should (equal (pilish-jsonl-sessions-root)
                    "/tmp/agent-dir/sessions/")))
   ;; A remote session-file anchor roots the scan on that remote: the

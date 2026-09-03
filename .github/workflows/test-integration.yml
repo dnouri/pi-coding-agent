@@ -61,4 +61,4 @@ jobs:
       - name: Run real backend contract
         run: make test-integration-ci-real
         env:
-          PI_PILISH_DIR: ${{ runner.temp }}/pi-test
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-test
