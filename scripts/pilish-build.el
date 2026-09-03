@@ -65,6 +65,10 @@ version after installation finishes."
         (missing nil))
     (setq package-install-upgrade-built-in t)
     (add-to-list 'package-archives '("melpa" . "https://melpa.org/packages/") t)
+    ;; MELPA's transient needs compat >= 31, which is published on
+    ;; GNU ELPA only; without this archive a cold dependency install
+    ;; fails with "Package 'compat' is unavailable".
+    (add-to-list 'package-archives '("gnu" . "https://elpa.gnu.org/packages/") t)
     (package-initialize)
     (unless package-archive-contents
       (package-refresh-contents))
