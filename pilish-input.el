@@ -33,7 +33,7 @@
 ;;
 ;; Key entry points:
 ;;   `pilish-send'                  Send prompt (C-c C-c)
-;;   `pilish-attach-image'          Attach one prompt image (C-c C-a)
+;;   `pilish-attach-image'          Attach one prompt image (menu C-c C-p a i)
 ;;   `pilish-abort'                 Abort current operation (C-c C-k)
 ;;   `pilish-quit'                  Close session
 ;;   `pilish-previous-input'        History backward (M-p)

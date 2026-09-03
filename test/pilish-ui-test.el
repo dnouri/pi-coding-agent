@@ -857,7 +857,6 @@ without an input window."
   (let ((header (pilish--format-startup-header)))
     (should (string-match-p "C-c C-c" header))
     (should (string-match-p "send" header))
-    (should (string-match-p "C-c C-a   attach image (C-u clears)" header))
     (should (string-match-p "C-c C-r   sessions" header))))
 
 (ert-deftest pilish-test-startup-header-shows-label ()

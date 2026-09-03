@@ -202,9 +202,9 @@ registers, spell checks, Evil, or whatever else your setup already
 gives you.  Your prompt stays in the bottom window while the
 conversation streams above it.
 
-Press =C-c C-a= to attach one image: select a file, or paste its path
-into the file prompt.  Attaching another image replaces the first;
-=C-u C-c C-a= clears it.  The header line keeps the attached basename
+Press =C-c C-p a i= to attach one image: select a file, or paste its
+path into the file prompt.  Attaching another image replaces the first;
+=C-u= before the =i= clears it.  The header line keeps the attached basename
 and size visible.  The file is read and materialized when attached,
 and PNG, JPEG, GIF, and WebP are recognized from their content rather
 than their extension.  The default source limit is 3 MiB.  Send it
@@ -335,8 +335,8 @@ configured warning and error thresholds.
 | Key              | Context | Description                                    |
 |------------------+---------+------------------------------------------------|
 | =C-c C-c=        | input   | 📮 Send prompt, or queue follow-up if busy    |
-| =C-c C-a=        | input   | 🖼️ Attach or replace one prompt image         |
-| =C-u C-c C-a=    | input   | 🧹 Clear the attached prompt image            |
+| =C-c C-p a i=    | menu    | 🖼️ Attach or replace one prompt image         |
+| =C-u … a i=      | menu    | 🧹 Clear the attached prompt image            |
 | =C-c C-s=        | input   | 🐎 Send steering message while Pi is busy     |
 | =C-c C-k=        | input   | 🪓 Abort current response or compaction       |
 | =C-c C-p=        | input   | 🎛️ Open transient menu                        |

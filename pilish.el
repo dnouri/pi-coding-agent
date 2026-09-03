@@ -58,7 +58,6 @@
 ;; Key Bindings:
 ;;   Input buffer:
 ;;     C-c C-c        Send prompt (queues text as follow-up if busy)
-;;     C-c C-a        Attach/replace one prompt image (C-u clears)
 ;;     C-c C-s        Queue steering (interrupts after current tool; busy only)
 ;;     C-c C-k        Abort current operation
 ;;     C-c C-p        Open menu

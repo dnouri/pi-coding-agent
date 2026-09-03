@@ -570,6 +570,13 @@ BINDING-SPEC is (DIR CHAT-NAME INPUT-NAME PROC).  DIR is evaluated once."
     (pilish-input-mode)
     (should (eq (key-binding (kbd "C-c C-p")) 'pilish-menu))))
 
+(ert-deftest pilish-test-attach-routes-through-menu-submenu ()
+  "Menu `a' opens the attach submenu; its `i' attaches prompt images."
+  (should (eq (pilish-test--menu-suffix-command 'pilish-menu "a")
+              'pilish-attach-menu))
+  (should (eq (pilish-test--menu-suffix-command 'pilish-attach-menu "i")
+              'pilish-attach-image)))
+
 ;;; Chat Navigation
 
 (ert-deftest pilish-test-chat-has-navigation-keys ()

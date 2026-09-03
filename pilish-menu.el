@@ -1366,6 +1366,7 @@ Uses commands from pi's `get_commands' RPC."
    ["Actions"
     ("RET" "send" pilish-send)
     ("s" "steer" pilish-queue-steering)
+    ("a" "attach" pilish-attach-menu)
     ("k" "abort" pilish-abort)]]
   [["Model"
     ("m" "select" pilish-select-model)
@@ -1376,6 +1377,14 @@ Uses commands from pi's `get_commands' RPC."
    ["Info"
     ("i" "stats" pilish-session-stats)
     ("y" "copy last" pilish-copy-last-message)]])
+
+(transient-define-prefix pilish-attach-menu ()
+  "Attach objects to the current prompt draft.
+Each entry attaches to the input buffer's draft; a prefix argument
+clears the attachment instead.  Object-specific keys leave room for
+future attachment kinds such as video or files."
+  ["Attach"
+   ("i" "image" pilish-attach-image)])
 
 (defun pilish-refresh-commands ()
   "Refresh commands from pi via RPC."

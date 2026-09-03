@@ -927,7 +927,6 @@ removing the instructional header that would otherwise appear."
 (defvar pilish-input-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'pilish-send)
-    (define-key map (kbd "C-c C-a") #'pilish-attach-image)
     (define-key map (kbd "TAB") #'pilish-complete)
     (define-key map (kbd "C-c C-k") #'pilish-abort)
     (define-key map (kbd "C-c C-p") #'pilish-menu)
@@ -2324,7 +2323,6 @@ Stores the result in CHAT-BUF and emits a minibuffer notice when available."
     (concat
      separator "\n"
      "C-c C-c   send prompt\n"
-     "C-c C-a   attach image (C-u clears)\n"
      "C-c C-k   abort\n"
      "C-c C-r   sessions\n"
      "C-c C-p   menu\n")))
