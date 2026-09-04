@@ -53,7 +53,7 @@ is the shortest path to a usable session.
 - [[https://pi.dev][pi coding agent]] =@earendil-works/pi-coding-agent@0.84.2= or later,
   installed and in =PATH= on the host where Pi runs
 - Pi CLI authentication: a provider API key, or a one-time =/login= run
-  in a terminal (see [[*Install pi and authenticate][Install pi and authenticate]])
+  in a terminal (see [[#install-pi-and-authenticate-][Install pi and authenticate]])
 - A C compiler if Emacs needs to compile tree-sitter grammars
 
 The published Pi 0.84.2 CLI omits tool identity metadata from
@@ -62,6 +62,9 @@ corresponding =toolcall_end= arrives.  Newer Pi builds that include =id= and
 =toolName= on the start event also show supported arguments while they stream.
 
 ** Install pi and authenticate 🔐
+:PROPERTIES:
+:CUSTOM_ID: install-pi-and-authenticate-
+:END:
 
 #+begin_src bash
 # Install the pi CLI
@@ -76,7 +79,7 @@ mise use -g npm:@earendil-works/pi-coding-agent@latest
 
 Pi authenticates in one of two ways:
 
-- *Subscription or API key via =/login=:* =/login= is an interactive
+- *Subscription or API key* via =/login=: =/login= is an interactive
   command that is unavailable from Emacs: run plain =pi= once in a
   terminal and type =/login=; you can then pick a subscription such as
   ChatGPT Plus/Pro, or choose a provider and enter its API key.
@@ -153,7 +156,7 @@ and old-name settings do not carry over automatically.
 
 2. Rename =pi-coding-agent= to =pilish= in your init file: the
    =require= or =use-package= declaration, the =pi= alias, any
-   =pi-coding-agent-*= variable names in =setq=/=setopt= or
+   =pi-coding-agent-*= variable names in =setq=, =setopt=, or
    =custom-set-variables=, and any =with-eval-after-load=, hook, or
    keybinding forms naming =pi-coding-agent= commands.  A missed old
    name raises no error at startup; it is silently ignored, so
@@ -692,7 +695,7 @@ expensive whole-buffer redisplay on every resize.  Tool blocks in
 older history also lose their expand/collapse buttons and syntax
 highlighting, keeping long sessions snappy.  Customize
 =pilish-hot-tail-turn-count= to choose how many recent
-=You=/=Assistant= turns stay live.
+=You= and =Assistant= turns stay live.
 
 ** Sessions, transcripts, and exports 🗃️
 
