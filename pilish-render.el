@@ -3532,6 +3532,103 @@ was toggled successfully."
                       (min original-pos (max new-start (1- new-end))))))
     t))
 
+(defun pilish--startup-banner-section (label names)
+  "Return the LABEL detail line listing NAMES for the startup banner.
+NAMES is a list of strings; returns nil when empty so empty sections are
+omitted from the expanded banner entirely."
+  (when names
+    (concat label " " (mapconcat #'identity names ", "))))
+
+(defun pilish--format-startup-banner-expanded ()
+  "Return the propertized expanded startup banner text.
+Line one carries the version segments and a TAB collapse hint; then one
+line per non-empty section with context files, skill names (the skill:
+prefix stripped), and prompt names (each prefixed with a slash), all in
+`pilish--commands' order."
+  (let ((sections
+         (delq nil
+               (list
+                (pilish--startup-banner-section
+                 "[Context]" (pilish--startup-context-files))
+                (pilish--startup-banner-section
+                 "[Skills]"
+                 (mapcar (lambda (name) (string-remove-prefix "skill:" name))
+                         (pilish--startup-banner-command-names "skill")))
+                (pilish--startup-banner-section
+                 "[Prompts]"
+                 (mapcar (lambda (name) (concat "/" name))
+                         (pilish--startup-banner-command-names "prompt")))))))
+    (pilish--propertize-startup-banner
+     (mapconcat
+      #'identity
+      (cons (concat (mapconcat #'identity
+                               (pilish--startup-banner-version-segments)
+                               " · ")
+                   " · TAB collapse")
+            sections)
+      "\n")
+     'expanded)))
+
+(defun pilish--startup-banner-probe-pos (pos)
+  "Return a position inside the startup banner at POS, or nil.
+Checks POS and the preceding character so point resting on a banner
+boundary still resolves to the banner being toggled."
+  (when (> (point-max) (point-min))
+    (let ((probe (cond ((<= pos (point-min)) (point-min))
+                       ((>= pos (point-max)) (max (point-min)
+                                                  (1- (point-max))))
+                       (t pos))))
+      (cond ((get-text-property probe 'pilish-startup-banner) probe)
+            ((and (> probe (point-min))
+                  (get-text-property (1- probe)
+                                     'pilish-startup-banner))
+             (1- probe))))))
+
+(defun pilish--replace-startup-banner-region (start end rendered)
+  "Replace the startup banner START..END with RENDERED text.
+Returns the new bounds as (START . NEW-END) and keeps visible windows
+usable after the rewrite."
+  (let* ((buffer (current-buffer))
+         (saved-windows (pilish--capture-window-rewrite-states))
+         (inhibit-read-only t)
+         new-end)
+    (save-excursion
+      (goto-char start)
+      (delete-region start end)
+      (insert rendered)
+      (setq new-end (point))
+      (condition-case-unless-debug nil
+          (font-lock-ensure start new-end)
+        (error nil)))
+    (pilish--restore-window-rewrite-states
+     buffer
+     saved-windows
+     (let ((delta (- new-end end)))
+       (lambda (pos)
+         (pilish--adjust-pos-after-region-replacements
+          pos (list (list start end delta))))))
+    (cons start new-end)))
+
+(defun pilish--toggle-startup-banner-at-point ()
+  "Toggle the startup banner at point between compact and expanded.
+Returns non-nil when point was on the startup banner."
+  (when-let* ((probe (pilish--startup-banner-probe-pos (point)))
+              (state (get-text-property probe 'pilish-startup-banner)))
+    (let* ((original-pos (point))
+           (start (or (previous-single-property-change
+                       (1+ probe) 'pilish-startup-banner)
+                      (point-min)))
+           (end (next-single-property-change
+                 probe 'pilish-startup-banner nil (point-max)))
+           (rendered (if (eq state 'expanded)
+                         (pilish--format-startup-banner-compact)
+                       (pilish--format-startup-banner-expanded)))
+           (new-bounds (pilish--replace-startup-banner-region
+                        start end rendered)))
+      (goto-char (max (car new-bounds)
+                      (min original-pos (1- (cdr new-bounds)))))
+      t)))
+
 (defun pilish--insert-rendered-tool-content (content lang is-edit-diff)
   "Insert CONTENT rendered for LANG with a trailing newline.
 When IS-EDIT-DIFF is non-nil, apply diff overlays to the inserted block."
@@ -3595,26 +3692,28 @@ Returns (START . END) if inside a tool block, nil otherwise."
 
 (defun pilish-toggle-tool-section ()
   "Toggle the section at point.
-Completed thinking blocks toggle first, then tool output blocks, then the
-command falls back to `outline-cycle' for turn folding."
+The startup banner toggles first, then completed thinking blocks, then tool
+output blocks, then the command falls back to `outline-cycle' for turn
+folding."
   (interactive)
-  (unless (pilish--toggle-thinking-block-at-point)
-    (let ((original-pos (point)))
-      (if-let* ((bounds (pilish--find-tool-block-bounds)))
-          (if-let* ((btn (pilish--find-toggle-button-in-region
-                          (car bounds) (cdr bounds))))
-              (progn
-                (pilish--toggle-tool-output btn)
-                ;; Try to restore position, clamped to new block bounds.
-                ;; Use (1- end) because overlays-at uses half-open [start, end),
-                ;; so clamping to exactly end would place cursor outside the
-                ;; overlay, breaking the next toggle.
-                (when-let* ((new-bounds (pilish--find-tool-block-bounds)))
-                  (goto-char (min original-pos (1- (cdr new-bounds))))))
-            ;; No button found - short output, use outline-cycle
-            (outline-cycle))
-        ;; Not in a tool block
-        (outline-cycle)))))
+  (unless (pilish--toggle-startup-banner-at-point)
+    (unless (pilish--toggle-thinking-block-at-point)
+      (let ((original-pos (point)))
+        (if-let* ((bounds (pilish--find-tool-block-bounds)))
+            (if-let* ((btn (pilish--find-toggle-button-in-region
+                            (car bounds) (cdr bounds))))
+                (progn
+                  (pilish--toggle-tool-output btn)
+                  ;; Try to restore position, clamped to new block bounds.
+                  ;; Use (1- end) because overlays-at uses half-open [start, end),
+                  ;; so clamping to exactly end would place cursor outside the
+                  ;; overlay, breaking the next toggle.
+                  (when-let* ((new-bounds (pilish--find-tool-block-bounds)))
+                    (goto-char (min original-pos (1- (cdr new-bounds))))))
+              ;; No button found - short output, use outline-cycle
+              (outline-cycle))
+          ;; Not in a tool block
+          (outline-cycle))))))
 
 ;;;; Tool Block Cooling
 ;;

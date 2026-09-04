@@ -864,6 +864,108 @@ without an input window."
   (let ((header (pilish--format-startup-header)))
     (should (string-equal "Pilish" (car (split-string header "\n"))))))
 
+(defun pilish-test--banner-commands ()
+  "Return a command fixture with two prompts and two skills."
+  (list '(:name "create-todo" :description "New todo" :source "prompt")
+        '(:name "fix-tests" :description "Fix tests" :source "prompt")
+        '(:name "skill:aws-sso" :description "AWS SSO" :source "skill")
+        '(:name "skill:uv" :description "uv runner" :source "skill")))
+
+(ert-deftest pilish-test-startup-header-shows-summary-line ()
+  "Startup header ends with a compact summary line after the keybindings.
+Counts come from `pilish--commands' and the pi version from
+`pilish--process-version'."
+  (let ((dir (pilish-test--make-temp-directory "pilish-test-banner-summary-")))
+    (unwind-protect
+        (pilish-test-with-mock-session dir
+          (let ((chat (get-buffer (pilish-test--chat-buffer-name dir))))
+            (with-current-buffer chat
+              (setq pilish--process-version "0.84.2"
+                    pilish--commands (pilish-test--banner-commands))
+              (pilish--display-startup-header)
+              (should (string-match-p
+                       (regexp-quote
+                        "pi v0.84.2 · pilish 3.0.0 · 2 skills · 2 prompts · TAB details")
+                       (buffer-string))))))
+      (delete-directory dir t))))
+
+(ert-deftest pilish-test-startup-header-omits-missing-summary-data ()
+  "Summary line drops the pi version and count segments when data is missing.
+Never renders misleading zero counts."
+  (let ((dir (pilish-test--make-temp-directory "pilish-test-banner-omitted-")))
+    (unwind-protect
+        (pilish-test-with-mock-session dir
+          (let* ((chat (get-buffer (pilish-test--chat-buffer-name dir)))
+                 (text (with-current-buffer chat (buffer-string)))
+                 (lines (split-string text "\n")))
+            (should (member "pilish 3.0.0 · TAB details" lines))
+            (should-not (string-match-p "pi v" text))
+            (should-not (string-match-p "[0-9]+ skills" text))
+            (should-not (string-match-p "[0-9]+ prompts" text))))
+      (delete-directory dir t))))
+
+(ert-deftest pilish-test-refresh-startup-banner-fills-summary-line ()
+  "Refreshing the banner replaces the summary line in place, idempotently."
+  (let ((dir (pilish-test--make-temp-directory "pilish-test-banner-refresh-")))
+    (unwind-protect
+        (pilish-test-with-mock-session dir
+          (let ((chat (get-buffer (pilish-test--chat-buffer-name dir))))
+            (with-current-buffer chat
+              ;; The mock session displayed the banner with no data yet.
+              (setq pilish--process-version "0.84.2")
+              (pilish--set-commands (pilish-test--banner-commands))
+              (pilish--refresh-startup-banner)
+              (should (string-match-p
+                       (regexp-quote
+                        "pi v0.84.2 · pilish 3.0.0 · 2 skills · 2 prompts · TAB details")
+                       (buffer-string)))
+              (should-not (member "pilish 3.0.0 · TAB details"
+                                  (split-string (buffer-string) "\n")))
+              (let ((after-first (buffer-string)))
+                (pilish--refresh-startup-banner)
+                (should (equal (buffer-string) after-first))))))
+      (delete-directory dir t))))
+
+(ert-deftest pilish-test-refresh-startup-banner-noop-without-banner ()
+  "Refreshing the banner is a no-op when the buffer shows no banner."
+  (let ((dir (pilish-test--make-temp-directory "pilish-test-banner-noop-")))
+    (unwind-protect
+        (pilish-test-with-mock-session dir
+          (let ((chat (get-buffer (pilish-test--chat-buffer-name dir))))
+            (with-current-buffer chat
+              (let ((inhibit-read-only t))
+                (erase-buffer))
+              ;; Must not signal and must not insert anything.
+              (pilish--refresh-startup-banner)
+              (should-not (string-match-p "TAB details" (buffer-string))))))
+      (delete-directory dir t))))
+
+(ert-deftest pilish-test-startup-context-files-scan ()
+  "Context scan walks up from DIRECTORY collecting AGENTS-family files.
+The user-level file comes first, then nearest directory first walking
+upward; in a given directory AGENTS.override.md wins and shadows the
+other family names there."
+  (let* ((root (pilish-test--make-temp-directory "pilish-test-banner-context-"))
+         (user-dir (expand-file-name "home" root))
+         (walk-dir (expand-file-name "walk" root))
+         (sub-dir (expand-file-name "sub" walk-dir))
+         (proj-dir (expand-file-name "proj" sub-dir))
+         (user-file (expand-file-name "AGENTS.md" user-dir))
+         (proj-file (expand-file-name "CLAUDE.md" proj-dir))
+         (override-file (expand-file-name "AGENTS.override.md" sub-dir))
+         (walk-file (expand-file-name "AGENTS.md" walk-dir)))
+    (make-directory user-dir t)
+    (make-directory proj-dir t)
+    ;; sub-dir carries both the override and a plain AGENTS.md; only the
+    ;; override may be reported.
+    (dolist (file (list user-file proj-file override-file
+                        (expand-file-name "AGENTS.md" sub-dir) walk-file))
+      (with-temp-file file (insert "agents\n")))
+    (unwind-protect
+        (should (equal (pilish--startup-context-files proj-dir user-dir)
+                       (list user-file proj-file override-file walk-file)))
+      (delete-directory root t))))
+
 (ert-deftest pilish-test-extract-pi-version-from-clean-output ()
   "Extract the plain semantic version returned by pi."
   (should (equal (pilish--extract-pi-version "0.79.1\n")

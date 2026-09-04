@@ -1670,7 +1670,12 @@ setter updates all of them to keep them in sync."
       (when (and (buffer-live-p buf)
                  (not (eq buf (current-buffer))))
         (with-current-buffer buf
-          (setq pilish--commands commands))))))
+          (setq pilish--commands commands))))
+    ;; The banner summary reads buffer-local commands, so refresh it in the
+    ;; chat buffer wherever the RPC callback happened to run.
+    (when (buffer-live-p chat-buf)
+      (with-current-buffer chat-buf
+        (pilish--refresh-startup-banner)))))
 
 ;;;; Buffer Navigation
 
@@ -2315,21 +2320,154 @@ Stores the result in CHAT-BUF and emits a minibuffer notice when available."
              (with-current-buffer chat-buf
                (setq pilish--process-version version)
                (message "Pi: version %s" version)
-               (pilish--warn-if-pi-version-outdated version)))))))))
+               (pilish--warn-if-pi-version-outdated version)
+               ;; The banner summary shows the probed version; the callback
+               ;; already re-established the chat-buffer context above.
+               (pilish--refresh-startup-banner)))))))))
 
 (defun pilish--format-startup-header ()
-  "Format the startup header string with styled separator."
+  "Format the startup header string with separator and session summary.
+Ends with the compact, toggleable banner line built by
+`pilish--format-startup-banner-compact'."
   (let ((separator (pilish--make-separator "Pilish")))
     (concat
      separator "\n"
      "C-c C-c   send prompt\n"
      "C-c C-k   abort\n"
      "C-c C-r   sessions\n"
-     "C-c C-p   menu\n")))
+     "C-c C-p   menu\n"
+     (pilish--format-startup-banner-compact) "\n")))
 
 (defun pilish--display-startup-header ()
   "Display the startup header in the chat buffer."
   (pilish--append-to-chat (pilish--format-startup-header)))
+
+;;;; Startup Banner
+
+(defconst pilish--startup-context-candidates
+  '("AGENTS.override.md" "AGENTS.md" "AGENTS.MD" "CLAUDE.md" "CLAUDE.MD")
+  "Context file names pi loads, in per-directory precedence order.
+AGENTS.override.md shadows AGENTS.md within the same directory.")
+
+(defun pilish--startup-context-file-in-dir (directory)
+  "Return the first existing context file path in DIRECTORY, or nil.
+Candidates from `pilish--startup-context-candidates' are checked in order
+and only regular files count."
+  (catch 'found
+    (dolist (name pilish--startup-context-candidates nil)
+      (let ((path (expand-file-name name directory)))
+        (when (and (file-exists-p path) (file-regular-p path))
+          (throw 'found path))))))
+
+(defun pilish--startup-context-files (&optional directory user-agent-dir)
+  "Return existing AGENTS-family context files pi would load.
+The user-level file from USER-AGENT-DIR (default \"~/.pi/agent\", expanded)
+comes first when present, then one file per ancestor of DIRECTORY walking up
+to the root, nearest directory first.  DIRECTORY defaults to the chat
+buffer's session directory.  Only the first existing candidate is returned
+per directory."
+  (let* ((user-dir (expand-file-name (or user-agent-dir "~/.pi/agent")))
+         (start-dir (expand-file-name
+                     (or directory (pilish--chat-session-directory))))
+         (files (when-let* ((user-file
+                             (pilish--startup-context-file-in-dir user-dir)))
+                  (list user-file)))
+         (dir (directory-file-name start-dir)))
+    (catch 'done
+      (while t
+        (when-let* ((file (pilish--startup-context-file-in-dir dir)))
+          (unless (member file files)
+            (setq files (append files (list file)))))
+        (let ((parent (directory-file-name (file-name-directory dir))))
+          (when (string= parent dir)
+            (throw 'done nil))
+          (setq dir parent))))
+    files))
+
+(defun pilish--startup-banner-command-names (source)
+  "Return names of `pilish--commands' entries whose :source equals SOURCE.
+Order follows `pilish--commands' so the banner preserves command order."
+  (delq nil
+        (mapcar (lambda (command)
+                  (when (equal (plist-get command :source) source)
+                    (plist-get command :name)))
+                pilish--commands)))
+
+(defun pilish--startup-banner-count-commands (source)
+  "Return how many `pilish--commands' entries have :source equal to SOURCE."
+  (length (pilish--startup-banner-command-names source)))
+
+(defun pilish--startup-banner-version-segments ()
+  "Return version segments for the startup banner summary.
+Includes \"pi V\" only when `pilish--process-version' is set and always
+includes \"pilish V\" from `pilish-version'."
+  (delq nil
+        (list (when pilish--process-version
+                (concat "pi v" pilish--process-version))
+              (concat "pilish " pilish-version))))
+
+(defun pilish--propertize-startup-banner (text state)
+  "Return TEXT tagged as a startup banner shown in display STATE.
+STATE is `compact' or `expanded'; the `pilish-startup-banner' text property
+marks the toggleable span and records its current display, mirroring how
+completed thinking blocks tag their spans."
+  (propertize text
+              'pilish-startup-banner state
+              'help-echo "TAB: toggle session details"))
+
+(defun pilish--format-startup-banner-compact ()
+  "Return the propertized compact startup banner summary line.
+Count segments are omitted entirely while `pilish--commands' is unset, so a
+session that has not loaded commands yet never shows misleading zero
+counts."
+  (let ((segments (pilish--startup-banner-version-segments)))
+    (when pilish--commands
+      (setq segments
+            (append segments
+                    (list (format "%d skills"
+                                  (pilish--startup-banner-count-commands
+                                   "skill"))
+                          (format "%d prompts"
+                                  (pilish--startup-banner-count-commands
+                                   "prompt"))))))
+    (pilish--propertize-startup-banner
+     (concat (mapconcat #'identity segments " · ") " · TAB details")
+     'compact)))
+
+(defun pilish--startup-banner-region ()
+  "Return the startup banner span in the current buffer as (START . END).
+Returns nil when the buffer contains no banner."
+  (let ((pos (point-min)))
+    (catch 'found
+      (while (< pos (point-max))
+        (if (get-text-property pos 'pilish-startup-banner)
+            (throw 'found
+                   (cons pos
+                         (next-single-property-change
+                          pos 'pilish-startup-banner nil (point-max))))
+          (setq pos (next-single-property-change
+                     pos 'pilish-startup-banner nil (point-max)))))
+      nil)))
+
+(defun pilish--refresh-startup-banner ()
+  "Re-render the compact startup banner in place from current buffer state.
+No-op when the buffer has no banner or the banner is expanded, so a
+background refresh never collapses details the user opened.  Idempotent."
+  (when-let* ((region (pilish--startup-banner-region))
+              (state (get-text-property (car region)
+                                        'pilish-startup-banner)))
+    (when (eq state 'compact)
+      (let ((inhibit-read-only t)
+            (start (car region))
+            (end (cdr region)))
+        (pilish--with-scroll-preservation
+          (save-excursion
+            (goto-char start)
+            (delete-region start end)
+            (insert (pilish--format-startup-banner-compact))
+            (condition-case-unless-debug nil
+                (font-lock-ensure start (point))
+              (error nil))))))))
 
 ;;;; Header Line
 
