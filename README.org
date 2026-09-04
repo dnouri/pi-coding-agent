@@ -886,6 +886,7 @@ evaluate this once to install the external dependencies:
 (package-refresh-contents)
 
 (package-install 'transient)
+(package-install 'magit-section)
 (package-install 'md-ts-mode)
 (package-install 'markdown-table-wrap)
 #+end_src
