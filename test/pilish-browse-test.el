@@ -1166,7 +1166,9 @@ completes in-call."
 ;;;; Session Browser Dispatch Transient
 
 (ert-deftest pilish-test-session-browser-dispatch-binding ()
-  "Session browser binds `?' and `h' to the dispatch transient."
+  "Session browser binds its direct delete and dispatch keys."
+  (should (eq (lookup-key pilish-session-browser-mode-map "d")
+              'pilish-session-browser-delete))
   (should (eq (lookup-key pilish-session-browser-mode-map "?")
               'pilish-session-browser-dispatch))
   (should (eq (lookup-key pilish-session-browser-mode-map "h")
@@ -1182,6 +1184,7 @@ completes in-call."
   (let ((expected
          '(("RET" . pilish-session-browser-switch)
            ("r"   . pilish-session-browser-rename)
+           ("d"   . pilish-session-browser-delete)
            ("s"   . pilish-session-browser-cycle-sort)
            ("f"   . pilish-session-browser-toggle-named)
            ("t"   . pilish-session-browser-toggle-scope)
@@ -2309,6 +2312,140 @@ landed-elsewhere state all leave the window alone."
       (kill-buffer browser-buf)
       (kill-buffer other-buf)
       (when (buffer-live-p chat-buf) (kill-buffer chat-buf)))))
+
+;;;; Session Delete
+
+(defun pilish-test--session-command-at-point (item command)
+  "Run COMMAND at ITEM's session-browser section."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-items (list item))
+    (pilish--session-browser-rerender)
+    (goto-char (point-min))
+    (search-forward (pilish--session-display-name item))
+    (backward-char)
+    (funcall command)))
+
+(ert-deftest pilish-test-session-delete-confirmed ()
+  "Confirmed deletion uses the trash-aware file operation and refreshes."
+  (let* ((path (make-temp-file "pilish-delete-session-" nil ".jsonl"))
+         (name (file-name-nondirectory path))
+         (item (list :path path :name "Disposable session"
+                     :messageCount 1 :modified "2026-03-02T10:00:00Z"))
+         (real-delete (symbol-function 'delete-file))
+         (delete-calls nil)
+         (refreshes 0)
+         (prompt nil)
+         (messages nil))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'y-or-n-p)
+                     (lambda (text)
+                       (setq prompt text)
+                       t))
+                    ((symbol-function 'delete-file)
+                     (lambda (file &optional trash)
+                       (push (list file trash) delete-calls)
+                       (funcall real-delete file)))
+                    ((symbol-function 'pilish--session-browser-fetch-and-render)
+                     (lambda () (setq refreshes (1+ refreshes))))
+                    ((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (push (apply #'format fmt args) messages))))
+            (pilish-test--session-command-at-point
+             item #'pilish-session-browser-delete))
+          (should (equal prompt (format "Delete session %s? " name)))
+          (should (equal delete-calls (list (list path t))))
+          (should-not (file-exists-p path))
+          (should (= refreshes 1))
+          (should (member (format "Pi: Deleted %s" name) messages)))
+      (when (file-exists-p path)
+        (funcall real-delete path)))))
+
+(ert-deftest pilish-test-session-delete-cancelled ()
+  "Declining deletion leaves the session file and browser untouched."
+  (let* ((path (make-temp-file "pilish-keep-session-" nil ".jsonl"))
+         (item (list :path path :name "Keep this session"
+                     :messageCount 1 :modified "2026-03-02T10:00:00Z"))
+         (delete-calls nil)
+         (refreshes 0))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) nil))
+                    ((symbol-function 'delete-file)
+                     (lambda (&rest args) (push args delete-calls)))
+                    ((symbol-function 'pilish--session-browser-fetch-and-render)
+                     (lambda () (setq refreshes (1+ refreshes)))))
+            (pilish-test--session-command-at-point
+             item #'pilish-session-browser-delete))
+          (should (file-exists-p path))
+          (should-not delete-calls)
+          (should (= refreshes 0)))
+      (delete-file path))))
+
+(ert-deftest pilish-test-session-delete-refuses-live-session ()
+  "A live Pilish process blocks deletion even when its chat is not linked."
+  (let* ((path (make-temp-file "pilish-live-session-" nil ".jsonl"))
+         (item (list :path path :name "Open elsewhere"
+                     :messageCount 1 :modified "2026-03-02T10:00:00Z"))
+         (chat-buf (generate-new-buffer "*pilish-test-delete-live-chat*"))
+         (proc (start-process "pilish-delete-live-test" nil "sleep" "30"))
+         (prompted nil)
+         (refreshes 0))
+    (set-process-query-on-exit-flag proc nil)
+    (process-put proc 'pilish-chat-buffer chat-buf)
+    (with-current-buffer chat-buf
+      (setq pilish--process proc
+            pilish--state (list :session-file path)))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'y-or-n-p)
+                     (lambda (_prompt)
+                       (setq prompted t)
+                       t))
+                    ((symbol-function 'pilish--session-browser-fetch-and-render)
+                     (lambda () (setq refreshes (1+ refreshes)))))
+            (should
+             (equal
+              (error-message-string
+               (should-error
+                (pilish-test--session-command-at-point
+                 item #'pilish-session-browser-delete)
+                :type 'user-error))
+              (format "Session is open in %s — close it first"
+                      (buffer-name chat-buf)))))
+          (should-not prompted)
+          (should (file-exists-p path))
+          (should (= refreshes 0)))
+      (when (process-live-p proc)
+        (delete-process proc))
+      (kill-buffer chat-buf)
+      (delete-file path))))
+
+(ert-deftest pilish-test-session-delete-ignores-non-session-section ()
+  "Delete on a grouping header does not treat its value as a file path."
+  (with-temp-buffer
+    (pilish-session-browser-mode)
+    (setq pilish--session-browser-items
+          '((:path "/tmp/not-used.jsonl" :name "Grouped session"
+             :messageCount 1 :modified "2026-03-02T10:00:00Z"))
+          pilish--session-browser-sort "recent")
+    (pilish--session-browser-rerender)
+    (goto-char (point-min))
+    (let ((prompted nil)
+          (deleted nil)
+          (messages nil))
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (_prompt) (setq prompted t) t))
+                ((symbol-function 'delete-file)
+                 (lambda (&rest args) (push args deleted)))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (push (apply #'format fmt args) messages))))
+        (pilish-session-browser-delete))
+      (should-not prompted)
+      (should-not deleted)
+      (should (member "Pi: No session at point" messages)))))
 
 ;;;; Phase 2: Rename
 
