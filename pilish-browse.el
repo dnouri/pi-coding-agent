@@ -28,7 +28,7 @@
 ;; Session and tree browsing for Pilish.
 ;;
 ;; Provides two read-only, refreshable, keyboard-driven buffers:
-;;   - Session Browser: find, filter, switch sessions (like TUI /resume)
+;;   - Session Browser: find, filter, switch, rename, and delete sessions
 ;;   - Tree Browser: navigate conversation tree, label nodes (like TUI /tree)
 ;;
 ;; Session data comes from time-sliced scans of JSONL files on disk,
@@ -538,6 +538,7 @@ Groups: \"Today\", \"Yesterday\", \"This Week\", \"Older\"."
     (define-key map (kbd "/") #'pilish-session-browser-search)
     (define-key map (kbd "t") #'pilish-session-browser-toggle-scope)
     (define-key map (kbd "r") #'pilish-session-browser-rename)
+    (define-key map (kbd "d") #'pilish-session-browser-delete)
     (define-key map (kbd "RET") #'pilish-session-browser-switch)
     (define-key map (kbd "?") #'pilish-session-browser-dispatch)
     (define-key map (kbd "h") #'pilish-session-browser-dispatch)
@@ -614,6 +615,7 @@ browser's state on the real rendering path."
    ["Actions"
     ("RET" "switch" pilish-session-browser-switch)
     ("r" "rename" pilish-session-browser-rename)
+    ("d" "delete" pilish-session-browser-delete)
     ("g" "refresh" pilish-browse-refresh)
     ("q" "quit" quit-window)]
    ["Filter & Sort"
@@ -858,12 +860,50 @@ Message count and age are rendered as a right-margin overlay."
     (when need-rerender
       (pilish--session-browser-rerender))))
 
+(defun pilish--session-browser-path-at-point ()
+  "Return the file path of the session at point, or nil."
+  (when-let* ((section (magit-current-section))
+              ((object-of-class-p section 'pilish-session-section)))
+    (oref section value)))
+
 (defun pilish-session-browser-switch ()
   "Switch to the session at point."
   (interactive)
-  (if-let* ((section (magit-current-section))
-            (path (oref section value)))
+  (if-let* ((path (pilish--session-browser-path-at-point)))
       (pilish--browse-switch-session path)
+    (message "Pi: No session at point")))
+
+(defun pilish--browse-live-session-chat-buffer (path)
+  "Return the chat buffer of a live Pilish process using PATH, or nil."
+  (cl-loop for proc in (process-list)
+           for chat-buf = (process-get proc 'pilish-chat-buffer)
+           when (and (pilish--session-live-process-p proc)
+                     (buffer-live-p chat-buf)
+                     (pilish--browse-session-file-matches-p chat-buf path))
+           return chat-buf))
+
+(defun pilish--browse-ensure-session-closed (path)
+  "Signal a `user-error' when a live Pilish process is using PATH."
+  (when-let* ((chat-buf (pilish--browse-live-session-chat-buffer path)))
+    (user-error "Session is open in %s — close it first"
+                (buffer-name chat-buf))))
+
+(defun pilish-session-browser-delete ()
+  "Delete the session at point after confirmation.
+Refuse sessions used by a live Pilish process in this Emacs.  Processes
+outside this Emacs cannot be detected.  Pass the trash flag to
+`delete-file', so `delete-by-moving-to-trash' controls whether the file
+is moved to the system trash or permanently removed."
+  (interactive)
+  (if-let* ((path (pilish--session-browser-path-at-point)))
+      (let ((name (file-name-nondirectory path)))
+        (pilish--browse-ensure-session-closed path)
+        (when (y-or-n-p (format "Delete session %s? " name))
+          ;; A process can open the session while confirmation is active.
+          (pilish--browse-ensure-session-closed path)
+          (delete-file path t)
+          (pilish--session-browser-fetch-and-render)
+          (message "Pi: Deleted %s" name)))
     (message "Pi: No session at point")))
 
 (defun pilish--browse-clean-session-name (name)
@@ -1005,8 +1045,7 @@ current-vs-other session (see
     appends out-of-band, then refreshes; an unreadable file cancels
     with a message and no refresh."
   (interactive)
-  (if-let* ((section (magit-current-section))
-            (path (oref section value)))
+  (if-let* ((path (pilish--session-browser-path-at-point)))
       (let* ((item (cl-find path pilish--session-browser-items
                             :key (lambda (it) (plist-get it :path))
                             :test #'equal))
