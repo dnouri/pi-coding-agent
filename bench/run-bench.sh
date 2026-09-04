@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-bench.sh - Run pilish table rendering benchmarks
+# run-bench.sh - Run Pilish table rendering benchmarks
 #
 # Usage:
 #   ./bench/run-bench.sh              # GUI via xvfb (primary lane)
@@ -42,7 +42,7 @@ EMACS_INIT=(
     -l "$SCRIPT_DIR/pilish-bench.el"
 )
 
-echo "=== pilish Table Rendering Benchmarks ==="
+echo "=== Pilish Table Rendering Benchmarks ==="
 echo "Project: $PROJECT_DIR"
 
 if [ "$BATCH" = "1" ]; then

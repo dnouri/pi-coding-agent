@@ -25,7 +25,7 @@
 
 ;;; Commentary:
 
-;; Session and tree browsing for pilish.
+;; Session and tree browsing for Pilish.
 ;;
 ;; Provides two read-only, refreshable, keyboard-driven buffers:
 ;;   - Session Browser: find, filter, switch sessions (like TUI /resume)
@@ -528,7 +528,7 @@ Groups: \"Today\", \"Yesterday\", \"This Week\", \"Older\"."
     (define-key map (kbd "g") #'pilish-browse-refresh)
     (define-key map (kbd "q") #'quit-window)
     map)
-  "Base keymap for pilish browse modes.")
+  "Base keymap for Pilish browse modes.")
 
 (defvar pilish-session-browser-mode-map
   (let ((map (make-sparse-keymap)))
@@ -653,7 +653,7 @@ browser's state on the real rendering path."
 
 (define-derived-mode pilish-browse-mode magit-section-mode
   "Pi-Browse"
-  "Base mode for pilish browse buffers.
+  "Base mode for Pilish browse buffers.
 Inherits section navigation from `magit-section-mode'."
   :group 'pilish)
 

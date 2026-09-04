@@ -6,7 +6,7 @@
 
 ;;; Commentary:
 
-;; Deterministic reload/resume benchmarks for pilish.
+;; Deterministic reload/resume benchmarks for Pilish.
 ;; The benchmark generates synthetic pi JSONL session files, drives the Emacs
 ;; UI through a fake JSON-over-stdio backend, and records only metrics.  No
 ;; private session files are read.

@@ -25,7 +25,7 @@
 
 ;;; Commentary:
 
-;; Input buffer features for pilish: prompt composition,
+;; Input buffer features for Pilish: prompt composition,
 ;; history navigation (comint/eshell-style M-p/M-n), incremental
 ;; history search (readline-style C-r), file reference completion (@),
 ;; path completion (Tab), slash command completion, message queuing

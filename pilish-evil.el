@@ -1,4 +1,4 @@
-;;; pilish-evil.el --- Evil keybindings for pilish -*- lexical-binding: t; -*-
+;;; pilish-evil.el --- Evil keybindings for Pilish -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Daniel Nouri
 
@@ -25,7 +25,7 @@
 
 ;;; Commentary:
 
-;; Optional Evil integration for pilish, modeled on how Evil
+;; Optional Evil integration for Pilish, modeled on how Evil
 ;; and Magit cooperate: the read-only chat buffer starts in motion
 ;; state so navigation keys work unmodified, the input buffer starts
 ;; in insert state, and `?' opens the transient menu.
@@ -197,7 +197,7 @@ When APPEND is non-nil, move point to the end of the input buffer."
 
 ;;;###autoload
 (defun pilish-evil-setup ()
-  "Set up Evil integration for pilish.
+  "Set up Evil integration for Pilish.
 Set initial buffer states, install keybindings, and apply the user
 options `pilish-evil-chat-state',
 `pilish-evil-input-state',

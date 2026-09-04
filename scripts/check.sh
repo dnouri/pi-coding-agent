@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Quality checks for pilish - run before commits
+# Quality checks for Pilish - run before commits
 #
 # Usage:
 #   ./scripts/check.sh              # Unit tests only (fast)

@@ -85,7 +85,7 @@ Each entry is (LANG URL REVISION [SOURCE-DIR]).")
 (defconst pilish-grammar-recipes
   (append pilish-essential-grammar-recipes
           pilish-optional-grammar-recipes)
-  "All tree-sitter grammar recipes needed by pilish.")
+  "All tree-sitter grammar recipes needed by Pilish.")
 
 ;; Register recipes so `M-x treesit-install-language-grammar' works
 ;; on Emacs 29/30 (which ship with zero recipes).  Use APPEND so user
@@ -319,7 +319,7 @@ then offers to install the missing ones."
         (with-current-buffer buf
           (let ((inhibit-read-only t))
             (erase-buffer)
-            (insert (format "pilish Tree-sitter Grammars\n\
+            (insert (format "Pilish Tree-sitter Grammars\n\
 ====================================\n\n"))
             (when essential-missing
               (insert (format "⚠ ESSENTIAL (required for chat rendering):\n"))

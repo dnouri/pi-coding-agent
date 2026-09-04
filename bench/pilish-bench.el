@@ -6,7 +6,7 @@
 
 ;;; Commentary:
 
-;; Performance benchmarks for display-only table rendering in pilish.
+;; Performance benchmarks for display-only table rendering in Pilish.
 ;; Exercises the full rendering pipeline: tree-sitter detection, visible-text
 ;; extraction, cell wrapping, overlay creation, streaming refresh, and
 ;; hot-tail resize.

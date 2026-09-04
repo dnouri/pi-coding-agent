@@ -860,9 +860,9 @@ without an input window."
     (should (string-match-p "C-c C-r   sessions" header))))
 
 (ert-deftest pilish-test-startup-header-shows-label ()
-  "Startup header labels the buffer with the package name."
+  "Startup header labels the buffer with the project title."
   (let ((header (pilish--format-startup-header)))
-    (should (string-match-p "^pilish$" header))))
+    (should (string-equal "Pilish" (car (split-string header "\n"))))))
 
 (ert-deftest pilish-test-extract-pi-version-from-clean-output ()
   "Extract the plain semantic version returned by pi."

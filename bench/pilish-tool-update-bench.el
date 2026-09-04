@@ -6,7 +6,7 @@
 
 ;;; Commentary:
 
-;; Deterministic tool_execution_update storm benchmarks for pilish.
+;; Deterministic tool_execution_update storm benchmarks for Pilish.
 ;; A real session backed by `bench/fake-pi-tool-update-storm.py' renders a
 ;; synthetic long-session fill phase and then a burst-patterned storm of
 ;; subagent progress updates.  The harness measures how the stock frontend

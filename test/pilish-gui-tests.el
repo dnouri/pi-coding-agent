@@ -1,4 +1,4 @@
-;;; pilish-gui-tests.el --- GUI integration tests for pilish -*- lexical-binding: t; -*-
+;;; pilish-gui-tests.el --- GUI integration tests for Pilish -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 ;;

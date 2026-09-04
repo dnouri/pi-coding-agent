@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-reload-resume-bench.sh - Run pilish reload/resume benchmarks
+# run-reload-resume-bench.sh - Run Pilish reload/resume benchmarks
 #
 # Usage:
 #   ./bench/run-reload-resume-bench.sh                         # GUI via xvfb (primary lane)
@@ -186,7 +186,7 @@ EMACS_INIT=(
     -l "$SCRIPT_DIR/pilish-reload-resume-bench.el"
 )
 
-printf '=== pilish Reload/Resume Benchmarks ===\n'
+printf '=== Pilish Reload/Resume Benchmarks ===\n'
 printf 'Project: %s\n' "$PROJECT_DIR"
 if [[ "$BATCH" = "1" ]]; then
     MODE="batch"
@@ -297,7 +297,7 @@ if rows:
         writer.writerows(rows)
 
 summary_lines: list[str] = []
-summary_lines.append("# pilish reload/resume benchmark summary")
+summary_lines.append("# Pilish reload/resume benchmark summary")
 summary_lines.append("")
 summary_lines.append("Synthetic deterministic fixtures only; no private session content is used.")
 summary_lines.append("")

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-tool-update-bench.sh - Run pilish tool-update storm benchmarks
+# run-tool-update-bench.sh - Run Pilish tool-update storm benchmarks
 #
 # Usage:
 #   ./bench/run-tool-update-bench.sh                         # GUI via xvfb (primary lane)
@@ -208,7 +208,7 @@ EMACS_INIT=(
     -l "$SCRIPT_DIR/pilish-tool-update-bench.el"
 )
 
-printf '=== pilish Tool-Update Benchmarks ===\n'
+printf '=== Pilish Tool-Update Benchmarks ===\n'
 printf 'Project: %s\n' "$PROJECT_DIR"
 if [[ "$BATCH" = "1" ]]; then
     MODE="batch"
@@ -357,7 +357,7 @@ if rows:
         writer.writerows(rows)
 
 summary_lines: list[str] = []
-summary_lines.append("# pilish tool-update benchmark summary")
+summary_lines.append("# Pilish tool-update benchmark summary")
 summary_lines.append("")
 summary_lines.append("Synthetic deterministic workload only; no private session content is used.")
 summary_lines.append("")

@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; ERT tests for the core pilish functionality: JSON parsing,
+;; ERT tests for the core Pilish functionality: JSON parsing,
 ;; line accumulation, and command encoding.
 
 ;;; Code:

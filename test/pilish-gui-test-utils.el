@@ -1,4 +1,4 @@
-;;; pilish-gui-test-utils.el --- Utilities for pilish GUI tests -*- lexical-binding: t; -*-
+;;; pilish-gui-test-utils.el --- Utilities for Pilish GUI tests -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 ;;

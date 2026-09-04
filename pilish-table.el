@@ -25,7 +25,7 @@
 
 ;;; Commentary:
 
-;; Display-only markdown pipe table rendering for pilish chat buffers.
+;; Display-only markdown pipe table rendering for Pilish chat buffers.
 ;;
 ;; Detects pipe tables via tree-sitter, wraps them to the window width via
 ;; `markdown-table-wrap', and renders the wrapped output as per-line display

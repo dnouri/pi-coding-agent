@@ -93,12 +93,12 @@ version after installation finishes."
     t))
 
 (defun pilish-build--default-grammars ()
-  "Return all grammars needed by pilish."
+  "Return all grammars needed by Pilish."
   (require 'pilish-grammars)
   (mapcar #'car pilish-grammar-recipes))
 
 (defun pilish-build-install-grammars (&optional grammars)
-  "Install tree-sitter GRAMMARS used by pilish.
+  "Install tree-sitter GRAMMARS used by Pilish.
 GRAMMARS defaults to all recipes from `pilish-grammar-recipes'.
 Returns a plist with counts for already installed, newly installed,
 failed, and total grammars.  Signals an error if any grammar fails."

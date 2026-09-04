@@ -1,8 +1,8 @@
-;;; pilish-test.el --- Tests for pilish -*- lexical-binding: t; -*-
+;;; pilish-test.el --- Tests for Pilish -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; Entry-point and cross-module integration tests for pilish.
+;; Entry-point and cross-module integration tests for Pilish.
 
 ;;; Code:
 
@@ -784,7 +784,7 @@ still mock the RPC boundary, so the process is never used for I/O."
             (dired-goto-file session-file)
             (cl-letf (((symbol-function 'dired-get-filename)
                        (lambda (&rest _)
-                         (ert-fail "pilish inspected Dired point")))
+                         (ert-fail "Pilish inspected Dired point")))
                       ((symbol-function 'project-current)
                        (lambda (&rest _) nil))
                       ((symbol-function 'pilish--check-dependencies)
@@ -818,13 +818,13 @@ still mock the RPC boundary, so the process is never used for I/O."
           (with-current-buffer file-buf
             (cl-letf (((symbol-function 'pilish--read-session-file-name)
                        (lambda ()
-                         (ert-fail "pilish read a session file")))
+                         (ert-fail "Pilish read a session file")))
                       ((symbol-function 'pilish--session-file-cwd-or-error)
                        (lambda (&rest _)
-                         (ert-fail "pilish validated a session file")))
+                         (ert-fail "Pilish validated a session file")))
                       ((symbol-function 'pilish--resume-selected-session)
                        (lambda (&rest _)
-                         (ert-fail "pilish resumed a session file")))
+                         (ert-fail "Pilish resumed a session file")))
                       ((symbol-function 'project-current)
                        (lambda (&rest _) nil))
                       ((symbol-function 'pilish--check-dependencies)

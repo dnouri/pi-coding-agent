@@ -1,4 +1,4 @@
-;;; pilish-core.el --- Core functionality for pilish -*- lexical-binding: t; -*-
+;;; pilish-core.el --- Core functionality for Pilish -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Daniel Nouri
 
@@ -25,7 +25,7 @@
 
 ;;; Commentary:
 
-;; Core functionality for pilish: JSON parsing, line buffering, RPC communication.
+;; Core functionality for Pilish: JSON parsing, line buffering, RPC communication.
 ;; This module provides the low-level plumbing for communicating with the
 ;; pi coding agent via JSON-over-stdio.
 

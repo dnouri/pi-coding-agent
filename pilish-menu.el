@@ -26,7 +26,7 @@
 ;;; Commentary:
 
 ;; Transient menu, session management, model selection, and command
-;; infrastructure for pilish.
+;; infrastructure for Pilish.
 ;;
 ;; Key entry points:
 ;;   `pilish-menu'            Transient menu (C-c C-p)
@@ -70,7 +70,7 @@ VERSION may include a leading prefix like `v' or extra suffix text."
                      transient-version
                      pilish--minimum-transient-version))))
   (display-warning 'pilish
-                   (format "pilish requires transient >= %s, \
+                   (format "Pilish requires transient >= %s, \
 but %s is loaded.
   Fix: upgrade transient from MELPA.  If Emacs is using an older built-in
   copy, set `package-install-upgrade-built-in' to t before running

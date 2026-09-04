@@ -8,7 +8,7 @@
 ;;; Commentary:
 
 ;; Batch entry point used by the Makefile and CI to install the
-;; tree-sitter grammars needed by pilish.
+;; tree-sitter grammars needed by Pilish.
 ;;
 ;; Usage:
 ;;   Emacs --batch -Q -L . -l scripts/install-ts-grammars.el
