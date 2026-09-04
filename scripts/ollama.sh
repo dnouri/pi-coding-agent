@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/ollama.sh - Manage Ollama Docker container for testing
 #
-# This script provides isolated Ollama setup for pilish integration tests.
+# This script provides isolated Ollama setup for Pilish integration tests.
 # All data stays in .ollama/ within the project directory.
 #
 # Usage:
@@ -149,7 +149,7 @@ cmd_logs() {
 }
 
 cmd_help() {
-    echo "Ollama Docker management for pilish testing"
+    echo "Ollama Docker management for Pilish testing"
     echo ""
     echo "Usage: $0 <command>"
     echo ""

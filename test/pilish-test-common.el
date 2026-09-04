@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; Common definitions shared across pilish test files.
+;; Common definitions shared across Pilish test files.
 ;; Centralizes timeout values, fake-pi launch helpers, the mock-session
 ;; macro, and toolcall streaming helpers for easy adjustment (e.g., slow CI).
 

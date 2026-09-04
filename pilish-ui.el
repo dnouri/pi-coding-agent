@@ -25,10 +25,10 @@
 
 ;;; Commentary:
 
-;; Foundation module for pilish: shared state, faces, customization,
+;; Foundation module for Pilish: shared state, faces, customization,
 ;; buffer management, display primitives, header-line, and major modes.
 ;;
-;; This is the base layer that all other pilish modules require.
+;; This is the base layer that all other Pilish modules require.
 ;; It provides:
 ;; - Customization options and face definitions
 ;; - Buffer-local session variables (the shared mutable state)
@@ -174,7 +174,7 @@ real session phase change from buffer lifecycle events that merely
 reapply or clean up buffer-local UI.
 
 This is an abnormal hook.  Functions should be idempotent because
-pilish may call them again with the same OLD-PHASE and
+Pilish may call them again with the same OLD-PHASE and
 NEW-PHASE when session buffers are relinked or reset."
   :type 'hook
   :group 'pilish)
@@ -2069,7 +2069,7 @@ Returns nil if MS is nil."
 ;;;; Dependency Checking
 
 (defconst pilish--pi-package "@earendil-works/pi-coding-agent"
-  "Npm package name for the pi CLI supported by pilish.")
+  "Npm package name for the pi CLI supported by Pilish.")
 
 (defconst pilish--minimum-pi-version "0.84.2"
   "Minimum supported pi CLI version.")
@@ -2209,7 +2209,7 @@ warnings for missing dependencies."
 ;;;; Startup Header
 
 (defconst pilish-version "3.0.0"
-  "Version of pilish.")
+  "Version of Pilish.")
 
 (defconst pilish--version-probe-delay 0.1
   "Seconds to wait before probing `pi --version' for a new process.")
@@ -2319,7 +2319,7 @@ Stores the result in CHAT-BUF and emits a minibuffer notice when available."
 
 (defun pilish--format-startup-header ()
   "Format the startup header string with styled separator."
-  (let ((separator (pilish--make-separator "pilish")))
+  (let ((separator (pilish--make-separator "Pilish")))
     (concat
      separator "\n"
      "C-c C-c   send prompt\n"

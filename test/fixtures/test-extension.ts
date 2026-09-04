@@ -1,5 +1,5 @@
 /**
- * Test extension for pilish integration tests.
+ * Test extension for Pilish integration tests.
  * Load with: pi --mode rpc -e test/fixtures/test-extension.ts --no-extensions
  */
 

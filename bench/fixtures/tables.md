@@ -1,4 +1,4 @@
-# Benchmark fixture tables for pilish
+# Benchmark fixture tables for Pilish
 
 Tables below are extracted by the bench harness.  Each table is
 separated by at least one blank line of non-table text.  The fixture

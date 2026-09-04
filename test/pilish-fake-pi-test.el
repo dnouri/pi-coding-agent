@@ -514,7 +514,7 @@ SPEC is (PROC SCENARIO &rest EXTRA-ARGS)."
             :output (buffer-string)))))
 
 (defmacro pilish-fake-pi-test-with-session (spec &rest body)
-  "Create a real pilish session against fake-pi, then run BODY.
+  "Create a real Pilish session against fake-pi, then run BODY.
 SPEC is (SESSION SCENARIO &rest EXTRA-ARGS)."
   (declare (indent 1) (debug t))
   (let ((session (nth 0 spec))

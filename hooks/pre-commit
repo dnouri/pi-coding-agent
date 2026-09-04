@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Git pre-commit hook for pilish
+# Git pre-commit hook for Pilish
 # Runs byte-compilation and tests before allowing commits
 
 exec ./scripts/check.sh

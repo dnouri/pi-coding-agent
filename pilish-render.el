@@ -25,7 +25,7 @@
 
 ;;; Commentary:
 
-;; Rendering module for pilish: streaming chat display, tool output,
+;; Rendering module for Pilish: streaming chat display, tool output,
 ;; and fontification.
 ;;
 ;; This module handles everything that appears in the chat buffer:

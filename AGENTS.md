@@ -239,7 +239,7 @@ tmux new-session -d -s test -x 120 -y 40 \
 sleep 2 && tmux capture-pane -t test -p
 ```
 
-To start a full interactive `pilish` session in tmux:
+To start a full interactive `Pilish` session in tmux:
 ```bash
 tmux new-session -d -s test -x 120 -y 40 \
   "emacs -nw -Q --eval \"(progn (require 'package) (package-initialize) \
@@ -252,7 +252,7 @@ Common gotchas:
 - **Sleep timing**: use `sleep 2` for UI ops, `sleep 10`+ for LLM responses
 - **Buffer names** follow `*pilish-{chat,input}:<dir>*` (abbreviated),
   e.g. `*pilish-chat:~/co/pilish/*`
-- **Window focus**: the `pilish` layout has two windows; `C-x o` switches between them.
+- **Window focus**: the `Pilish` layout has two windows; `C-x o` switches between them.
   Prefer spike scripts over interactive `tmux send-keys` when possible —
   they're reproducible, debuggable, and don't require tracking focus state
 

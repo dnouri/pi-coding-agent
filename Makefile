@@ -1,4 +1,4 @@
-# pilish Makefile
+# Pilish Makefile
 
 EMACS ?= emacs
 export EMACS

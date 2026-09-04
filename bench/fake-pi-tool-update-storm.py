@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fake pi JSON-over-stdio server emitting a tool_execution_update storm.
 
-Drives the pilish tool-update benchmark.  On ``prompt`` the server
+Drives the Pilish tool-update benchmark.  On ``prompt`` the server
 replays one deterministic synthetic agent turn in two phases:
 
 Fill phase
