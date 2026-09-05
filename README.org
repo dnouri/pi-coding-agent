@@ -298,6 +298,11 @@ Press =TAB= on a turn header (=You= or =Assistant=) to fold or unfold
 that turn.  Use =n= and =p= in the chat buffer to jump between user
 messages, and =f= to fork the conversation from the turn at point.
 
+The chat header ends with a session summary line showing the pi and
+Pilish versions plus skill and prompt-template counts.  Press =TAB= on
+that line to expand it into the loaded context files, skills, and
+prompt templates; =TAB= again collapses it back to the summary line.
+
 #+html: <a id="sessions-and-context"></a>
 ** Sessions and context 🗂️
 
@@ -349,7 +354,7 @@ configured warning and error thresholds.
 | =C-r=            | input   | 🕵️ Incremental prompt-history search          |
 | =TAB=            | input   | 🪄 Complete paths, and =/= commands           |
 | =M+<prior/next>= | input   | 🛗 Scroll linked chat window                  |
-| =TAB=            | chat    | 🪗 Toggle thinking block, tool block, or turn |
+| =TAB=            | chat    | 🪗 Toggle summary line, thinking, tool, or turn |
 | =!=              | chat    | 🐚 Run a Dired-inspired command on a file    |
 | =RET=            | chat    | 🎯 Visit strict file target at point          |
 | =n= / =p=        | chat    | 🐾 Navigate user messages                     |

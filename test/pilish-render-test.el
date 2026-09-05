@@ -847,6 +847,114 @@ agent_end + next section's leading newline must not create triple newlines."
       (should (< first-pos custom-pos))
       (should (< custom-pos second-pos)))))
 
+(defun pilish-test--startup-banner-history ()
+  "Return a one-turn history used by startup banner tests."
+  [(:role "user"
+    :content [(:type "text" :text "Question?")]
+    :timestamp 1704067200000)])
+
+(ert-deftest pilish-test-tab-toggles-startup-banner-details ()
+  "TAB on the startup banner expands and collapses the summary details.
+The banner is toggled before thinking blocks and outline cycling."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (setq pilish--process-version "0.84.2"
+          pilish--commands
+          (list '(:name "create-todo" :description "New todo" :source "prompt")
+                '(:name "fix-tests" :description "Fix tests" :source "prompt")
+                '(:name "skill:aws-sso" :description "AWS SSO" :source "skill")
+                '(:name "skill:uv" :description "uv runner" :source "skill")))
+    (pilish--display-startup-header)
+    (goto-char (point-min))
+    (search-forward "TAB details")
+    (pilish-toggle-tool-section)
+    (let ((text (buffer-string)))
+      (should (string-match-p "^pi v0\.84\.2 · pilish 3\.0\.0 · TAB collapse$" text))
+      (should (string-match-p "^\\[Skills\\] aws-sso, uv$" text))
+      (should (string-match-p "^\\[Prompts\\] /create-todo, /fix-tests$" text)))
+    ;; TAB again restores the compact form.
+    (pilish-toggle-tool-section)
+    (let ((text (buffer-string)))
+      (should (string-match-p
+               "^pi v0\.84\.2 · pilish 3\.0\.0 · 2 skills · 2 prompts · TAB details$"
+               text))
+      (should-not (string-match-p "\\[Skills\\]" text))
+      (should-not (string-match-p "\\[Prompts\\]" text))
+      (should-not (string-match-p "TAB collapse" text)))))
+
+(ert-deftest pilish-test-startup-banner-details-list-skills-and-prompts ()
+  "Expanded banner strips the skill: prefix, prefixes prompts with /, and
+joins context files with comma and space."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (setq pilish--process-version "0.84.2"
+          pilish--commands
+          (list '(:name "create-todo" :description "New todo" :source "prompt")
+                '(:name "fix-tests" :description "Fix tests" :source "prompt")
+                '(:name "skill:aws-sso" :description "AWS SSO" :source "skill")
+                '(:name "skill:uv" :description "uv runner" :source "skill")))
+    (cl-letf (((symbol-function 'pilish--startup-context-files)
+               (lambda (&optional _directory _user-agent-dir)
+                 '("/home/u/.pi/agent/AGENTS.md" "/p/AGENTS.md"))))
+      (pilish--display-startup-header)
+      (goto-char (point-min))
+      (search-forward "TAB details")
+      (pilish-toggle-tool-section)
+      (let ((text (buffer-string)))
+        (should (string-match-p "^\\[Skills\\] aws-sso, uv$" text))
+        (should-not (string-match-p "skill:" text))
+        (should (string-match-p "^\\[Prompts\\] /create-todo, /fix-tests$" text))
+        (should (string-match-p
+                 "^\\[Context\\] /home/u/.pi/agent/AGENTS.md, /p/AGENTS.md$"
+                 text))))))
+
+(ert-deftest pilish-test-display-session-history-includes-startup-summary ()
+  "History replay renders the compact startup summary above session messages."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (setq pilish--process-version "0.84.2"
+          pilish--commands
+          (list '(:name "create-todo" :description "New todo" :source "prompt")
+                '(:name "fix-tests" :description "Fix tests" :source "prompt")
+                '(:name "skill:aws-sso" :description "AWS SSO" :source "skill")
+                '(:name "skill:uv" :description "uv runner" :source "skill")))
+    (pilish--display-session-history
+     (pilish-test--startup-banner-history)
+     (current-buffer))
+    (let ((text (buffer-string)))
+      (should (string-match-p
+               (regexp-quote
+                "pi v0.84.2 · pilish 3.0.0 · 2 skills · 2 prompts · TAB details")
+               text))
+      ;; The summary line sits above the first session message.
+      (should (< (match-beginning 0) (string-match "Question\\?" text))))))
+
+(ert-deftest pilish-test-rerender-reverts-startup-banner-expansion ()
+  "A canonical-history rebuild resets an expanded banner to compact form."
+  (with-temp-buffer
+    (pilish-chat-mode)
+    (setq pilish--process-version "0.84.2"
+          pilish--commands
+          (list '(:name "create-todo" :description "New todo" :source "prompt")
+                '(:name "fix-tests" :description "Fix tests" :source "prompt")
+                '(:name "skill:aws-sso" :description "AWS SSO" :source "skill")
+                '(:name "skill:uv" :description "uv runner" :source "skill")))
+    (pilish--display-session-history
+     (pilish-test--startup-banner-history)
+     (current-buffer))
+    (goto-char (point-min))
+    (search-forward "TAB details")
+    (pilish-toggle-tool-section)
+    (should (string-match-p "TAB collapse" (buffer-string)))
+    (pilish--rerender-canonical-history)
+    (let ((text (buffer-string)))
+      (should (string-match-p
+               (regexp-quote
+                "pi v0.84.2 · pilish 3.0.0 · 2 skills · 2 prompts · TAB details")
+               text))
+      (should-not (string-match-p "\\[Skills\\]" text))
+      (should-not (string-match-p "TAB collapse" text)))))
+
 (defun pilish-test--history-with-toggleable-thinking ()
   "Return history containing text, thinking, and a collapsed tool block."
   [(:role "assistant"
